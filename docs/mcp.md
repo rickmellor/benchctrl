@@ -125,7 +125,19 @@ the output terminals.
 |---|---|---|
 | `live(channel="mv", timeout_s=1.5)` | str, float | one sample value |
 | `take_snapshot(duration_s=0.5)` | float | latest value per channel in window |
-| `record(seconds, channels=None, save_path=None, name="recording")` | float, list[str], path, str | per-channel stats + optional file |
+| `record(seconds, channels=None, save_path=None, name="recording", plot_png=None)` | float, list[str], path, str, path | per-channel stats + optional file + optional PNG |
+
+`record`'s `save_path` extension is auto-detected: `.csv`, `.json`,
+`.opensmu`, or `.parquet` (the last requires `opensmu[parquet]`).
+`plot_png` requires `opensmu[plot]`.
+
+### Recording I/O (no SMU connection required)
+
+| Tool | Args | What it does |
+|---|---|---|
+| `recording_summary(input_path)` | path | Load a saved `.opensmu` file and return its metadata + per-channel statistics |
+| `plot_recording(input_path, output_png, channels=None, title=None)` | paths, optional list/str | Render a matplotlib quick-look PNG from a saved recording (one subplot per channel) |
+| `export_recording(input_path, output_path)` | paths | Convert a saved `.opensmu` to `.csv` / `.json` / `.parquet` / `.opensmu` based on output extension |
 
 ### Communication / GPIO
 
@@ -222,6 +234,29 @@ similar (commands vary by Claude Code build).
 | "What channels does the Arc have?" | Either: MCP `list_channels` (returns JSON) or opensmu skill (channel table in markdown) |
 
 The MCP server is for **driving the device**; the skill is for **writing code about the device**. They complement each other.
+
+## SDK ↔ MCP parity principle
+
+The MCP server is intentionally kept in sync with the opensmu Python
+SDK. When a new SDK feature lands that's meaningful in an interactive /
+tool-calling context, a matching MCP tool ships with it:
+
+| SDK feature (introduced) | MCP equivalent |
+|---|---|
+| `SMU.set_voltage()` (v0.1.0) | `set_voltage` tool |
+| `SMU.start_recording()` (v0.1.0) | `record` tool |
+| `SMU.get_*` GET interface (v0.2.0) | `state`, `versions`, `info` (cached + live readbacks) |
+| `Recording.save_parquet()` (v0.4.0) | `record(save_path="…parquet")`, `export_recording(in, out)` |
+| `Recording.plot()` (v0.4.0) | `record(plot_png=…)`, `plot_recording(in, out)` |
+| `Recording.to_numpy()` / `to_pandas()` (v0.4.0) | *N/A* — in-process objects don't cross the MCP boundary; use file-based tools instead |
+
+When opensmu gains a new wire command, surface, or output format, the
+expectation is: **if it fits the chat / tool-calling model, it ships
+with an MCP tool in the same release.** The exceptions are in-memory
+Python objects (`numpy.ndarray`, `pandas.DataFrame`, matplotlib
+`Figure`) which can't meaningfully cross the MCP serialisation
+boundary — for those we expose file-based equivalents (`save_parquet`,
+plot-to-PNG) instead.
 
 ## What's not exposed
 

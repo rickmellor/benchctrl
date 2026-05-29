@@ -28,10 +28,11 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from opensmu import SMU, Channel
+from opensmu import SMU, Channel, Recording
 from opensmu.channels import WIRE_ID_TO_CHANNEL
 from opensmu.exceptions import SMUError
 from opensmu.protocol import iter_frames, iter_samples
+from opensmu.samples import compute_statistics
 
 mcp = FastMCP("opensmu")
 
@@ -389,12 +390,75 @@ def take_snapshot(duration_s: float = 0.5) -> dict:
     return {"duration_s": duration_s, "channels": latest}
 
 
+def _save_recording_by_extension(rec: Recording, path: Path) -> Path:
+    """Dispatch save() based on file extension.
+
+    Accepts ``.csv``, ``.json``, ``.opensmu``, ``.parquet``. Anything else
+    is normalised to ``.opensmu``. Parquet requires ``opensmu[parquet]``
+    installed; a clear ``ImportError`` propagates otherwise.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return rec.save_csv(path)
+    if suffix == ".json":
+        return rec.save_json(path)
+    if suffix == ".parquet":
+        return rec.save_parquet(path)
+    if suffix != ".opensmu":
+        path = path.with_suffix(".opensmu")
+    return rec.save(path)
+
+
+def _statistics_dict(rec: Recording) -> dict:
+    """Per-channel statistics in JSON-friendly form."""
+    out: dict = {}
+    for ch_code in sorted({c.code for c in rec.channels}):
+        ch = Channel.from_code(ch_code)
+        stats = rec.statistics(ch)
+        out[ch_code] = {
+            "samples": stats.sample_count,
+            "min": stats.min,
+            "max": stats.max,
+            "average": stats.average,
+            "rms": stats.rms,
+            "duration_s": stats.duration,
+            "energy_J": stats.energy,
+            "charge_C": stats.charge,
+            "unit": ch.unit,
+            "label": ch.label,
+            "sample_rate_hz": ch.sample_rate,
+        }
+    return out
+
+
+def _render_plot_png(
+    rec: Recording,
+    output_png: str | Path,
+    *,
+    channels: Optional[list[str]] = None,
+    title: Optional[str] = None,
+) -> Path:
+    """Render a matplotlib quick-look PNG. Closes the figure after saving."""
+    import matplotlib
+
+    matplotlib.use("Agg")  # headless backend — no display required
+    import matplotlib.pyplot as plt
+
+    ch_objs = None if channels is None else [Channel.coerce(c) for c in channels]
+    fig = rec.plot(channels=ch_objs, show=False, title=title)
+    out = Path(output_png)
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
 @mcp.tool()
 def record(
     seconds: float,
     channels: Optional[list[str]] = None,
     save_path: Optional[str] = None,
     name: str = "recording",
+    plot_png: Optional[str] = None,
 ) -> dict:
     """Run a synchronous recording for ``seconds`` seconds; return summary stats.
 
@@ -402,14 +466,18 @@ def record(
         seconds: recording duration.
         channels: list of channel codes (default ``["mc", "mv"]``).
             Enabling ``mc`` auto-includes ``mp``; enabling ``ac`` auto-includes ``ap``.
-        save_path: optional file path. ``.csv``/``.json``/``.opensmu``
-            (native binary) extensions are auto-detected; any other
-            extension is saved as native ``.opensmu``.
-        name: recording name (recorded in metadata).
+        save_path: optional file path. Extension auto-detected:
+            ``.csv`` / ``.json`` / ``.opensmu`` (native binary) /
+            ``.parquet`` (requires ``opensmu[parquet]``). Other extensions
+            are saved as ``.opensmu``.
+        name: recording name (stored in metadata).
+        plot_png: optional path; if given, also renders a matplotlib
+            quick-look PNG (one subplot per channel). Requires
+            ``opensmu[plot]`` installed.
 
     Returns per-channel statistics (sample_count, min, max, average, rms,
-    charge for current channels, energy for power channels) and the file
-    path if saved.
+    charge for current channels, energy for power channels), the file
+    path if saved, and the PNG path if plotted.
     """
     smu = _get_smu()
     ch_codes = channels or ["mc", "mv"]
@@ -421,38 +489,93 @@ def record(
     out: dict = {
         "name": rec.name,
         "duration_s": seconds,
-        "channels": {},
+        "channels": _statistics_dict(rec),
     }
-    for ch_code in sorted({c.code for c in rec.channels}):
-        ch = Channel.from_code(ch_code)
-        stats = rec.statistics(ch)
-        out["channels"][ch_code] = {
-            "samples": stats.sample_count,
-            "min": stats.min,
-            "max": stats.max,
-            "average": stats.average,
-            "rms": stats.rms,
-            "duration_s": stats.duration,
-            "energy_J": stats.energy,
-            "charge_C": stats.charge,
-            "unit": ch.unit,
-            "label": ch.label,
-        }
 
     if save_path:
-        p = Path(save_path)
-        suffix = p.suffix.lower()
-        if suffix == ".csv":
-            rec.save_csv(p)
-        elif suffix == ".json":
-            rec.save_json(p)
-        else:
-            if suffix != ".opensmu":
-                p = p.with_suffix(".opensmu")
-            rec.save(p)
-        out["saved_to"] = str(p)
+        out["saved_to"] = str(_save_recording_by_extension(rec, Path(save_path)))
+
+    if plot_png:
+        out["plotted_to"] = str(_render_plot_png(rec, plot_png))
 
     return out
+
+
+@mcp.tool()
+def plot_recording(
+    input_path: str,
+    output_png: str,
+    channels: Optional[list[str]] = None,
+    title: Optional[str] = None,
+) -> dict:
+    """Render a matplotlib quick-look PNG from a saved ``.opensmu`` file.
+
+    Loads the recording from disk (no SMU connection needed) and writes
+    one subplot per channel with a shared x-axis.
+
+    Args:
+        input_path: path to a ``.opensmu`` file.
+        output_png: path for the rendered PNG.
+        channels: optional list of channel codes to plot (defaults to all).
+        title: optional plot title (defaults to the recording's name).
+
+    Requires ``opensmu[plot]`` installed. Useful for "open this saved
+    capture and show me what it looks like" without ever touching the
+    SMU.
+    """
+    rec = Recording.load(input_path)
+    out = _render_plot_png(rec, output_png, channels=channels, title=title)
+    return {
+        "input": input_path,
+        "output": str(out),
+        "channels": sorted({c.code for c in rec.channels}),
+        "name": rec.name,
+    }
+
+
+@mcp.tool()
+def recording_summary(input_path: str) -> dict:
+    """Inspect a saved ``.opensmu`` file without running a new capture.
+
+    Returns name, start/end times, offset, and per-channel statistics
+    (the same shape ``record`` returns for a live capture). Useful for
+    "tell me about this capture" or "compare these two runs" workflows.
+
+    Does not require an SMU connection.
+    """
+    rec = Recording.load(input_path)
+    return {
+        "input": input_path,
+        "name": rec.name,
+        "offset_s": rec.offset,
+        "start_time": rec.start_time.isoformat() if rec.start_time else None,
+        "end_time": rec.end_time.isoformat() if rec.end_time else None,
+        "device_info": rec.device_info,
+        "channels": _statistics_dict(rec),
+    }
+
+
+@mcp.tool()
+def export_recording(
+    input_path: str,
+    output_path: str,
+) -> dict:
+    """Convert a saved ``.opensmu`` recording to another format.
+
+    Output format is selected by the ``output_path`` extension:
+    ``.csv`` / ``.json`` / ``.parquet`` / ``.opensmu``. Parquet output
+    requires ``opensmu[parquet]`` installed.
+
+    Useful for "share this recording in parquet" or "give me CSV for
+    the spreadsheet" without re-running the capture.
+    """
+    rec = Recording.load(input_path)
+    out = _save_recording_by_extension(rec, Path(output_path))
+    return {
+        "input": input_path,
+        "output": str(out),
+        "format": out.suffix.lstrip("."),
+    }
 
 
 # ---------------------------------------------------------------------------

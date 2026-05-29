@@ -2,6 +2,49 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.1] — MCP server synced with v0.4.0 output formats
+
+Pure additive change to keep the MCP server in lock-step with the SDK
+(see the new ["SDK ↔ MCP parity principle"](docs/mcp.md#sdk--mcp-parity-principle)
+section). Three new tools, plus extensions to `record`.
+
+### Added — MCP tools
+
+- **`record(..., save_path="run.parquet")`** — the existing `record`
+  tool now handles `.parquet` save paths via the v0.4.0 Parquet output.
+  Requires `opensmu[parquet]`.
+- **`record(..., plot_png="run.png")`** — new optional param; when
+  given, also renders a matplotlib quick-look PNG in the same call.
+  Requires `opensmu[plot]`.
+- **`plot_recording(input_path, output_png, channels=None, title=None)`** —
+  load a saved `.opensmu` file and render a PNG. No SMU connection
+  required.
+- **`recording_summary(input_path)`** — load a saved `.opensmu` and
+  return its name, start/end times, offset, device metadata, and
+  per-channel statistics. No SMU connection required.
+- **`export_recording(input_path, output_path)`** — convert a saved
+  `.opensmu` to another format (CSV / JSON / Parquet / opensmu)
+  based on the output extension. No SMU connection required.
+
+MCP tool count: 23 → **26**.
+
+### Documentation
+
+- New section in [`docs/mcp.md`](docs/mcp.md#sdk--mcp-parity-principle):
+  the SDK ↔ MCP parity principle with a table mapping SDK features to
+  their MCP equivalents (and explicit exceptions — `to_numpy()` /
+  `to_pandas()` don't cross the MCP serialisation boundary; use
+  `save_parquet` / `plot_recording` instead).
+
+### Tests
+
+- 6 new hardware-free tests covering `recording_summary`,
+  `plot_recording`, and `export_recording` against synthetic recordings.
+- 3 new hardware-required tests covering `record(save_path=".parquet")`,
+  `record(plot_png=…)`, and combined save+plot in one call.
+
+Total: 203 → **212 tests passing**.
+
 ## [0.4.0] — output formats: numpy, pandas, parquet, matplotlib
 
 Recordings now offer first-class export to the scientific-Python stack,

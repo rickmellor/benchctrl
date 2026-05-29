@@ -5,16 +5,17 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.4.0 shipped — scientific-Python output formats
-- **Tests**: 203 / 203 passing
+- **Phase**: v0.4.1 shipped — MCP server synced with v0.4.0 output formats
+- **Tests**: 212 / 212 passing
 - **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
-- **MCP server**: `opensmu-mcp` ready for Claude Code / Claude Desktop config
+- **MCP server**: 26 tools (was 23 in v0.3.0); `opensmu-mcp` ready
 - **Claude Code skill** at `skills/opensmu/SKILL.md`
 - **Output formats**: `.opensmu` / Parquet / CSV / JSON / numpy / pandas
-  / matplotlib — all gated by **strictly optional** deps. Base install
-  pulls only pyserial; verified that opensmu imports clean without
-  numpy/pandas/pyarrow/matplotlib loaded.
-- **Last commit**: v0.4.0 output formats
+  / matplotlib — all strictly optional, lazy-imported
+- **SDK ↔ MCP parity principle** documented in `docs/mcp.md` —
+  policy: new SDK features that make sense in a tool-calling context
+  ship with an MCP equivalent in the same release
+- **Last commit**: v0.4.1 MCP sync
 - **Hardware**: Arc Pro on COM6, output off, nothing connected
 
 ## v0.2.0 update — what was decoded

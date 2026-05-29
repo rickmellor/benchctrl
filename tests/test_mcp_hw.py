@@ -204,6 +204,52 @@ def test_record_saves_native_when_extension_unknown(tmp_path):
     assert r["saved_to"].endswith(".opensmu")
 
 
+def test_record_saves_parquet_extension(tmp_path):
+    """v0.4.0 sync — `record` now handles `.parquet` save_path natively."""
+    _ensure_hardware_available()
+    pytest.importorskip("pyarrow")
+    from opensmu.mcp import record
+
+    out = tmp_path / "run.parquet"
+    r = record(seconds=0.6, channels=["mv"], save_path=str(out))
+    assert r["saved_to"] == str(out)
+    assert out.exists()
+
+
+def test_record_plot_png_produces_image(tmp_path):
+    """v0.4.0 sync — `record` can also render a matplotlib PNG in one call."""
+    _ensure_hardware_available()
+    pytest.importorskip("matplotlib")
+    from opensmu.mcp import record
+
+    out = tmp_path / "run.png"
+    r = record(seconds=0.6, channels=["mc", "mv"], plot_png=str(out))
+    assert r["plotted_to"] == str(out)
+    assert out.exists()
+    assert out.stat().st_size > 1000
+
+
+def test_record_combined_save_and_plot(tmp_path):
+    """One call: capture, save as parquet, render PNG."""
+    _ensure_hardware_available()
+    pytest.importorskip("pyarrow")
+    pytest.importorskip("matplotlib")
+    from opensmu.mcp import record
+
+    parquet_out = tmp_path / "run.parquet"
+    png_out = tmp_path / "run.png"
+    r = record(
+        seconds=0.6,
+        channels=["mc", "mv"],
+        save_path=str(parquet_out),
+        plot_png=str(png_out),
+    )
+    assert r["saved_to"] == str(parquet_out)
+    assert r["plotted_to"] == str(png_out)
+    assert parquet_out.exists()
+    assert png_out.exists()
+
+
 # ---- GPIO ------------------------------------------------------------------
 
 
