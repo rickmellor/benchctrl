@@ -1,0 +1,191 @@
+# OpenSMU MCP server
+
+A [Model Context Protocol](https://modelcontextprotocol.io) server that
+exposes your Arc Pro as a set of tools any MCP-aware client (Claude Code,
+Claude Desktop, Cursor, custom agents) can call. Built on the official
+`mcp` Python SDK.
+
+## Install
+
+```bash
+pip install "opensmu[mcp]"
+```
+
+For development:
+
+```bash
+pip install -e ".[mcp,dev]"
+```
+
+## Run
+
+The server speaks MCP over stdio (the standard transport for editor /
+desktop integrations):
+
+```bash
+opensmu-mcp
+```
+
+Or equivalently:
+
+```bash
+python -m opensmu.mcp
+```
+
+The server holds the SMU connection for its lifetime — only one process
+can hold the device at a time. Closing the server (or calling the
+`disconnect` tool) releases it.
+
+## Wire into Claude Code
+
+Add to your Claude Code MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "opensmu": {
+      "command": "opensmu-mcp"
+    }
+  }
+}
+```
+
+Claude will pick it up the next time it starts. Verify with `/mcp` in
+the Claude Code interface — `opensmu` should appear under connected
+servers.
+
+## Wire into Claude Desktop
+
+Edit `claude_desktop_config.json` (path varies by OS — see the [Claude
+Desktop docs](https://modelcontextprotocol.io/quickstart/user)) and add:
+
+```json
+{
+  "mcpServers": {
+    "opensmu": {
+      "command": "opensmu-mcp"
+    }
+  }
+}
+```
+
+Restart Claude Desktop.
+
+## Safety model
+
+Only **one** tool drives voltage onto the output terminals:
+`enable_output`. It refuses unless **all three** of these are true:
+
+1. `set_current_limit(amps)` has been called (bounds DUT damage in faults)
+2. `set_voltage(volts)` has been called (so we know what's about to be driven)
+3. The caller passes `confirm_dut_attached=True`
+
+If any guard fails, the tool returns a structured `{"error": ..., "guidance": ...}`
+response. The `guidance` field tells the LLM exactly what's needed.
+
+Every other tool is non-destructive on a setup with nothing connected to
+the output terminals.
+
+## Tool surface
+
+### Information
+
+| Tool | Returns |
+|---|---|
+| `info()` | Port, device name, firmware/hardware version, serial id |
+| `state()` | Every cached setpoint + connection state (no wire traffic) |
+| `versions()` | Reads name/hw/fw/serial from the device |
+| `list_channels()` | All 14 channels with codes, rates, units, labels |
+
+### Setpoints (do not enable output)
+
+| Tool | Args |
+|---|---|
+| `set_voltage(volts)` | float V, 0.0-5.5 |
+| `set_current_limit(amps)` | float A, 0.001-5.0 |
+| `set_exp_voltage(volts)` | float V, 1.2-5.0 |
+| `set_exp_5v(enabled)` | bool |
+| `set_range(range_)` | `"low"` or `"high"` |
+| `set_4wire(enabled)` | bool |
+| `set_current_limit_enabled(enabled)` | bool (True=CC mode, False=cut-off) |
+| `set_uart(enabled, baudrate=None)` | bool, optional int |
+| `set_gpo(pin, state_on)` | int 1/2/3, bool. Pin 3 = TX pin |
+| `set_power_regulation(mode)` | `"voltage"` / `"current"` / `"inline"` / `"off"` |
+
+### Output control
+
+| Tool | Args |
+|---|---|
+| `enable_output(confirm_dut_attached)` | bool — must be True, plus enforced guards |
+| `disable_output()` | — |
+
+### Measurement / capture
+
+| Tool | Args | Returns |
+|---|---|---|
+| `live(channel="mv", timeout_s=1.5)` | str, float | one sample value |
+| `take_snapshot(duration_s=0.5)` | float | latest value per channel in window |
+| `record(seconds, channels=None, save_path=None, name="recording")` | float, list[str], path, str | per-channel stats + optional file |
+
+### Communication / GPIO
+
+| Tool | Args |
+|---|---|
+| `write_uart_tx(text)` | str |
+| `get_gpi(pin)` | int 1/2 |
+
+### Connection
+
+| Tool | Args |
+|---|---|
+| `reconnect()` | — |
+| `disconnect()` | — (releases the device for another client) |
+
+## Example interactions
+
+> "Connect to the SMU and tell me the firmware version."
+
+Claude calls `info()` → `{"name": "Arc", "fw_version": "3.1.3", ...}`.
+
+> "Set 3.3 V with a 1 A limit, record main current for 5 seconds, give
+> me the peak current."
+
+Claude calls in order:
+
+1. `set_voltage(3.3)`
+2. `set_current_limit(1.0)`
+3. (asks user to confirm DUT)
+4. `enable_output(confirm_dut_attached=True)`
+5. `record(5.0, ["mc"])`
+6. `disable_output()`
+7. Returns stats including `max` from `record`'s response.
+
+> "What's the voltage on Sense+ right now?"
+
+Claude calls `live("sp")`.
+
+> "Snapshot everything."
+
+Claude calls `take_snapshot(0.5)` → returns latest value per channel.
+
+## What's not exposed
+
+- Battery emulation, calibration, firmware upgrade — deferred at the
+  library level (see [`../ROADMAP.md`](../ROADMAP.md)).
+- The native `.opensmu` file format is round-trippable — to analyse a
+  saved recording, use the Python `Recording.load()` API directly.
+- Multi-device coordination — open one server per device on different
+  port names if needed (one server holds one port).
+
+## Troubleshooting
+
+**"no Arc devices found"** when the device is plugged in: another
+process holds the COM port. Kill `otii_server`/`otii_core`/any other
+opensmu instance and retry.
+
+**Tool calls hang**: the device may have dropped streaming after USB
+disturbance. Call `reconnect()` to force a re-init handshake.
+
+**"REFUSED: confirm_dut_attached=False"** from `enable_output`: that's
+the safety guard. Set a voltage + current limit, verify your DUT can
+tolerate them, then retry with the confirmation flag.

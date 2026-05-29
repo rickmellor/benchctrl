@@ -64,6 +64,7 @@ with SMU.open() as smu:
 - [Getting started](docs/getting_started.md) — installation, first capture
 - [API reference](docs/api_reference.md) — every class and method
 - [Wire protocol](docs/protocol.md) — what's on the USB cable
+- [**MCP server**](docs/mcp.md) — drive the SMU from Claude Code / Claude Desktop / any MCP client
 - [For AI assistants](docs/AGENTS.md) — context briefing for agent use
 - [Design](docs/design.md) — architecture, decisions, layering
 - [Roadmap](ROADMAP.md) — deferred features and rationale

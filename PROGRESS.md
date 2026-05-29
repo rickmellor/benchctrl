@@ -5,12 +5,14 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.2.0 shipped — 100% decoding sweep complete
-- **Tests**: 164 / 164 passing
+- **Phase**: v0.3.0 shipped — MCP server live
+- **Tests**: 187 / 187 passing
 - **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
+- **MCP server**: `opensmu-mcp` ready for Claude Code / Claude Desktop config
+- **23 MCP tools** exposing every user-facing library capability
 - **GET interface works live**: device_name='Arc', fw='3.1.3',
   voltage=3.25V, current=2.5A, exp=5.0V, baud=115200
-- **Last commit**: v0.2.0 100% decode sweep
+- **Last commit**: v0.3.0 MCP server
 - **Hardware**: Arc Pro on COM6, output off, nothing connected
 
 ## v0.2.0 update — what was decoded

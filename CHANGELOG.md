@@ -2,6 +2,40 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] — MCP server
+
+Open the Arc Pro to any MCP-aware client (Claude Code, Claude Desktop,
+Cursor, custom agents) as a set of structured tools.
+
+### Added
+
+- **`opensmu.mcp`** — a FastMCP server exposing 23 tools covering every
+  user-facing capability of the library: device info, every setpoint,
+  output enable (with safety guards), live reads, snapshot, synchronous
+  recording with statistics, GPIO/UART, connection management.
+- **`opensmu-mcp` console script** — `pip install opensmu[mcp]` and run
+  `opensmu-mcp` to start the stdio server.
+- **`docs/mcp.md`** — install, configuration (Claude Code + Claude Desktop
+  JSON snippets), full tool reference, safety model, troubleshooting.
+- **Safety model** for `enable_output`: refuses unless all three guards
+  pass (current_limit set, voltage set, `confirm_dut_attached=True`).
+  Returns structured `{"error": ..., "guidance": ...}` responses so the
+  LLM gets clear feedback on how to proceed.
+- **23 new tests** (6 hardware-free + 17 hardware-required) covering tool
+  surface, schemas, state snapshots, and round-trips against the device.
+
+### Verified end-to-end
+
+- `opensmu-mcp` initializes MCP protocol v2024-11-05 over stdio.
+- `tools/list` enumerates all 23 tools with descriptions sourced from
+  Python docstrings.
+- `tools/call info` returns live device metadata: name=Arc, fw=3.1.3,
+  serial=442032203546324D3230353235313033.
+
+### Optional dependency
+
+- `mcp >= 1.0` — installed automatically with `pip install opensmu[mcp]`.
+
 ## [0.2.0] — 100% decoding sweep
 
 A systematic decode pass across every captured trace exposed the rest of the
