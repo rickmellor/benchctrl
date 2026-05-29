@@ -64,6 +64,7 @@ with SMU.open() as smu:
 - [Getting started](docs/getting_started.md) — installation, first capture
 - [API reference](docs/api_reference.md) — every class and method
 - [**Output formats**](docs/output_formats.md) — `.opensmu` / Parquet / CSV / JSON / numpy / pandas / matplotlib — when to use which
+- [**Battery features**](docs/battery.md) — battery profile I/O / life calculator / profiler / emulator (replaces Qoitech's licensed Battery Toolbox)
 - [Wire protocol](docs/protocol.md) — what's on the USB cable
 - [**MCP server**](docs/mcp.md) — drive the SMU from Claude Code / Claude Desktop / any MCP client
 - [For AI assistants](docs/AGENTS.md) — context briefing for agent use

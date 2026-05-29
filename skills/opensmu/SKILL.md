@@ -188,6 +188,27 @@ Async device errors (e.g. setting `4.0 V` in low range) surface as
 `SMUCommandError` on the next API call — the background reader thread
 parses error frames and queues them.
 
+## Battery features
+
+Independent of the SMU class, `opensmu.battery` ships a clean-room
+replacement for Qoitech's licensed Battery Toolbox. See
+[`docs/battery.md`](../../docs/battery.md) for the full feature plan.
+
+```python
+from opensmu.battery import BatteryProfile
+
+# Load Otii's bundled profile (or any compatible JSON)
+profile = BatteryProfile.load("CR2032-Energizer-(25).json")
+profile.nominal_voltage              # 3.0 V
+profile.nominal_capacity_mAh         # 230.2 mAh
+profile.ocv_at(used_capacity_mAh=50) # ~2.97 V
+profile.esr_at(used_capacity_mAh=50) # ~14.1 ohm
+```
+
+Profiles produced here round-trip bit-identically through Otii — fully
+interchangeable. **Don't write your own profile JSON shape**; use the
+`BatteryProfile` / `DischargeTable` / `DischargeSample` dataclasses.
+
 ## Anti-patterns — don't do these
 
 - **Don't reach for the Otii server / Automation Toolbox / TCP port 1905.**
@@ -195,10 +216,12 @@ parses error frames and queues them.
   Code that imports `otii_tcp_client` is the wrong path.
 - **Don't call `smu.calibrate()`, `smu.firmware_upgrade()`, `smu.set_supply_battery_emulator()`,
   `smu.enable_battery_profiling()`, `smu.wait_for_battery_data()`,
-  `smu.set_battery_profile()`.** They all raise `SMUNotImplementedError` by
-  design — calibration and battery emulation are deferred (see
-  [`ROADMAP.md`](../../ROADMAP.md)); firmware upgrade is deferred indefinitely
-  (bricking risk).
+  `smu.set_battery_profile()`** on the `SMU` class — they raise
+  `SMUNotImplementedError`. Battery emulation lives in
+  `opensmu.battery.emulator` (phased rollout — see
+  [`docs/battery.md`](../../docs/battery.md)); calibration is deferred
+  (see [`ROADMAP.md`](../../ROADMAP.md)); firmware upgrade is deferred
+  indefinitely (bricking risk).
 - **Don't call `smu.set_channel_samplerate()`.** No wire command exists —
   sample rates are hardware-fixed. Use `Recording.downsample(channel, factor)`
   for client-side downsampling after capture.

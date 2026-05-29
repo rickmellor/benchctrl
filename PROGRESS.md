@@ -5,8 +5,9 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.4.1 shipped — MCP server synced with v0.4.0 output formats
-- **Tests**: 212 / 212 passing
+- **Phase**: v0.5.0 shipped — battery profile format (phase 1 of 4 of Battery Toolbox replacement)
+- **Tests**: 230 / 230 passing
+- **Battery subpackage**: `opensmu.battery.profile` (phase 1) — phases 2-4 in flight
 - **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
 - **MCP server**: 26 tools (was 23 in v0.3.0); `opensmu-mcp` ready
 - **Claude Code skill** at `skills/opensmu/SKILL.md`

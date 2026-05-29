@@ -2,6 +2,67 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] — battery profile format (phase 1 of Battery Toolbox replacement)
+
+First of four phases replacing Qoitech's licensed Battery Toolbox on
+top of opensmu's existing wire vocabulary. This release nails the
+**profile JSON format** — the data structure every subsequent battery
+feature reads/writes.
+
+### Added — `opensmu.battery.profile`
+
+- **`BatteryProfile`** dataclass with nested `Battery`,
+  `DischargeTable`, `DischargeProfile`, `DischargeStep`,
+  `DischargeSample`, `ExitConditions`, `DeviceInfo` types — covers every
+  field the Otii format uses.
+- **`BatteryProfile.load(path)` / `.save(path)`** — JSON I/O. Output
+  format is bit-identical to Otii's bundled profiles (`%LOCALAPPDATA%\\otii3\\app-*\\resources\\batteryprofiles`).
+- **`profile.ocv_at(used_capacity_mAh, temperature=None)`** — linearly
+  interpolate the open-circuit voltage at a given used capacity.
+- **`profile.esr_at(used_capacity_mAh, temperature=None)`** — same for
+  the equivalent series resistance.
+- **`profile.select_table(temperature=None)`** — picks the nearest
+  discharge table for multi-temperature profiles.
+- **`profile.summary()`** — JSON-friendly summary (nominal V/C, cutoff,
+  temperatures, per-table extents).
+
+### Verified
+
+- All 8 profiles bundled with Otii 3.7.2 (AA, AAA, CR123A, CR2, CR2032,
+  LiPo at three temperatures) load, round-trip, and re-save as
+  bit-identical JSON — tested in-suite via a hardware-free test that
+  walks the Otii install directory.
+- CR2032 interpolation matches the bundled profile's first sample to
+  3 decimal places (V) and 3 decimal places (Ω).
+
+### Added — MCP tools (per SDK ↔ MCP parity principle)
+
+- **`battery_profile_summary(path)`** — load + return summary
+- **`battery_profile_lookup(path, used_capacity_mAh, temperature=None)`** —
+  return interpolated OCV / ESR at a point
+
+Both work on saved files; no SMU connection required.
+
+### Documentation
+
+- **`docs/battery.md`** — feature plan, phased status, JSON schema,
+  code recipes (loading bundled profiles, building synthetic ones,
+  merging multi-temperature data).
+- Skill ([`skills/opensmu/SKILL.md`](skills/opensmu/SKILL.md)) gains a
+  "Battery features" section pointing at the new subpackage.
+
+### Tests
+
+- 18 new tests in `tests/test_battery_profile.py`:
+  - 13 synthetic-data tests (interpolation, clamping, JSON round-trip,
+    multi-table selection, empty-profile edge cases, unit normalisation)
+  - 5 real-profile tests (gated by Otii install presence): load every
+    bundled profile, bit-identical round-trip, known-value
+    interpolation checks, LiPo power-mode detection, multi-temperature
+    file enumeration
+
+Total tests: 212 → **230 passing**.
+
 ## [0.4.1] — MCP server synced with v0.4.0 output formats
 
 Pure additive change to keep the MCP server in lock-step with the SDK

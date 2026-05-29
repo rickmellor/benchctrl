@@ -29,6 +29,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from opensmu import SMU, Channel, Recording
+from opensmu.battery import BatteryProfile
 from opensmu.channels import WIRE_ID_TO_CHANNEL
 from opensmu.exceptions import SMUError
 from opensmu.protocol import iter_frames, iter_samples
@@ -552,6 +553,58 @@ def recording_summary(input_path: str) -> dict:
         "end_time": rec.end_time.isoformat() if rec.end_time else None,
         "device_info": rec.device_info,
         "channels": _statistics_dict(rec),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tools — battery profiles (v0.5.0 — phase 1 of battery feature suite)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def battery_profile_summary(path: str) -> dict:
+    """Load a battery profile JSON and return a human-readable summary.
+
+    Compatible with profiles produced by Qoitech's Otii application (bundled
+    profiles live in ``%LOCALAPPDATA%\\otii3\\app-*\\resources\\batteryprofiles``).
+    Returns nominal voltage and capacity, cutoff voltage, all temperatures
+    covered, the discharge profile (high/low pulse load), and metadata for
+    every discharge table.
+
+    No SMU connection required.
+    """
+    p = BatteryProfile.load(path)
+    return {"input": path, **p.summary()}
+
+
+@mcp.tool()
+def battery_profile_lookup(
+    path: str,
+    used_capacity_mAh: float,
+    temperature: Optional[float] = None,
+) -> dict:
+    """Interpolate the OCV and ESR of a battery profile at a given used capacity.
+
+    Args:
+        path: path to a battery profile JSON.
+        used_capacity_mAh: how much capacity has been drawn from the cell, in mAh.
+        temperature: optional temperature selector. If the profile contains
+            multiple discharge tables, the nearest temperature is used.
+            If only one table is present, this argument is optional.
+
+    Returns the interpolated open-circuit voltage (V), equivalent series
+    resistance (Ω), and the temperature of the table used. Useful for
+    "at 50% SoC on a CR2032, what's the cell voltage I should expect?".
+    """
+    p = BatteryProfile.load(path)
+    table = p.select_table(temperature=temperature)
+    return {
+        "input": path,
+        "used_capacity_mAh": used_capacity_mAh,
+        "temperature": table.temperature,
+        "temperature_unit": table.temperature_unit,
+        "ocv_V": table.ocv_at(used_capacity_mAh),
+        "esr_ohm": table.esr_at(used_capacity_mAh),
     }
 
 
