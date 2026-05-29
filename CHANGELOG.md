@@ -2,6 +2,43 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] — full-rate streaming
+
+### Fixed
+
+- **Full-rate sample streaming unlocked.** Decoded from a fresh wire capture
+  of the Otii vendor server: recording is set up by a *per-channel* enable
+  command (`[seq][0x78][wire_id][1]`) followed by an 8-byte cleanup
+  (`[seq][0x7C]`) — not the 76-byte `69 83 2a ff …` payload v0.1 sent (which
+  turned out to be a misread of the device's *inbound* packed-sample
+  frame).
+- Verified rates on the Arc Pro: mc 4042 sps, mp 4042 sps, mv 1015 sps —
+  ~670× improvement on mc/mp and ~170× on mv.
+- Sub-millisecond transients on the DUT are now resolvable.
+
+### Added
+
+- `protocol.encode_channel_enable_for_recording(seq, wire_id, enable)` —
+  builds the 16-byte per-channel enable / disable payload.
+- `protocol.iter_samples()` now auto-detects and unpacks the **packed
+  sample frame** format (`69 83 2a ff` + per-channel sub-1 / sub-4
+  records + sentinel). Sub-4 records yield 4 samples per frame at
+  4× the frame rate.
+- Constants `PACKED_FRAME_MAGIC`, `PACKED_FRAME_SENTINEL` for the
+  inbound packed frame envelope.
+- `TYPE_CHANNEL_ENABLE` constant (alias of the now-misnomered
+  `TYPE_STOP_RECORDING`).
+- Tightened hardware test asserts `>=1500` mv samples and `>=6000` mc
+  samples in a 2 s recording (was `>=5`).
+
+### Internal
+
+- `SMU.start_recording()` now sends a per-channel `type=0x78` enable burst
+  + cleanup instead of the legacy 76-byte payload.
+- `SMU.stop_recording()` sends symmetric per-channel disables.
+- Removed unused `encode_start_recording` and `RecordingChannel` imports
+  from `device.py`.
+
 ## [0.1.0] — initial release
 
 First public release. Drives the Qoitech Otii Arc / Arc Pro directly

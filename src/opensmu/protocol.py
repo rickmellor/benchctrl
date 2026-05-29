@@ -36,10 +36,12 @@ WIRE_MAGIC = b"\xa3\x2c\xb5\x7f"
 
 TYPE_POLL = 0x0A
 TYPE_INIT_WAKE = 0x14  # short init payload
-TYPE_INIT_STEP2 = 0x64  # init step 2 + parameter-style payload shape
+TYPE_GET_PARAMETER = 0x64  # GET cached parameter value
+TYPE_INIT_STEP2 = 0x64  # legacy alias — init step 2 uses TYPE_GET_PARAMETER w/ cmd=0x29
 TYPE_SET_PARAMETER = 0x66
-TYPE_STOP_RECORDING = 0x78  # also init step 3
-TYPE_REC_CLEANUP = 0x7C  # 8B housekeeping payload after STOP
+TYPE_CHANNEL_ENABLE = 0x78  # cmd=wire_id, val=1 enables/0 disables that channel for streaming
+TYPE_STOP_RECORDING = 0x78  # legacy alias of TYPE_CHANNEL_ENABLE
+TYPE_REC_CLEANUP = 0x7C  # 8B housekeeping payload after enable/disable burst
 TYPE_ENABLE_LEGACY_SINK = 0x7C  # SET command (same code, different shape)
 
 
@@ -67,18 +69,37 @@ RANGE_LOW = 0
 RANGE_HIGH = 1
 
 
-# --- recording payload constants ----------------------------------------
+# --- legacy recording payload constants ---------------------------------
+#
+# The byte sequence below was historically used by `arc_direct.start_recording`,
+# but reverse-engineering capture #33 showed it is actually a mis-read of an
+# *inbound* packed-sample frame (the device's high-rate streaming envelope).
+# We keep these constants for backwards reference but do NOT send them on the
+# wire — see `encode_channel_enable_for_recording` for the correct command.
 
-START_REC_HEADER = b"\x69\x83\x2a\xff\x17\x02\x00\x00"
-START_REC_SENTINEL = b"\x17\x00\x00\x00\x00\x00\x00\x00"
+START_REC_HEADER = b"\x69\x83\x2a\xff\x17\x02\x00\x00"  # legacy / artifact
+START_REC_SENTINEL = b"\x17\x00\x00\x00\x00\x00\x00\x00"  # also tail of packed sample frames
 
 
 # --- inbound frame signatures -------------------------------------------
 
-# Sample record (within a device->host frame payload):
+# Baseline sample record (within a device->host frame payload):
 #   [02 00 08 00] [chan:u32 LE] [value:f32 LE]   — 12 B
+# Emitted when streaming in the slow baseline mode (no channels explicitly
+# enabled for recording).
 SAMPLE_RECORD_HEADER = b"\x02\x00\x08\x00"
 SAMPLE_RECORD_LEN = 12
+
+# Packed sample frame (full payload, device -> host):
+#   [69 83 2a ff] [seq:u32 LE] then per-channel records:
+#       subtype=1: [id:u16][1:u16][rate:u32][value:f32 LE]                 — 12 B  (1 sample)
+#       subtype=4: [id:u16][4:u16][rate:u32][value0..3:f32 LE x4]          — 24 B  (4 samples)
+#   then 8-byte sentinel [17 00 00 00 00 00 00 00]
+#
+# Frames arrive at the slowest enabled channel's rate (1 kHz when any sub-1
+# channel is enabled). High-rate (sub-4) channels carry 4 samples per frame.
+PACKED_FRAME_MAGIC = b"\x69\x83\x2a\xff"
+PACKED_FRAME_SENTINEL = b"\x17\x00\x00\x00\x00\x00\x00\x00"
 
 # Error response frame (whole 16-B payload):
 #   [0e 03 99 ff 04 10 00 00] [err:i32 LE] [last_good:u32 LE]
@@ -143,17 +164,53 @@ def encode_session_init_step2(seq: int) -> bytes:
 
 
 def encode_session_init_step3(seq: int) -> bytes:
-    """Init step 3 payload (16 B). Sent after step 2."""
-    return struct.pack("<IIII", seq & 0xFFFFFFFF, TYPE_STOP_RECORDING, 0x17, 1)
+    """Init step 3 payload (16 B). Sent after step 2.
+
+    Mechanically identical to ``encode_channel_enable_for_recording(seq, 0x17, True)``
+    — the historical "init step 3" simply enables the rx (UART log) channel for
+    streaming, which is also what triggers the device to start delivering its
+    baseline 12-channel stream.
+    """
+    return encode_channel_enable_for_recording(seq, 0x17, True)
+
+
+def encode_channel_enable_for_recording(seq: int, wire_id: int, enable: bool) -> bytes:
+    """Enable / disable one channel for recording-mode streaming (16 B).
+
+    Sent once per channel to be recorded. After the burst (plus an optional
+    recording cleanup payload), the device switches from baseline streaming
+    (12-byte ``02 00 08 00``-prefixed records at ~6 Hz) to packed high-rate
+    streaming (76-byte ``69 83 2a ff``-prefixed frames at the slowest enabled
+    channel's native rate, e.g. 1 kHz, with 4 samples packed per frame for
+    sub-4 channels like main current / main power).
+
+    Args:
+        seq: monotonic per-connection sequence number.
+        wire_id: device-side channel id (e.g. 0x00 for ``mc``).
+        enable: True to start streaming this channel, False to stop.
+    """
+    return struct.pack(
+        "<IIII",
+        seq & 0xFFFFFFFF,
+        TYPE_CHANNEL_ENABLE,
+        wire_id,
+        1 if enable else 0,
+    )
 
 
 def encode_stop_recording(seq: int, target_wire_id: int) -> bytes:
-    """STOP_RECORDING payload (16 B). The `value` field targets a wire id."""
-    return struct.pack("<IIII", seq & 0xFFFFFFFF, TYPE_STOP_RECORDING, target_wire_id, 0)
+    """Legacy single-channel stop. Equivalent to disabling one channel.
+
+    Kept for backwards compatibility; new code should call
+    :func:`encode_channel_enable_for_recording` with ``enable=False`` directly.
+    """
+    return encode_channel_enable_for_recording(seq, target_wire_id, False)
 
 
 def encode_recording_cleanup(seq: int) -> bytes:
-    """8-byte recording cleanup payload sent after STOP_RECORDING."""
+    """8-byte cleanup payload sent after a burst of channel enable/disable
+    commands. Without it the device sometimes lags in switching streaming
+    modes."""
     return struct.pack("<II", seq & 0xFFFFFFFF, TYPE_REC_CLEANUP)
 
 
@@ -277,12 +334,27 @@ class SampleRecord:
 
 
 def iter_samples(payload: bytes) -> Iterator[SampleRecord]:
-    """Walk a frame payload and yield every `02 00 08 00`-prefixed sample.
+    """Walk a frame payload and yield every sample record found.
 
-    The wire encoding allows multiple sample records per frame; this
-    iterator extracts each one. Other record types (errors, acks, metadata)
-    are skipped.
+    Handles both wire formats:
+
+      - **Baseline** records: 12-byte ``[02 00 08 00][chan:u32][value:f32]``
+        (one sample per record, used when no recording is active).
+      - **Packed** frames: full payload starts with ``[69 83 2a ff][seq:u32]``
+        and carries per-channel sub-1 (1 sample) or sub-4 (4 samples) records,
+        terminated by an 8-byte sentinel. Used during a recording at the
+        device's native rates.
+
+    For packed frames, sub-4 records yield four consecutive samples for the
+    same channel; sub-1 records yield one. Other record types
+    (errors, acks, metadata) are skipped.
     """
+    # Packed frame path — payload starts with the packed magic
+    if payload[:4] == PACKED_FRAME_MAGIC and len(payload) >= 16:
+        yield from _iter_packed_samples(payload)
+        return
+
+    # Baseline byte-scan for `02 00 08 00`-prefixed records
     k = 0
     m = len(payload)
     while k + SAMPLE_RECORD_LEN <= m:
@@ -294,6 +366,45 @@ def iter_samples(payload: bytes) -> Iterator[SampleRecord]:
                 k += SAMPLE_RECORD_LEN
                 continue
         k += 1
+
+
+def _iter_packed_samples(payload: bytes) -> Iterator[SampleRecord]:
+    """Walk a packed sample frame and yield each contained float sample.
+
+    Layout (after 8-byte ``[magic][seq]`` header):
+        per channel:
+            [wire_id:u16][subtype:u16][rate:u32]
+            then either a 4-byte f32 (subtype=1) or four 4-byte f32s (subtype=4)
+        trailing 8-byte sentinel.
+    """
+    n = len(payload)
+    # Skip 8-byte header (magic + seq)
+    i = 8
+    # Stop before the 8-byte sentinel — we don't strictly require it, but
+    # capping at n-8 keeps us out of garbage in malformed frames.
+    end = n - 8 if n >= 16 else n
+    while i + 8 <= end:
+        wire_id, subtype = struct.unpack_from("<HH", payload, i)
+        # rate is at offset i+4 but we don't yield it
+        if subtype == 1:
+            need = 12
+            if i + need > end:
+                break
+            val = struct.unpack_from("<f", payload, i + 8)[0]
+            yield SampleRecord(channel_id=wire_id, value=val)
+            i += need
+        elif subtype == 4:
+            need = 24
+            if i + need > end:
+                break
+            # 4 packed floats follow the [id][sub][rate] header
+            for k in range(4):
+                val = struct.unpack_from("<f", payload, i + 8 + 4 * k)[0]
+                yield SampleRecord(channel_id=wire_id, value=val)
+            i += need
+        else:
+            # Unknown subtype — bail rather than guess length
+            break
 
 
 @dataclass(frozen=True)

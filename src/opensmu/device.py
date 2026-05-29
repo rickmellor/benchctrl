@@ -46,17 +46,15 @@ from opensmu.protocol import (
     RANGE_HIGH,
     RANGE_LOW,
     SESSION_INIT_WAKE,
-    RecordingChannel,
     amps_to_microamps,
     amps_to_milliamps,
+    encode_channel_enable_for_recording,
     encode_frame,
     encode_gpo,
     encode_recording_cleanup,
     encode_session_init_step2,
     encode_session_init_step3,
     encode_set_command,
-    encode_start_recording,
-    encode_stop_recording,
     find_text_metadata,
     iter_frames,
     iter_samples,
@@ -636,24 +634,17 @@ class SMU:
             if src in channel_set:
                 channel_set.add(der)
 
-        # Build the START_RECORDING payload
-        ordered = sorted(channel_set, key=lambda c: c.wire_id)
-        seen_wire_ids: set[int] = set()
-        rec_channels: list[RecordingChannel] = []
-        for ch in ordered:
-            if ch.wire_id in seen_wire_ids:
-                continue  # GPI1 / GPI2 share a wire id
-            seen_wire_ids.add(ch.wire_id)
-            rec_channels.append(
-                RecordingChannel(
-                    wire_id=ch.wire_id,
-                    subtype=ch.subtype,
-                    sample_rate=ch.sample_rate,
-                )
+        # Send one type=0x78 channel-enable per requested channel, in
+        # wire-id ascending order to match the Otii server's behaviour
+        # captured in phase33. Each enable is `[seq][0x78][wire_id][1]`.
+        # Follow with a single 8-byte cleanup payload to flush.
+        ordered_wire_ids = sorted({c.wire_id for c in channel_set})
+        for wire_id in ordered_wire_ids:
+            self._send_payload(
+                encode_channel_enable_for_recording(self._next_seq(), wire_id, True)
             )
-        payload = encode_start_recording(rec_channels)
-        self._send_payload(payload)
-        self._active_recording_wire_ids = sorted(seen_wire_ids)
+        self._send_payload(encode_recording_cleanup(self._next_seq()))
+        self._active_recording_wire_ids = ordered_wire_ids
 
         # Pre-create channel buffers so reader thread doesn't have to lock
         rec = Recording(
@@ -684,9 +675,12 @@ class SMU:
             self._reader_thread.join(timeout=2.0)
         self._reader_thread = None
 
-        # Send STOP and cleanup frames
-        target = max(self._active_recording_wire_ids) if self._active_recording_wire_ids else 0
-        self._send_payload(encode_stop_recording(self._next_seq(), target))
+        # Send a per-channel disable for every wire id we enabled at start.
+        # Symmetric to the start-of-recording enable burst.
+        for wire_id in self._active_recording_wire_ids:
+            self._send_payload(
+                encode_channel_enable_for_recording(self._next_seq(), wire_id, False)
+            )
         self._send_payload(encode_recording_cleanup(self._next_seq()))
         self._active_recording_wire_ids = []
 

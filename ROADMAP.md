@@ -81,32 +81,24 @@ priority.
 self-contained `.opensmu` (msgpack-style binary) or `.csv` / `.json` via
 `Recording.save_*()`. Loading is symmetrical (`Recording.load()`).
 
-## Deferred for v0.2 — Full-rate sample streaming
+## DONE in v0.1.1 — Full-rate sample streaming
 
-**Why deferred:** Empirically, the Arc Pro streams all 12 default channels
-at about **6 Hz** in its baseline post-init state — the same rate observed
-by the legacy `arc_direct` library that opensmu is built on. The channel
-*capability* rates (1 kHz for subtype-1, 4 kHz for subtype-4 channels like
-main current and main power) are not delivered until some additional
-configuration command is sent. The vendor's Otii desktop client does
-achieve full rate, so there is a wire-level mechanism for it; we just
-haven't decoded which command unlocks it.
+**Resolved 2026-05-29.** Decoded from capture #33 (`33-otii-full-rate.raw`
+in the parent usb-sniffer project):
 
-**Symptoms in user code:** `Recording.statistics(...)` reports correct
-voltages/currents but only a handful of samples per second of recording.
-Sub-millisecond transients on the DUT will be missed.
+- The "start recording" mechanism is *not* the 76-byte `69 83 2a ff …`
+  payload v0.1 sent — that payload was a misread of the device's
+  **inbound** packed-sample frame.
+- The actual unlock is a per-channel command: `[seq:u32][0x78][wire_id][1]`
+  to enable streaming, `…[0]` to disable. Sent once per channel,
+  followed by an 8-byte `[seq:u32][0x7C]` cleanup.
+- Once enabled, the device delivers a 76-byte packed-sample frame every
+  1 ms (1 kHz frame rate). Each frame carries one sample per sub-1
+  channel and four packed samples per sub-4 channel — yielding native
+  rates of 1 kHz / 4 kHz.
 
-**Scope when picked up:**
-1. Capture a sample-rate-controlled Otii session (use the Otii GUI to set
-   high rate on `mc`, then start a recording).
-2. Diff the OUT URBs against the opensmu init sequence to identify the
-   extra command(s).
-3. Either fold the command into `SMU._connect()` (always-on full rate)
-   or expose as `SMU.set_streaming_mode("high")` / `"baseline"`.
-
-**Stub:** None. The current behaviour is operational — useful for
-slow-changing measurements (battery voltage over hours, idle currents).
-Just slower than the maximum the hardware can deliver.
+**Verified rates after fix**: mc 4042 sps, mp 4042 sps, mv 1015 sps —
+a ~670× improvement on mc/mp and ~170× on mv versus v0.1.
 
 ## Deferred for v0.3 — UART log channel parsing
 

@@ -5,10 +5,33 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.1 build COMPLETE
-- **Tests**: 132 / 132 passing (89 hardware-free + 43 hardware-required)
-- **Last commit**: final v0.1 handoff
+- **Phase**: v0.1.1 shipped — full-rate streaming unlocked
+- **Tests**: 131 / 132 passing (1 conditional skip on error-frame timing)
+- **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
+- **Last commit**: v0.1.1 full-rate streaming
 - **Hardware**: Arc Pro on COM6, output off, nothing connected
+
+## v0.1.1 update (today)
+
+Decoded the missing "start recording" command via a fresh USB capture of
+the Otii server doing a real recording (`33-otii-full-rate.raw` in the
+parent project). Three findings:
+
+1. **Per-channel `type=0x78` is the unlock.** `[seq][0x78][wire_id][1]`
+   enables that channel for streaming, `…[0]` disables. The 8-byte
+   `type=0x7C` cleanup follows the burst.
+2. **The 76-byte `69 83 2a ff …` payload v0.1 sent was wrong.** It was a
+   misread of the device's *inbound* packed sample frame (which carries
+   1 sample per sub-1 channel + 4 packed samples per sub-4 channel,
+   arriving every 1 ms). Sending it had no effect.
+3. **opensmu's "init step 3"** is the same `type=0x78` command applied
+   to channel `0x17` (rx) — that's what triggers baseline streaming on
+   open.
+
+Wired through `protocol.encode_channel_enable_for_recording`, updated
+`SMU.start_recording` / `stop_recording`, taught `iter_samples` to
+auto-detect and unpack the packed-frame format. Tightened test asserts
+the device actually delivers ≥6000 mc samples in 2 s now (was ≥5).
 
 ## What's done
 

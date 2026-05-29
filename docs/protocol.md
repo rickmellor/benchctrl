@@ -59,54 +59,83 @@ Three OUTs:
 After step 3 the device begins streaming all 12 default channels at
 its baseline rate (~6 Hz observed; full rate not yet decoded).
 
-### START_RECORDING
+### Recording start / stop — per-channel enable (`type=0x78`)
 
-A variable-length payload that selects channels and rates:
-
-```
-[8 B header: 69 83 2a ff 17 02 00 00]
-[N channel records]
-[8 B sentinel: 17 00 00 00 00 00 00 00]
-```
-
-Channel records have two sizes based on subtype:
-
-| Subtype | Size | Layout |
-|---|---|---|
-| 1 (1 kHz nominal) | 12 B | `[id:u16][1:u16][rate:u32][0:u32]` |
-| 4 (4 kHz nominal) | 24 B | `[id:u16][4:u16][rate:u32][16 B zero blob]` |
-
-Enabling `mc` (id `0x00`) auto-includes `mp` (id `0x06`); enabling `ac`
-(`0x02`) auto-includes `ap` (`0x07`). The host mirrors this so the
-payload matches what the vendor stack sends.
-
-### STOP_RECORDING — type `0x78` (16 B)
+There is **no single START_RECORDING command**. Recording is set up by
+sending one channel-enable frame per requested channel:
 
 ```
-[seq:u32] [78 00 00 00] [target_wire_id:u32] [0:u32]
+[seq:u32 LE] [0x78 00 00 00] [wire_id:u32 LE] [value:u32 LE]
 ```
 
-`target_wire_id` is one of the channels in the currently active
-recording (highest in the set, per vendor capture).
-
-### Recording cleanup — type `0x7C` (8 B)
+with `value = 1` to start streaming that channel, `value = 0` to stop.
+After the per-channel burst, send a single 8-byte cleanup payload
+(`type=0x7C`) to flush:
 
 ```
-[seq:u32] [7C 00 00 00]
+[seq:u32 LE] [0x7C 00 00 00]
 ```
 
-Sent after `STOP_RECORDING` to release the recording context.
+The "init step 3" sent on session open is mechanically the same command
+applied to channel `0x17` (rx) — that's what kicks the device into its
+baseline streaming mode.
+
+Once a regular channel (e.g. `mc` `0x00`) is enabled this way, the device
+switches from the slow baseline envelope to high-rate packed-sample
+frames (see "Inbound packed sample frame" below). Disabling all the
+explicitly-enabled channels (val=0) returns the device to baseline.
+
+### Legacy `69 83 2a ff …` payload
+
+The 76-byte `69 83 2a ff 17 02 00 00 …` payload used by historical
+versions of `arc_direct` (and opensmu v0.1) is **not** what the vendor
+stack sends. It was a misread of the device's *inbound* packed sample
+frame and produced no useful effect when sent host→device.
 
 ## Inbound (device → host) payloads
 
-### Sample record (12 B, inside a frame payload)
+### Baseline sample record (12 B, inside a frame payload)
 
 ```
 [02 00 08 00] [chan:u32 LE] [value:f32 LE]
 ```
 
-One frame can carry many sample records back-to-back. The `chan` field
-is the channel wire id (see table below).
+Emitted when streaming in baseline mode (no channel explicitly enabled
+for recording). One frame can carry many of these records back-to-back.
+The `chan` field is the channel wire id (see table below).
+
+### Inbound packed sample frame (variable, native-rate)
+
+Emitted as the *entire payload* of a wire frame, once any channel is
+enabled for recording via the `type=0x78` mechanism above:
+
+```
+[69 83 2a ff] [seq:u32 LE]
+[per-channel record …]
+[17 00 00 00 00 00 00 00]                       sentinel
+```
+
+Each per-channel record:
+
+| Subtype | Size | Layout | Samples carried |
+|---|---|---|---|
+| 1 | 12 B | `[id:u16][1:u16][rate:u32][value:f32 LE]` | 1 sample |
+| 4 | 24 B | `[id:u16][4:u16][rate:u32][v0..v3:f32 LE x4]` | 4 samples |
+
+The frame arrives at the slowest enabled channel's rate (1 kHz for any
+sub-1 channel). High-rate (sub-4) channels carry 4 samples per frame,
+so `mc` and `mp` arrive at 4 kHz native even though frames come every
+1 ms.
+
+A 76-byte frame typical for `mc + mv + mp` decodes as:
+
+```
+0000  69 83 2a ff [seq:u32]                                magic + seq
+0008  00 00 04 00 [rate=4000] [4 floats: mc samples]       mc sub-4
+0020  01 00 01 00 [rate=1000] [1 float:  mv sample]        mv sub-1
+002C  06 00 04 00 [rate=4000] [4 floats: mp samples]       mp sub-4
+0044  17 00 00 00 00 00 00 00                              sentinel
+```
 
 ### Error response (16-B payload)
 

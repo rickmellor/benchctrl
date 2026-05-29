@@ -20,11 +20,11 @@ def test_record_context_manager_yields_samples(smu):
     assert not rec.is_running
     mv = rec.buffer(Channel.MAIN_VOLTAGE)
     mc = rec.buffer(Channel.MAIN_CURRENT)
-    # Device's baseline streaming rate is ~6 Hz across all channels until
-    # the full-rate command is sent (see ROADMAP.md "Full-rate streaming"
-    # deferral). So 2 s of recording yields ~10-15 samples per channel.
-    assert len(mv.values) >= 5, f"only {len(mv.values)} mv samples"
-    assert len(mc.values) >= 5, f"only {len(mc.values)} mc samples"
+    # Native rates after the type=0x78 channel-enable unlock: mv = 1 kHz
+    # (1 sample per packed frame), mc = 4 kHz (4 samples per packed frame).
+    # Allow 75% headroom for thread scheduling and start/stop overhead.
+    assert len(mv.values) >= 1500, f"only {len(mv.values)} mv samples (expected >=1500 @ 1 kHz)"
+    assert len(mc.values) >= 6000, f"only {len(mc.values)} mc samples (expected >=6000 @ 4 kHz)"
 
 
 def test_record_statistics_on_main_voltage(smu):
