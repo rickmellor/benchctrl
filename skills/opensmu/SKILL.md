@@ -257,14 +257,56 @@ duty = duty_cycle_from_recording(
 `self_discharge_loss_mAh`, `safety_margin_loss_mAh`, `final_voltage_V`
 (profile estimator only), `method`, `stop_reason`.
 
+### Profiler (v0.7.0)
+
+Orchestrates a real-cell discharge → builds a `BatteryProfile`.
+
+```python
+from opensmu import SMU
+from opensmu.battery import (
+    Battery, DischargeProfile, DischargeStep, ExitConditions,
+)
+from opensmu.battery.profiler import Profiler, ProfilerConfig
+
+config = ProfilerConfig(
+    discharge_profile=DischargeProfile(
+        low=DischargeStep("current", 0.001, 60.0),
+        high=DischargeStep("current", 0.020, 0.5),
+        exit_conditions=ExitConditions(iterations=0, ocv=2.7, voltage=2.5),
+    ),
+    battery=Battery(
+        capacity=1000.0, capacity_unit="mAh",
+        voltage=3.7, voltage_unit="V",
+        manufacturer="Cellmaker", model="LP-1000",
+    ),
+    temperature=25.0,
+)
+
+with SMU.open() as smu:
+    profiler = Profiler(smu, config)
+    result = profiler.run(progress=lambda s: print(s.iteration, s.voltage_ocv))
+    result.profile.save("LP-1000-(25).json")
+```
+
+Phase 3 limitations:
+- **Step duration**: minimum 50 ms (USB-driven step changes have ms latency).
+  Short-pulse profiles like Otii's CR2032 (2 ms) are rejected.
+- **Mode**: `"current"` only. `"power"` / `"resistance"` rejected for now.
+- **Real-battery hardware required** to validate; mock-SMU tests cover
+  orchestration logic.
+
 ### MCP tools
 
-Profile and calculator tools (work on saved files; no SMU connection):
+Profile, calculator, and profiler tools (most work on saved files; profiler
+needs an SMU and a real battery):
+
 - `battery_profile_summary(path)`
 - `battery_profile_lookup(path, used_capacity_mAh, temperature=None)`
 - `battery_life_estimate(capacity_mAh, active_current_A, active_time_s, sleep_current_A, sleep_time_s, ...)`
 - `battery_life_estimate_from_profile(profile_path, active_current_A, ...)`
-- `battery_life_from_recording(recording_path, active_window_start_s, ..., sleep_window_end_s, profile_path=None, capacity_mAh=None, ...)`
+- `battery_life_from_recording(recording_path, active_window_start_s, ..., profile_path=None, capacity_mAh=None, ...)`
+- `battery_profiler_estimate_duration(capacity_mAh, high_current_A, high_time_s, low_current_A, low_time_s)` — pre-run estimate
+- `battery_profiler_run(output_path, high_current_A, ..., capacity_mAh, nominal_voltage_V, ...)` — full discharge (LONG — hours typically)
 
 ## Anti-patterns — don't do these
 

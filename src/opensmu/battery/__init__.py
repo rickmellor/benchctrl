@@ -33,6 +33,17 @@ from opensmu.battery.profile import (
     DischargeTable,
     ExitConditions,
 )
+from opensmu.battery.emulator import (
+    Emulator,
+    EmulatorConfig,
+    EmulatorState,
+)
+from opensmu.battery.profiler import (
+    Profiler,
+    ProfilerConfig,
+    ProfilerResult,
+    ProfilerSample,
+)
 
 __all__ = [
     # profile (v0.5.0)
@@ -50,4 +61,13 @@ __all__ = [
     "duty_cycle_from_recording",
     "estimate_life_constant_current",
     "estimate_life_from_profile",
+    # profiler (v0.7.0)
+    "Profiler",
+    "ProfilerConfig",
+    "ProfilerResult",
+    "ProfilerSample",
+    # emulator (v0.8.0)
+    "Emulator",
+    "EmulatorConfig",
+    "EmulatorState",
 ]

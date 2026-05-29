@@ -2,6 +2,71 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] — battery profiler (phase 3 of Battery Toolbox replacement)
+
+Hardware orchestration: drive a real battery through a configured
+discharge profile, measure V/I per cycle, build a profile JSON.
+
+### Added — `opensmu.battery.profiler`
+
+- **`ProfilerConfig`** dataclass — discharge profile + battery
+  metadata + temperature + measurement-window / relaxation /
+  initial-settle timing + progress throttle + sample cap.
+- **`ProfilerSample`** dataclass — one captured cycle:
+  iteration, timestamp, OCV, loaded voltage, loaded current, ESR,
+  cumulative capacity consumed (mAh).
+- **`ProfilerResult`** dataclass — final BatteryProfile + samples +
+  runtime + stop reason + aborted flag.
+- **`Profiler(smu, config).run(progress=None)`** — synchronous
+  orchestrated discharge. Alternates between high and low current
+  steps, measures OCV after relaxation, computes ESR from step
+  response. Stops on exit conditions (iteration limit, OCV cutoff,
+  loaded-voltage cutoff), `Profiler.abort()` from another thread or
+  the progress callback, or `sample_cap` reached.
+- Profile auto-tags `software_version="opensmu/<ver>"` and queries the
+  connected SMU for `firmware_version` + `device_id` to populate
+  the `device` metadata block (round-trip-compatible with Otii's
+  format).
+
+### Constraints
+
+- **Step duration**: minimum 50 ms. Profiles with extremely fast high
+  pulses (e.g. Otii's CR2032 default of 2 ms) are rejected with a clear
+  error.
+- **Mode**: `"current"` only in v0.7.0. `"power"` and `"resistance"`
+  modes raise on construction; tracked for v0.7.x.
+
+### Added — MCP tools (per SDK ↔ MCP parity principle)
+
+- **`battery_profiler_estimate_duration(capacity_mAh, high_current_A, high_time_s, low_current_A, low_time_s)`** —
+  pre-run estimate. Returns cycle count, total seconds, human-readable
+  duration. Use before kicking off a long run.
+- **`battery_profiler_run(output_path, ..., capacity_mAh, nominal_voltage_V, ...)`** —
+  full synchronous run; writes profile to disk. Documented warning that
+  most MCP clients will time out before a real profile completes —
+  Python `Profiler` API recommended for anything beyond a short demo.
+
+### Tests
+
+14 new tests in `tests/test_battery_profiler.py` using a `_MockSMU`
+that models a linear-decay cell with configurable ESR:
+
+- Input validation (4): rejects too-short steps, negative currents,
+  unsupported modes, zero capacity.
+- Run behaviour (10): produces correct sample count, stops on OCV
+  cutoff, disables output at end, alternates high/low steps,
+  computes non-negative ESR, progress callback fires + survives
+  exceptions, abort halts after current cycle, built profile
+  round-trips through JSON, runtime is recorded.
+
+Total tests: 248 → **262 passing**.
+
+### Hardware validation
+
+Phase 3 ships green tests against a mock SMU. Real-battery validation
+is a separate hardware task (needs an actual cell on the output
+terminals) — tracked for a follow-up when bench hardware is wired up.
+
 ## [0.6.0] — battery life calculator (phase 2 of Battery Toolbox replacement)
 
 Pure-Python duty-cycle life estimator. Drop-in replacement for Qoitech's

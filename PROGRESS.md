@@ -5,9 +5,9 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.6.0 shipped — battery life calculator (phase 2 of 4 of Battery Toolbox replacement)
-- **Tests**: 248 / 248 passing
-- **Battery subpackage**: `opensmu.battery.profile` (phase 1) + `.calculator` (phase 2) — phases 3-4 in flight
+- **Phase**: v0.7.0 shipped — battery profiler (phase 3 of 4 of Battery Toolbox replacement)
+- **Tests**: 262 / 262 passing (profiler tests use a mock SMU; real-battery validation is a follow-up hardware task)
+- **Battery subpackage**: `.profile` (v0.5) + `.calculator` (v0.6) + `.profiler` (v0.7) — phase 4 (emulator) in flight
 - **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
 - **MCP server**: 26 tools (was 23 in v0.3.0); `opensmu-mcp` ready
 - **Claude Code skill** at `skills/opensmu/SKILL.md`

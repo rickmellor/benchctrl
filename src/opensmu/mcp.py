@@ -30,8 +30,14 @@ from mcp.server.fastmcp import FastMCP
 
 from opensmu import SMU, Channel, Recording
 from opensmu.battery import (
+    Battery,
     BatteryProfile,
+    DischargeProfile,
+    DischargeStep,
     DutyCycle,
+    ExitConditions,
+    Profiler,
+    ProfilerConfig,
     duty_cycle_from_recording,
     estimate_life_constant_current,
     estimate_life_from_profile,
@@ -743,6 +749,115 @@ def battery_life_from_recording(
     if profile_path:
         out["profile_path"] = profile_path
     return out
+
+
+@mcp.tool()
+def battery_profiler_estimate_duration(
+    capacity_mAh: float,
+    high_current_A: float,
+    high_time_s: float,
+    low_current_A: float,
+    low_time_s: float,
+) -> dict:
+    """Estimate how long a profiler run will take, before kicking one off.
+
+    Rough math: charge consumed per cycle = sum of high+low current*time;
+    cycles to depletion = capacity / charge_per_cycle; wall-clock duration =
+    cycles * (high_time + low_time + measurement overhead).
+
+    Use this before calling :py:meth:`battery_profiler_run` so you know
+    whether to start a 10 s run or a 12 hr one.
+    """
+    cycle_time_s = high_time_s + low_time_s
+    if cycle_time_s <= 0:
+        return {"error": "high_time_s + low_time_s must be > 0"}
+    cycle_charge_mAh = (
+        (high_current_A * high_time_s) + (low_current_A * low_time_s)
+    ) / 3.6
+    if cycle_charge_mAh <= 0:
+        return {"error": "no net charge drawn per cycle"}
+    cycles = capacity_mAh / cycle_charge_mAh
+    raw_seconds = cycles * cycle_time_s
+    # Overhead: measurement window + relaxation per cycle (~0.6 s default)
+    overhead_seconds = cycles * 0.6
+    total_seconds = raw_seconds + overhead_seconds
+
+    from opensmu.battery.calculator import _humanize_seconds
+
+    return {
+        "estimated_cycles": cycles,
+        "estimated_duration_s": total_seconds,
+        "estimated_duration_human": _humanize_seconds(total_seconds),
+        "cycle_time_s": cycle_time_s,
+        "cycle_charge_mAh": cycle_charge_mAh,
+    }
+
+
+@mcp.tool()
+def battery_profiler_run(
+    output_path: str,
+    high_current_A: float,
+    high_time_s: float,
+    low_current_A: float,
+    low_time_s: float,
+    capacity_mAh: float,
+    nominal_voltage_V: float,
+    manufacturer: str = "",
+    model: str = "",
+    temperature: float = 25.0,
+    cutoff_voltage_V: float = 0.0,
+    cutoff_ocv_V: float = 0.0,
+    max_iterations: int = 0,
+) -> dict:
+    """Run a full battery profiler discharge and save the resulting profile.
+
+    SAFETY-CRITICAL: this draws current from a real battery connected to
+    the SMU's output terminals. Verify the battery + connections before
+    calling. The output is enabled for the duration of the run; the
+    cell will be drained according to the configured discharge profile.
+
+    DURATION WARNING: profiling can take many hours. Call
+    :py:meth:`battery_profiler_estimate_duration` first to know what
+    you're committing to. Most MCP clients will time out before a real
+    profiling run completes — prefer the Python API
+    (``opensmu.battery.Profiler``) for anything beyond a short demo.
+
+    The discharge profile uses **current mode only** in phase 3 — power
+    and resistance modes are tracked for later.
+    """
+    smu = _get_smu()
+    config = ProfilerConfig(
+        discharge_profile=DischargeProfile(
+            low=DischargeStep("current", low_current_A, low_time_s),
+            high=DischargeStep("current", high_current_A, high_time_s),
+            exit_conditions=ExitConditions(
+                iterations=max_iterations,
+                ocv=cutoff_ocv_V,
+                voltage=cutoff_voltage_V,
+            ),
+        ),
+        battery=Battery(
+            capacity=capacity_mAh,
+            capacity_unit="mAh",
+            voltage=nominal_voltage_V,
+            voltage_unit="V",
+            manufacturer=manufacturer,
+            model=model,
+        ),
+        temperature=temperature,
+    )
+    profiler = Profiler(smu, config)
+    result = profiler.run()
+    out = result.profile.save(output_path)
+    return {
+        "saved_to": str(out),
+        "iterations": len(result.samples),
+        "runtime_s": result.runtime_s,
+        "stop_reason": result.stop_reason,
+        "aborted": result.aborted,
+        "first_sample": result.samples[0].__dict__ if result.samples else None,
+        "last_sample": result.samples[-1].__dict__ if result.samples else None,
+    }
 
 
 @mcp.tool()
