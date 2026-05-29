@@ -257,6 +257,44 @@ duty = duty_cycle_from_recording(
 `self_discharge_loss_mAh`, `safety_margin_loss_mAh`, `final_voltage_V`
 (profile estimator only), `method`, `stop_reason`.
 
+### Emulator (v0.8.0)
+
+Host-side control loop drives the SMU as a battery (OCV + ESR sag).
+
+```python
+from opensmu import SMU
+from opensmu.battery import BatteryProfile
+from opensmu.battery.emulator import Emulator, EmulatorConfig
+
+profile = BatteryProfile.load("CR2032-Energizer-(25).json")
+config = EmulatorConfig(
+    profile=profile,
+    initial_soc=1.0, series=1, parallel=1,
+    soc_tracking=True,
+    safety_max_voltage_V=3.5,     # MUST match your DUT's tolerance
+    update_interval_s=0.01,        # 100 Hz host loop
+)
+
+with SMU.open() as smu:
+    emu = Emulator(smu, config)
+    emu.start()
+    try:
+        time.sleep(60.0)   # let your DUT run
+        st = emu.state()   # snapshot any time, thread-safe
+        print(f"SoC: {st.soc*100:.1f}%, V_out: {st.output_voltage_V:.3f}")
+    finally:
+        emu.stop()         # always disables output in a finally
+```
+
+Bandwidth: ~100 Hz host-side, suitable for IoT loads with > 10 ms
+response. Sub-ms ESR tracking would need firmware-level access. Otii's
+licensed device-side emulator handles that regime; for everything
+else, the opensmu emulator works.
+
+Safety: `safety_max_voltage_V` is a hard cap on output. Always set
+this to your DUT's max tolerable voltage. The loop also stops on
+`safety_max_used_mAh` and `soc_floor` if configured.
+
 ### Profiler (v0.7.0)
 
 Orchestrates a real-cell discharge → builds a `BatteryProfile`.
@@ -307,6 +345,9 @@ needs an SMU and a real battery):
 - `battery_life_from_recording(recording_path, active_window_start_s, ..., profile_path=None, capacity_mAh=None, ...)`
 - `battery_profiler_estimate_duration(capacity_mAh, high_current_A, high_time_s, low_current_A, low_time_s)` — pre-run estimate
 - `battery_profiler_run(output_path, high_current_A, ..., capacity_mAh, nominal_voltage_V, ...)` — full discharge (LONG — hours typically)
+- `battery_emulator_start(profile_path, initial_soc=1.0, ..., safety_max_voltage_V=5.0, ...)` — start the emulator
+- `battery_emulator_state()` — snapshot
+- `battery_emulator_stop()` — stop + disable output
 
 ## Anti-patterns — don't do these
 

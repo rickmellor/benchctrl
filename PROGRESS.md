@@ -5,9 +5,10 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.7.0 shipped — battery profiler (phase 3 of 4 of Battery Toolbox replacement)
-- **Tests**: 262 / 262 passing (profiler tests use a mock SMU; real-battery validation is a follow-up hardware task)
-- **Battery subpackage**: `.profile` (v0.5) + `.calculator` (v0.6) + `.profiler` (v0.7) — phase 4 (emulator) in flight
+- **Phase**: v0.8.0 shipped — Battery Toolbox replacement COMPLETE (4 of 4 phases)
+- **Tests**: 276 / 276 passing (profiler + emulator tests use mock SMUs; real-hardware validation is a follow-up task)
+- **Battery subpackage**: `.profile` (v0.5) + `.calculator` (v0.6) + `.profiler` (v0.7) + `.emulator` (v0.8) — all four phases shipped
+- **Outcome**: Qoitech's licensed Battery Toolbox is fully replaced by opensmu on top of the wire vocabulary we already decoded. Profile JSONs interchange bit-for-bit with Otii in both directions.
 - **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
 - **MCP server**: 26 tools (was 23 in v0.3.0); `opensmu-mcp` ready
 - **Claude Code skill** at `skills/opensmu/SKILL.md`

@@ -35,6 +35,8 @@ from opensmu.battery import (
     DischargeProfile,
     DischargeStep,
     DutyCycle,
+    Emulator,
+    EmulatorConfig,
     ExitConditions,
     Profiler,
     ProfilerConfig,
@@ -857,6 +859,112 @@ def battery_profiler_run(
         "aborted": result.aborted,
         "first_sample": result.samples[0].__dict__ if result.samples else None,
         "last_sample": result.samples[-1].__dict__ if result.samples else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Battery emulator (v0.8.0)
+# ---------------------------------------------------------------------------
+#
+# The emulator is stateful — it runs in a background control loop. MCP
+# tools work on a singleton instance attached to the SMU.
+
+_emulator: Optional[Emulator] = None
+
+
+@mcp.tool()
+def battery_emulator_start(
+    profile_path: str,
+    initial_soc: float = 1.0,
+    series: int = 1,
+    parallel: int = 1,
+    temperature: Optional[float] = None,
+    soc_tracking: bool = True,
+    safety_max_voltage_V: float = 5.0,
+    update_interval_s: float = 0.01,
+    safety_max_used_mAh: Optional[float] = None,
+    soc_floor: float = 0.0,
+) -> dict:
+    """Start the battery emulator with a host-side control loop.
+
+    SAFETY-CRITICAL: drives voltage onto the output terminals. The
+    initial output voltage is the battery's open-circuit voltage at
+    ``initial_soc``. Connect your DUT before calling; verify
+    ``safety_max_voltage_V`` matches what the DUT can tolerate.
+
+    A background thread runs at ``update_interval_s`` (default 100 Hz):
+
+    1. Reads main current from the device.
+    2. Integrates to update state of charge (if ``soc_tracking=True``).
+    3. Looks up OCV(SoC) and ESR(SoC) from the profile.
+    4. Applies series / parallel multipliers.
+    5. Writes ``V = OCV − I·ESR`` (clamped to safety cap).
+
+    The emulator continues until ``battery_emulator_stop`` is called,
+    or one of the safety limits fires (``safety_max_used_mAh`` reached,
+    ``soc_floor`` reached).
+
+    Only one emulator can run at a time. Returns the initial state.
+    """
+    global _emulator
+    if _emulator is not None:
+        return {
+            "error": "REFUSED: emulator already running",
+            "guidance": "Call battery_emulator_stop() first.",
+        }
+    smu = _get_smu()
+    profile = BatteryProfile.load(profile_path)
+    config = EmulatorConfig(
+        profile=profile,
+        initial_soc=initial_soc,
+        series=series,
+        parallel=parallel,
+        temperature=temperature,
+        soc_tracking=soc_tracking,
+        safety_max_voltage_V=safety_max_voltage_V,
+        update_interval_s=update_interval_s,
+        safety_max_used_mAh=safety_max_used_mAh,
+        soc_floor=soc_floor,
+    )
+    _emulator = Emulator(smu, config)
+    _emulator.start()
+    return {
+        "started": True,
+        "profile_path": profile_path,
+        "state": _emulator.state().__dict__,
+    }
+
+
+@mcp.tool()
+def battery_emulator_state() -> dict:
+    """Snapshot the running emulator's state.
+
+    Returns SoC, used capacity (mAh), OCV (V), ESR (Ω), output voltage,
+    measured current, runtime, iteration count, running flag, stop
+    reason if stopped.
+    """
+    if _emulator is None:
+        return {"error": "no emulator running", "guidance": "Call battery_emulator_start() first."}
+    return _emulator.state().__dict__
+
+
+@mcp.tool()
+def battery_emulator_stop() -> dict:
+    """Stop the running emulator and disable the output.
+
+    Idempotent — safe to call when no emulator is running.
+    """
+    global _emulator
+    if _emulator is None:
+        return {"stopped": False, "note": "no emulator was running"}
+    final = _emulator.state()
+    _emulator.stop()
+    state = _emulator.state()
+    _emulator = None
+    return {
+        "stopped": True,
+        "final_state": state.__dict__,
+        "iterations_at_stop": final.iteration,
     }
 
 

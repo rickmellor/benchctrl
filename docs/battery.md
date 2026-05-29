@@ -30,7 +30,7 @@ without it.
 | 1 | `opensmu.battery.profile` — Otii-compatible JSON I/O + interpolation | **shipped (v0.5.0)** |
 | 2 | `opensmu.battery.calculator` — duty-cycle life estimator | **shipped (v0.6.0)** |
 | 3 | `opensmu.battery.profiler` — orchestrated hardware discharge | **shipped (v0.7.0)** |
-| 4 | `opensmu.battery.emulator` — host-side OCV + ESR control loop | next |
+| 4 | `opensmu.battery.emulator` — host-side OCV + ESR control loop | **shipped (v0.8.0)** |
 
 ## Phase 1 — `opensmu.battery.profile`
 
@@ -339,9 +339,110 @@ connection before calling. The profile run sets `set_output(True)` and
 draws the configured high/low currents until exit conditions fire or
 the run is aborted.
 
-## Coming next
+## Phase 4 — `opensmu.battery.emulator`
 
-- **Phase 4 (`opensmu.battery.emulator`)** — host-side control loop:
-  read main current at native rate, compute
-  `V = OCV(SoC) − I · ESR(SoC)` from the profile, write
-  `set_main_voltage`. Makes the SMU behave as a battery for DUT testing.
+Host-side control loop that drives the SMU as a battery with OCV + ESR
+sag. Replaces Otii's licensed Battery Emulator using only opensmu's
+existing wire vocabulary.
+
+### Workflow
+
+```python
+from opensmu import SMU
+from opensmu.battery import BatteryProfile
+from opensmu.battery.emulator import Emulator, EmulatorConfig
+
+profile = BatteryProfile.load("CR2032-Energizer-(25).json")
+config = EmulatorConfig(
+    profile=profile,
+    initial_soc=1.0,             # 100% charged
+    series=1, parallel=1,        # single cell
+    soc_tracking=True,           # SoC drops as the DUT draws current
+    safety_max_voltage_V=3.5,    # absolute cap on output
+    update_interval_s=0.01,      # 100 Hz control loop
+)
+
+with SMU.open() as smu:
+    emu = Emulator(smu, config)
+    emu.start()
+    try:
+        time.sleep(60.0)         # run your DUT against the cell
+        st = emu.state()
+        print(f"SoC: {st.soc*100:.1f}%, used: {st.used_capacity_mAh:.3f} mAh")
+    finally:
+        emu.stop()
+```
+
+### Control loop
+
+Each tick (default 100 Hz):
+
+1. Reads main current ``I`` from the SMU.
+2. Integrates ``I × dt`` → used capacity → SoC (if `soc_tracking=True`).
+3. Looks up ``OCV(SoC)`` and ``ESR(SoC)`` from the profile's discharge curve.
+4. Applies series + parallel multipliers (`series` multiplies OCV + ESR;
+   `parallel` divides ESR + multiplies effective capacity).
+5. Computes `V_out = total_OCV − I × total_ESR`, clamps to
+   `safety_max_voltage_V`.
+6. Writes `set_main_voltage(V_out)`.
+
+### Bandwidth
+
+USB-driven control loops are bounded by ~ms-scale latency on each
+read+write cycle. The default 100 Hz update rate handles:
+
+- Steady-state operation (always fine)
+- Slow transients (anything > 10 ms response time)
+- Typical IoT sleep/wake cycles (TX bursts, sensor sampling)
+
+For sub-ms ESR tracking (e.g. fast switching converters), Otii's
+licensed device-side emulator handles the regulation in the device's
+own MHz regulator. That regime is out of reach for a host-side loop
+and would require firmware-level access we don't have today.
+
+### Modes
+
+- `soc_tracking=True` (default) — cell drains as DUT draws current.
+- `soc_tracking=False` — SoC pinned at initial value. The emulator still
+  applies ESR sag in response to load, but the cell doesn't appear to
+  "run down". Useful for steady-state DUT characterisation.
+
+### Series / parallel
+
+- `series=N` — OCV and ESR are multiplied by N (cells in series).
+- `parallel=N` — ESR is divided by N, effective capacity is multiplied
+  by N (cells in parallel).
+- Combine them: a 2S2P pack uses `series=2, parallel=2`.
+
+### Safety stops
+
+The emulator's loop stops on its own (and disables the output) if:
+
+- `safety_max_used_mAh` is set and the cumulative used capacity reaches it
+- `soc_floor` is set and the computed SoC drops to or below it
+
+In all cases (including normal `stop()` or exception) the output is
+disabled in a `finally` block before `stop()` returns.
+
+### MCP tools
+
+- `battery_emulator_start(profile_path, initial_soc=1.0, series=1, parallel=1, temperature=None, soc_tracking=True, safety_max_voltage_V=5.0, update_interval_s=0.01, safety_max_used_mAh=None, soc_floor=0.0)` —
+  start the emulator. Only one can run at a time.
+- `battery_emulator_state()` — snapshot the running emulator's state.
+- `battery_emulator_stop()` — stop the emulator and disable the output.
+
+⚠ **Hardware safety.** The emulator drives voltage onto the output
+terminals from the moment `start()` is called. Connect your DUT
+before calling, and pick `safety_max_voltage_V` to match what the DUT
+can tolerate.
+
+## Going further
+
+All four phases are now shipped. Possible follow-ups:
+
+- Capture vendor wire bytes for **firmware-level ESR tracking**
+  (sub-ms regulation) to extend the emulator's bandwidth.
+- Add **power / resistance discharge modes** to the profiler.
+- Support **multi-temperature profile merging** with auto-interpolation
+  between tables in the emulator.
+- A **GUI / web dashboard** showing live emulator state and recording.

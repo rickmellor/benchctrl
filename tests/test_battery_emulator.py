@@ -87,8 +87,9 @@ def _flat_profile(capacity_mAh: float = 1000.0, ocv: float = 3.7,
 
 
 def test_emulator_rejects_bad_soc():
+    config = EmulatorConfig(profile=_flat_profile(), initial_soc=1.5)
     with pytest.raises(SMUValueError):
-        EmulatorConfig(profile=_flat_profile(), initial_soc=1.5)
+        Emulator(_MockSMU(), config)
 
 
 def test_emulator_rejects_zero_capacity_profile():

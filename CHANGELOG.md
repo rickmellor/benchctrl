@@ -2,6 +2,95 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0] — battery emulator (phase 4 of Battery Toolbox replacement) — FOUR PHASES DONE
+
+Host-side control loop that drives the SMU as a battery with OCV + ESR
+sag. Completes the Battery Toolbox replacement: opensmu now covers all
+four features Qoitech's licensed product offers.
+
+### Added — `opensmu.battery.emulator`
+
+- **`EmulatorConfig`** dataclass — profile + initial SoC + series + parallel
+  + temperature + soc_tracking + update_interval_s + safety_max_voltage_V
+  + safety_max_used_mAh + soc_floor + current_read_timeout_s.
+- **`EmulatorState`** dataclass — SoC, used capacity (mAh), OCV (V),
+  ESR (Ω), output voltage (V), measured current (A), runtime, iteration,
+  running flag, stop reason.
+- **`Emulator(smu, config)`** with `start()`, `stop()`, `state()`,
+  `run_for(seconds)` lifecycle. Background daemon thread runs the
+  control loop at the configured update interval (default 100 Hz).
+- Control loop algorithm: read mc, integrate I·dt → SoC, look up
+  OCV(SoC) + ESR(SoC) from the profile, apply series/parallel
+  multipliers, write `V = OCV − I·ESR` clamped to safety_max_voltage_V.
+- Safety stops on `safety_max_used_mAh` and `soc_floor`. Output is
+  always disabled in a `finally` block before `stop()` returns.
+
+### Modes
+
+- **`soc_tracking=True`** (default) — cell drains as DUT draws current.
+- **`soc_tracking=False`** — SoC pinned at initial value. ESR sag still
+  applies; cell doesn't appear to run down. Steady-state characterisation.
+
+### Series / parallel
+
+- `series=N` multiplies OCV and ESR.
+- `parallel=N` divides ESR and multiplies effective capacity.
+
+### Bandwidth
+
+USB-driven host loop tops out around ~ms-scale latency per read+write
+cycle. 100 Hz default update rate handles steady-state and slow
+transients well (anything > ~10 ms response). Sub-ms ESR tracking
+needs firmware-level regulation — out of reach for the host loop.
+That's the one regime Otii's licensed device-side emulator covers
+that this doesn't.
+
+### Added — MCP tools (per SDK ↔ MCP parity principle)
+
+- **`battery_emulator_start(profile_path, initial_soc=1.0, series=1, parallel=1, temperature=None, soc_tracking=True, safety_max_voltage_V=5.0, update_interval_s=0.01, safety_max_used_mAh=None, soc_floor=0.0)`** —
+  start the emulator. Only one at a time. Refuses with structured
+  guidance if one's already running.
+- **`battery_emulator_state()`** — snapshot.
+- **`battery_emulator_stop()`** — stop + disable output. Idempotent.
+
+### Tests
+
+14 new tests in `tests/test_battery_emulator.py` against a `_MockSMU`
+that models a DUT drawing constant current:
+
+- Input validation (4): rejects bad SoC, zero capacity profile, zero
+  series/parallel, zero update interval.
+- Run behaviour (10): seeds output at total OCV on start, disables
+  output on stop, rejects double-start, idempotent stop, applies ESR
+  sag (V = OCV − I·ESR), tracks SoC over time, `soc_tracking=False`
+  pins SoC, safety_max_voltage clamps output, safety_max_used_mAh
+  triggers stop, `run_for(seconds)` returns final state, `parallel`
+  scales bank capacity, `state()` is thread-safe under load.
+
+Total tests: 262 → **276 passing**.
+
+### Hardware validation
+
+Phase 4 ships green against a mock SMU. Real-DUT validation (connect a
+load drawing variable current, verify voltage sag tracks ESR curve) is
+a separate hardware task — tracked for when bench hardware is wired
+up.
+
+### What this completes
+
+The Battery Toolbox replacement is now feature-complete on top of
+opensmu's existing wire vocabulary:
+
+| Otii Battery Toolbox feature | opensmu module |
+|---|---|
+| Battery Profile Manager | `opensmu.battery.profile` (v0.5.0) |
+| Battery Life Calculator | `opensmu.battery.calculator` (v0.6.0) |
+| Battery Profiler | `opensmu.battery.profiler` (v0.7.0) |
+| Battery Emulator | `opensmu.battery.emulator` (v0.8.0) |
+
+No vendor license required. No Otii server. Profile JSONs interchange
+bit-for-bit between opensmu and Otii in both directions.
+
 ## [0.7.0] — battery profiler (phase 3 of Battery Toolbox replacement)
 
 Hardware orchestration: drive a real battery through a configured
