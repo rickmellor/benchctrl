@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import struct
 import threading
 import time
 from collections.abc import Iterable, Iterator
@@ -87,7 +86,7 @@ class SMUInfo:
     description: str
 
     @classmethod
-    def from_port(cls, p: PortInfo) -> "SMUInfo":
+    def from_port(cls, p: PortInfo) -> SMUInfo:
         return cls(
             port=p.device,
             name=p.name,
@@ -165,7 +164,7 @@ class SMU:
         port: Optional[Union[str, SMUInfo, PortInfo]] = None,
         *,
         baudrate: int = 9600,
-    ) -> "SMU":
+    ) -> SMU:
         """Open a connection. If `port` is None, auto-discovers the first device."""
         info: Optional[SMUInfo] = None
         port_name: Optional[str] = None
@@ -231,7 +230,7 @@ class SMU:
 
     # ----- context manager ----------------------------------------------
 
-    def __enter__(self) -> "SMU":
+    def __enter__(self) -> SMU:
         return self
 
     def __exit__(self, *exc_info) -> None:
@@ -587,19 +586,19 @@ class SMU:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if ch in self._active_recording._buffers:
-                    buf = self._active_recording._buffers[ch]
-                    if buf.values:
-                        return buf.values[-1]
+                    channel_buf = self._active_recording._buffers[ch]
+                    if channel_buf.values:
+                        return channel_buf.values[-1]
                 time.sleep(0.02)
             raise SMUTimeoutError(
                 f"no sample for {ch.code} within {timeout:.2f} s"
             )
 
         # No recording: drain a window of raw bytes and parse
-        buf = self._transport.read_for(min(timeout, 0.5))
-        self._raw_window_buffer.extend(buf)
+        raw = self._transport.read_for(min(timeout, 0.5))
+        self._raw_window_buffer.extend(raw)
         # Check for error frames first
-        for fr in iter_frames(buf):
+        for fr in iter_frames(raw):
             err = parse_error_frame(fr.payload)
             if err is not None:
                 raise SMUCommandError(err.error_code, err.last_good_value)

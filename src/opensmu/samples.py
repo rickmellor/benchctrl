@@ -20,7 +20,6 @@ from opensmu.channels import WIRE_ID_TO_CHANNEL, Channel
 from opensmu.protocol import (
     SAMPLE_RECORD_HEADER,
     SAMPLE_RECORD_LEN,
-    Frame,
     SampleRecord,
     iter_frames,
     iter_samples,

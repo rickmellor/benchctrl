@@ -27,8 +27,8 @@ def test_encode_frame_structure():
     assert framed[:4] == WIRE_MAGIC
     L = struct.unpack_from("<H", framed, 4)[0]
     S = struct.unpack_from("<H", framed, 6)[0]
-    assert L == len(payload)
-    assert S == checksum(payload)
+    assert len(payload) == L
+    assert checksum(payload) == S
     assert framed[8:] == payload
 
 

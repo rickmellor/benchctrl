@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from opensmu.exceptions import SMUCommandError
-
 
 pytestmark = pytest.mark.hardware
 

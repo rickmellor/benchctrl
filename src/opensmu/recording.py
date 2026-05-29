@@ -16,7 +16,7 @@ import datetime as _dt
 import json
 import math
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 
@@ -333,7 +333,7 @@ class Recording:
         return p
 
     @classmethod
-    def load(cls, path: str | Path) -> "Recording":
+    def load(cls, path: str | Path) -> Recording:
         """Inverse of :py:meth:`save`."""
         p = Path(path)
         with p.open("rb") as f:

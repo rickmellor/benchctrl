@@ -6,7 +6,6 @@ import pytest
 
 from opensmu import Channel
 
-
 pytestmark = pytest.mark.hardware
 
 

@@ -8,7 +8,6 @@ import pytest
 
 from opensmu import Channel, Recording
 
-
 pytestmark = pytest.mark.hardware
 
 

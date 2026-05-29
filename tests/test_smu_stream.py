@@ -6,7 +6,6 @@ import pytest
 
 from opensmu import Channel, Sample
 
-
 pytestmark = pytest.mark.hardware
 
 
@@ -26,7 +25,7 @@ def test_stream_during_recording_raises(smu):
 
     smu.disable_all_channels()
     smu.enable_channel(Channel.MAIN_VOLTAGE)
-    rec = smu.start_recording()
+    smu.start_recording()
     try:
         with pytest.raises(SMUValueError):
             next(iter(smu.stream(seconds=0.5)))

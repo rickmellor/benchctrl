@@ -135,7 +135,7 @@ class Transport:
                 buf.extend(chunk)
         return bytes(buf)
 
-    def __enter__(self) -> "Transport":
+    def __enter__(self) -> Transport:
         self.open()
         return self
 

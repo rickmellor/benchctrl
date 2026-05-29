@@ -8,8 +8,6 @@ from opensmu.protocol import (
     CMD_ENABLE_5V,
     CMD_SET_MAIN_VOLTAGE,
     CMD_SET_OC_PROTECTION,
-    RANGE_HIGH,
-    RANGE_LOW,
     START_REC_HEADER,
     START_REC_SENTINEL,
     TYPE_REC_CLEANUP,

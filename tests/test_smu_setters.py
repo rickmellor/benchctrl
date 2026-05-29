@@ -8,7 +8,6 @@ import pytest
 
 from opensmu.exceptions import SMUValueError
 
-
 pytestmark = pytest.mark.hardware
 
 

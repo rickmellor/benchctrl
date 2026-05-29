@@ -28,8 +28,8 @@ from opensmu.exceptions import (
     SMUTimeoutError,
     SMUValueError,
 )
-from opensmu.recording import ChannelInfoResult, Recording, Statistics
-from opensmu.samples import Sample
+from opensmu.recording import ChannelInfoResult, Recording
+from opensmu.samples import Sample, Statistics
 
 __all__ = [
     "__version__",

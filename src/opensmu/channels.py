@@ -98,7 +98,7 @@ class Channel(Enum):
         raise KeyError(f"no channel with code {code!r}")
 
     @classmethod
-    def coerce(cls, value: Union["Channel", str]) -> Channel:
+    def coerce(cls, value: Union[Channel, str]) -> Channel:
         """Accept either a `Channel` or its short code; return the enum."""
         if isinstance(value, cls):
             return value
