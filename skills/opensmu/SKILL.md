@@ -123,22 +123,52 @@ for power channels (W). Both are integrated over the selected window. Voltage
 channels return `None` for charge/energy — by design, those quantities aren't
 meaningful for a voltage stream alone.
 
-## File formats
+## Output formats
 
-| Extension | Content | Round-trip lossless? |
-|---|---|---|
-| `.opensmu` | Native binary, msgpack-like | yes |
-| `.csv` | Long form (default) or wide (`format="wide"`) | no (text formatting) |
-| `.json` | Samples + statistics + metadata | yes |
-| `.raw` | Raw inbound USB bytes (escape hatch) | yes |
+Full chooser table + sizing examples in [`docs/output_formats.md`](../../docs/output_formats.md).
+Quick rules:
+
+| Need | Reach for |
+|---|---|
+| Archive for future opensmu round-trip | `.save("run.opensmu")` |
+| Share with colleagues (compact, portable) | `.save_parquet("run.parquet")` — needs `opensmu[parquet]` |
+| Open in Excel right now | `.save_csv("run.csv", format="wide")` |
+| Notebook / custom analysis | `.to_pandas()` / `.to_numpy(ch)` — need `opensmu[pandas]` / `opensmu[numpy]` |
+| Quick-look plot | `.plot()` — needs `opensmu[plot]` |
+| Inspect wire bytes | `.save_raw("run.raw", buf)` |
 
 ```python
-rec.save("run.opensmu")           # canonical
-rec.save_csv("run.csv")           # long: timestamp_s,channel,value,unit
-rec.save_csv("run.csv", format="wide")  # one column per channel
-rec.save_json("run.json")         # human-readable
-Recording.load("run.opensmu")     # reconstructs an equivalent Recording
+# Always available (no extras):
+rec.save("run.opensmu")                           # native binary, canonical
+rec.save_csv("run.csv")                           # long: timestamp,channel,value,unit
+rec.save_csv("run.csv", format="wide")            # one column per channel
+rec.save_json("run.json")                         # samples + stats + metadata
+Recording.load("run.opensmu")                     # round-trip
+
+# With opensmu[numpy]:
+arr = rec.to_numpy("mc")                          # float32 ndarray
+ts = rec.timestamps_numpy("mc")                   # float64 ndarray
+
+# With opensmu[pandas]:
+series = rec.to_pandas("mc")                      # Series indexed by timestamp
+df = rec.to_pandas()                              # wide DataFrame (NaN where rates differ)
+
+# With opensmu[parquet]:
+rec.save_parquet("run.parquet")                   # ~10-20× smaller than CSV
+
+# With opensmu[plot]:
+fig = rec.plot()                                  # one subplot per channel
+fig.savefig("run.png")                            # standard matplotlib
+
+# Or install everything at once:
+#   pip install opensmu[science]
 ```
+
+**Optional-dependency rule** — opensmu's base install pulls only pyserial.
+The data-science methods import their deps lazily; calling one without
+the dep raises a clear `ImportError` pointing at the right extras key
+(e.g. `pip install 'opensmu[parquet]'`). The base library never loads
+numpy/pandas/pyarrow/matplotlib at import time.
 
 ## Exception hierarchy
 

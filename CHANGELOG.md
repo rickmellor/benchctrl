@@ -2,6 +2,82 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] — output formats: numpy, pandas, parquet, matplotlib
+
+Recordings now offer first-class export to the scientific-Python stack,
+all gated by **strictly optional** dependencies. The base install pulls
+only pyserial; you only need the extras for the features you actually
+use.
+
+### Added
+
+- **`Recording.to_numpy(channel)`** → 1D float32 `numpy.ndarray` of values.
+  Install with `pip install 'opensmu[numpy]'`.
+- **`Recording.timestamps_numpy(channel)`** → 1D float64 `numpy.ndarray`
+  of synthesised timestamps (offset-adjusted).
+- **`Recording.to_pandas(channel=None)`** — returns a `pandas.Series`
+  if a channel is given, or a wide `pandas.DataFrame` (one column per
+  channel, NaN-padded where rates differ) if not.
+  Install with `pip install 'opensmu[pandas]'`.
+- **`Recording.save_parquet(path, compression="snappy")`** → Apache
+  Parquet file. Wide form, columnar, ~10-20× smaller than the equivalent
+  CSV. Opens cleanly in pandas, polars, duckdb, Excel via Power Query,
+  and Apache Arrow tooling. Embeds channel units/labels/wire-ids and
+  the recording name as column-level metadata.
+  Install with `pip install 'opensmu[parquet]'`.
+- **`Recording.plot(channels=None, show=True, title=None)`** →
+  matplotlib `Figure` with one subplot per channel and shared x-axis.
+  Install with `pip install 'opensmu[plot]'`.
+- **`opensmu[science]`** umbrella extras key installs parquet + plot
+  (which pull in pandas, numpy, pyarrow, matplotlib).
+- **`docs/output_formats.md`** — full chooser table covering every
+  format (native / parquet / CSV long / CSV wide / JSON / numpy /
+  pandas / matplotlib / raw), sizing comparisons, a decision tree, and
+  the optional-dependency rule.
+
+### Notes on the optional model
+
+opensmu imports cleanly without any of `numpy`, `pandas`, `pyarrow`, or
+`matplotlib` installed — verified by an in-suite test that blocks these
+modules in a child interpreter and confirms `import opensmu` succeeds
+with none of them loaded.
+
+Each method's import is lazy: the dependency is only imported the
+moment the method is called. If the dep is missing, the method raises
+a clear `ImportError`:
+
+```
+ImportError: save_parquet() requires pyarrow.
+Install with: pip install 'opensmu[parquet]'
+```
+
+### Sizing example
+
+Same 5 s recording of `mc` (4 kHz) + `mv` (1 kHz) across formats:
+
+| Format | Size |
+|---|---|
+| `.opensmu` (native) | ~40 KB |
+| `.parquet` (snappy) | ~50 KB |
+| `.csv` (wide) | ~200 KB |
+| `.json` | ~600 KB |
+| `.csv` (long) | ~750 KB |
+
+For a 30-minute battery-profiling capture (7.2 M samples on `mc`), the
+gap widens — parquet stays around ~10 MB while CSV crosses 250 MB.
+
+### Tests
+
+16 new tests in `tests/test_recording_export_extras.py`:
+- numpy: 5 tests (shape/dtype/values/timestamps/offset/empty-buffer)
+- pandas: 3 tests (Series, wide DataFrame, empty)
+- parquet: 3 tests (round-trip, embedded metadata, compaction)
+- plot: 3 tests (subplots-per-channel, channel subset, empty-rejection)
+- lazy import: 2 tests (clean opensmu import without deps, friendly
+  ImportError when calling a method without its dep)
+
+Total tests: 187 → **203 passing**.
+
 ## [0.3.1] — Claude Code skill
 
 ### Added

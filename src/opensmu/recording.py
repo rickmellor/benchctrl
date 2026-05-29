@@ -279,6 +279,209 @@ class Recording:
         write_raw(path, buf)
         return Path(path)
 
+    # --- data-science conveniences (optional dependencies) --------------
+    #
+    # Each method below is gated by a lazy import — the optional dep is
+    # only loaded when the method is actually called. opensmu itself
+    # imports clean without any of numpy / pandas / pyarrow / matplotlib
+    # installed; you only need them if you call the corresponding
+    # method. Each lazy import is wrapped to produce a clear, actionable
+    # error message pointing to the right extras key.
+
+    def to_numpy(self, channel: ChannelLike):
+        """Return this channel's samples as a 1-D ``numpy.ndarray`` (float32).
+
+        **Optional dependency**: ``numpy``. Install with
+        ``pip install opensmu[numpy]``. opensmu itself imports clean
+        without numpy — you only need it if you call this method.
+
+        See :py:meth:`timestamps_numpy` for the matching time axis.
+        """
+        try:
+            import numpy as np
+        except ImportError as e:  # pragma: no cover - environment-dependent
+            raise ImportError(
+                "to_numpy() requires numpy. "
+                "Install with: pip install 'opensmu[numpy]'"
+            ) from e
+
+        buf = self.buffer(channel)
+        return np.asarray(buf.values, dtype=np.float32)
+
+    def timestamps_numpy(self, channel: ChannelLike):
+        """Return this channel's synthetic time axis as a 1-D ``numpy.ndarray``.
+
+        **Optional dependency**: ``numpy``. Install with
+        ``pip install opensmu[numpy]``.
+
+        Offset-adjusted to match :py:meth:`timestamps`.
+        """
+        try:
+            import numpy as np
+        except ImportError as e:  # pragma: no cover
+            raise ImportError(
+                "timestamps_numpy() requires numpy. "
+                "Install with: pip install 'opensmu[numpy]'"
+            ) from e
+
+        buf = self.buffer(channel)
+        n = len(buf.values)
+        if n == 0 or buf.sample_rate <= 0:
+            return np.zeros(n, dtype=np.float64) + buf.t0 + self.offset
+        dt = 1.0 / buf.sample_rate
+        return (buf.t0 + self.offset) + np.arange(n, dtype=np.float64) * dt
+
+    def to_pandas(self, channel: Optional[ChannelLike] = None):
+        """Return a ``pandas`` object holding the recording's samples.
+
+        - If ``channel`` is given, returns a :class:`pandas.Series` named
+          for the channel code, indexed by the channel's timestamps.
+        - If ``channel`` is None, returns a wide :class:`pandas.DataFrame`
+          with one column per channel, indexed at the highest channel's
+          rate. Lower-rate channels carry ``NaN`` at timestamps that
+          don't align with their native rate — use ``.ffill()`` if you
+          want forward-filled values.
+
+        **Optional dependency**: ``pandas`` (which pulls in ``numpy``).
+        Install with ``pip install opensmu[pandas]``.
+        """
+        try:
+            import pandas as pd
+        except ImportError as e:  # pragma: no cover
+            raise ImportError(
+                "to_pandas() requires pandas. "
+                "Install with: pip install 'opensmu[pandas]'"
+            ) from e
+
+        if channel is not None:
+            ch = _coerce(channel)
+            buf = self.buffer(ch)
+            return pd.Series(
+                buf.values,
+                index=pd.Index(
+                    [t + self.offset for t in buf.timestamps()],
+                    name="timestamp_s",
+                ),
+                name=ch.code,
+                dtype="float32",
+            )
+
+        # Wide DataFrame across all channels — outer join on the union of timestamps
+        if not self._buffers:
+            return pd.DataFrame(
+                {}, index=pd.Index([], name="timestamp_s", dtype="float64")
+            )
+        series = [self.to_pandas(ch) for ch in sorted(self._buffers, key=lambda c: c.wire_id)]
+        df = pd.concat(series, axis=1)
+        df.index.name = "timestamp_s"
+        return df
+
+    def save_parquet(
+        self,
+        path: str | Path,
+        *,
+        compression: str = "snappy",
+    ) -> Path:
+        """Write the recording to an Apache Parquet file.
+
+        Layout: wide form (same shape as :py:meth:`to_pandas` with no
+        channel argument) — one column per channel, ``timestamp_s`` as
+        the index. Stored columnar with the chosen compression
+        (``"snappy"`` by default; also accepts ``"zstd"``, ``"gzip"``,
+        ``"brotli"``, or ``"none"``).
+
+        Loads cleanly in pandas (``pd.read_parquet``), polars
+        (``pl.read_parquet``), duckdb (``read_parquet``), and Apache
+        Arrow tooling. Compact and portable — typically 10-20× smaller
+        than the equivalent CSV.
+
+        **Optional dependency**: ``pyarrow`` (and ``pandas`` for the
+        DataFrame construction). Install with
+        ``pip install opensmu[parquet]``.
+        """
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError as e:  # pragma: no cover
+            raise ImportError(
+                "save_parquet() requires pyarrow. "
+                "Install with: pip install 'opensmu[parquet]'"
+            ) from e
+
+        df = self.to_pandas().reset_index()
+        # Embed channel units + labels in column metadata so consumers
+        # can recover unit context without a sidecar.
+        col_meta = {}
+        for ch in sorted(self._buffers, key=lambda c: c.wire_id):
+            col_meta[ch.code] = {
+                "unit": ch.unit,
+                "label": ch.label,
+                "wire_id": str(ch.wire_id),
+                "sample_rate_hz": str(ch.sample_rate),
+            }
+        table = pa.Table.from_pandas(df, preserve_index=False)
+        table = table.replace_schema_metadata(
+            {
+                **(table.schema.metadata or {}),
+                b"opensmu.recording_name": self.name.encode("utf-8"),
+                b"opensmu.offset_s": str(self.offset).encode("utf-8"),
+                b"opensmu.columns": json.dumps(col_meta).encode("utf-8"),
+            }
+        )
+        p = Path(path)
+        pq.write_table(table, p, compression=compression)
+        return p
+
+    def plot(
+        self,
+        channels: Optional[list[ChannelLike]] = None,
+        *,
+        show: bool = True,
+        title: Optional[str] = None,
+    ):
+        """Quick-look matplotlib plot — one subplot per channel, shared x-axis.
+
+        Returns the :class:`matplotlib.figure.Figure` for further
+        customisation (annotations, save to disk, etc.). With
+        ``show=True`` (default) the figure is displayed via
+        ``plt.show()``; pass ``show=False`` in headless / batch contexts.
+
+        **Optional dependency**: ``matplotlib``. Install with
+        ``pip install opensmu[plot]``.
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:  # pragma: no cover
+            raise ImportError(
+                "plot() requires matplotlib. "
+                "Install with: pip install 'opensmu[plot]'"
+            ) from e
+
+        if channels is None:
+            chs = sorted(self._buffers.keys(), key=lambda c: c.wire_id)
+        else:
+            chs = [_coerce(c) for c in channels]
+        if not chs:
+            raise SMUValueError("no channels to plot")
+
+        fig, axes = plt.subplots(
+            len(chs), 1, sharex=True, figsize=(10, max(2.0, 2.0 * len(chs)))
+        )
+        if len(chs) == 1:
+            axes = [axes]
+        for ax, ch in zip(axes, chs):
+            buf = self.buffer(ch)
+            ts = self.timestamps_numpy(ch)
+            ax.plot(ts, buf.values, linewidth=0.8, label=ch.label)
+            ax.set_ylabel(f"{ch.label}\n({ch.unit})", rotation=0, ha="right", va="center")
+            ax.grid(True, alpha=0.3)
+        axes[-1].set_xlabel("time (s)")
+        fig.suptitle(title or self.name)
+        fig.tight_layout()
+        if show:
+            plt.show()
+        return fig
+
     # --- native binary format ('.opensmu') ------------------------------
 
     OPENSMU_MAGIC = b"OSMU\x00\x00\x00\x01"  # 8 B — schema version 1
