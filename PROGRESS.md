@@ -5,12 +5,15 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.9.0 shipped — measurement stabilization + bench subpackage with QR10x driver
-- **Tests**: 281 / 281 passing in core suite (+18 new QR10x tests; hardware tests skip without device)
-- **Battery subpackage**: `.profile` + `.calculator` + `.profiler` (now hardware-validated against real AA pair) + `.emulator`
-- **Bench subpackage** (NEW): `opensmu.bench.QR10x` — Eastwood Tech programmable resistance, AT commands over USB-Serial
-- **Real-hardware validation**: AA pair profiled at OCV 3.19V, ESR 3.18Ω; QR10x driver round-trip-verified on COM7
-- **MCP tool count**: 38 → **48** (+10 QR10x tools)
+- **Phase**: v0.9.1 shipped — emulator CV-mode fix + end-to-end QR10x validation
+- **Tests**: 300 / 300 passing
+- **Hardware validation milestones**:
+  - **Profiler**: AA pair, OCV 3.19 V, ESR 3.18 Ω, 10-cycle short profile (15 s, 10.6 µAh used)
+  - **Emulator**: CR2032 profile + QR10x load sweep (100 kΩ → 12 Ω), voltage sag tracks ESR
+    exactly (predicted 28.8 mV vs measured 28 mV at 1 kΩ; predicted 279 mV vs measured 288 mV
+    at 100 Ω), cell "collapses" at 12 Ω as a real CR2032 would, SoC recovery shows new
+    OCV at lower SoC
+- **MCP tool count**: 48
 - **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
 - **MCP server**: 26 tools (was 23 in v0.3.0); `opensmu-mcp` ready
 - **Claude Code skill** at `skills/opensmu/SKILL.md`

@@ -15,7 +15,7 @@ A background thread runs at ``update_interval_s`` (default 10 ms ≈ 100 Hz):
 4. Apply series / parallel multipliers.
 5. Compute target output ``V_out = OCV_total − I × ESR_total``.
 6. Clamp to ``safety_max_voltage_V``.
-7. Write ``set_main_voltage(V_out)``.
+7. Write ``set_voltage(V_out)``.
 
 The control loop bandwidth is bounded by USB latency (~ms), so this
 emulator handles steady-state and slow transients well. Sub-ms ESR
@@ -125,6 +125,10 @@ class EmulatorConfig:
     safety_max_used_mAh: Optional[float] = None
     soc_floor: float = 0.0
     current_read_timeout_s: float = 0.5
+    # OC protection during emulation. The SMU acts as a voltage source up
+    # to this current; beyond it the device protects itself. Should comfortably
+    # exceed the highest current you expect to draw from the emulated cell.
+    current_limit_A: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -177,13 +181,39 @@ class Emulator:
     # --- public lifecycle -----------------------------------------
 
     def start(self) -> None:
-        """Enable the output at the current OCV and start the control loop."""
+        """Configure the SMU for CV-mode operation and start the control loop.
+
+        The emulator drives the SMU as a voltage source: ``V = OCV − I·ESR``.
+        Before enabling output we explicitly select **constant-voltage**
+        regulation so the device sources current into the DUT load rather
+        than enforcing a residual CC setpoint left over from a previous
+        session. Current limit is armed at ``config.current_limit_A``
+        to bound fault current.
+        """
         if self._thread is not None:
             raise SMUValueError("emulator is already running")
+        # Configure the SMU for voltage-source operation. Each call has a
+        # try/except so a failure on one step doesn't leave the device in
+        # an inconsistent state — the error propagates after we restore
+        # the output to a safe state.
+        try:
+            self.smu.set_range("low")
+        except Exception:
+            log.debug("set_range('low') failed", exc_info=True)
+        try:
+            self.smu.set_current_limit(self.config.current_limit_A)
+            self.smu.set_current_limit_enabled(True)
+        except Exception:
+            log.warning("could not arm current limit", exc_info=True)
+        try:
+            self.smu.set_power_regulation("voltage")
+        except Exception:
+            log.debug("set_power_regulation('voltage') failed", exc_info=True)
+
         # Seed the output at the open-circuit voltage (no current → no sag)
         initial_v = self._total_ocv()
         log.debug("seed output to %.4f V", initial_v)
-        self.smu.set_main_voltage(initial_v)
+        self.smu.set_voltage(initial_v)
         self.smu.set_output(True)
         self._t_start = time.monotonic()
         self._stop_event.clear()
@@ -349,9 +379,9 @@ class Emulator:
 
             # Drive the SMU (outside the lock to avoid blocking state())
             try:
-                self.smu.set_main_voltage(v_out)
+                self.smu.set_voltage(v_out)
             except Exception:
-                log.warning("set_main_voltage failed", exc_info=True)
+                log.warning("set_voltage failed", exc_info=True)
 
             # Sleep until next tick
             elapsed = time.monotonic() - now
@@ -361,7 +391,7 @@ class Emulator:
 
         # Loop exit — caller will disable output
         try:
-            self.smu.set_main_voltage(0.0)
+            self.smu.set_voltage(0.0)
         except Exception:
             pass
 

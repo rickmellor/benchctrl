@@ -431,6 +431,24 @@ disabled in a `finally` block before `stop()` returns.
 - `battery_emulator_state()` — snapshot the running emulator's state.
 - `battery_emulator_stop()` — stop the emulator and disable the output.
 
+### End-to-end validation (CR2032 profile + QR10x programmable load)
+
+Verified on bench (v0.9.1): Arc Pro emulating an Energizer CR2032
+(fresh OCV 3.224 V, ESR ≈ 9 Ω from the profile), QR10x stepping
+through 100 kΩ → 12 Ω → recovery. Predicted vs measured at key points:
+
+| R_load | I drawn | V_out (measured) | V drop | Expected drop (9 Ω · I) |
+|---|---|---|---|---|
+| 1 kΩ | 3.2 mA | 3.195 V | 28 mV | 29 mV |
+| 100 Ω | 31 mA | 2.936 V | 288 mV | 279 mV |
+| 12 Ω | 160 mA | **1.660 V** (under cutoff) | 1.56 V | 1.44 V |
+| 100 kΩ (recover) | 30 µA | 3.146 V | — | new OCV at 99.925% SoC |
+
+The emulator faithfully reproduces a CR2032's load behaviour — including
+that it **cannot sustain 160 mA**, which is exactly the failure mode a
+real CR2032 would show. SoC tracking visible in the recovery step
+(OCV came back at 3.146 V, not 3.224 V, because 173 µAh had been drawn).
+
 ⚠ **Hardware safety.** The emulator drives voltage onto the output
 terminals from the moment `start()` is called. Connect your DUT
 before calling, and pick `safety_max_voltage_V` to match what the DUT

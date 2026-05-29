@@ -41,7 +41,7 @@ class _MockSMU:
     voltage_setpoint_V: float = 0.0
     output_enabled: bool = False
 
-    def set_main_voltage(self, volts: float) -> None:
+    def set_voltage(self, volts: float) -> None:
         self.set_voltage_calls.append(volts)
         self.voltage_setpoint_V = volts
 

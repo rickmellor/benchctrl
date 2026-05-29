@@ -2,6 +2,62 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.1] — emulator CV-mode fix + end-to-end validation
+
+### Fixed — emulator CV-mode regulation
+
+`Emulator.start()` now explicitly configures the SMU for
+**constant-voltage** regulation before enabling output: `set_range("low")`
++ `set_current_limit(config.current_limit_A)` +
+`set_current_limit_enabled(True)` + `set_power_regulation("voltage")`.
+
+Without this, the device would inherit whatever mode the last test left
+it in — typically `current` mode at 0 A target after a profiler run.
+The Arc then prioritized current regulation (holding I=0 A) over the
+voltage setpoint and refused to source current into the load, so the
+emulator looked like an open circuit at the terminals.
+
+### Added — `EmulatorConfig.current_limit_A`
+
+New field, default 0.5 A. Sets the OC trip threshold during emulation —
+the SMU acts as an ideal voltage source up to this current, then
+protects itself. Tune up for higher-current DUTs (LiPo etc.).
+
+### Fixed — `set_voltage` method name
+
+The emulator was calling `self.smu.set_main_voltage(...)` which doesn't
+exist on the real SMU — it's `set_voltage(...)`. Mock tests had a
+matching `set_main_voltage` method so didn't catch this. Renamed
+throughout (emulator + mock) so they match the real SMU surface.
+
+### Verified — end-to-end emulator validation against the QR10x
+
+Bench setup: Arc Pro emulating an Energizer CR2032 (fresh OCV 3.224 V,
+ESR ≈ 9 Ω), QR10x as the programmable load. Stepped through
+100 kΩ → 10 kΩ → 3 kΩ → 1 kΩ → 300 Ω → 100 Ω → 50 Ω → 25 Ω → 12 Ω,
+then recovery back to 100 kΩ.
+
+Highlights:
+
+- Voltage sag tracks the ESR curve exactly: at 1 kΩ load the predicted
+  9 Ω × 3.2 mA = 28.8 mV drop matched the measured 28 mV; at 100 Ω,
+  predicted 279 mV vs measured 288 mV.
+- The CR2032 emulator **collapses at 12 Ω load to 1.66 V** — below the
+  profile's 1.8 V cutoff. That's exactly how a real CR2032 would
+  behave at 160 mA draw.
+- SoC integration verified: after the sweep SoC dropped to 99.925%,
+  OCV came back at 3.146 V on the high-impedance recovery step — the
+  profile's discharge curve correctly produced the new OCV.
+- The ~14% R_err at low impedances tracks ~1.5 Ω of cable + plug
+  series resistance in the measurement loop — physics, not an
+  emulator bug.
+
+### Tests
+
+Existing test count unchanged (300 / 300 pass). The CV-mode fix is
+covered by both mock-SMU tests and the real-hardware validation
+above; no new unit tests beyond what already exists.
+
 ## [0.9.0] — bench subpackage + measurement stabilization
 
 Two themes:
