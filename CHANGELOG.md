@@ -2,6 +2,120 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0] — bench subpackage + measurement stabilization
+
+Two themes:
+
+1. **Stabilize the profiler's measurement path** so step-response
+   readings are accurate on real hardware (the previous implementation
+   could return stale baseline samples).
+2. **Open the door to bench instruments** via a new
+   ``opensmu.bench`` subpackage, starting with the Eastwood Tech QR10x
+   programmable resistance.
+
+### Added — `SMU.read_window(channels, duration_s)`
+
+New public primitive on the SMU: drains a window of inbound samples
+and returns them grouped by channel. Like ``read_raw`` but parses
+samples; like a brief recording but without the orchestration cost.
+
+```python
+samples = smu.read_window([Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT], 0.5)
+# {Channel.MAIN_VOLTAGE: [3.2071, 3.2080, ...], Channel.MAIN_CURRENT: [-0.020, -0.020, ...]}
+```
+
+Surfaces queued device errors as ``SMUCommandError`` on the next SET,
+matching ``read_value``'s semantics. Refuses when a recording is
+active (the reader thread owns the byte stream then).
+
+### Fixed — battery profiler
+
+- **Sink-sign convention**: ``set_main_current(positive)`` is *source*
+  (push into load), ``set_main_current(negative)`` is *sink* (draw
+  from load). The profiler now negates user-supplied positive load
+  magnitudes internally — the API stays clean.
+- **Stable step-response measurement**: ``_measure_v_i`` now uses
+  ``SMU.read_window`` and averages the most-recent half of the window.
+  Previously it called ``read_value``, which could return the *first*
+  sample seen in its drain window — often a stale pre-step baseline
+  value. This made V_loaded read as ~0 V (the output-disabled noise
+  floor) on real hardware.
+- ``run()`` now explicitly sets the SMU into CC sink mode at start:
+  ``set_range("low")`` + ``set_current_limit_enabled(True)`` +
+  ``set_power_regulation("current")``.
+
+### Verified — real AA pair
+
+End-to-end profiler run against two AA alkalines in series:
+
+- OCV: 3.187-3.191 V (per-cell 1.594-1.596 V — fresh)
+- V_loaded at 20 mA sink: 3.11-3.16 V
+- ESR pack: 2.7-3.8 Ω (mean 3.18 Ω), per-cell 1.4-1.9 Ω
+  (includes banana plug + cable + Arc internal sense path)
+- 10-cycle short profile completed in 15.2 s, used 10.6 µAh total
+
+### Added — `opensmu.bench` subpackage + `QR10x` driver
+
+New subpackage for non-Arc lab instruments. First driver:
+**Eastwood Tech QR10x programmable resistance** — 1 Ω-8.4 MΩ depending
+on model, ±0.02-0.05% accuracy, AT commands over USB-Serial (CH340
+chip, 115200 8N1).
+
+```python
+from opensmu.bench import QR10x
+
+with QR10x.open("COM7") as qr:
+    print(qr.info())
+    qr.set_safety_limit(12.0)
+    qr.set_resistance(10_000)
+    qr.actual_resistance()    # 10000.xxx (PV)
+```
+
+Public surface: ``info()``, ``set_resistance(ohms)`` /
+``get_setpoint()`` / ``actual_resistance()``, ``set_safety_limit(ohms)``
+/ ``get_safety_limit()``, ``get_temperature()``, ``incr(delta_ohm)`` /
+``decr(delta_ohm)``. Exception hierarchy: ``QR10xError`` ->
+``QR10xConnectionError`` / ``QR10xProtocolError`` /
+``QR10xTimeoutError`` / ``QR10xValueError``.
+
+### Added — MCP tools (per SDK ↔ MCP parity principle)
+
+- `qr10x_open(port="COM7", baudrate=115200)` / `qr10x_close()`
+- `qr10x_info()`
+- `qr10x_set_resistance(ohms)` / `qr10x_get_setpoint()` /
+  `qr10x_actual_resistance()`
+- `qr10x_set_safety_limit(ohms)` / `qr10x_get_safety_limit()`
+- `qr10x_get_temperature()`
+- `qr10x_incr(delta_ohm)` / `qr10x_decr(delta_ohm)`
+
+Only one QR10x at a time; server holds the connection across tool
+calls until `qr10x_close()`.
+
+### Optional dependencies
+
+- `pip install opensmu[bench]` — declares intent (QR10x driver uses
+  pyserial which is already a base dep)
+- `pip install opensmu[bench-visa]` — for future SCPI/VISA-based
+  instruments (Rigol DL3031A etc.), pulls in pyvisa
+
+### Tests
+
+- 3 new hardware tests for `SMU.read_window` in `test_smu_stream.py`.
+- 19 tests in `test_bench_qr10x.py` (13 hardware-free + 6 hardware on
+  COM7). Override port via `OPENSMU_QR10X_PORT`.
+
+Total tests: 278 → **300** (assuming all hardware tests run).
+
+### Verified — QR10x driver on live device
+
+First-try success against the connected QR101B-AM-1R on COM7:
+
+- `info()`: serial 00000248, HW 5.1N, FW 5.967KS, TCR 25 ppm/°C
+- `set_resistance(100)` → PV 100.038 Ω (0.04% deviation)
+- `set_safety_limit(12.0)` accepted device-side
+- `incr(900)` → 1000.027 Ω; `decr(900)` → 100.038 Ω
+- Internal temp: 24.7 °C
+
 ## [0.8.0] — battery emulator (phase 4 of Battery Toolbox replacement) — FOUR PHASES DONE
 
 Host-side control loop that drives the SMU as a battery with OCV + ESR

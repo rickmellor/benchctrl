@@ -44,6 +44,7 @@ from opensmu.battery import (
     estimate_life_constant_current,
     estimate_life_from_profile,
 )
+from opensmu.bench import QR10x
 from opensmu.channels import WIRE_ID_TO_CHANNEL
 from opensmu.exceptions import SMUError
 from opensmu.protocol import iter_frames, iter_samples
@@ -966,6 +967,131 @@ def battery_emulator_stop() -> dict:
         "final_state": state.__dict__,
         "iterations_at_stop": final.iteration,
     }
+
+
+# ---------------------------------------------------------------------------
+# QR10x programmable resistance (opensmu.bench)
+# ---------------------------------------------------------------------------
+
+_qr10x: Optional[QR10x] = None
+_qr10x_lock = threading.RLock()
+
+
+def _get_qr10x() -> QR10x:
+    if _qr10x is None or not _qr10x.is_open:
+        raise RuntimeError(
+            "QR10x not open — call qr10x_open(port=...) first."
+        )
+    return _qr10x
+
+
+@mcp.tool()
+def qr10x_open(port: str = "COM7", baudrate: int = 115200) -> dict:
+    """Open a connection to the Eastwood QR10x programmable resistor.
+
+    The QR10x exposes a USB-Serial interface (CH340 chip) at 115200 8N1
+    and accepts AT commands. Returns its identity info on success.
+
+    Only one connection at a time. Call ``qr10x_close()`` first if
+    already open on a different port.
+    """
+    global _qr10x
+    with _qr10x_lock:
+        if _qr10x is not None and _qr10x.is_open:
+            return {
+                "error": "QR10x already open",
+                "guidance": "Call qr10x_close() before reopening on a different port.",
+                "current_port": _qr10x.port,
+            }
+        _qr10x = QR10x.open(port, baudrate=baudrate)
+    return {"port": _qr10x.port, "info": _qr10x.info().to_dict()}
+
+
+@mcp.tool()
+def qr10x_close() -> dict:
+    """Close the QR10x connection so the port can be reopened."""
+    global _qr10x
+    with _qr10x_lock:
+        if _qr10x is None:
+            return {"closed": False, "note": "no QR10x was open"}
+        _qr10x.close()
+        _qr10x = None
+    return {"closed": True}
+
+
+@mcp.tool()
+def qr10x_info() -> dict:
+    """Get the QR10x's identity and static specs."""
+    return _get_qr10x().info().to_dict()
+
+
+@mcp.tool()
+def qr10x_set_resistance(ohms: float) -> dict:
+    """Set the QR10x's output resistance (Ω).
+
+    Will be clamped to ``RLIMIT`` if a safety limit is configured. The
+    device will pick the achievable value closest to the setpoint; read
+    back via ``qr10x_actual_resistance()`` to see the actual achieved
+    resistance (PV).
+    """
+    qr = _get_qr10x()
+    out = qr.set_resistance(ohms)
+    out["actual_resistance_ohm"] = qr.actual_resistance()
+    return out
+
+
+@mcp.tool()
+def qr10x_get_setpoint() -> dict:
+    """Get the current resistance setpoint (Ω) — what was last commanded."""
+    return {"setpoint_ohm": _get_qr10x().get_setpoint()}
+
+
+@mcp.tool()
+def qr10x_actual_resistance() -> dict:
+    """Get the actual achieved resistance (PV, Ω) — what the device produced."""
+    return {"actual_resistance_ohm": _get_qr10x().actual_resistance()}
+
+
+@mcp.tool()
+def qr10x_set_safety_limit(ohms: float) -> dict:
+    """Set the QR10x's minimum-resistance safety limit (Ω).
+
+    Any subsequent set_resistance below this value is clamped
+    device-side. Set this to keep power within the device's rating for
+    your source voltage. At 3.2 V (e.g. AA pair) the rated 1 W gives a
+    minimum safe R of ~12 Ω; at 5 V it's ~25 Ω.
+    """
+    return _get_qr10x().set_safety_limit(ohms)
+
+
+@mcp.tool()
+def qr10x_get_safety_limit() -> dict:
+    """Get the QR10x's minimum-resistance safety limit (Ω)."""
+    return {"safety_limit_ohm": _get_qr10x().get_safety_limit()}
+
+
+@mcp.tool()
+def qr10x_get_temperature() -> dict:
+    """Get the QR10x's internal temperature sensor (°C)."""
+    return {"temperature_C": _get_qr10x().get_temperature()}
+
+
+@mcp.tool()
+def qr10x_incr(delta_ohm: float) -> dict:
+    """Step the QR10x setpoint up by ``delta_ohm`` Ω."""
+    qr = _get_qr10x()
+    out = qr.incr(delta_ohm)
+    out["actual_resistance_ohm"] = qr.actual_resistance()
+    return out
+
+
+@mcp.tool()
+def qr10x_decr(delta_ohm: float) -> dict:
+    """Step the QR10x setpoint down by ``delta_ohm`` Ω."""
+    qr = _get_qr10x()
+    out = qr.decr(delta_ohm)
+    out["actual_resistance_ohm"] = qr.actual_resistance()
+    return out
 
 
 @mcp.tool()

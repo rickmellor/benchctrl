@@ -212,6 +212,9 @@ class Profiler:
         capacity_consumed_C = 0.0  # total charge drawn (Coulombs)
 
         # Settle the cell at zero load before starting
+        self.smu.set_range("low")  # alkaline / Li-ion etc. all fit
+        self.smu.set_current_limit_enabled(True)
+        self.smu.set_power_regulation("current")  # CC mode for sink
         self.smu.set_main_current(0.0)
         self.smu.set_output(True)
         time.sleep(self.config.initial_settle_time_s)
@@ -251,6 +254,8 @@ class Profiler:
                 )
 
                 # --- ESR -------------------------------------------
+                # i_loaded is negative (sinking from cell), so use |I| in
+                # the divider. OCV > V_loaded under positive sink draw.
                 if abs(i_loaded) < 1e-9:
                     esr = 0.0
                 else:
@@ -335,8 +340,15 @@ class Profiler:
             raise SMUValueError("battery.capacity must be > 0")
 
     def _apply_step(self, step) -> None:
-        """Set the SMU to draw the configured step's load."""
-        self.smu.set_main_current(step.value)
+        """Set the SMU to draw the configured step's load.
+
+        The Arc Pro's CC wire command treats positive ``set_main_current``
+        values as *source* (push current INTO the load) and negative
+        values as *sink* (draw current FROM the load). Battery profiling
+        is always sinking from the cell, so we negate the user-supplied
+        positive "load magnitude" here.
+        """
+        self.smu.set_main_current(-abs(step.value))
 
     def _wait_at_least(self, seconds: float) -> None:
         if seconds > 0:
@@ -345,21 +357,27 @@ class Profiler:
     def _measure_v_i(self, v_channel, i_channel, window_s: float) -> tuple[float, float]:
         """Average voltage and current over a short measurement window.
 
-        Falls back to a single read on each channel if a continuous
-        recording isn't available — accurate enough for steady-state
-        steps.
+        Calls :py:meth:`SMU.read_window` to drain a window of inbound
+        samples, then returns the mean of the **most recent half** on
+        each channel. The most-recent-half trick gives the device's
+        measurement time to settle after the prior load step took
+        effect, avoiding stale carry-over.
         """
-        # Simple path: take one reading on each channel after the window
-        time.sleep(max(0.0, window_s))
         try:
-            v = self.smu.read_value(v_channel, timeout=2.0)
+            samples = self.smu.read_window(
+                [v_channel, i_channel], max(0.02, window_s)
+            )
         except Exception:
-            v = float("nan")
-        try:
-            i = self.smu.read_value(i_channel, timeout=2.0)
-        except Exception:
-            i = float("nan")
-        return v, i
+            return float("nan"), float("nan")
+
+        def _avg_latest(ch) -> float:
+            vals = samples.get(ch, [])
+            if not vals:
+                return float("nan")
+            tail = vals[max(0, len(vals) // 2):]
+            return sum(tail) / len(tail)
+
+        return _avg_latest(v_channel), _avg_latest(i_channel)
 
     def _check_exit(
         self,

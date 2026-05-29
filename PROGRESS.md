@@ -5,10 +5,12 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.8.0 shipped — Battery Toolbox replacement COMPLETE (4 of 4 phases)
-- **Tests**: 276 / 276 passing (profiler + emulator tests use mock SMUs; real-hardware validation is a follow-up task)
-- **Battery subpackage**: `.profile` (v0.5) + `.calculator` (v0.6) + `.profiler` (v0.7) + `.emulator` (v0.8) — all four phases shipped
-- **Outcome**: Qoitech's licensed Battery Toolbox is fully replaced by opensmu on top of the wire vocabulary we already decoded. Profile JSONs interchange bit-for-bit with Otii in both directions.
+- **Phase**: v0.9.0 shipped — measurement stabilization + bench subpackage with QR10x driver
+- **Tests**: 281 / 281 passing in core suite (+18 new QR10x tests; hardware tests skip without device)
+- **Battery subpackage**: `.profile` + `.calculator` + `.profiler` (now hardware-validated against real AA pair) + `.emulator`
+- **Bench subpackage** (NEW): `opensmu.bench.QR10x` — Eastwood Tech programmable resistance, AT commands over USB-Serial
+- **Real-hardware validation**: AA pair profiled at OCV 3.19V, ESR 3.18Ω; QR10x driver round-trip-verified on COM7
+- **MCP tool count**: 38 → **48** (+10 QR10x tools)
 - **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
 - **MCP server**: 26 tools (was 23 in v0.3.0); `opensmu-mcp` ready
 - **Claude Code skill** at `skills/opensmu/SKILL.md`

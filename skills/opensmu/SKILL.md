@@ -349,6 +349,29 @@ needs an SMU and a real battery):
 - `battery_emulator_state()` — snapshot
 - `battery_emulator_stop()` — stop + disable output
 
+## Bench instruments
+
+`opensmu.bench` hosts drivers for other lab instruments wired alongside
+the Arc. Currently:
+
+- `opensmu.bench.QR10x` — Eastwood Tech QR10x programmable resistance
+  substitution box (1 Ω-8.4 MΩ, USB-Serial, AT command set). Useful
+  for DUT load simulation during emulator validation, sensor
+  simulation, current-draw testing.
+
+```python
+from opensmu.bench import QR10x
+
+with QR10x.open("COM7") as qr:
+    qr.set_safety_limit(12.0)            # device-enforced min R
+    qr.set_resistance(10_000)             # 10 kΩ
+    qr.actual_resistance()                # what the device actually achieved
+```
+
+**Safety rule of thumb**: set `qr.set_safety_limit(V**2 / P_max)`
+where V is the source voltage and P_max ≤ 1 W. At 3.2 V → 12 Ω, at
+5 V → 25 Ω.
+
 ## Anti-patterns — don't do these
 
 - **Don't reach for the Otii server / Automation Toolbox / TCP port 1905.**

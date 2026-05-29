@@ -73,16 +73,44 @@ class _MockSMU:
         self.output_enabled = enable
         self.set_output_calls.append(enable)
 
+    # No-op mode setters the profiler calls during setup
+    def set_range(self, range_: str) -> None: pass
+    def set_current_limit_enabled(self, enable: bool) -> None: pass
+    def set_power_regulation(self, mode: str) -> None: pass
+
     def read_value(self, channel, timeout: float = 2.0) -> float:
         self._accrue()
         # Linearly interpolate OCV
         frac = min(1.0, self.capacity_consumed_mAh / self.capacity_mAh)
         ocv = self.ocv_initial + frac * (self.ocv_final - self.ocv_initial)
         if channel is Channel.MAIN_VOLTAGE or channel == "mv":
-            return ocv - self.current_setpoint_A * self.esr
+            # Sink convention: setpoint is negative when drawing from a cell.
+            # V_loaded = OCV - |I_sink| * ESR
+            return ocv - abs(self.current_setpoint_A) * self.esr
         if channel is Channel.MAIN_CURRENT or channel == "mc":
             return self.current_setpoint_A
         return float("nan")
+
+    def read_window(self, channels, duration_s):
+        """Mock the new SMU.read_window: return one current-state sample per channel."""
+        self._accrue()
+        if duration_s > 0:
+            time.sleep(duration_s)
+        out = {}
+        for ch in channels:
+            ch_obj = Channel.coerce(ch) if not isinstance(ch, Channel) else ch
+            out[ch_obj] = [self.read_value(ch_obj)]
+        return out
+
+    def _accrue(self) -> None:
+        """Consume capacity proportional to (|current| * elapsed). Sink convention."""
+        now = time.monotonic()
+        elapsed = now - self._last_t
+        self._last_t = now
+        if self.output_enabled:
+            self.capacity_consumed_mAh += (
+                abs(self.current_setpoint_A) * elapsed / 3.6
+            )
 
     def get_fw_version(self) -> str:
         return "mock-3.1.3"
@@ -90,17 +118,7 @@ class _MockSMU:
     def get_device_id(self) -> str:
         return "MOCK0123456789ABCDEF0123456789AB"
 
-    # --- internal --------------------------------------------------
-
-    def _accrue(self) -> None:
-        """Consume capacity proportional to (current * elapsed)."""
-        now = time.monotonic()
-        elapsed = now - self._last_t
-        self._last_t = now
-        if self.output_enabled:
-            self.capacity_consumed_mAh += (
-                self.current_setpoint_A * elapsed / 3.6
-            )  # A*s = C; C/3.6 = mAh
+    # (the sink-convention _accrue lives above, near read_value)
 
 
 def _fast_config(
@@ -227,18 +245,26 @@ def test_profiler_alternates_high_and_low_steps():
     smu = _MockSMU()
     profiler = Profiler(smu, config)
     profiler.run()
-    # The set_main_current sequence should be: 0 (settle), [0.05, 0.001] x 2, 0 (cleanup)
+    # The wire convention is: positive = source, negative = sink. Battery
+    # profiling sinks from the cell, so the profiler negates the user-supplied
+    # positive load magnitudes internally. We expect:
+    # 0 (settle), [-0.05, -0.001] x 2, 0 (cleanup)
     non_zero = [c for c in smu.set_main_current_calls if c not in (0.0,)]
-    # We expect alternating high (0.05), low (0.001)
-    assert non_zero[0] == 0.05
-    assert non_zero[1] == 0.001
-    assert non_zero[2] == 0.05
-    assert non_zero[3] == 0.001
+    assert non_zero[0] == -0.05
+    assert non_zero[1] == -0.001
+    assert non_zero[2] == -0.05
+    assert non_zero[3] == -0.001
 
 
 def test_profiler_computes_nonnegative_esr():
+    # The mock's read_value returns current_setpoint as mc. With the
+    # profiler now negating internally for sink, current_loaded will be
+    # negative; ESR = (OCV - V_loaded) / |I_loaded| must still be
+    # non-negative for a cell with non-decreasing terminal voltage under
+    # discharge. We bump initial OCV high enough for the slope to read
+    # positive ESR throughout.
     config = _fast_config(iterations=2)
-    smu = _MockSMU(esr=0.5)
+    smu = _MockSMU(esr=0.5, ocv_initial=4.2, ocv_final=3.0, capacity_mAh=1000.0)
     profiler = Profiler(smu, config)
     result = profiler.run()
     for s in result.samples:

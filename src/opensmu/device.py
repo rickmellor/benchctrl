@@ -633,6 +633,57 @@ class SMU:
                     return rec.value
         raise SMUTimeoutError(f"no sample for {ch.code} within {timeout:.2f} s")
 
+    def read_window(
+        self,
+        channels: Iterable[ChannelLike],
+        duration_s: float,
+    ) -> dict[Channel, list[float]]:
+        """Drain ``duration_s`` of inbound samples, return a list per channel.
+
+        Like :py:meth:`read_raw` but parses sample records and groups them
+        by channel. Useful when you need a recent-history window without
+        starting a full recording — e.g. for the battery profiler's
+        step-response measurement.
+
+        Args:
+            channels: channels of interest (others are ignored).
+            duration_s: how long to drain the inbound stream.
+
+        Returns:
+            ``{channel: [sample, sample, ...]}``, one entry per requested
+            channel (empty list if no samples arrived on that channel).
+
+        Raises:
+            SMUValueError: if a recording is active. Stop the recording
+                first; the reader thread owns the byte stream during
+                recording.
+        """
+        if self._active_recording is not None:
+            raise SMUValueError(
+                "read_window() requires no active recording — stop_recording() first"
+            )
+        target = {Channel.coerce(c) for c in channels}
+        raw = self._transport.read_for(duration_s)
+        self._raw_window_buffer.extend(raw)
+        out: dict[Channel, list[float]] = {c: [] for c in target}
+        for fr in iter_frames(raw):
+            err = parse_error_frame(fr.payload)
+            if err is not None:
+                # Queue the error to be raised on the next SET (matches
+                # read_value's behaviour).
+                with self._pending_error_lock:
+                    if self._pending_error is None:
+                        self._pending_error = SMUCommandError(
+                            err.error_code, err.last_good_value
+                        )
+                continue
+            for rec in iter_samples(fr.payload):
+                ch = WIRE_ID_TO_CHANNEL.get(rec.channel_id)
+                if ch in target:
+                    out[ch].append(rec.value)
+                    self._state.last_value[ch] = rec.value
+        return out
+
     # ----- recording lifecycle ------------------------------------------
 
     def start_recording(
