@@ -29,7 +29,13 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from opensmu import SMU, Channel, Recording
-from opensmu.battery import BatteryProfile
+from opensmu.battery import (
+    BatteryProfile,
+    DutyCycle,
+    duty_cycle_from_recording,
+    estimate_life_constant_current,
+    estimate_life_from_profile,
+)
 from opensmu.channels import WIRE_ID_TO_CHANNEL
 from opensmu.exceptions import SMUError
 from opensmu.protocol import iter_frames, iter_samples
@@ -575,6 +581,168 @@ def battery_profile_summary(path: str) -> dict:
     """
     p = BatteryProfile.load(path)
     return {"input": path, **p.summary()}
+
+
+@mcp.tool()
+def battery_life_estimate(
+    capacity_mAh: float,
+    active_current_A: float,
+    active_time_s: float,
+    sleep_current_A: float,
+    sleep_time_s: float,
+    self_discharge_per_month_pct: float = 0.0,
+    safety_margin_pct: float = 0.0,
+) -> dict:
+    """Estimate battery life with a constant-current model.
+
+    Treats the cell as a flat-voltage capacity reservoir. Pass:
+        - cell capacity (mAh)
+        - active phase current (A) + duration (s)
+        - sleep phase current (A) + duration (s)
+        - optional self-discharge rate (% of capacity per month)
+        - optional safety margin (% of capacity reserved)
+
+    Returns runtime in seconds + human-readable form, average current,
+    iterations, capacity consumed, self-discharge loss.
+
+    No SMU connection and no battery profile required.
+    """
+    duty = DutyCycle(
+        active_current_A=active_current_A,
+        active_time_s=active_time_s,
+        sleep_current_A=sleep_current_A,
+        sleep_time_s=sleep_time_s,
+    )
+    est = estimate_life_constant_current(
+        capacity_mAh=capacity_mAh,
+        duty_cycle=duty,
+        self_discharge_per_month_pct=self_discharge_per_month_pct,
+        safety_margin_pct=safety_margin_pct,
+    )
+    return est.to_dict()
+
+
+@mcp.tool()
+def battery_life_estimate_from_profile(
+    profile_path: str,
+    active_current_A: float,
+    active_time_s: float,
+    sleep_current_A: float,
+    sleep_time_s: float,
+    temperature: Optional[float] = None,
+    self_discharge_per_month_pct: float = 0.0,
+    safety_margin_pct: float = 0.0,
+    cutoff_voltage_V: Optional[float] = None,
+) -> dict:
+    """Estimate battery life by iterating against a battery profile's discharge curve.
+
+    More accurate than the constant-current estimator when the cell's
+    OCV varies significantly over discharge. Matches Otii's Battery Life
+    Calculator semantics.
+
+    Args:
+        profile_path: path to a battery profile JSON (Otii-format).
+        active_current_A / active_time_s: active phase load.
+        sleep_current_A / sleep_time_s: sleep phase load.
+        temperature: optional table selector for multi-temperature profiles.
+        self_discharge_per_month_pct: optional self-discharge rate.
+        safety_margin_pct: optional reserved-capacity fraction.
+        cutoff_voltage_V: optional override of the profile's cutoff voltage.
+
+    Returns runtime + iterations + final voltage + stop reason.
+    No SMU connection required.
+    """
+    profile = BatteryProfile.load(profile_path)
+    duty = DutyCycle(
+        active_current_A=active_current_A,
+        active_time_s=active_time_s,
+        sleep_current_A=sleep_current_A,
+        sleep_time_s=sleep_time_s,
+    )
+    est = estimate_life_from_profile(
+        profile=profile,
+        duty_cycle=duty,
+        temperature=temperature,
+        self_discharge_per_month_pct=self_discharge_per_month_pct,
+        safety_margin_pct=safety_margin_pct,
+        cutoff_voltage=cutoff_voltage_V,
+    )
+    out = est.to_dict()
+    out["profile_path"] = profile_path
+    out["profile_battery"] = {
+        "manufacturer": profile.battery.manufacturer,
+        "model": profile.battery.model,
+        "nominal_voltage_V": profile.nominal_voltage,
+        "nominal_capacity_mAh": profile.nominal_capacity_mAh,
+    }
+    return out
+
+
+@mcp.tool()
+def battery_life_from_recording(
+    recording_path: str,
+    active_window_start_s: float,
+    active_window_end_s: float,
+    sleep_window_start_s: float,
+    sleep_window_end_s: float,
+    profile_path: Optional[str] = None,
+    capacity_mAh: Optional[float] = None,
+    self_discharge_per_month_pct: float = 0.0,
+    safety_margin_pct: float = 0.0,
+    temperature: Optional[float] = None,
+) -> dict:
+    """Estimate battery life using duty-cycle data extracted from a saved recording.
+
+    Otii's "Get from selection" workflow: you observed an active region
+    and a sleep region in a captured run, the tool averages main current
+    over each window and uses those as the active/sleep load.
+
+    Either ``profile_path`` (uses profile-based estimator) OR
+    ``capacity_mAh`` (uses constant-current estimator) must be provided.
+    """
+    if profile_path is None and capacity_mAh is None:
+        return {
+            "error": "REFUSED: must provide profile_path or capacity_mAh",
+            "guidance": (
+                "Pass profile_path=<path to a battery profile JSON> for "
+                "the curve-aware estimator, or capacity_mAh=<float> for "
+                "the constant-current estimator."
+            ),
+        }
+    rec = Recording.load(recording_path)
+    duty = duty_cycle_from_recording(
+        rec,
+        active_window=(active_window_start_s, active_window_end_s),
+        sleep_window=(sleep_window_start_s, sleep_window_end_s),
+    )
+    if profile_path is not None:
+        profile = BatteryProfile.load(profile_path)
+        est = estimate_life_from_profile(
+            profile=profile,
+            duty_cycle=duty,
+            temperature=temperature,
+            self_discharge_per_month_pct=self_discharge_per_month_pct,
+            safety_margin_pct=safety_margin_pct,
+        )
+    else:
+        assert capacity_mAh is not None  # for type-checker
+        est = estimate_life_constant_current(
+            capacity_mAh=capacity_mAh,
+            duty_cycle=duty,
+            self_discharge_per_month_pct=self_discharge_per_month_pct,
+            safety_margin_pct=safety_margin_pct,
+        )
+    out = est.to_dict()
+    out["recording_path"] = recording_path
+    out["duty_cycle_from_recording"] = {
+        "active_current_A": duty.active_current_A,
+        "active_time_s": duty.active_time_s,
+        "sleep_current_A": duty.sleep_current_A,
+        "sleep_time_s": duty.sleep_time_s,
+    }
+    if profile_path:
+        out["profile_path"] = profile_path
+    return out
 
 
 @mcp.tool()

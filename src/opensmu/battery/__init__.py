@@ -16,6 +16,13 @@ Phases:
   SMU as a battery with realistic OCV + ESR sag (v0.8.0, deferred)
 """
 
+from opensmu.battery.calculator import (
+    DutyCycle,
+    LifeEstimate,
+    duty_cycle_from_recording,
+    estimate_life_constant_current,
+    estimate_life_from_profile,
+)
 from opensmu.battery.profile import (
     Battery,
     BatteryProfile,
@@ -28,6 +35,7 @@ from opensmu.battery.profile import (
 )
 
 __all__ = [
+    # profile (v0.5.0)
     "Battery",
     "BatteryProfile",
     "DeviceInfo",
@@ -36,4 +44,10 @@ __all__ = [
     "DischargeStep",
     "DischargeTable",
     "ExitConditions",
+    # calculator (v0.6.0)
+    "DutyCycle",
+    "LifeEstimate",
+    "duty_cycle_from_recording",
+    "estimate_life_constant_current",
+    "estimate_life_from_profile",
 ]

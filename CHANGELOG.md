@@ -2,6 +2,62 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] — battery life calculator (phase 2 of Battery Toolbox replacement)
+
+Pure-Python duty-cycle life estimator. Drop-in replacement for Qoitech's
+Battery Life Calculator using opensmu's open profile format from v0.5.0.
+
+### Added — `opensmu.battery.calculator`
+
+- **`DutyCycle`** dataclass — active/sleep load pattern with computed
+  `cycle_time_s`, `cycle_charge_C`, `average_current_A` properties.
+- **`LifeEstimate`** dataclass — runtime + iterations + capacity
+  consumed + self-discharge loss + safety margin loss + final voltage
+  (profile method only) + method + stop reason.
+- **`estimate_life_constant_current(capacity_mAh, duty_cycle, ...)`** —
+  analytic estimator. Treats the cell as a flat-voltage reservoir.
+  Optional self-discharge (% per month) and safety margin (%). Returns
+  infinite runtime for zero drain.
+- **`estimate_life_from_profile(profile, duty_cycle, temperature=None, ...)`** —
+  iterative estimator against a `BatteryProfile`. Looks up OCV at each
+  cycle's used-capacity point. Stops at cutoff voltage (defaults to
+  profile's own) or usable-capacity exhaustion. Matches Otii's Battery
+  Life Calculator semantics.
+- **`duty_cycle_from_recording(rec, active_window, sleep_window, channel="mc")`** —
+  extract a DutyCycle from a captured Recording by averaging main
+  current over user-selected time windows. Otii's "Get from selection"
+  workflow.
+
+### Added — MCP tools (per SDK ↔ MCP parity principle)
+
+- **`battery_life_estimate(capacity_mAh, active_current_A, active_time_s, sleep_current_A, sleep_time_s, ...)`** —
+  constant-current estimator
+- **`battery_life_estimate_from_profile(profile_path, ...)`** —
+  profile-based estimator
+- **`battery_life_from_recording(recording_path, active_window_start_s, ..., profile_path=None, capacity_mAh=None, ...)`** —
+  end-to-end: load saved capture, extract windows, estimate
+
+### Verified
+
+CR2032-Energizer with a typical IoT load (20 mA / 100 ms / 60 s cycle ≈
+38 µA average): ~250 days from the constant-current estimator; ~208
+days with 1%/month self-discharge + 10% safety margin. Real numbers,
+match physical intuition.
+
+### Tests
+
+18 new tests in `tests/test_battery_calculator.py`:
+- DutyCycle properties (cycle time, cycle charge, average current)
+  + input validation
+- Constant-current estimator: simple math, safety margin scaling,
+  self-discharge, zero-drain infinity, input validation
+- Profile-based estimator: flat-profile equivalence to CC, voltage
+  cutoff, safety margin scaling, real CR2032 sanity check
+- DutyCycle extraction from synthetic Recording + edge cases
+- Humanize formatter (seconds → "5 days 3 hours …")
+
+Total tests: 230 → **248 passing**.
+
 ## [0.5.0] — battery profile format (phase 1 of Battery Toolbox replacement)
 
 First of four phases replacing Qoitech's licensed Battery Toolbox on

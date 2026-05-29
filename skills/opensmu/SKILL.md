@@ -190,9 +190,11 @@ parses error frames and queues them.
 
 ## Battery features
 
-Independent of the SMU class, `opensmu.battery` ships a clean-room
-replacement for Qoitech's licensed Battery Toolbox. See
-[`docs/battery.md`](../../docs/battery.md) for the full feature plan.
+`opensmu.battery` ships a clean-room replacement for Qoitech's licensed
+Battery Toolbox. See [`docs/battery.md`](../../docs/battery.md) for the
+full feature plan.
+
+### Profile I/O (v0.5.0)
 
 ```python
 from opensmu.battery import BatteryProfile
@@ -208,6 +210,61 @@ profile.esr_at(used_capacity_mAh=50) # ~14.1 ohm
 Profiles produced here round-trip bit-identically through Otii — fully
 interchangeable. **Don't write your own profile JSON shape**; use the
 `BatteryProfile` / `DischargeTable` / `DischargeSample` dataclasses.
+
+### Life calculator (v0.6.0)
+
+Duty-cycle simulator. Two estimators:
+
+```python
+from opensmu.battery import (
+    BatteryProfile, DutyCycle,
+    estimate_life_constant_current,
+    estimate_life_from_profile,
+    duty_cycle_from_recording,
+)
+
+duty = DutyCycle(
+    active_current_A=0.020, active_time_s=0.1,    # 20 mA pulse for 100 ms
+    sleep_current_A=5e-6,   sleep_time_s=60.0,    # 5 uA idle for 60 s
+)
+
+# Quick analytic estimate (flat-voltage assumption):
+est = estimate_life_constant_current(capacity_mAh=230.0, duty_cycle=duty)
+print(est.runtime_human)  # "250 days 16 hours 28 minutes ..."
+
+# Profile-based iterative estimate (curve-aware, matches Otii's calculator):
+profile = BatteryProfile.load("CR2032-Energizer-(25).json")
+est = estimate_life_from_profile(
+    profile=profile,
+    duty_cycle=duty,
+    self_discharge_per_month_pct=1.0,   # typical lithium primary
+    safety_margin_pct=10.0,
+)
+print(est.runtime_human, est.stop_reason, est.final_voltage_V)
+
+# Pull a duty cycle straight out of a recording (Otii's "Get from selection"):
+from opensmu import Recording
+rec = Recording.load("device-under-test.opensmu")
+duty = duty_cycle_from_recording(
+    rec,
+    active_window=(1.25, 1.5),   # seconds — when your TX pulse fires
+    sleep_window=(2.0, 60.0),    # the long idle period
+)
+```
+
+`LifeEstimate` carries `runtime_s`, `runtime_human` ("5 days 3 hours
+22 minutes"), `iterations`, `capacity_consumed_mAh`, `average_current_A`,
+`self_discharge_loss_mAh`, `safety_margin_loss_mAh`, `final_voltage_V`
+(profile estimator only), `method`, `stop_reason`.
+
+### MCP tools
+
+Profile and calculator tools (work on saved files; no SMU connection):
+- `battery_profile_summary(path)`
+- `battery_profile_lookup(path, used_capacity_mAh, temperature=None)`
+- `battery_life_estimate(capacity_mAh, active_current_A, active_time_s, sleep_current_A, sleep_time_s, ...)`
+- `battery_life_estimate_from_profile(profile_path, active_current_A, ...)`
+- `battery_life_from_recording(recording_path, active_window_start_s, ..., sleep_window_end_s, profile_path=None, capacity_mAh=None, ...)`
 
 ## Anti-patterns — don't do these
 
