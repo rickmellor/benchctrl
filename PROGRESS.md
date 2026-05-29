@@ -5,45 +5,115 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: scaffolding
-- **Last commit**: (none yet)
-- **Last touched**: design doc + scaffold
+- **Phase**: v0.1 build COMPLETE
+- **Tests**: 132 / 132 passing (89 hardware-free + 43 hardware-required)
+- **Last commit**: final v0.1 handoff
 - **Hardware**: Arc Pro on COM6, output off, nothing connected
 
-## Where to look first if you're resuming
+## What's done
 
-1. `docs/official_api_inventory.md` — full catalog of every method in
-   the official `otii_tcp_client` we are replicating
-2. `docs/design.md` — architecture + API style decisions
-3. `ROADMAP.md` — features explicitly deferred + why
-4. `TEST_PLAN.md` — what should be exercised
-5. `VALIDATION_REPORT.md` — what was actually validated against hardware
-6. `src/opensmu/` — the implementation
+Everything in the v0.1 scope is built, tested, and documented. The
+package is installable (`pip install -e .` works), the CLI is wired up
+(`python -m opensmu` and `opensmu` both work), and every documented
+public method is exercised end-to-end.
 
-## Phase ledger
+| # | Phase | Status |
+|---|---|---|
+| 1 | Survey official `otii_tcp_client` API | DONE — see `docs/official_api_inventory.md` |
+| 2 | Write design doc | DONE — see `docs/design.md` |
+| 3 | Scaffold package | DONE — `pyproject.toml`, `src/opensmu/`, MIT license |
+| 4 | Transport + protocol + framing | DONE — `transport.py`, `protocol.py` |
+| 5 | Device (SMU) class | DONE — `device.py` |
+| 6 | Recording + samples | DONE — `recording.py`, `samples.py`, native `.opensmu` format |
+| 7 | TEST_PLAN + pytest suite | DONE — see `TEST_PLAN.md`, `tests/` |
+| 8 | Validation against hardware | DONE — see `VALIDATION_REPORT.md` |
+| 9 | Documentation | DONE — getting started, API reference, protocol, AGENTS.md, design |
+| 10 | Polish + handoff | DONE — this file, CHANGELOG, final commits |
 
-| # | Phase | Status | Notes |
-|---|---|---|---|
-| 1 | Survey official API | done | inventory in `docs/official_api_inventory.md` |
-| 2 | Design doc | in progress | `docs/design.md` |
-| 3 | Scaffold package | in progress | pyproject + src layout + git init |
-| 4 | Transport + protocol | pending | |
-| 5 | Device class | pending | |
-| 6 | Recording + samples | pending | |
-| 7 | Test plan + suite | pending | |
-| 8 | Validation | pending | |
-| 9 | Documentation | pending | |
-| 10 | Polish + handoff | pending | |
+## Resuming in the morning
 
-## Known blockers / open questions
+1. `cd C:\Users\rickm\Desktop\opensmu`
+2. `cat PROGRESS.md` (this file)
+3. `git log --oneline` to see the trail
+4. `python -m pytest tests/ -q` to confirm all 132 tests still green
+5. `cat ROADMAP.md` to see what's deferred for v0.2
 
-(none yet)
+Use `opensmu info` from the shell as a smoke test against the live
+device.
+
+## Where to find what
+
+| Looking for | Path |
+|---|---|
+| Tutorial for a new user | `docs/getting_started.md` |
+| Every public API element | `docs/api_reference.md` |
+| The USB wire protocol | `docs/protocol.md` |
+| Architecture / decisions | `docs/design.md` |
+| What the official client exposes (for parity) | `docs/official_api_inventory.md` |
+| AI agent briefing | `docs/AGENTS.md` |
+| Deferred features (v0.2+) | `ROADMAP.md` |
+| Test inventory | `TEST_PLAN.md` |
+| Last validation results | `VALIDATION_REPORT.md` |
+| Release notes | `CHANGELOG.md` |
+
+## Notable findings during the build
+
+### 1. Device baseline streams at ~6 Hz, not 1 kHz / 4 kHz
+
+The biggest surprise. Both opensmu and the legacy `arc_direct` library
+get only ~6 Hz across all channels after standard session init. The
+documented native rates (1 kHz subtype-1, 4 kHz subtype-4) are
+capabilities, not the default. A wire-level command unlocks higher
+rates — it's deferred to v0.2 (see `ROADMAP.md` § Full-rate streaming).
+
+Tests were calibrated to the actual rate. Recording functionality is
+fully working; just slower than the maximum the hardware can deliver.
+Useful for any measurement where sub-1-ms detail isn't needed.
+
+### 2. Battery emulation is the biggest scope item for v0.2
+
+The user explicitly flagged battery emulation as the priority for the
+next pass — Qoitech's separate Battery Toolbox license can be
+obsoleted once it's working. Scoped in `ROADMAP.md`.
+
+### 3. Floating-point boundaries in time-domain slicing
+
+Switched `slice_indices` from `floor(start*rate)` to `ceil(start*rate)`
+to fix off-by-one when window bounds land exactly on sample boundaries.
+Semantics now: include sample `k` iff `start <= t_k < end`.
+
+## v0.2 priority queue
+
+In order of user-stated interest:
+
+1. **Battery emulation** — decode profile upload + SoC API + battery data
+   stream, obsoleting the Battery Toolbox.
+2. **Full-rate streaming** — decode the unlock command so high-rate
+   channels actually deliver 4 kHz.
+3. **Calibration** — capture the calibration flow, expose with
+   appropriate safety warnings.
+4. **set_channel_samplerate** — re-attempt capture if the Otii server
+   bug is fixed in a newer version.
+
+Multi-device coordination + UART log parsing + project save/load are
+v0.3 candidates.
+
+## Open questions for tomorrow
+
+- Should `set_supply_battery_emulator()` accept a JSON file path
+  directly, or take a parsed `BatteryProfile` dataclass and a
+  `BatteryProfile.from_json()` factory? (Tomorrow's design call.)
+- Should the full-rate streaming unlock be implicit (always on after
+  init) or explicit (`SMU.set_streaming_mode("high")`)?
 
 ## Quick resume commands
 
 ```powershell
 cd C:\Users\rickm\Desktop\opensmu
 git log --oneline -20
-python -m pytest tests/ -m "not hardware"     # hardware-free
-python -m pytest tests/ -m hardware            # requires Arc Pro on COM6
+python -m pytest tests/ -m "not hardware" -q     # hardware-free, <1 s
+python -m pytest tests/ -m hardware -q            # requires Arc Pro on COM6, ~35 s
+python -m pytest tests/ -q                        # both, 132 tests
+opensmu discover
+opensmu info
 ```
