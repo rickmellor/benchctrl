@@ -2,6 +2,89 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] — 100% decoding sweep
+
+A systematic decode pass across every captured trace exposed the rest of the
+wire vocabulary. Result: opensmu now understands every distinct frame
+type the device emits or accepts in the captured corpus.
+
+### Added — newly decoded wire commands
+
+- **GET-parameter interface** (`type=0x64`) — every parameter we can SET, we
+  can now read back. New `SMU.get_param(cmd_code)` returns a unified
+  :class:`Response` with status + data. Convenience methods:
+  `get_device_name()`, `get_hw_version()`, `get_fw_version()`,
+  `get_device_id()`, `get_main_voltage_setpoint()`,
+  `get_max_current_setpoint()`, `get_exp_voltage_setpoint()`,
+  `get_uart_baudrate_setpoint()`, `get_channel_inventory()`.
+- **SET_POWER_REGULATION** (`type=0x66 cmd=0x0A`) — `set_power_regulation()`
+  now sends a real wire command. Modes map to `voltage=0`, `current=1`,
+  `inline=10`, `off=100`.
+- **write_tx** (`type=0x82 cmd=0x19` + UTF-8 text) — `SMU.write_tx()` no
+  longer raises; sends a variable-length text payload distinct from the
+  SET/GET vocabulary.
+- **set_tx** (decoded as `set_gpo(3, state)`) — no longer raises. The TX
+  pin is the third GPO slot in the GPO bit pattern (bits 6/7 of
+  `SET_GPO`).
+- **set_gpo(3, state)** — previously rejected, now valid.
+- **Prepare-stop (`type=0x7E`)** — `stop_recording()` now sends this 8-byte
+  flush frame before the per-channel disable burst, matching vendor
+  behaviour. Eliminates a small streaming-mode-switch lag.
+- **POLL (`type=0x0A`)** — `encode_poll(seq, timestamp_us)` available for
+  the optional ~1 Hz host heartbeat (not sent by default; the device
+  works without it).
+
+### Added — decoded inbound formats
+
+- **Unified `Response` parser** — `parse_response(payload)` decodes any
+  `0e 03 99 ff`-prefixed frame into `Response(response_seq, status, data)`
+  with status conventions `0=OK / -3=N/A / negative=rejected`.
+  `Response.as_u32() / as_int() / as_float() / as_text() / as_u32_array()`
+  pull typed values from the data field.
+- **180-byte `ce f2 2f ff` baseline envelope** — confirmed as a simple
+  container holding one `02 00 08 00`-prefixed sample record per channel.
+  Already correctly parsed by `iter_samples`' baseline byte-scan; now
+  documented in `docs/protocol.md`.
+- **Packed sample frame** — already implemented in v0.1.1, now formally
+  documented alongside the GET response format.
+
+### Changed — protocol model
+
+- `parse_error_frame` / `parse_set_ack_frame` now key off the response
+  status word instead of the legacy `04 10 00 00` / `0x10XX` "discriminator"
+  bytes — which we discovered in cap #16 were actually just sequence
+  numbers, not type discriminators. The legacy convenience APIs are
+  preserved for backwards compatibility, but new code should use
+  `parse_response()` directly.
+
+### Defer notes (no change in scope, just clarified)
+
+- **`set_channel_samplerate`** — fails at the Otii server's JavaScript
+  layer before reaching the device (cap #42). Most plausible
+  interpretation: there is no wire command for this — sample rates are
+  hardware-fixed and "sample rate" in the GUI is a post-processing
+  downsample. Marked architecturally not-a-wire-command.
+- **`calibrate()`** — fires zero wire commands via the API (cap #41).
+  The vendor's calibration flow lives somewhere else (likely the
+  Desktop GUI's service-mode path). Stub kept.
+- **Battery emulation** — blocked at the Otii server by a separate
+  "Battery Toolbox" license we don't hold (cap #40 reached the gate but
+  not the wire). Decoding requires manually driving the Otii Desktop
+  GUI with DMS capturing in parallel. Stubs kept.
+
+### Internal
+
+- `protocol.py` constants: `CMD_SET_POWER_REGULATION`, `CMD_WRITE_TX`,
+  `CMD_GET_DEVICE_NAME`, `CMD_GET_HW_VERSION`, `CMD_GET_FW_VERSION`,
+  `CMD_GET_DEVICE_ID`, `CMD_GET_CHANNEL_INVENTORY`, `POWER_REGULATION_MAP`,
+  `TYPE_PREPARE_STOP`, `TYPE_WRITE_TEXT`.
+- `device.py` GET round-trip: `SMU.get_param()` sends a type=0x64 request,
+  drains inbound bytes, matches on response_seq, returns the parsed
+  `Response`. Requires no active recording (reader thread owns the
+  byte stream during recording).
+- Hardware-free test coverage expanded from 89 to 105 tests; hardware
+  tier from 43 to 59 (132 -> 164 total).
+
 ## [0.1.1] — full-rate streaming
 
 ### Fixed

@@ -27,8 +27,6 @@ def smu_skeleton():
         ("set_supply_battery_emulator", ("uuid-1234",)),
         ("wait_for_battery_data", (1.0,)),
         ("iter_uart_log", ()),
-        ("write_tx", ("hello",)),
-        ("set_tx", (True,)),
         ("get_rx", ()),
         ("set_channel_samplerate", ("mc", 4000)),
     ],

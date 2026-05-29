@@ -49,7 +49,7 @@ def test_set_gpo_invalid_pin_raises(smu):
     with pytest.raises(SMUValueError):
         smu.set_gpo(0, True)
     with pytest.raises(SMUValueError):
-        smu.set_gpo(3, True)
+        smu.set_gpo(4, True)  # pin 3 is now valid (TX pin); pin 4 is not
 
 
 def test_set_range_invalid_raises(smu):

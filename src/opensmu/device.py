@@ -31,6 +31,11 @@ from opensmu.exceptions import (
 from opensmu.protocol import (
     CMD_ENABLE_5V,
     CMD_ENABLE_LEGACY_SINK,
+    CMD_GET_CHANNEL_INVENTORY,
+    CMD_GET_DEVICE_ID,
+    CMD_GET_DEVICE_NAME,
+    CMD_GET_FW_VERSION,
+    CMD_GET_HW_VERSION,
     CMD_SET_4WIRE,
     CMD_SET_ADC_RESISTOR,
     CMD_SET_DIGITAL_VOLTAGE,
@@ -39,27 +44,35 @@ from opensmu.protocol import (
     CMD_SET_MAIN_OUTPUT,
     CMD_SET_MAIN_VOLTAGE,
     CMD_SET_OC_PROTECTION,
+    CMD_SET_POWER_REGULATION,
     CMD_SET_RANGE,
     CMD_SET_SRC_CUR_LIMIT_ENABLED,
     CMD_SET_UART_BAUDRATE,
     CMD_SET_UART_ENABLE,
+    POWER_REGULATION_MAP,
     RANGE_HIGH,
     RANGE_LOW,
     SESSION_INIT_WAKE,
+    Response,
     amps_to_microamps,
     amps_to_milliamps,
     encode_channel_enable_for_recording,
     encode_frame,
+    encode_get_command,
     encode_gpo,
+    encode_prepare_stop,
     encode_recording_cleanup,
     encode_session_init_step2,
     encode_session_init_step3,
     encode_set_command,
+    encode_write_tx,
     find_text_metadata,
     iter_frames,
     iter_samples,
     ohms_to_microohms,
     parse_error_frame,
+    parse_response,
+    power_regulation_value,
     volts_to_microvolts,
 )
 from opensmu.recording import Recording
@@ -465,33 +478,44 @@ class SMU:
         self._send_set(CMD_SET_UART_BAUDRATE, baud)
         self._state.uart_baudrate = baud
 
-    def write_tx(self, value: str) -> None:
-        """Write a UART text frame.
+    def write_tx(self, value: str | bytes) -> None:
+        """Write a UART TX frame (text).
 
-        The wire encoding for TX writes has not been fully reverse
-        engineered. v0.1 raises rather than send speculative bytes.
+        Wire form: ``[seq][0x82][0x19][utf-8 bytes…]`` — a variable-length
+        payload distinct from the SET/GET vocabulary. Decoded in cap #43.
         """
-        raise SMUNotImplementedError(
-            "write_tx() is a deferred feature — see ROADMAP.md"
-        )
+        self._raise_pending_error()
+        payload = encode_write_tx(self._next_seq(), value)
+        log.debug("write_tx %r", value)
+        self._send_payload(payload)
 
     def set_tx(self, value: bool) -> None:
-        """TX-pin-as-GPO. Maps onto GPO pin 1 in the deferred semantic.
-        v0.1 raises to avoid touching wire bytes we haven't verified."""
-        raise SMUNotImplementedError(
-            "set_tx() is a deferred feature — see ROADMAP.md"
-        )
+        """Drive the TX pin as a GPO.
+
+        Decoded in cap #43: ``Arc.set_tx`` is exactly equivalent to
+        ``set_gpo(3, state)`` — the TX pin occupies the third GPO slot
+        (bits 6-8) in the SET_GPO bit pattern.
+        """
+        self.set_gpo(3, value)
 
     def get_rx(self) -> bool:
-        """RX-pin-as-GPI. Deferred — see ROADMAP.md."""
+        """Read the RX pin as a GPI.
+
+        Not yet decoded as a distinct wire command. The vendor API may
+        report this from a GPI bitmap channel, but the bit-position has not
+        been verified. Defers cleanly for now."""
         raise SMUNotImplementedError(
             "get_rx() is a deferred feature — see ROADMAP.md"
         )
 
     def set_gpo(self, pin: int, state: bool) -> None:
-        """Set GPO pin (1 or 2) to state."""
-        if pin not in (1, 2):
-            raise SMUValueError(f"GPO pin must be 1 or 2, got {pin}")
+        """Set GPO pin (1, 2, or 3) to state.
+
+        Pin 3 is the TX pin used as a GPO when UART is disabled — same
+        wire encoding the vendor's ``Arc.set_tx`` produces (cap #43).
+        """
+        if pin not in (1, 2, 3):
+            raise SMUValueError(f"GPO pin must be 1, 2, or 3, got {pin}")
         self._send_set(CMD_SET_GPO, encode_gpo(pin, state))
         self._state.gpo[pin] = bool(state)
 
@@ -520,13 +544,16 @@ class SMU:
     enable_legacy_sink = set_legacy_sink
 
     def set_power_regulation(self, mode: str) -> None:
-        """Set power regulation mode."""
-        if mode not in VALID_POWER_REGULATIONS:
+        """Set power regulation mode.
+
+        Wire form: ``type=0x66 cmd=0x0A val=<mode>`` where
+        ``voltage=0, current=1, inline=10, off=100`` (decoded in cap #43).
+        """
+        if mode not in POWER_REGULATION_MAP:
             raise SMUValueError(
-                f"mode must be one of {VALID_POWER_REGULATIONS}, got {mode!r}"
+                f"mode must be one of {sorted(POWER_REGULATION_MAP)}, got {mode!r}"
             )
-        # Host-side cache only; the wire command for this mode was not
-        # observed in our captures. Treated as a deferred refinement.
+        self._send_set(CMD_SET_POWER_REGULATION, power_regulation_value(mode))
         self._state.power_regulation = mode
 
     def set_supply_power_box(self) -> None:
@@ -675,6 +702,13 @@ class SMU:
             self._reader_thread.join(timeout=2.0)
         self._reader_thread = None
 
+        # Prepare-stop (0x7E) flushes the packed-streaming buffer before we
+        # send per-channel disables. The vendor sends this — cap #04 frame
+        # 3182 + cap #18 frame 2310 both show 0x7E immediately before the
+        # disable burst. Without it the device sometimes lags in switching
+        # streaming modes.
+        self._send_payload(encode_prepare_stop(self._next_seq()))
+
         # Send a per-channel disable for every wire id we enabled at start.
         # Symmetric to the start-of-recording enable burst.
         for wire_id in self._active_recording_wire_ids:
@@ -687,6 +721,127 @@ class SMU:
         rec._end()
         self._active_recording = None
         return rec
+
+    # ----- GET-parameter interface (type=0x64) --------------------------
+
+    def get_param(
+        self,
+        cmd_code: int,
+        *,
+        timeout: float = 1.0,
+    ) -> Response:
+        """Send a GET-parameter command and return the device's response.
+
+        Wire form: ``[seq][0x64][cmd][0]`` outbound; device replies with a
+        unified response frame ``[0e 03 99 ff][seq][status:i32][data]`` —
+        see :py:meth:`opensmu.protocol.parse_response`.
+
+        Args:
+            cmd_code: parameter to query. The same code as the matching
+                ``CMD_SET_*`` reads back that parameter (e.g. cmd=0x0B
+                returns the cached main voltage). Banked variants
+                (0x040B, 0x080B, …) expose per-range / per-calibration-set
+                readbacks; see ``docs/protocol.md``.
+            timeout: seconds to wait for the response.
+
+        Returns:
+            The decoded :class:`Response`. Check ``.ok`` / ``.not_available``
+            / ``.rejected`` to discriminate outcomes; use ``.as_u32()``,
+            ``.as_int()``, ``.as_float()``, ``.as_text()``, or
+            ``.as_u32_array()`` for typed data extraction.
+
+        Raises:
+            SMUValueError: if a recording is active. Stop the recording
+                first; the reader thread owns the inbound byte stream
+                during a recording.
+            SMUTimeoutError: if no response arrives within ``timeout``.
+        """
+        if self._active_recording is not None:
+            raise SMUValueError(
+                "get_param() requires no active recording — stop_recording() first"
+            )
+        self._raise_pending_error()
+        seq = self._next_seq()
+        self._send_payload(encode_get_command(seq, cmd_code))
+        # Drain incoming bytes in short windows and look for a matching seq
+        pending = bytearray()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            chunk = self._transport.read_chunk(8192)
+            if chunk:
+                pending.extend(chunk)
+            # Try to find a response for our seq
+            for fr in iter_frames(bytes(pending)):
+                r = parse_response(fr.payload)
+                if r is not None and r.response_seq == seq:
+                    return r
+        raise SMUTimeoutError(
+            f"no response to GET cmd=0x{cmd_code:04X} within {timeout:.2f}s"
+        )
+
+    def get_device_name(self) -> str:
+        """Query the device's name string (typically ``"Arc"``)."""
+        return self.get_param(CMD_GET_DEVICE_NAME).as_text()
+
+    def get_hw_version(self) -> str:
+        """Query the hardware version string."""
+        return self.get_param(CMD_GET_HW_VERSION).as_text()
+
+    def get_fw_version(self) -> str:
+        """Query the firmware version string."""
+        return self.get_param(CMD_GET_FW_VERSION).as_text()
+
+    def get_device_id(self) -> str:
+        """Query the 32-character device serial id."""
+        return self.get_param(CMD_GET_DEVICE_ID).as_text()
+
+    def get_main_voltage_setpoint(self) -> float | None:
+        """Read back the device's cached main voltage (V).
+
+        Wire form: ``GET cmd=0x0B``. Returns the cached setpoint in volts,
+        or ``None`` if the device reports the parameter as not available.
+        """
+        r = self.get_param(0x0B)
+        v = r.as_u32()
+        return None if not r.ok or v is None else v / 1_000_000
+
+    def get_max_current_setpoint(self) -> float | None:
+        """Read back the device's cached current limit (A).
+
+        Wire form: ``GET cmd=0x0C``. Value is milliamps.
+        """
+        r = self.get_param(0x0C)
+        v = r.as_u32()
+        return None if not r.ok or v is None else v / 1_000
+
+    def get_exp_voltage_setpoint(self) -> float | None:
+        """Read back the device's cached expansion-port voltage (V).
+
+        Wire form: ``GET cmd=0x33``. Value is microvolts.
+        """
+        r = self.get_param(0x33)
+        v = r.as_u32()
+        return None if not r.ok or v is None else v / 1_000_000
+
+    def get_uart_baudrate_setpoint(self) -> int | None:
+        """Read back the device's cached UART baud rate (baud).
+
+        Wire form: ``GET cmd=0x29``. Value is the baud rate directly.
+        """
+        r = self.get_param(0x29)
+        v = r.as_u32()
+        return None if not r.ok else v
+
+    def get_channel_inventory(self) -> bytes:
+        """Query the device's channel inventory table.
+
+        Wire form: ``GET cmd=0x8D``. Returns the raw 268-byte response
+        data. The decoded structure is documented in ``docs/protocol.md`` —
+        a repeating record of
+        ``[wire_id:u16][flags:u16][padding:u32][rate:u32][padding:u32]``
+        per supported channel.
+        """
+        return self.get_param(CMD_GET_CHANNEL_INVENTORY).data
 
     @contextlib.contextmanager
     def record(

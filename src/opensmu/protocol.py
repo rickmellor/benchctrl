@@ -34,15 +34,17 @@ WIRE_MAGIC = b"\xa3\x2c\xb5\x7f"
 
 # --- payload-level type tags --------------------------------------------
 
-TYPE_POLL = 0x0A
+TYPE_POLL = 0x0A  # host heartbeat with monotonic ~1 MHz timestamp counter (optional)
 TYPE_INIT_WAKE = 0x14  # short init payload
 TYPE_GET_PARAMETER = 0x64  # GET cached parameter value
 TYPE_INIT_STEP2 = 0x64  # legacy alias — init step 2 uses TYPE_GET_PARAMETER w/ cmd=0x29
 TYPE_SET_PARAMETER = 0x66
 TYPE_CHANNEL_ENABLE = 0x78  # cmd=wire_id, val=1 enables/0 disables that channel for streaming
 TYPE_STOP_RECORDING = 0x78  # legacy alias of TYPE_CHANNEL_ENABLE
+TYPE_PREPARE_STOP = 0x7E  # 8B host -> device "flush packed streaming buffer" before disable burst
 TYPE_REC_CLEANUP = 0x7C  # 8B housekeeping payload after enable/disable burst
 TYPE_ENABLE_LEGACY_SINK = 0x7C  # SET command (same code, different shape)
+TYPE_WRITE_TEXT = 0x82  # variable-length: [seq][0x82][cmd][text bytes...]
 
 
 # --- SET command codes (type 0x66) --------------------------------------
@@ -51,16 +53,39 @@ CMD_SET_4WIRE = 0x05
 CMD_SET_SRC_CUR_LIMIT_ENABLED = 0x06
 CMD_SET_RANGE = 0x08  # 0=low, 1=high
 CMD_SET_MAIN_OUTPUT = 0x09  # output enable
+CMD_SET_POWER_REGULATION = 0x0A  # voltage=0, current=1, inline=10, off=100
 CMD_SET_MAIN_VOLTAGE = 0x0B  # microvolts
 CMD_SET_OC_PROTECTION = 0x0C  # milliamps (also "max current")
 CMD_SET_MAIN_CURRENT = 0x0D  # microamps (CC source/sink)
 CMD_SET_ADC_RESISTOR = 0x1E  # micro-ohms
 CMD_SET_UART_ENABLE = 0x28
 CMD_SET_UART_BAUDRATE = 0x29
-CMD_SET_GPO = 0x32  # encoded bit pattern, see encode_gpo
+CMD_SET_GPO = 0x32  # encoded bit pattern, see encode_gpo (supports pins 1/2/3, TX pin = pin 3)
 CMD_SET_DIGITAL_VOLTAGE = 0x33  # microvolts (expansion-port digital)
 CMD_ENABLE_5V = 0x34  # 5_000_000 enables, 0 disables
 CMD_ENABLE_LEGACY_SINK = 0x7C  # 1/0
+
+# type=0x82 cmd code(s)
+CMD_WRITE_TX = 0x19  # write UART TX text — payload is [seq][0x82][0x19][utf-8 bytes]
+
+# Well-known GET cmd codes (type=0x64) for read-back / device identification
+CMD_GET_DEVICE_NAME = 0x01      # response data: ASCII device name (e.g. "Arc")
+CMD_GET_HW_VERSION = 0x80       # response data: ASCII hardware version (e.g. "1.3")
+CMD_GET_FW_VERSION = 0x81       # response data: ASCII firmware version (e.g. "3.1.3")
+CMD_GET_DEVICE_ID = 0x82        # response data: 32-char ASCII serial id
+CMD_GET_CHANNEL_INVENTORY = 0x8D  # response data: 268 B channel inventory table
+
+# Symbolic power regulation modes (value semantics for cmd=0x0A)
+POWER_REGULATION_VOLTAGE = 0
+POWER_REGULATION_CURRENT = 1
+POWER_REGULATION_INLINE = 10
+POWER_REGULATION_OFF = 100
+POWER_REGULATION_MAP = {
+    "voltage": POWER_REGULATION_VOLTAGE,
+    "current": POWER_REGULATION_CURRENT,
+    "inline": POWER_REGULATION_INLINE,
+    "off": POWER_REGULATION_OFF,
+}
 
 
 # --- range values --------------------------------------------------------
@@ -158,6 +183,58 @@ def encode_set_command(seq: int, cmd_code: int, value: int) -> bytes:
     return struct.pack("<IIII", seq & 0xFFFFFFFF, TYPE_SET_PARAMETER, cmd_code, value & 0xFFFFFFFF)
 
 
+def encode_get_command(seq: int, cmd_code: int) -> bytes:
+    """Build the 16-byte GET-parameter payload (type=0x64).
+
+    Args:
+        seq: monotonic per-connection sequence number.
+        cmd_code: parameter to query — usually the same as the corresponding
+            ``CMD_SET_*`` (e.g. cmd=0x0B queries main voltage).
+            Banked variants (0x040B, 0x080B, ...) expose per-range or
+            calibration-set readbacks; see ``docs/protocol.md``.
+    """
+    return struct.pack("<IIII", seq & 0xFFFFFFFF, TYPE_GET_PARAMETER, cmd_code, 0)
+
+
+def encode_write_tx(seq: int, text: str | bytes) -> bytes:
+    """Build the variable-length UART TX text payload (type=0x82 cmd=0x19).
+
+    The wire form is ``[seq:u32][0x82:u32][0x19:u32][utf-8 bytes…]`` — no
+    trailing null and no length prefix; the device reads to end-of-frame.
+    """
+    data = text.encode("utf-8") if isinstance(text, str) else bytes(text)
+    return struct.pack("<III", seq & 0xFFFFFFFF, TYPE_WRITE_TEXT, CMD_WRITE_TX) + data
+
+
+def encode_prepare_stop(seq: int) -> bytes:
+    """8-byte 'flush packed streaming buffer' payload (type=0x7E).
+
+    Otii sends this immediately before a per-channel disable burst when
+    stopping a recording. Without it, the device sometimes lags in switching
+    streaming modes. opensmu's stop_recording sends it for vendor parity."""
+    return struct.pack("<II", seq & 0xFFFFFFFF, TYPE_PREPARE_STOP)
+
+
+def encode_poll(seq: int, timestamp_us: int) -> bytes:
+    """16-byte host heartbeat (type=0x0A) with a monotonic timestamp.
+
+    Optional — the device functions without it. Otii sends one every ~1 s
+    with a microsecond-resolution counter at the cmd offset and constant
+    ``value=4``.
+    """
+    return struct.pack("<IIII", seq & 0xFFFFFFFF, TYPE_POLL, timestamp_us & 0xFFFFFFFF, 4)
+
+
+def power_regulation_value(mode: str) -> int:
+    """Map a power-regulation mode string to its wire value."""
+    if mode not in POWER_REGULATION_MAP:
+        raise SMUProtocolError(
+            f"unknown power_regulation mode {mode!r}; "
+            f"valid: {sorted(POWER_REGULATION_MAP)}"
+        )
+    return POWER_REGULATION_MAP[mode]
+
+
 def encode_session_init_step2(seq: int) -> bytes:
     """Init step 2 payload (16 B). Sent after the wake payload."""
     return struct.pack("<IIII", seq & 0xFFFFFFFF, TYPE_INIT_STEP2, 0x29, 0)
@@ -250,11 +327,14 @@ def encode_gpo(pin: int, state: bool) -> int:
     Each pin reserves 3 bits in the value field. bit 0 = OFF command,
     bit 1 = ON command (bit 2 unused, possibly tri-state).
 
-    Verified against captures:
+    Verified against captures (cap #29 for pins 1-2; cap #43 for pin 3 via
+    `Arc.set_tx`):
         gpo(1, True)  -> 2     (bit 1)
         gpo(1, False) -> 1     (bit 0)
         gpo(2, True)  -> 16    (bit 4)
         gpo(2, False) -> 8     (bit 3)
+        gpo(3, True)  -> 128   (bit 7) — same wire encoding as Arc.set_tx(True)
+        gpo(3, False) -> 64    (bit 6) — same wire encoding as Arc.set_tx(False)
     """
     if pin < 1:
         raise SMUProtocolError(f"GPO pin must be >= 1, got {pin}")
@@ -407,28 +487,132 @@ def _iter_packed_samples(payload: bytes) -> Iterator[SampleRecord]:
             break
 
 
+# ---------------------------------------------------------------------------
+# Response frame parsing — unified format decoded in cap #16 (phase37)
+# ---------------------------------------------------------------------------
+#
+# All device->host non-sample responses share the shape:
+#
+#     [0e 03 99 ff] [response_seq:u32 LE] [status:i32 LE] [data: 0..N bytes]
+#
+# The response_seq echoes the request's seq number for routing/pairing. The
+# status field interpretation:
+#
+#     0           — success, data follows
+#     -3 (0xFD..) — parameter not available / not supported
+#     -101        — value rejected as out of range (the legacy "error frame")
+#     other neg.  — other device-side rejection
+#
+# Common data shapes by response length:
+#
+#     12 B (status only)            — short ack / N/A reply
+#     16 B (status + 1×u32)         — single-value parameter readback
+#     20 B (status + 2×u32 + 1×u32) — composite (seen for GET cmd=0x0C06)
+#     28 B (status + 5×u32)         — calibration-table responses (GET 0x51-0x5F)
+#     44 B (status + 32 ASCII bytes)— device serial id
+#     >44 B (status + bulk data)    — channel inventory (268 B for cmd=0x8D)
+
+
+@dataclass(frozen=True)
+class Response:
+    """A parsed device response frame.
+
+    Attributes:
+        response_seq: echoed request sequence number
+        status: int32 — 0 = OK, negative = error
+        data: bytes following the status field (may be empty)
+    """
+
+    response_seq: int
+    status: int
+    data: bytes
+
+    @property
+    def ok(self) -> bool:
+        return self.status == 0
+
+    @property
+    def not_available(self) -> bool:
+        return self.status == -3
+
+    @property
+    def rejected(self) -> bool:
+        return self.status < 0 and self.status != -3
+
+    def as_u32(self) -> int | None:
+        """Return the first 32-bit word of data as an unsigned int."""
+        if len(self.data) < 4:
+            return None
+        return struct.unpack_from("<I", self.data, 0)[0]
+
+    def as_int(self) -> int | None:
+        """Return the first 32-bit word of data as a signed int."""
+        if len(self.data) < 4:
+            return None
+        return struct.unpack_from("<i", self.data, 0)[0]
+
+    def as_float(self) -> float | None:
+        """Return the first 32-bit word of data as float32."""
+        if len(self.data) < 4:
+            return None
+        return struct.unpack_from("<f", self.data, 0)[0]
+
+    def as_text(self) -> str:
+        """Return the data as a UTF-8 string (best effort, trim NULs)."""
+        return self.data.rstrip(b"\x00").decode("utf-8", errors="replace")
+
+    def as_u32_array(self) -> tuple[int, ...]:
+        """Return the data as a tuple of u32 values."""
+        n = len(self.data) // 4
+        return struct.unpack_from(f"<{n}I", self.data, 0)
+
+
+def parse_response(payload: bytes) -> Response | None:
+    """Return a parsed response, or None if `payload` isn't a device response.
+
+    Accepts any length >= 8 bytes (header + seq). Status is decoded as i32.
+    """
+    if len(payload) < 8 or payload[:4] != b"\x0e\x03\x99\xff":
+        return None
+    response_seq = struct.unpack_from("<I", payload, 4)[0]
+    status = 0
+    data = b""
+    if len(payload) >= 12:
+        status = struct.unpack_from("<i", payload, 8)[0]
+        data = bytes(payload[12:])
+    return Response(response_seq=response_seq, status=status, data=data)
+
+
+# --- legacy convenience APIs --------------------------------------------------
+# Kept so callers built against v0.1 still work. New code should use
+# `parse_response()` directly.
+
 @dataclass(frozen=True)
 class ErrorRecord:
-    """A device error response to a rejected SET."""
+    """Legacy: a device error response to a rejected SET."""
 
     error_code: int  # signed
     last_good_value: int  # u32
 
 
 def parse_error_frame(payload: bytes) -> ErrorRecord | None:
-    """Return the parsed error, or None if `payload` isn't an error frame."""
-    if len(payload) != ERROR_PAYLOAD_LEN:
+    """Return the parsed error, or None.
+
+    Updated semantics: an "error" is any 16-byte response with status < 0.
+    The legacy v0.1 implementation used a hard-coded ``04 10 00 00`` prefix
+    which was actually ``seq=0x1004`` (a regular seq number). This version
+    correctly identifies errors by checking the status word.
+    """
+    r = parse_response(payload)
+    if r is None or len(payload) != 16 or r.status >= 0:
         return None
-    if payload[:8] != ERROR_PAYLOAD_HEADER:
-        return None
-    err = struct.unpack_from("<i", payload, 8)[0]
-    last_good = struct.unpack_from("<I", payload, 12)[0]
-    return ErrorRecord(error_code=err, last_good_value=last_good)
+    last_good = r.as_u32() or 0
+    return ErrorRecord(error_code=r.status, last_good_value=last_good)
 
 
 @dataclass(frozen=True)
 class SetAck:
-    """A device acknowledgement of a SET command (echoes cmd_code | 0x1000)."""
+    """Legacy: a device acknowledgement of a SET command."""
 
     command_code: int
     field: int
@@ -436,28 +620,23 @@ class SetAck:
 
 
 def parse_set_ack_frame(payload: bytes) -> SetAck | None:
-    """Return the parsed SET ack, or None if `payload` isn't one.
+    """Return the parsed SET ack, or None.
 
-    SET-ack and error frames share the `0e 03 99 ff` prefix. The error
-    frame's second word is the fixed `04 10 00 00` discriminator; SET-ack
-    frames carry `0x1000 | cmd_code` instead.
+    Updated semantics: a SET ack is a 16-byte successful response (status=0)
+    with the value at offset 12-15. We synthesise the legacy ``command_code``
+    field by extracting the low byte of the response_seq for compatibility,
+    though it is no longer a meaningful field in the new protocol model.
     """
-    if len(payload) != SET_ACK_PAYLOAD_LEN:
+    r = parse_response(payload)
+    if r is None or len(payload) != 16 or not r.ok:
         return None
-    if payload[:4] != SET_ACK_PREFIX:
-        return None
-    second_word = struct.unpack_from("<I", payload, 4)[0]
-    if (second_word & 0xFF00) != SET_ACK_CMD_MASK:
-        # Discriminate from error frame (which has 0x1004 == 4 10 00 00 LE)
-        return None
-    # The error frame's discriminator (0x00001004) also satisfies the mask;
-    # treat it as not-a-set-ack so callers can use parse_error_frame.
-    if second_word == 0x00001004:
-        return None
-    cmd_code = second_word & 0xFF
-    field = struct.unpack_from("<I", payload, 8)[0]
+    field = r.as_u32() or 0
     value = struct.unpack_from("<I", payload, 12)[0]
-    return SetAck(command_code=cmd_code, field=field, value=value)
+    return SetAck(
+        command_code=r.response_seq & 0xFF,
+        field=field,
+        value=value,
+    )
 
 
 def find_text_metadata(buf: bytes) -> dict[str, str]:

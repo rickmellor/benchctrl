@@ -3,41 +3,53 @@
 Features intentionally deferred from v0.1, with rationale and pointers
 so the next pass can pick them up cleanly.
 
-## Deferred for v0.2 — Battery emulation
+## Deferred for v0.3 — Battery emulation
 
-**Why deferred:** The on-wire encoding for battery profiles, SoC, used-capacity,
-SoC-tracking, and the runtime emulator state machine has not yet been
-reverse-engineered. The official `Arc.set_supply_battery_emulator()` round-trips
-a server-side `battery_profile_id` (UUID) — the device-side wire format that
-backs it is unknown to us.
+**Blocked at the Otii server (cap #40, 2026-05-29):** the API call
+`otii_get_battery_profiles` fails with `"You need a battery toolbox
+license for this feature."` — Otii's separate paid product gates the
+flow at the server layer before bytes reach the device.
+
+**Path forward (Desktop GUI capture):** the Otii Desktop application
+exposes the Battery Toolbox feature directly and speaks the same wire
+protocol regardless of automation licensing. Capturing a manual flow
+via the GUI with DMS recording in parallel will yield the wire bytes.
 
 **Scope when picked up:**
-1. Capture USB traffic while the Qoitech Battery Toolbox runs through a full
-   profile (load profile → set SoC → enable → wait for battery data → disable).
-2. Decode profile-upload protocol (probably a multi-frame transfer of the JSON).
+1. Capture USB traffic while the Otii Desktop GUI runs a full battery
+   profile flow (load profile → set SoC → enable emulator → record →
+   disable).
+2. Decode profile-upload protocol (likely a multi-frame transfer of
+   JSON / discharge tables).
 3. Add `opensmu.battery` submodule with `BatteryProfile` dataclass and
-   `SMU.set_supply_battery_emulator()` that mirrors the official API shape
-   but consumes a local profile rather than a server UUID.
-4. Wire the streamed battery-state samples (channel TBD — capture will reveal).
-5. End-to-end demo: charge curve replay against a test load.
+   `SMU.set_supply_battery_emulator()` that consumes a local profile
+   rather than a server UUID.
+4. Wire the streamed battery-state samples (new channel id TBD — capture
+   will reveal).
+5. End-to-end demo: charge-curve replay against a test load.
 
 **Stub:** `SMU.enable_battery_profiling()`, `SMU.set_supply_battery_emulator()`,
-`SMU.wait_for_battery_data()`, `SMU.set_supply_power_box()` raise
-`SMUNotImplementedError("battery emulation deferred — see ROADMAP.md")`.
+`SMU.wait_for_battery_data()` raise `SMUNotImplementedError("battery
+emulation deferred — see ROADMAP.md")`. `SMU.set_supply_power_box()` is
+host-side cache-only (no wire command needed in default supply mode).
 
-## Deferred for v0.2 — Internal calibration
+## Deferred for v0.3 — Internal calibration
 
-**Why deferred:** Calibration writes persistent state to the device and an
-incorrect implementation can degrade measurement accuracy. The wire format
-for calibration trigger + completion notification has not been reverse
-engineered, and we don't want to risk the user's hardware on speculative
-bytes.
+**Updated status (cap #41, 2026-05-29):** Calling `Arc.calibrate()` via
+the Otii TCP API sends **zero wire commands** to the device. The actual
+calibration flow lives somewhere other than the documented API — most
+likely the Desktop GUI's service-mode path or a USB control transfer
+outside the bulk endpoint.
+
+**Why deferred:** Calibration writes persistent state to the device and
+an incorrect implementation can degrade measurement accuracy. The wire
+format has not been observed, and speculative bytes are too risky.
 
 **Stub:** `SMU.calibrate()` raises `SMUNotImplementedError`.
 
-**Scope when picked up:** Capture the Otii GUI's calibration flow, decode the
-trigger command and the multi-stage progress responses, expose with a clear
-"this writes to NVM" warning.
+**Scope when picked up:** Capture the Desktop GUI's calibration flow,
+decode the trigger and progress responses, expose with a clear "this
+writes to NVM" warning.
 
 ## Deferred indefinitely — Firmware upgrade
 
@@ -49,15 +61,19 @@ device unrecoverable without vendor tooling.
 **Stub:** `SMU.firmware_upgrade()` raises `SMUNotImplementedError` and
 points the user at the vendor app for firmware updates.
 
-## Deferred for v0.3 — Channel sample-rate control
+## Architecturally not a wire command — Channel sample-rate control
 
-**Why deferred:** The official `Arc.set_channel_samplerate()` triggers a
-server-side bug in current Otii server builds (`Cannot read properties of
-undefined (reading 'id')`), so we never captured its wire-level command.
-The device always streams at the channel's native rate (1 kHz for subtype-1,
-4 kHz for subtype-4) by default.
+**Decoded conclusion (cap #42, 2026-05-29):** the Otii server's
+`set_channel_samplerate` errors at the JavaScript layer before any bytes
+reach the device. The most plausible interpretation is that there is no
+wire command for this — the device always streams at hardware-fixed
+native rates (1 kHz subtype-1 / 4 kHz subtype-4), and "sample rate" in
+the vendor's GUI is a post-processing downsample applied after capture.
 
 **Stub:** `SMU.set_channel_samplerate()` raises `SMUNotImplementedError`.
+A future opensmu release may instead implement client-side downsampling
+on captured `Recording` data via `Recording.downsample(channel, factor)`,
+which already exists.
 
 ## Deferred for v0.3 — Multi-device coordination
 

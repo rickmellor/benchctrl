@@ -5,11 +5,32 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.1.1 shipped — full-rate streaming unlocked
-- **Tests**: 131 / 132 passing (1 conditional skip on error-frame timing)
+- **Phase**: v0.2.0 shipped — 100% decoding sweep complete
+- **Tests**: 164 / 164 passing
 - **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
-- **Last commit**: v0.1.1 full-rate streaming
+- **GET interface works live**: device_name='Arc', fw='3.1.3',
+  voltage=3.25V, current=2.5A, exp=5.0V, baud=115200
+- **Last commit**: v0.2.0 100% decode sweep
 - **Hardware**: Arc Pro on COM6, output off, nothing connected
+
+## v0.2.0 update — what was decoded
+
+Methodical sweep across phase33 + new captures phase34c, phase35-43.
+
+| Item | Status | Wire form |
+|---|---|---|
+| type=0x64 GET interface | DONE | `[seq][0x64][cmd][0]` |
+| Unified Response format | DONE | `[0e 03 99 ff][seq:u32][status:i32][data]` |
+| 180-byte ce-frame | DONE | envelope of baseline records (already parsed) |
+| type=0x0A POLL | DONE | optional host heartbeat |
+| cmd=0x0A SET_POWER_REGULATION | DONE | voltage=0/current=1/inline=10/off=100 |
+| set_tx = set_gpo(3, …) | DONE | bits 6/7 in SET_GPO bit pattern |
+| type=0x82 write_tx | DONE | `[seq][0x82][0x19][utf-8…]` |
+| 0x7E prepare-stop | DONE | flushes packed-stream buffer |
+| Channel inventory (cmd=0x8D) | DONE | 256-byte response, structured |
+| Calibration via API | DECODED as no-op — Desktop path TBD |
+| set_channel_samplerate | DECODED as not-a-wire-command (server concept) |
+| Battery emulation | BLOCKED on Battery Toolbox license |
 
 ## v0.1.1 update (today)
 

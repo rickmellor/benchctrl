@@ -213,13 +213,41 @@ exhibits the same. A higher-rate streaming mode exists (the Otii
 desktop client achieves it) but the unlock command has not been
 reverse engineered. Tracked in `ROADMAP.md` as v0.2.
 
-## Things we have *not* decoded
+## Things we have *not* decoded (and why)
 
-- Full-rate (1 kHz / 4 kHz) streaming command
-- Battery emulation: profile upload, SoC commands, profiling enable
-- Calibration: trigger and completion notification
-- Firmware upgrade: bootloader entry + image upload (deferred indefinitely)
-- `set_channel_samplerate` wire command (Otii server bug blocked capture)
-- UART log channel record format (probably type `0x0003`)
-- `set_power_regulation` wire command
-- `set_tx` / `get_rx` (treating TX/RX as GPO/GPI)
+### Decoded but intentionally not implemented
+
+- **Firmware transfer** — payload type `0x18`. Captured shape: a multi-frame
+  transfer of up to 4108 B per frame; first frame's body begins with the
+  ASCII header `"Qoitech Arc firmware package"` followed by the filename
+  (`"arc-fw.bin"`) and binary firmware bytes. opensmu deliberately does
+  not implement firmware upgrade (bricking risk on interrupted /
+  malformed transfers).
+- **Calibration internals** — calling `Arc.calibrate()` via the documented
+  Otii TCP API fires zero wire commands (cap #41). The vendor's actual
+  calibration flow lives somewhere else — probably the Desktop GUI's
+  service-mode path or a USB control transfer outside the bulk
+  endpoint. Out of scope.
+- **Battery emulation** — gated at the Otii server by a separate Battery
+  Toolbox license we don't hold (cap #40). To capture, the Desktop GUI
+  has to drive the flow manually with DMS recording in parallel. Stubs
+  remain.
+
+### Probably-not-wire-commands
+
+- **`set_channel_samplerate`** — fails inside the Otii server's
+  JavaScript layer with `"Cannot read properties of undefined"` before
+  any bytes reach the device (cap #42). Most plausible interpretation:
+  there is no wire command — the device streams at hardware-fixed
+  native rates and "sample rate" in the GUI is a post-capture
+  downsample.
+
+### Niche / low-impact
+
+- 8-byte payloads with `type=0x68` (6 occurrences across all captures)
+  and `type=0x6A` (1 occurrence) — small control frames near response
+  bursts. Likely flow-control housekeeping. Documented; not needed for
+  measurement.
+- UART log (`rx`) channel text decoding — the device emits parsed UART
+  text on channel `0x17` in some envelope we haven't focused on. Out of
+  scope for v0.2; tracked in ROADMAP.md.
