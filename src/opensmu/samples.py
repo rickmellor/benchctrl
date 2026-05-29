@@ -157,17 +157,18 @@ class ChannelBuffer:
     def slice_indices(
         self, start: Optional[float], end: Optional[float]
     ) -> tuple[int, int]:
-        """Return the (i0, i1) index range covering `[start, end]`.
+        """Return the (i0, i1) index range covering ``[start, end)``.
 
-        Treats negative bounds and out-of-range values as clamped. If
-        `start` is None it defaults to `t0`; if `end` is None to `t_end`.
-        Returns a half-open interval suitable for slicing.
+        Semantics: include sample ``k`` iff ``start <= t_k < end`` where
+        ``t_k = t0 + k / sample_rate``. Bounds are clamped to the buffer's
+        actual range. ``start=None`` defaults to ``t0``; ``end=None`` to
+        ``t_end``. Returns a half-open interval suitable for slicing.
         """
         if not self.values or self.sample_rate <= 0:
             return (0, len(self.values))
         s = self.t0 if start is None else start
         e = self.t_end if end is None else end
-        i0 = max(0, math.floor((s - self.t0) * self.sample_rate))
+        i0 = max(0, math.ceil((s - self.t0) * self.sample_rate))
         i1 = min(len(self.values), math.ceil((e - self.t0) * self.sample_rate))
         if i1 < i0:
             i1 = i0

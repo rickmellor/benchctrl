@@ -81,6 +81,33 @@ priority.
 self-contained `.opensmu` (msgpack-style binary) or `.csv` / `.json` via
 `Recording.save_*()`. Loading is symmetrical (`Recording.load()`).
 
+## Deferred for v0.2 — Full-rate sample streaming
+
+**Why deferred:** Empirically, the Arc Pro streams all 12 default channels
+at about **6 Hz** in its baseline post-init state — the same rate observed
+by the legacy `arc_direct` library that opensmu is built on. The channel
+*capability* rates (1 kHz for subtype-1, 4 kHz for subtype-4 channels like
+main current and main power) are not delivered until some additional
+configuration command is sent. The vendor's Otii desktop client does
+achieve full rate, so there is a wire-level mechanism for it; we just
+haven't decoded which command unlocks it.
+
+**Symptoms in user code:** `Recording.statistics(...)` reports correct
+voltages/currents but only a handful of samples per second of recording.
+Sub-millisecond transients on the DUT will be missed.
+
+**Scope when picked up:**
+1. Capture a sample-rate-controlled Otii session (use the Otii GUI to set
+   high rate on `mc`, then start a recording).
+2. Diff the OUT URBs against the opensmu init sequence to identify the
+   extra command(s).
+3. Either fold the command into `SMU._connect()` (always-on full rate)
+   or expose as `SMU.set_streaming_mode("high")` / `"baseline"`.
+
+**Stub:** None. The current behaviour is operational — useful for
+slow-changing measurements (battery voltage over hours, idle currents).
+Just slower than the maximum the hardware can deliver.
+
 ## Deferred for v0.3 — UART log channel parsing
 
 **Why deferred:** The `rx` channel produces a stream of text fragments

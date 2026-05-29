@@ -96,11 +96,11 @@ class Recording:
     def _begin(self, smu) -> None:
         self._smu_ref = smu
         self._is_running = True
-        self._start_time = _dt.datetime.utcnow()
+        self._start_time = _dt.datetime.now(_dt.timezone.utc)
 
     def _end(self) -> None:
         self._is_running = False
-        self._end_time = _dt.datetime.utcnow()
+        self._end_time = _dt.datetime.now(_dt.timezone.utc)
         self._smu_ref = None
 
     def _ensure_buffer(self, channel: Channel, sample_rate: int) -> ChannelBuffer:
