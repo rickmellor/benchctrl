@@ -2,6 +2,33 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.1] — Claude Code skill
+
+### Added
+
+- **`skills/opensmu/SKILL.md`** — a Claude Code skill that complements
+  the MCP server. The MCP server lets Claude *drive* the device; the
+  skill guides Claude when *writing opensmu Python code* (custom
+  analysis, batch processing, plotting, transient detection, anything
+  beyond the 23 tool surface).
+- The skill covers: the two integration paths (MCP vs Python),
+  context-manager + safety patterns, the channel-code quick reference,
+  recording analysis recipes, exception hierarchy, anti-patterns
+  (don't use the Otii server, don't call deferred methods, don't write
+  your own framing), and copy-paste recipes for voltage sweep,
+  transient detection, live monitoring, and batch processing.
+- Install instructions added to [`docs/mcp.md`](docs/mcp.md) — symlink
+  (recommended, stays in sync with repo) or static copy. Lands at
+  `~/.claude/skills/opensmu/SKILL.md`.
+
+### When does the skill activate?
+
+Whenever the user is doing anything with opensmu beyond what MCP tools
+cover. Frontmatter description: "Use when controlling a Qoitech Otii
+Arc Pro source-measurement unit, writing code with the opensmu Python
+library, analysing captured .opensmu recordings, or building
+measurement automation."
+
 ## [0.3.0] — MCP server
 
 Open the Arc Pro to any MCP-aware client (Claude Code, Claude Desktop,

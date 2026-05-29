@@ -168,6 +168,61 @@ Claude calls `live("sp")`.
 
 Claude calls `take_snapshot(0.5)` → returns latest value per channel.
 
+## Install the Claude Code skill
+
+Complementary to the MCP server: a skill that guides Claude when **writing
+opensmu Python code** for tasks the MCP tools don't cover (custom analysis,
+batch processing, plotting, transient detection, etc.).
+
+The skill lives in this repo at [`skills/opensmu/SKILL.md`](../skills/opensmu/SKILL.md).
+Install it into your Claude config one of two ways.
+
+**Symlink** (recommended — skill stays in sync with repo updates):
+
+```powershell
+# PowerShell:
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills" | Out-Null
+New-Item -ItemType SymbolicLink `
+    -Path "$env:USERPROFILE\.claude\skills\opensmu" `
+    -Target "$(Resolve-Path .\skills\opensmu)"
+```
+
+```bash
+# bash / zsh:
+mkdir -p ~/.claude/skills
+ln -s "$(pwd)/skills/opensmu" ~/.claude/skills/opensmu
+```
+
+**Copy** (static install):
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills\opensmu" | Out-Null
+Copy-Item -Recurse -Force .\skills\opensmu\* "$env:USERPROFILE\.claude\skills\opensmu\"
+```
+
+```bash
+mkdir -p ~/.claude/skills/opensmu
+cp -r skills/opensmu/* ~/.claude/skills/opensmu/
+```
+
+Verify it loaded: in a fresh Claude Code session, ask "what's the canonical
+recording pattern in opensmu?" — Claude should invoke the `opensmu` skill
+and respond with the `with SMU.open() as smu: ...` context-manager
+pattern. If the skill didn't activate, ask Claude to `/list-skills` or
+similar (commands vary by Claude Code build).
+
+### MCP vs skill: when does which apply?
+
+| User says... | Claude does... |
+|---|---|
+| "Set 3.3V and record 5 seconds" | Calls MCP `set_voltage` → `set_current_limit` → `enable_output` → `record` |
+| "Write a voltage-sweep script and save the I-V curve" | Loads opensmu skill, writes Python with `SMU` + `Recording` |
+| "What's the peak current right now?" | Calls MCP `live("mc")` or `take_snapshot` |
+| "Process every .opensmu file in /captures/" | Loads opensmu skill, writes Python with `Recording.load()` |
+| "What channels does the Arc have?" | Either: MCP `list_channels` (returns JSON) or opensmu skill (channel table in markdown) |
+
+The MCP server is for **driving the device**; the skill is for **writing code about the device**. They complement each other.
+
 ## What's not exposed
 
 - Battery emulation, calibration, firmware upgrade — deferred at the
