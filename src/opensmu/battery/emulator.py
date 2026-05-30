@@ -129,6 +129,11 @@ class EmulatorConfig:
     # to this current; beyond it the device protects itself. Should comfortably
     # exceed the highest current you expect to draw from the emulated cell.
     current_limit_A: float = 0.5
+    # SMU voltage range. ``None`` (default) auto-selects ``"low"`` for cells
+    # whose fresh OCV (× series multiplier) is ≤ 3.4 V, ``"high"`` otherwise
+    # (LiPo, multi-cell packs above 3.5 V, etc.). Override only if you have a
+    # specific reason to force a range.
+    voltage_range: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -196,10 +201,11 @@ class Emulator:
         # try/except so a failure on one step doesn't leave the device in
         # an inconsistent state — the error propagates after we restore
         # the output to a safe state.
+        rng = self._select_voltage_range()
         try:
-            self.smu.set_range("low")
+            self.smu.set_range(rng)
         except Exception:
-            log.debug("set_range('low') failed", exc_info=True)
+            log.debug("set_range(%r) failed", rng, exc_info=True)
         try:
             self.smu.set_current_limit(self.config.current_limit_A)
             self.smu.set_current_limit_enabled(True)
@@ -210,8 +216,18 @@ class Emulator:
         except Exception:
             log.debug("set_power_regulation('voltage') failed", exc_info=True)
 
-        # Seed the output at the open-circuit voltage (no current → no sag)
+        # Seed the output at the open-circuit voltage (no current → no sag).
+        # Clamp to safety_max_voltage_V so a profile whose fresh OCV exceeds
+        # what the SMU can physically deliver (e.g. LiPo on Arc Pro high
+        # range, max ~4.2 V under load) doesn't get rejected at startup,
+        # which would otherwise queue a -101 error and stall the loop.
         initial_v = self._total_ocv()
+        if initial_v > self.config.safety_max_voltage_V:
+            log.warning(
+                "initial OCV %.4f V exceeds safety_max_voltage_V %.4f V; clamping",
+                initial_v, self.config.safety_max_voltage_V,
+            )
+            initial_v = self.config.safety_max_voltage_V
         log.debug("seed output to %.4f V", initial_v)
         self.smu.set_voltage(initial_v)
         self.smu.set_output(True)
@@ -274,6 +290,20 @@ class Emulator:
             )
 
     # --- helpers --------------------------------------------------
+
+    def _select_voltage_range(self) -> str:
+        """Auto-select 'low' or 'high' from the profile's fresh OCV.
+
+        Cells above ~3.4 V fresh OCV (LiPo, Li-ion, multi-cell packs)
+        need ``set_range('high')`` so the Arc can drive past the
+        low-range cap of ~3.5 V. The user can override via
+        ``EmulatorConfig.voltage_range``.
+        """
+        if self.config.voltage_range is not None:
+            return self.config.voltage_range
+        fresh_ocv = self.config.profile.ocv_at(0.0)
+        pack_v = fresh_ocv * self.config.series
+        return "high" if pack_v > 3.4 else "low"
 
     def _validate(self) -> None:
         if not 0.0 <= self.config.initial_soc <= 1.0:

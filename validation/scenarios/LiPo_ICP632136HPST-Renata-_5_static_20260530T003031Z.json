@@ -1,0 +1,161 @@
+{
+  "scenario": "static_load_sweep",
+  "schema_version": 1,
+  "captured_utc": "2026-05-30T00:30:51+00:00",
+  "opensmu_version": "0.9.1",
+  "profile": {
+    "path": "C:\\Users\\rickm\\AppData\\Local\\otii3\\app-3.7.2\\resources\\batteryprofiles\\LiPo_ICP632136HPST-Renata-(5).json",
+    "stem": "LiPo_ICP632136HPST-Renata-(5)",
+    "battery": {
+      "manufacturer": "Renata",
+      "model": "ICP632136HPST",
+      "nominal_voltage_V": 3.8,
+      "nominal_capacity_mAh": 521.6693115234375,
+      "cutoff_voltage_V": 3.0
+    }
+  },
+  "emulator_config": {
+    "initial_soc": 1.0,
+    "series": 1,
+    "parallel": 1,
+    "soc_tracking": true,
+    "safety_max_voltage_V": 4.2,
+    "current_limit_A": 0.5,
+    "update_interval_s": 0.01,
+    "voltage_range_resolved": "high"
+  },
+  "bench": {
+    "load_kind": "Eastwood QR10x programmable resistor",
+    "device_type": "QR101A-1M-R1",
+    "serial": "00000248",
+    "hardware_version": "5.1N",
+    "firmware_version": "5.967KS",
+    "port": "COM7",
+    "safety_limit_ohm_applied": 20.0,
+    "settle_time_per_step_s": 1.2
+  },
+  "r_steps_ohm": [
+    100000,
+    10000,
+    1000,
+    100,
+    50,
+    25,
+    12,
+    100000
+  ],
+  "steps": [
+    {
+      "r_setpoint_ohm": 100000,
+      "r_actual_ohm": 100000.031,
+      "v_out_V": 4.2,
+      "i_measured_A": 3.316497532068752e-05,
+      "ocv_V": 4.318735122680664,
+      "esr_ohm": 1.0803948640823364,
+      "v_predicted_V": 4.31869929141166,
+      "voltage_error_mV": -118.69929141165957,
+      "r_inferred_ohm": 126639.62386186793,
+      "soc_pct": 99.9999946069216,
+      "used_capacity_mAh": 2.8134034954223515e-05,
+      "iteration": 7
+    },
+    {
+      "r_setpoint_ohm": 10000,
+      "r_actual_ohm": 10000.014,
+      "v_out_V": 4.2,
+      "i_measured_A": 0.00039560068398714066,
+      "ocv_V": 4.318735122680664,
+      "esr_ohm": 1.0803948640823364,
+      "v_predicted_V": 4.318307717733457,
+      "voltage_error_mV": -118.30771773345639,
+      "r_inferred_ohm": 10616.766274692602,
+      "soc_pct": 99.9999610101533,
+      "used_capacity_mAh": 0.00020339806484593118,
+      "iteration": 11
+    },
+    {
+      "r_setpoint_ohm": 1000,
+      "r_actual_ohm": 1000.027,
+      "v_out_V": 4.2,
+      "i_measured_A": 0.004054106306284666,
+      "ocv_V": 4.318735122680664,
+      "esr_ohm": 1.0803948640823364,
+      "v_predicted_V": 4.31435508704891,
+      "voltage_error_mV": -114.35508704891006,
+      "r_inferred_ohm": 1035.9866472887427,
+      "soc_pct": 99.99968773928168,
+      "used_capacity_mAh": 0.0016289683393750913,
+      "iteration": 14
+    },
+    {
+      "r_setpoint_ohm": 100,
+      "r_actual_ohm": 100.038,
+      "v_out_V": 4.2,
+      "i_measured_A": 0.0405581034719944,
+      "ocv_V": 4.318735122680664,
+      "esr_ohm": 1.0803948640823364,
+      "v_predicted_V": 4.274916355992602,
+      "voltage_error_mV": -74.91635599260161,
+      "r_inferred_ohm": 103.55513794919241,
+      "soc_pct": 99.99624113265351,
+      "used_capacity_mAh": 0.01960885740753034,
+      "iteration": 18
+    },
+    {
+      "r_setpoint_ohm": 50,
+      "r_actual_ohm": 50.005,
+      "v_out_V": 4.2,
+      "i_measured_A": 0.08053161948919296,
+      "ocv_V": 4.318735122680664,
+      "esr_ohm": 1.0803948640823364,
+      "v_predicted_V": 4.231729174588307,
+      "voltage_error_mV": -31.72917458830682,
+      "r_inferred_ohm": 52.15342776713467,
+      "soc_pct": 99.99066330690974,
+      "used_capacity_mAh": 0.04870666256299877,
+      "iteration": 21
+    },
+    {
+      "r_setpoint_ohm": 25,
+      "r_actual_ohm": 24.997,
+      "v_out_V": 4.14717770107889,
+      "i_measured_A": 0.1587914079427719,
+      "ocv_V": 4.318735122680664,
+      "esr_ohm": 1.0803948640823364,
+      "v_predicted_V": 4.14717770107889,
+      "voltage_error_mV": 0.0,
+      "r_inferred_ohm": 26.117141694300766,
+      "soc_pct": 99.97558066815527,
+      "used_capacity_mAh": 0.1273881603130397,
+      "iteration": 25
+    },
+    {
+      "r_setpoint_ohm": 12,
+      "r_actual_ohm": 20.027,
+      "v_out_V": 4.106083266750089,
+      "i_measured_A": 0.19682790338993073,
+      "ocv_V": 4.318735122680664,
+      "esr_ohm": 1.0803948640823364,
+      "v_predicted_V": 4.106083266750089,
+      "voltage_error_mV": 0.0,
+      "r_inferred_ohm": 20.861286413317284,
+      "soc_pct": 99.96042154474304,
+      "used_capacity_mAh": 0.20646865505061995,
+      "iteration": 28
+    },
+    {
+      "r_setpoint_ohm": 100000,
+      "r_actual_ohm": 100000.031,
+      "v_out_V": 4.2,
+      "i_measured_A": 3.807996472460218e-05,
+      "ocv_V": 4.318735122680664,
+      "esr_ohm": 1.0803948640823364,
+      "v_predicted_V": 4.318693981282351,
+      "voltage_error_mV": -118.69398128235088,
+      "r_inferred_ohm": 110294.21981807987,
+      "soc_pct": 99.95511302694527,
+      "used_capacity_mAh": 0.23416156329837348,
+      "iteration": 32
+    }
+  ]
+}

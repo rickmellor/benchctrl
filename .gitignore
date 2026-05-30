@@ -20,3 +20,5 @@ venv/
 *.json
 !docs/**/*.json
 !tests/fixtures/*.json
+!validation/scenarios/*.json
+!validation/scenarios/*.csv

@@ -5,7 +5,7 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.9.1 shipped — emulator CV-mode fix + end-to-end QR10x validation
+- **Phase**: v0.9.2 shipped — bench validation harness, multi-profile matrix, LiPo support
 - **Tests**: 300 / 300 passing
 - **Hardware validation milestones**:
   - **Profiler**: AA pair, OCV 3.19 V, ESR 3.18 Ω, 10-cycle short profile (15 s, 10.6 µAh used)
@@ -13,6 +13,12 @@ exactly where it is. Updated after every milestone; latest entry on top.
     exactly (predicted 28.8 mV vs measured 28 mV at 1 kΩ; predicted 279 mV vs measured 288 mV
     at 100 Ω), cell "collapses" at 12 Ω as a real CR2032 would, SoC recovery shows new
     OCV at lower SoC
+  - **Multi-profile matrix (v0.9.2)**: 8 profiles × static sweep + 3 × dynamic IoT pattern
+    saved as reusable test scenarios in `validation/scenarios/`. Validates chemistry-specific
+    behavior (CR2032 collapse, CR123A pulse capability) and LiPo temperature dependency
+    (ESR rises ~10× from +20 °C to −10 °C).
+  - **LiPo support**: auto-range to `set_range("high")` + safety_max clamp at startup.
+    Surfaced Arc Pro high-range limit (~4.2 V under load) — documented and worked around.
 - **MCP tool count**: 48
 - **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
 - **MCP server**: 26 tools (was 23 in v0.3.0); `opensmu-mcp` ready

@@ -2,6 +2,86 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.2] — bench validation harness + multi-profile matrix + LiPo support
+
+### Added — `validation/` harness with reusable scenarios
+
+New top-level `validation/` directory holds an end-to-end test harness
+(`run_validation.py`) plus 11 saved scenarios captured against real
+hardware (Arc Pro + Eastwood QR10x on COM7). Each scenario is a
+self-describing JSON + CSV + PNG bundle that embeds a copy of the
+input battery profile, so a saved scenario is fully reproducible
+regardless of changes to the bundled profiles.
+
+Two scenario kinds:
+
+- **`static`** — step through a fixed list of QR resistances (100 kΩ
+  down to 12 Ω, plus a recovery step), record one snapshot per step.
+- **`dynamic`** — drive the QR through a time-varying IoT pattern
+  (sleep / wake / TX burst), poll the emulator's state at 20 Hz.
+
+CLI::
+
+    python validation/run_validation.py --scenario static --all
+    python validation/run_validation.py --scenario dynamic \
+        --profile "CR2032-Energizer-(25)" --cycles 3
+
+See `validation/README.md` for the full results table.
+
+### Added — multi-profile validation matrix
+
+Static sweep captured for all 8 bundled Otii battery profiles
+(CR2032, CR123A, CR2, AA-Varta, AAA-Duracell, LiPo @ +20/+5/−10 °C).
+Confirms the emulator faithfully reproduces chemistry-specific
+behavior:
+
+- CR2032 collapses at 12 Ω (1.85 V at 140 mA) — real coin cells do
+  exactly this.
+- CR123A sustains 258 mA at 12 Ω with 95 mV sag — designed for high
+  pulse currents, reproduced.
+- LiPo temperature sweep: same chemistry, ESR rises ~10× from +20 °C
+  to −10 °C (12 Ω: V drops to 4.20 → 4.11 → 3.70 V respectively).
+
+### Added — dynamic IoT-pattern scenarios
+
+Captured for CR2032, CR123A, LiPo @ 20 °C. The CR2032/CR123A pair is
+the most striking comparison — a 100 Ω, 400 ms "TX burst" sags a
+CR2032 by 186 mV with multi-second recovery, vs. 10 mV with instant
+recovery on a CR123A. This is the whole point of battery emulation
+in the first place, and the emulator nails it.
+
+### Fixed — emulator startup clamp to safety_max_voltage_V
+
+`Emulator.start()` now clamps the initial OCV setpoint to
+`safety_max_voltage_V` before sending `set_voltage(initial_v)`.
+Previously, a profile whose fresh OCV exceeded what the SMU can
+physically deliver (e.g. LiPo at 4.31 V on Arc Pro high range, capped
+at ~4.2 V under load) would be silently rejected by the device with
+error -101 and "reverted to last_good_value". The error queued and
+poisoned every subsequent `read_value(MAIN_CURRENT)` call (each
+returning 0.0 via the read-error swallow path), so the emulator's
+loop would tick along reporting v_out = OCV and I = 0 forever.
+
+Now the clamp happens before the rejection can occur, and the
+emulator logs a warning. Tested with all three LiPo profiles.
+
+### Added — `EmulatorConfig.voltage_range` with auto-detection
+
+New `Optional[str]` field. Default `None` auto-selects `"low"` for
+cells whose fresh OCV (× series multiplier) is ≤ 3.4 V, `"high"`
+otherwise. This is what makes LiPo and other multi-cell stacks work
+out-of-the-box — previously the emulator was hardcoded to
+`set_range("low")` which caps voltage at ~3.5 V.
+
+Override with `voltage_range="high"` or `"low"` for explicit control.
+
+### Discovered — Arc Pro high-range output caps at ≈ 4.2 V under load
+
+Bench-measured. `set_voltage(4.31)` is silently rejected with error
+-101 / `last_good_value=4200000`. Documented in `validation/README.md`
+under "Known limits" and `PROFILE_OVERRIDES` in the harness sets
+LiPo's `safety_max_V` to 4.2 V to work with this constraint.
+
 ## [0.9.1] — emulator CV-mode fix + end-to-end validation
 
 ### Fixed — emulator CV-mode regulation
