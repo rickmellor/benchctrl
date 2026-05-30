@@ -1,126 +1,173 @@
 # OpenSMU roadmap
 
-Features intentionally deferred from v0.1, with rationale and pointers
-so the next pass can pick them up cleanly.
+What's planned, what's deferred, and why. Entries follow a consistent
+format: **status** (current state) + **scope when picked up** (what
+landing this would mean) + **why deferred** (the blocker / rationale).
 
-## Deferred for v0.3 — Battery emulation
+For shipped features, see [`CHANGELOG.md`](CHANGELOG.md). For known
+hardware/firmware caps and workarounds, see
+[`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 
-**Blocked at the Otii server (cap #40, 2026-05-29):** the API call
-`otii_get_battery_profiles` fails with `"You need a battery toolbox
-license for this feature."` — Otii's separate paid product gates the
-flow at the server layer before bytes reach the device.
+## Near-term (v0.10 / v1.0)
 
-**Path forward (Desktop GUI capture):** the Otii Desktop application
-exposes the Battery Toolbox feature directly and speaks the same wire
-protocol regardless of automation licensing. Capturing a manual flow
-via the GUI with DMS recording in parallel will yield the wire bytes.
+### Resolve DL3031A LIST timing in Arc Pro high range
 
-**Scope when picked up:**
-1. Capture USB traffic while the Otii Desktop GUI runs a full battery
-   profile flow (load profile → set SoC → enable emulator → record →
-   disable).
-2. Decode profile-upload protocol (likely a multi-frame transfer of
-   JSON / discharge tables).
-3. Add `opensmu.battery` submodule with `BatteryProfile` dataclass and
-   `SMU.set_supply_battery_emulator()` that consumes a local profile
-   rather than a server UUID.
-4. Wire the streamed battery-state samples (new channel id TBD — capture
-   will reveal).
-5. End-to-end demo: charge-curve replay against a test load.
+**Status**: documented in [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) § F-2.
+With the Arc Pro in high range (LiPo profiles, 4.2 V), the DL3031A's
+LIST playback fires a partial / misordered sequence instead of the
+expected `cycles × n_steps` repeats. CR2032 / CR123A in low range
+work cleanly.
 
-**Stub:** `SMU.enable_battery_profiling()`, `SMU.set_supply_battery_emulator()`,
-`SMU.wait_for_battery_data()` raise `SMUNotImplementedError("battery
-emulation deferred — see ROADMAP.md")`. `SMU.set_supply_power_box()` is
-host-side cache-only (no wire command needed in default supply mode).
+**Why deferred**: cause appears to interact with the FUNC:MODE-FIXed
+one-way firmware bug (§ F-3). Isolating it cleanly needs an
+oscilloscope on the trigger line.
 
-## Deferred for v0.3 — Internal calibration
+**Scope when picked up**:
+1. Scope-capture the DL3031A `:TRIGger` line and the input current
+   simultaneously to see what the device actually does at trigger time
+   vs LIST playback time
+2. If the cause is recoverable in software, build a workaround into
+   `run_dynamic_list` (e.g. dummy LIST cycle to "prime" the state
+   machine in high range)
+3. If not, document it as a hardware limit and move on
 
-**Updated status (cap #41, 2026-05-29):** Calling `Arc.calibrate()` via
-the Otii TCP API sends **zero wire commands** to the device. The actual
-calibration flow lives somewhere other than the documented API — most
-likely the Desktop GUI's service-mode path or a USB control transfer
-outside the bulk endpoint.
+### Validation harness: extract sub-second TX bursts from native streaming
 
-**Why deferred:** Calibration writes persistent state to the device and
-an incorrect implementation can degrade measurement accuracy. The wire
-format has not been observed, and speculative bytes are too risky.
+**Status**: hires runner captures at ~4 kHz but phase tagging is
+host-clock-aligned. Sub-100 ms TX bursts in `--scenario dynamic-list`
+work in firmware but phase-tagging accuracy depends on the host
+correlating record timestamps with the trigger instant.
 
-**Stub:** `SMU.calibrate()` raises `SMUNotImplementedError`.
+**Scope when picked up**:
+1. Use the DL3031A's `:TRIGger` as a digital event that the Arc Pro
+   can latch on its GPIO line (rear-panel I/O)
+2. Embed the trigger instant in the recording's sample stream instead
+   of relying on host-clock correlation
+3. Achievable phase-tagging accuracy: ±1 sample (~250 µs at 4 kHz),
+   vs. ±200 ms today
 
-**Scope when picked up:** Capture the Desktop GUI's calibration flow,
+### Hardware test for the DP2031 power supply
+
+**Status**: user has expressed interest in adding a Rigol DP2031
+programmable supply for advanced battery emulation (high-V cells the
+Arc can't drive, charge profile drives, etc.). SCPI surface is in the
+same family as DL3031A.
+
+**Scope when picked up** (~2 days with hardware):
+1. New `opensmu.bench.RigolDP2031` driver modeled on RigolDL3031A
+2. CV/CC/CR modes, OVP/OCP, LIST sequence, timer/wave modes
+3. MCP parity (~25 tools)
+4. Validation harness: extend `_LoadAdapter` to also be a `_SourceAdapter`
+   for cell-charging scenarios
+5. Hardware-marked tests
+6. KNOWN_LIMITATIONS section if firmware quirks shake out
+
+## Foundation hardening
+
+### Strict mypy
+
+**Status**: `mypy src` runs with `check_untyped_defs = true` but not
+strict. CI has it as `continue-on-error: true`.
+
+**Scope when picked up**: Audit the existing `# type: ignore` set,
+add return-type annotations on the few functions still missing them,
+flip `--strict`. Mostly mechanical.
+
+### Multi-device coordination
+
+**Status**: multiple independent `SMU` instances can already open on
+different ports concurrently. Each gets its own thread-safe protocol
+session. **What's missing**: fan-out helpers
+(`set_all_main(...)`), cross-device sync (shared timebase, simultaneous
+trigger), aggregated recording.
+
+**Why deferred**: only one Arc Pro available for hardware validation;
+designing the API responsibly needs a multi-device rig.
+
+**Scope when picked up**:
+1. Acquire a second Arc / Arc Pro
+2. Add a `MultiSMU` class that fans `set_*` / `enable_channels` /
+   recording out across multiple devices
+3. Decide on timebase strategy (host clock vs designated leader)
+4. End-to-end demo: synchronized capture on 2+ devices
+
+### Project save/load
+
+**Status**: a `Recording` instance can be serialised to a
+self-contained `.opensmu` (msgpack-style binary) or `.csv` / `.json`
+via `Recording.save_*()`. The official Otii Desktop's `Project` /
+`Otii.open_project()` / `Project.save_as()` produces an opaque
+server-managed format we don't replicate.
+
+**Why deferred**: their project format is server-internal; opening
+project files cross-vendor isn't a priority. The scenario harness in
+`validation/` covers the "save a captured experiment" use case
+cleanly.
+
+### UART log channel parsing
+
+**Status**: the `rx` channel produces text fragments with
+per-fragment timestamps. Raw bytes can be retrieved via
+`SMU.read_raw()` and parsed manually.
+
+**Why deferred**: needs a focused capture pass to characterize the
+wire-level type-0x0003 records.
+
+**Scope when picked up**:
+1. Capture USB traffic of the Otii Desktop displaying a UART feed
+2. Add a `RxFrame` parser to `protocol.py`
+3. Expose via `Recording.uart_messages()` or similar
+
+## Indefinite — hardware-side constraints
+
+### Internal calibration
+
+**Status**: `SMU.calibrate()` raises `SMUNotImplementedError`. The
+Otii TCP API's `Arc.calibrate()` sends **zero wire commands** to the
+device — the actual calibration flow lives somewhere other than the
+documented API (likely the Desktop GUI's service-mode path or a USB
+control transfer outside the bulk endpoint).
+
+**Why deferred indefinitely**: calibration writes persistent state to
+the device; an incorrect implementation can degrade measurement
+accuracy. The wire format has not been observed, and speculative
+bytes are too risky.
+
+**Scope when picked up**: Capture the Desktop GUI's calibration flow,
 decode the trigger and progress responses, expose with a clear "this
 writes to NVM" warning.
 
-## Deferred indefinitely — Firmware upgrade
+### Firmware upgrade
 
-**Why deferred:** Bricking risk. The official `Arc.firmware_upgrade()`
-ships an image to the device which then enters a bootloader. The bootloader
-protocol is proprietary, and an interrupted or malformed upload can leave the
-device unrecoverable without vendor tooling.
+**Status**: `SMU.firmware_upgrade()` raises
+`SMUNotImplementedError` and points users at the vendor app.
 
-**Stub:** `SMU.firmware_upgrade()` raises `SMUNotImplementedError` and
-points the user at the vendor app for firmware updates.
+**Why deferred indefinitely**: bricking risk. The official
+`Arc.firmware_upgrade()` ships an image which puts the device in a
+bootloader speaking a proprietary protocol. Interrupted or malformed
+upload can leave the device unrecoverable without vendor tooling.
+Not worth the risk to replicate.
 
-## Architecturally not a wire command — Channel sample-rate control
+### Channel sample-rate control as a wire command
 
-**Decoded conclusion (cap #42, 2026-05-29):** the Otii server's
-`set_channel_samplerate` errors at the JavaScript layer before any bytes
-reach the device. The most plausible interpretation is that there is no
-wire command for this — the device always streams at hardware-fixed
-native rates (1 kHz subtype-1 / 4 kHz subtype-4), and "sample rate" in
-the vendor's GUI is a post-processing downsample applied after capture.
+**Status**: `SMU.set_channel_samplerate()` raises
+`SMUNotImplementedError`. The Otii server's
+`set_channel_samplerate` errors at the JavaScript layer before any
+bytes reach the device — the most plausible interpretation is that
+there is no wire command for this, and "sample rate" in the vendor
+GUI is a post-processing downsample applied after capture.
 
-**Stub:** `SMU.set_channel_samplerate()` raises `SMUNotImplementedError`.
-A future opensmu release may instead implement client-side downsampling
-on captured `Recording` data via `Recording.downsample(channel, factor)`,
-which already exists.
+**What works today**: client-side downsampling on `Recording` data
+via `Recording.downsample(channel, factor)`. Hardware always streams
+at native rates (1 kHz subtype-1 / 4 kHz subtype-4) when recording is
+enabled.
 
-## Deferred for v0.3 — Multi-device coordination
+## Resolved — historical context
 
-**Why deferred:** Only one Arc Pro is available for hardware validation.
-The opening API (`SMU.discover()`, `SMU.open(port=...)`) already supports
-multiple devices, but `Otii.set_all_main()`-equivalent fan-out and
-cross-device sync features (shared timebase, simultaneous trigger) need a
-multi-device rig to design responsibly.
+(Kept here briefly so future readers see what was deferred and how it
+got picked up. Full release notes in [`CHANGELOG.md`](CHANGELOG.md).)
 
-**What works today:** Multiple independent `SMU` instances can be opened on
-different ports concurrently. Each gets its own thread-safe protocol session.
-
-## Deferred for v0.3 — Project save/load
-
-**Why deferred:** The official `Project` / `Otii.open_project()` /
-`Project.save_as()` produces an opaque server-managed file format. We do
-not have access to that format and creating a competing one isn't a v0.1
-priority.
-
-**What works today:** A `Recording` instance can be serialised to a
-self-contained `.opensmu` (msgpack-style binary) or `.csv` / `.json` via
-`Recording.save_*()`. Loading is symmetrical (`Recording.load()`).
-
-## DONE in v0.1.1 — Full-rate sample streaming
-
-**Resolved 2026-05-29.** Decoded from capture #33 (`33-otii-full-rate.raw`
-in the parent usb-sniffer project):
-
-- The "start recording" mechanism is *not* the 76-byte `69 83 2a ff …`
-  payload v0.1 sent — that payload was a misread of the device's
-  **inbound** packed-sample frame.
-- The actual unlock is a per-channel command: `[seq:u32][0x78][wire_id][1]`
-  to enable streaming, `…[0]` to disable. Sent once per channel,
-  followed by an 8-byte `[seq:u32][0x7C]` cleanup.
-- Once enabled, the device delivers a 76-byte packed-sample frame every
-  1 ms (1 kHz frame rate). Each frame carries one sample per sub-1
-  channel and four packed samples per sub-4 channel — yielding native
-  rates of 1 kHz / 4 kHz.
-
-**Verified rates after fix**: mc 4042 sps, mp 4042 sps, mv 1015 sps —
-a ~670× improvement on mc/mp and ~170× on mv versus v0.1.
-
-## Deferred for v0.3 — UART log channel parsing
-
-**Why deferred:** The `rx` channel produces a stream of text fragments
-with per-fragment timestamps. The wire-level format we observed maps to
-type-0x0003 records (TBC) and needs a focused capture pass. Today the
-raw bytes can be retrieved via `SMU.read_raw()` and parsed manually.
-
-**Stub:** `SMU.iter_uart_log()` raises `SMUNotImplementedError`.
+- **v0.1.1**: Full-rate sample streaming — the "start recording" unlock is a per-channel `[seq:u32][0x78][wire_id][1]` command. Native ~4 kHz on MAIN_CURRENT verified.
+- **v0.6.0** through **v0.8.0**: Battery profile I/O, life calculator, profiler, and emulator landed in `opensmu.battery`. The Otii "Battery Toolbox license required" blocker that scoped this for v0.3 was bypassed by re-implementing the four phases natively instead of replaying their server's flow.
+- **v0.9.0** through **v0.9.6**: Bench instrument drivers (QR10x, RigolDL3031A) including firmware-side LIST / transient / battery-discharge modes; MCP server expanded to 93 tools; validation harness with three scenario kinds.
+- **v0.9.7**: Adversarial-review fix-batch — propagating-error model in the emulator, parity catch-up, KNOWN_LIMITATIONS.md, several firmware bugs discovered and worked around.

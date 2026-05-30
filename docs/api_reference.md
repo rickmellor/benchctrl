@@ -1,8 +1,15 @@
 # OpenSMU API reference
 
-Every public name exported from `opensmu`. Internal modules
-(`opensmu.transport`, `opensmu.protocol`, etc.) are documented for
-contributors but not part of the stability surface.
+Every public name exported from `opensmu` and its sub-packages.
+Internal modules (`opensmu.transport`, `opensmu.protocol`, etc.) are
+documented for contributors but not part of the stability surface.
+
+This document is structured by sub-package:
+
+- [`opensmu` — SMU device control](#smu--the-device) (this layer)
+- [`opensmu.battery` — Battery Toolbox replacement](#opensmubattery--battery-toolbox-replacement)
+- [`opensmu.bench` — companion instrument drivers](#opensmubench--companion-instrument-drivers)
+- [`opensmu.mcp` — Model Context Protocol server](docs/mcp.md) (separate doc — 93 tools)
 
 ## `SMU` — the device
 
@@ -289,6 +296,11 @@ logger. Sub-loggers:
 
 - `opensmu.device` — SET commands, recording lifecycle, reader stats
 - `opensmu.protocol` — frame hex dumps (DEBUG only)
+- `opensmu.battery.emulator` — emulator loop tick + warnings
+- `opensmu.battery.profiler` — profiler step transitions
+- `opensmu.bench.qr10x` — QR10x AT command traffic
+- `opensmu.bench.rigol_dl3031a` — DL3031A SCPI traffic
+- `opensmu.mcp` — MCP server lifecycle + tool warnings
 
 Enable hex dumps:
 
@@ -297,3 +309,325 @@ import logging
 logging.basicConfig(level=logging.DEBUG)
 logging.getLogger("opensmu.protocol").setLevel(logging.DEBUG)
 ```
+
+---
+
+## `opensmu.battery` — Battery Toolbox replacement
+
+Four phased modules that together replace Qoitech's licensed Battery
+Toolbox. Detailed walkthrough in [`battery.md`](battery.md); this
+section is the API surface.
+
+```python
+from opensmu.battery import (
+    BatteryProfile, Battery, DischargeTable, DischargeSample,
+    DischargeProfile, DischargeStep, ExitConditions, DeviceInfo,
+    LifeEstimate, DutyCycle,
+    estimate_life_constant_current, estimate_life_from_profile,
+    duty_cycle_from_recording,
+    Profiler, ProfilerConfig, ProfilerResult, ProfilerSample,
+    Emulator, EmulatorConfig, EmulatorState,
+)
+```
+
+### Battery profile I/O
+
+```python
+BatteryProfile.load(path: str | Path) -> BatteryProfile
+BatteryProfile.from_json(data: str | dict) -> BatteryProfile
+profile.save(path: str | Path) -> None
+profile.to_json() -> str
+profile.ocv_at(used_capacity_mAh: float, temperature: float = None) -> float
+profile.esr_at(used_capacity_mAh: float, temperature: float = None) -> float
+```
+
+`BatteryProfile` is a dataclass with `battery: Battery`,
+`discharge_tables: list[DischargeTable]`, `device: DeviceInfo`, and
+some lookup helpers. Round-trip is bit-identical with Otii's bundled
+profile JSON format.
+
+### Life calculator
+
+```python
+estimate_life_constant_current(
+    profile: BatteryProfile, current_A: float, temperature: float = None,
+) -> LifeEstimate
+
+estimate_life_from_profile(
+    battery_profile: BatteryProfile, recording: Recording,
+    *, sample_rate_hz: float = None, temperature: float = None,
+) -> LifeEstimate
+
+duty_cycle_from_recording(recording: Recording) -> DutyCycle
+```
+
+`LifeEstimate` carries `runtime_s`, `used_capacity_mAh`,
+`drained_to_cutoff: bool`, and trace data. Used both standalone and
+as the analysis side of profiler / emulator workflows.
+
+### Profiler
+
+```python
+class Profiler:
+    def __init__(self, smu: SMU, config: ProfilerConfig): ...
+    def run(self) -> ProfilerResult: ...
+
+ProfilerConfig(
+    discharge_steps: list[DischargeStep],
+    sample_window_s: float = 1.0,
+    settle_s: float = 0.1,
+    ocv_relax_s: float = 60.0,
+    safety_max_voltage_V: float = 5.0,
+    safety_min_voltage_V: float = 0.5,
+    voltage_channel: Channel = Channel.MAIN_VOLTAGE,
+    current_channel: Channel = Channel.MAIN_CURRENT,
+)
+```
+
+`Profiler` drives a discharge sequence against a real cell and
+records V/I to produce a `ProfilerResult`. Result can be written to
+a `BatteryProfile` for use with the life calculator or emulator.
+
+### Emulator
+
+```python
+class Emulator:
+    def __init__(self, smu: SMU, config: EmulatorConfig): ...
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def state(self) -> EmulatorState: ...
+
+EmulatorConfig(
+    profile: BatteryProfile,
+    initial_soc: float = 1.0,
+    series: int = 1,
+    parallel: int = 1,
+    temperature: Optional[float] = None,
+    soc_tracking: bool = True,
+    safety_max_voltage_V: float = 5.0,
+    current_limit_A: float = 0.5,
+    voltage_range: Optional[str] = None,   # auto-select if None
+    update_interval_s: float = 0.01,
+    safety_max_used_mAh: Optional[float] = None,
+    soc_floor: float = 0.0,
+)
+
+EmulatorState(
+    soc: float,
+    used_capacity_mAh: float,
+    ocv_V: float,
+    esr_ohm: float,
+    output_voltage_V: float,
+    measured_current_A: float,
+    runtime_s: float,
+    iteration: int,
+    stop_reason: Optional[str],
+)
+```
+
+`Emulator.start()` arms the SMU (range, current limit, CV regulation)
+and spawns a daemon thread running the 100 Hz control loop
+`V = OCV(SoC) − I·ESR(SoC)`. Failures during the configuration
+sequence propagate (no silent swallow — see CONTRIBUTING.md § 4).
+`stop()` is idempotent and disables the output.
+
+`state()` returns a thread-safe snapshot — call it from any thread.
+
+---
+
+## `opensmu.bench` — companion instrument drivers
+
+```python
+from opensmu.bench import QR10x, QR10xInfo, QR10xError
+from opensmu.bench import RigolDL3031A, RigolDLInfo, RigolDLError
+```
+
+`RigolDL3031A` is lazily imported (PEP 562) so users without
+`opensmu[bench-visa]` don't get a pyvisa import error just for using
+the QR10x.
+
+### `QR10x` — Eastwood Tech programmable resistor
+
+```python
+QR10x.open(port: str, baudrate: int = 115200) -> QR10x
+qr.close() -> None
+qr.is_open: bool
+qr.port: str
+
+qr.info() -> QR10xInfo
+
+qr.set_resistance(ohms: float) -> dict             # returns full state dump
+qr.get_setpoint() -> float                          # commanded R (Ω)
+qr.actual_resistance() -> float                     # achieved R, PV (Ω)
+qr.incr(delta_ohm: float) -> dict
+qr.decr(delta_ohm: float) -> dict
+
+qr.set_safety_limit(ohms: float) -> dict            # RLIMIT — clamps min R
+qr.get_safety_limit() -> float
+qr.get_temperature() -> float                       # °C
+```
+
+`QR10xInfo(device_type, serial, hardware_version, firmware_version,
+production_date, temperature_coefficient_ppm)`.
+
+`QR10xError` hierarchy: `QR10xError` → `QR10xConnectionError` /
+`QR10xProtocolError` / `QR10xTimeoutError` / `QR10xValueError`.
+
+Wire format: 115200 8N1, AT command set, ~60 ms quiet-window
+end-of-response detection. Details in [`bench.md`](bench.md).
+
+### `RigolDL3031A` — Rigol DL3000-series electronic load
+
+```python
+RigolDL3031A.open(resource: Optional[str] = None, *,
+                  timeout_ms: int = 2000,
+                  read_termination: str = "\n",
+                  write_termination: str = "\n") -> RigolDL3031A
+dl.close() -> None
+
+dl.info() -> RigolDLInfo                            # parsed *IDN?
+dl.reset() -> None                                  # *RST
+dl.clear_status() -> None                           # *CLS
+dl.last_error() -> Optional[tuple[int, str]]        # :SYST:ERR? (None if clean)
+dl.raise_if_error() -> None                         # raises on non-zero
+```
+
+**Low-level transport** (for SCPI commands not yet wrapped):
+
+```python
+dl.write(command: str) -> None
+dl.query(command: str) -> str
+dl.query_float(command: str) -> float
+dl.query_int(command: str) -> int
+```
+
+**Mode and input**:
+
+```python
+dl.set_mode("CC" | "CV" | "CR" | "CP") -> None
+dl.get_mode() -> str
+dl.set_input(on: bool) -> None
+dl.get_input() -> bool
+```
+
+**Per-mode setpoints + getters**:
+
+```python
+dl.set_current(amps) / get_current()
+dl.set_voltage(volts) / get_voltage()
+dl.set_resistance(ohms) / get_resistance()
+dl.set_power(watts) / get_power()
+```
+
+**Ranges + slew**:
+
+```python
+dl.set_current_range(amps) / get_current_range()
+dl.set_voltage_range(volts) / get_voltage_range()
+dl.set_slew(amps_per_us) / get_slew()
+```
+
+**Measurements**:
+
+```python
+# Triggers a fresh 10 PLC (~200 ms) integration per call.
+dl.measure_voltage() / measure_current() / measure_power() / measure_resistance()
+dl.measure_all() -> dict[str, float]
+
+# Non-blocking reads of the device's continuously-updated register.
+# All four fetch_* reads share the same ~200 ms integration window.
+dl.fetch_voltage() / fetch_current() / fetch_power() / fetch_resistance()
+dl.fetch_all() -> dict[str, float]
+```
+
+**Function mode** (top-level regulation source):
+
+```python
+dl.set_function_mode("FIXed" | "LIST" | "WAVe" | "BATTery" | "OCP" | "OPP") -> None
+dl.get_function_mode() -> str
+```
+
+Note: `:SOUR:FUNC:MODE FIXed` is one-way under the current firmware
+— once the device enters LIST / WAV / BATT / OCP / OPP, only a
+power-cycle restores FIX. See KNOWN_LIMITATIONS § F-3.
+
+**Trigger system**:
+
+```python
+dl.set_trigger_source("BUS" | "EXTernal" | "MANUal") -> None
+dl.get_trigger_source() -> str
+dl.trigger_now() -> None                            # :TRIGger (software trigger)
+```
+
+**LIST sequence mode** (firmware-timed, sub-100 µs widths):
+
+```python
+dl.program_list(
+    steps: list[tuple[float, float]],               # (level, width_s)
+    *, mode: str = "CC", count: int = 1,
+    range_value: Optional[float] = None,
+    slew_A_per_us: Optional[float] = None,
+    end_behavior: str = "OFF",                       # "OFF" | "LAST"
+    trigger_source: str = "BUS",
+) -> None
+
+# Granular SCPI wrappers (also available, see bench.md):
+dl.list_set_mode / list_set_range / list_set_count / list_set_step_count /
+   list_set_step / list_set_slew / list_set_end
+```
+
+`steps` must contain 2 to 512 entries, **but not 4** — STEP=4 is a
+firmware bug that fires no steps; the driver rejects 4-step programs
+at the SDK boundary (KNOWN_LIMITATIONS § F-1).
+
+**CC transient mode** (A↔B pulse generator):
+
+```python
+dl.configure_transient_pulse(
+    *, a_level_A: float, b_level_A: float,
+    a_width_s: float, b_width_s: float,
+    mode: str = "CONTinuous",                        # CONT / PULS / TOGG
+) -> None
+dl.transient_enable(on: bool) -> None
+
+# Granular setters: transient_set_mode / set_a_level / set_b_level /
+#                   set_a_width / set_b_width / set_frequency / set_duty
+```
+
+`transient_set_frequency(hz)` takes **Hz** (not kHz despite the
+manual's claim — bench-verified, KNOWN_LIMITATIONS § F-4).
+
+**Battery discharge mode** (firmware-side test with stop conditions):
+
+```python
+dl.configure_battery_test(
+    *, current_A: float,
+    v_stop_V: Optional[float] = None,
+    capacity_stop_mAh: Optional[float] = None,
+    time_stop_s: Optional[float] = None,
+    von_V: Optional[float] = None,
+    range_A: Optional[float] = None,
+) -> None
+
+dl.battery_stats() -> dict[str, float]
+# {capacity_mAh, energy_Wh, discharge_time_s, voltage_V, current_A}
+```
+
+The `discharge_time_s` field is parsed from the device's actual
+return format (H:MM:SS), not the float documented in the manual.
+
+**Exception hierarchy**:
+
+```
+RigolDLError
+├── RigolDLConnectionError    open / VISA transport failure
+├── RigolDLCommandError       device -101 etc. from :SYST:ERR?
+├── RigolDLTimeoutError       VI_ERROR_TMO
+└── RigolDLValueError         client-side range / type check failed
+```
+
+`RigolDLInfo(manufacturer, model, serial, firmware, resource)`.
+
+Details + firmware quirks in [`bench.md`](bench.md). Hardware-marked
+tests in `tests/test_bench_rigol_dl3031a.py` exercise every wire
+format against the real device.
