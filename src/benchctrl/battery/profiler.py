@@ -55,10 +55,12 @@ from benchctrl.battery.profile import (
     DischargeSample,
     DischargeTable,
 )
+from benchctrl.channels import StandardChannel
 from benchctrl.exceptions import BenchValueError
 
 if TYPE_CHECKING:
-    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+    from benchctrl.interfaces import SourceMeasurementUnit
+    SMU = SourceMeasurementUnit
 
 log = logging.getLogger("benchctrl.battery.profiler")
 
@@ -199,8 +201,6 @@ class Profiler:
         progress: Optional[Callable[[ProfilerSample], None]] = None,
     ) -> ProfilerResult:
         """Execute the discharge cycle and return the resulting profile."""
-        from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
-
         dp = self.config.discharge_profile
         high = dp.high
         low = dp.low
@@ -232,7 +232,7 @@ class Profiler:
                 # Wait the full step time, then read measurement window
                 self._wait_at_least(high.time - self.config.measurement_window_s)
                 v_loaded, i_loaded = self._measure_v_i(
-                    Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT,
+                    StandardChannel.MAIN_VOLTAGE, StandardChannel.MAIN_CURRENT,
                     window_s=self.config.measurement_window_s,
                 )
                 # Total charge from this step
@@ -246,7 +246,7 @@ class Profiler:
                 # Relax then measure OCV
                 self._wait_at_least(self.config.relaxation_time_s)
                 v_ocv, i_low = self._measure_v_i(
-                    Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT,
+                    StandardChannel.MAIN_VOLTAGE, StandardChannel.MAIN_CURRENT,
                     window_s=self.config.measurement_window_s,
                 )
                 capacity_consumed_C += abs(i_low) * (

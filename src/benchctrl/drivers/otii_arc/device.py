@@ -665,10 +665,18 @@ class OtiiArc:
             raise BenchValueError(
                 "read_window() requires no active recording — stop_recording() first"
             )
-        target = {Channel.coerce(c) for c in channels}
+        # Preserve the caller's channel objects as dict keys so the result
+        # is keyed by whatever the caller passed in (StandardChannel,
+        # OtiiArcChannel, or a short code). Internally we still need the
+        # OtiiArcChannel for wire-id matching.
+        requested = list(channels)
+        input_to_arc: dict = {c: Channel.coerce(c) for c in requested}
+        arc_to_inputs: dict = {}
+        for inp, arc in input_to_arc.items():
+            arc_to_inputs.setdefault(arc, []).append(inp)
         raw = self._transport.read_for(duration_s)
         self._raw_window_buffer.extend(raw)
-        out: dict[Channel, list[float]] = {c: [] for c in target}
+        out: dict = {inp: [] for inp in requested}
         for fr in iter_frames(raw):
             err = parse_error_frame(fr.payload)
             if err is not None:
@@ -682,8 +690,9 @@ class OtiiArc:
                 continue
             for rec in iter_samples(fr.payload):
                 ch = WIRE_ID_TO_CHANNEL.get(rec.channel_id)
-                if ch in target:
-                    out[ch].append(rec.value)
+                if ch in arc_to_inputs:
+                    for inp in arc_to_inputs[ch]:
+                        out[inp].append(rec.value)
                     self._state.last_value[ch] = rec.value
         return out
 

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
+from benchctrl.channels import StandardChannel
 from benchctrl.battery import (
     Battery,
     DischargeProfile,
@@ -83,23 +83,23 @@ class _MockSMU:
         # Linearly interpolate OCV
         frac = min(1.0, self.capacity_consumed_mAh / self.capacity_mAh)
         ocv = self.ocv_initial + frac * (self.ocv_final - self.ocv_initial)
-        if channel is Channel.MAIN_VOLTAGE or channel == "mv":
+        code = channel.code if hasattr(channel, "code") else channel
+        if code == "mv":
             # Sink convention: setpoint is negative when drawing from a cell.
             # V_loaded = OCV - |I_sink| * ESR
             return ocv - abs(self.current_setpoint_A) * self.esr
-        if channel is Channel.MAIN_CURRENT or channel == "mc":
+        if code == "mc":
             return self.current_setpoint_A
         return float("nan")
 
     def read_window(self, channels, duration_s):
-        """Mock the new SMU.read_window: return one current-state sample per channel."""
+        """Mock SMU.read_window: keyed by the caller's channel object."""
         self._accrue()
         if duration_s > 0:
             time.sleep(duration_s)
         out = {}
         for ch in channels:
-            ch_obj = Channel.coerce(ch) if not isinstance(ch, Channel) else ch
-            out[ch_obj] = [self.read_value(ch_obj)]
+            out[ch] = [self.read_value(ch)]
         return out
 
     def _accrue(self) -> None:

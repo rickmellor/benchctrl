@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
+from benchctrl.channels import StandardChannel
+from benchctrl.interfaces import SourceMeasurementUnit
 from benchctrl.battery import (
     Battery,
     BatteryProfile,
@@ -83,11 +84,25 @@ class _MockSMU:
         self.set_power_regulation_calls.append(mode)
 
     def read_value(self, channel, timeout: float = 0.5) -> float:
-        if channel is Channel.MAIN_CURRENT or channel == "mc":
+        code = channel.code if hasattr(channel, "code") else channel
+        if code == "mc":
             return self.dut_current_A if self.output_enabled else 0.0
-        if channel is Channel.MAIN_VOLTAGE or channel == "mv":
+        if code == "mv":
             return self.voltage_setpoint_V if self.output_enabled else 0.0
         return float("nan")
+
+
+def test_mock_smu_satisfies_protocol_partial():
+    """The mock implements the slice of SourceMeasurementUnit the
+    emulator touches. Verifying the read_value + set_voltage + set_output
+    + range/limit/regulation methods exist is enough — full Protocol
+    conformance requires record/read_window which the emulator never uses."""
+    m = _MockSMU()
+    for name in (
+        "set_voltage", "set_output", "set_range", "set_current_limit",
+        "set_current_limit_enabled", "set_power_regulation", "read_value",
+    ):
+        assert callable(getattr(m, name)), f"_MockSMU missing {name}"
 
 
 def _flat_profile(capacity_mAh: float = 1000.0, ocv: float = 3.7,
@@ -248,7 +263,7 @@ def test_emulator_loop_logs_and_retries_on_read_failure(caplog):
 
     def flaky(channel, timeout: float = 0.5) -> float:
         smu._read_count += 1  # type: ignore[attr-defined]
-        if smu._read_count == 1 and channel is Channel.MAIN_CURRENT:
+        if smu._read_count == 1 and channel is StandardChannel.MAIN_CURRENT:
             raise RuntimeError("simulated transport hiccup")
         return orig(channel, timeout)
     smu.read_value = flaky  # type: ignore[method-assign]

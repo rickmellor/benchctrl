@@ -81,10 +81,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 from benchctrl.battery.profile import BatteryProfile
+from benchctrl.channels import StandardChannel
 from benchctrl.exceptions import BenchValueError
 
 if TYPE_CHECKING:
-    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+    from benchctrl.interfaces import SourceMeasurementUnit
+    # Backward-compatible name in this module so the existing
+    # `smu: SMU` parameter annotations don't need to change.
+    SMU = SourceMeasurementUnit
 
 log = logging.getLogger("benchctrl.battery.emulator")
 
@@ -442,9 +446,7 @@ class Emulator:
         sleeps and continues, so retries on transient failures still
         work — but real errors now surface in the warning log instead
         of being silently swallowed."""
-        from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
-
         return self.smu.read_value(
-            Channel.MAIN_CURRENT,
+            StandardChannel.MAIN_CURRENT,
             timeout=self.config.current_read_timeout_s,
         )

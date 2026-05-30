@@ -98,13 +98,19 @@ class OtiiArcChannel(Enum):
         raise KeyError(f"no channel with code {code!r}")
 
     @classmethod
-    def coerce(cls, value: Union[OtiiArcChannel, str]) -> OtiiArcChannel:
-        """Accept either a `Channel` or its short code; return the enum."""
+    def coerce(cls, value) -> OtiiArcChannel:
+        """Accept an `OtiiArcChannel`, a `StandardChannel`, or a short code."""
+        from benchctrl.channels import StandardChannel
         if isinstance(value, cls):
             return value
+        if isinstance(value, StandardChannel):
+            return cls.from_code(value.code)
         if isinstance(value, str):
             return cls.from_code(value)
-        raise TypeError(f"expected OtiiArcChannel or str, got {type(value).__name__}")
+        raise TypeError(
+            f"expected OtiiArcChannel, StandardChannel, or str, "
+            f"got {type(value).__name__}"
+        )
 
 
 # Wire-id reverse lookup, including the alias for GPI bitmap.

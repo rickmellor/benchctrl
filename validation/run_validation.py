@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
-from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
+from benchctrl.channels import StandardChannel
 from benchctrl._version import __version__ as BENCHCTRL_VERSION
 from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
 from benchctrl.drivers.eastwood_qr10x import QR10x
@@ -886,7 +886,7 @@ def run_dynamic_hires(*, profile_path: Path, load: _LoadAdapter,
             smu.set_output(True)
             time.sleep(0.3)
             try:
-                with smu.record(Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT,
+                with smu.record(StandardChannel.MAIN_VOLTAGE, StandardChannel.MAIN_CURRENT,
                                 name=scenario_name) as rec:
                     t0 = time.monotonic()
                     for cycle_idx in range(cycles):
@@ -902,12 +902,12 @@ def run_dynamic_hires(*, profile_path: Path, load: _LoadAdapter,
                             })
                             time.sleep(dur)
                 # Extract recording — values + timestamps per channel
-                vs = rec.data(Channel.MAIN_VOLTAGE)
-                ts_v = rec.timestamps(Channel.MAIN_VOLTAGE)
-                is_ = rec.data(Channel.MAIN_CURRENT)
-                ts_i = rec.timestamps(Channel.MAIN_CURRENT)
-                record_rate_v = rec.buffer(Channel.MAIN_VOLTAGE).sample_rate
-                record_rate_i = rec.buffer(Channel.MAIN_CURRENT).sample_rate
+                vs = rec.data(StandardChannel.MAIN_VOLTAGE)
+                ts_v = rec.timestamps(StandardChannel.MAIN_VOLTAGE)
+                is_ = rec.data(StandardChannel.MAIN_CURRENT)
+                ts_i = rec.timestamps(StandardChannel.MAIN_CURRENT)
+                record_rate_v = rec.buffer(StandardChannel.MAIN_VOLTAGE).sample_rate
+                record_rate_i = rec.buffer(StandardChannel.MAIN_CURRENT).sample_rate
                 # Merge to a single time axis by interpolation on the I rate
                 # (current is the higher-rate channel typically).
                 merged_ts = ts_i
@@ -1134,7 +1134,7 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
                     t_cursor += dur
             # Start recording, then arm the LIST by enabling input.
             try:
-                with smu.record(Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT,
+                with smu.record(StandardChannel.MAIN_VOLTAGE, StandardChannel.MAIN_CURRENT,
                                 name=scenario_name) as rec:
                     t_rec_open = time.monotonic()
                     load.dl.set_input(True)
@@ -1143,12 +1143,12 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
                     load.dl.trigger_now()  # BUS trigger starts the list
                     time.sleep(total_s + 0.3)
                     load.dl.set_input(False)
-                vs = rec.data(Channel.MAIN_VOLTAGE)
-                ts_v = rec.timestamps(Channel.MAIN_VOLTAGE)
-                is_ = rec.data(Channel.MAIN_CURRENT)
-                ts_i = rec.timestamps(Channel.MAIN_CURRENT)
-                record_rate_v = rec.buffer(Channel.MAIN_VOLTAGE).sample_rate
-                record_rate_i = rec.buffer(Channel.MAIN_CURRENT).sample_rate
+                vs = rec.data(StandardChannel.MAIN_VOLTAGE)
+                ts_v = rec.timestamps(StandardChannel.MAIN_VOLTAGE)
+                is_ = rec.data(StandardChannel.MAIN_CURRENT)
+                ts_i = rec.timestamps(StandardChannel.MAIN_CURRENT)
+                record_rate_v = rec.buffer(StandardChannel.MAIN_VOLTAGE).sample_rate
+                record_rate_i = rec.buffer(StandardChannel.MAIN_CURRENT).sample_rate
                 merged_ts = ts_i
                 merged_v: list[float] = []
                 vi = 0
