@@ -1071,29 +1071,14 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
     with SMU.open(**smu_kwargs) as smu:
         load.open()
         try:
-            # Pin the Arc at the profile's fresh OCV BEFORE touching
-            # the DL3031A — order matters. Bench-verified: with the
-            # DL3031A reset before the SMU is sourcing, LIST in high
-            # range doesn't fire (LiPo profiles). With the SMU
-            # sourcing first, then DL reset + program, LIST fires
-            # cleanly in any range.
-            pinned_V = min(profile.ocv_at(0.0), cfg.safety_max_voltage_V)
-            if pinned_V < 0.1:
-                raise RuntimeError(
-                    f"dynamic-list: derived pinned_V={pinned_V!r} too low — "
-                    f"check profile.ocv_at(0) and safety_max_voltage_V"
-                )
-            smu.set_range("low" if pinned_V <= 3.4 else "high")
-            smu.set_current_limit(0.5)
-            smu.set_current_limit_enabled(True)
-            smu.set_power_regulation("voltage")
-            smu.set_voltage(pinned_V)
-            smu.set_output(True)
-            time.sleep(0.5)
-            # Now configure the DL3031A. NOTE: skip load.setup() —
-            # the standard setup() puts the DL in CR mode (for
-            # QR10x-style scenarios), and that mode change persists
-            # through *RST and breaks subsequent LIST mode.
+            # Reset DL first so the bench_dict reads the real device
+            # state, then settle the Arc Pro voltage, then program
+            # the LIST. NOTE: skip load.setup() — the standard
+            # setup() puts the DL in CR mode (for QR10x-style
+            # scenarios), and that mode change persists through *RST
+            # and is suspected to interact badly with LIST mode in
+            # the Arc Pro's high range (LiPo profiles — see
+            # KNOWN_LIMITATIONS § F-2).
             assert isinstance(load, _DL3031AAdapter) and load.dl is not None
             load.dl.reset()
             load.dl.clear_status()
@@ -1109,6 +1094,19 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
                 "voltage_range_V": 36.0,
                 "note": "LIST sequence executed in firmware; no CR-mode setup",
             }
+            pinned_V = min(profile.ocv_at(0.0), cfg.safety_max_voltage_V)
+            if pinned_V < 0.1:
+                raise RuntimeError(
+                    f"dynamic-list: derived pinned_V={pinned_V!r} too low — "
+                    f"check profile.ocv_at(0) and safety_max_voltage_V"
+                )
+            smu.set_range("low" if pinned_V <= 3.4 else "high")
+            smu.set_current_limit(0.5)
+            smu.set_current_limit_enabled(True)
+            smu.set_power_regulation("voltage")
+            smu.set_voltage(pinned_V)
+            smu.set_output(True)
+            time.sleep(0.5)
             load.dl.set_voltage_range(36.0)
             load.dl.set_current_range(6.0)
             load.dl.program_list(
