@@ -23,7 +23,7 @@ validation/
     <profile>_<kind>_<utc>_profile.json   # snapshot of the input profile
 ```
 
-Scenario JSON layout (`schema_version: 1`)::
+Scenario JSON layout (`schema_version: 2` since v0.9.4)::
 
 ```json
 {

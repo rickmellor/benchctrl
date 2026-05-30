@@ -5,10 +5,10 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.9.6 shipped — DL3031A built-in modes (LIST, transient, battery discharge)
-- **Tests**: 372 / 374 passing (284 hw-free + 90 hardware) — +36 in DL3031A coverage
+- **Phase**: v0.9.7 shipped — adversarial-review fix batch + LIST/battery firmware bugs found
+- **Tests**: 292 hw-free + 90 hardware passing (was 282 + 89 in v0.9.6)
 - **Scenarios captured**: 27 total — 11 QR10x + 11 DL3031A standard + 3 hires + 2 dynamic-list
-- **MCP tool count**: 73 (was 65 in v0.9.5)
+- **MCP tool count**: 93 (was 73 in v0.9.6) — DL3031A parity caught up to QR10x
 - **Hardware validation milestones**:
   - **Profiler**: AA pair, OCV 3.19 V, ESR 3.18 Ω, 10-cycle short profile (15 s, 10.6 µAh used)
   - **Emulator**: CR2032 profile + QR10x load sweep (100 kΩ → 12 Ω), voltage sag tracks ESR

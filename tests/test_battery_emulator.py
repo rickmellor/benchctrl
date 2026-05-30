@@ -33,13 +33,30 @@ from opensmu.exceptions import SMUValueError
 
 @dataclass
 class _MockSMU:
-    """Mock SMU for the emulator. Simulates a DUT drawing constant current."""
+    """Mock SMU for the emulator. Simulates a DUT drawing constant current.
+
+    Mirrors the real ``SMU``'s public method surface that
+    ``Emulator.start`` exercises: ``set_range`` / ``set_current_limit``
+    / ``set_current_limit_enabled`` / ``set_power_regulation`` /
+    ``set_voltage`` / ``set_output`` / ``read_value``. Earlier
+    iterations omitted the first four; combined with the emulator's
+    silent try/except on each config call, missing methods passed
+    tests but would silently leave the real device unconfigured.
+    """
 
     dut_current_A: float = 0.010   # 10 mA DUT
     set_voltage_calls: list[float] = field(default_factory=list)
     set_output_calls: list[bool] = field(default_factory=list)
+    set_range_calls: list[str] = field(default_factory=list)
+    set_current_limit_calls: list[float] = field(default_factory=list)
+    set_current_limit_enabled_calls: list[bool] = field(default_factory=list)
+    set_power_regulation_calls: list[str] = field(default_factory=list)
     voltage_setpoint_V: float = 0.0
     output_enabled: bool = False
+    current_limit_A: float = 5.0
+    current_limit_enabled: bool = False
+    power_regulation: str = "voltage"
+    voltage_range: str = "low"
 
     def set_voltage(self, volts: float) -> None:
         self.set_voltage_calls.append(volts)
@@ -48,6 +65,22 @@ class _MockSMU:
     def set_output(self, enable: bool) -> None:
         self.output_enabled = enable
         self.set_output_calls.append(enable)
+
+    def set_range(self, range_: str) -> None:
+        self.voltage_range = range_
+        self.set_range_calls.append(range_)
+
+    def set_current_limit(self, amps: float) -> None:
+        self.current_limit_A = amps
+        self.set_current_limit_calls.append(amps)
+
+    def set_current_limit_enabled(self, enabled: bool) -> None:
+        self.current_limit_enabled = enabled
+        self.set_current_limit_enabled_calls.append(enabled)
+
+    def set_power_regulation(self, mode: str) -> None:
+        self.power_regulation = mode
+        self.set_power_regulation_calls.append(mode)
 
     def read_value(self, channel, timeout: float = 0.5) -> float:
         if channel is Channel.MAIN_CURRENT or channel == "mc":
@@ -146,6 +179,90 @@ def test_emulator_seeds_output_at_total_ocv_on_start():
         assert smu.set_output_calls[0] is True
     finally:
         emu.stop()
+
+
+def test_emulator_start_configures_smu_cv_mode():
+    """Regression for v0.9.1 hardening: start() must arm range, current
+    limit, current-limit-enabled, and voltage regulation BEFORE
+    enabling the output. Earlier the calls were each wrapped in
+    try/except so an AttributeError silently elided them; now they
+    propagate, and the mock receives them in order."""
+    smu = _MockSMU(dut_current_A=0.0)
+    config = EmulatorConfig(
+        profile=_flat_profile(ocv=3.2),
+        initial_soc=1.0,
+        update_interval_s=0.1,
+        safety_max_voltage_V=5.0,
+        current_limit_A=0.5,
+    )
+    emu = Emulator(smu, config)
+    emu.start()
+    try:
+        # Range chosen by auto-select (3.2 V → "low")
+        assert smu.set_range_calls == ["low"]
+        # Current limit armed with the configured value
+        assert smu.set_current_limit_calls == [pytest.approx(0.5)]
+        assert smu.set_current_limit_enabled_calls == [True]
+        # Power regulation set to voltage (CV mode)
+        assert smu.set_power_regulation_calls == ["voltage"]
+        # Output enabled AFTER all the config calls
+        assert smu.set_output_calls[0] is True
+    finally:
+        emu.stop()
+
+
+def test_emulator_start_propagates_config_failures():
+    """If any SMU config call raises, start() must not enable the
+    output. Previously these were swallowed by try/except, leading to
+    an emulator running with an unknown range / no current limit / no
+    CV regulation. (C2 from v0.9.7 adversarial review.)"""
+    smu = _MockSMU()
+
+    # Simulate set_power_regulation rejecting at runtime
+    def boom(*_a, **_k):
+        raise RuntimeError("simulated device error")
+    smu.set_power_regulation = boom  # type: ignore[method-assign]
+
+    config = EmulatorConfig(profile=_flat_profile(), update_interval_s=0.1)
+    emu = Emulator(smu, config)
+    with pytest.raises(RuntimeError, match="simulated device error"):
+        emu.start()
+    # Output never enabled, no voltage set after failure
+    assert all(call is False or call == enable for call, enable in
+               zip(smu.set_output_calls, []))
+    assert not smu.set_output_calls or smu.set_output_calls[0] is not True
+
+
+def test_emulator_loop_logs_and_retries_on_read_failure(caplog):
+    """The inner _read_current swallow was removed in v0.9.7; the
+    outer _loop's try/except now catches failures, logs at warning,
+    and continues. Verify that a transient read failure logs once
+    and the loop keeps running."""
+    smu = _MockSMU(dut_current_A=0.005)
+
+    # First call raises, subsequent calls return normally
+    orig = smu.read_value
+    smu._read_count = 0  # type: ignore[attr-defined]
+
+    def flaky(channel, timeout: float = 0.5) -> float:
+        smu._read_count += 1  # type: ignore[attr-defined]
+        if smu._read_count == 1 and channel is Channel.MAIN_CURRENT:
+            raise RuntimeError("simulated transport hiccup")
+        return orig(channel, timeout)
+    smu.read_value = flaky  # type: ignore[method-assign]
+
+    import logging
+    config = EmulatorConfig(profile=_flat_profile(), update_interval_s=0.05)
+    emu = Emulator(smu, config)
+    with caplog.at_level(logging.WARNING, logger="opensmu.battery.emulator"):
+        emu.start()
+        time.sleep(0.3)
+        emu.stop()
+    # Should have logged a warning about the failed read
+    assert any("read_current" in r.message for r in caplog.records), \
+        f"expected a 'read_current' warning, got: {[r.message for r in caplog.records]}"
+    # Loop kept running — emulator's state shows non-zero iteration count
+    assert emu.state().iteration > 0
 
 
 def test_emulator_stop_disables_output():

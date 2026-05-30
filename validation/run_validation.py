@@ -59,8 +59,35 @@ from opensmu.battery import BatteryProfile, Emulator, EmulatorConfig
 from opensmu.bench import QR10x
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PROFILE_DIR = Path(r"C:\Users\rickm\AppData\Local\otii3\app-3.7.2\resources\batteryprofiles")
 SCENARIO_DIR = REPO_ROOT / "validation" / "scenarios"
+
+
+def _default_profile_dir() -> Path:
+    """Resolve the battery-profile directory in priority order:
+
+    1. ``OPENSMU_BATTERY_PROFILE_DIR`` env var
+    2. CLI ``--profile-dir`` (handled in :func:`main`)
+    3. Otii bundled profile dir under ``%LOCALAPPDATA%\\otii3``
+    4. Repo-local ``validation/profiles/`` (if present — bring your own)
+    """
+    import os
+    env = os.environ.get("OPENSMU_BATTERY_PROFILE_DIR")
+    if env:
+        return Path(env)
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        otii_root = Path(local_app) / "otii3"
+        if otii_root.exists():
+            # Walk app-* dirs and find batteryprofiles
+            for app_dir in sorted(otii_root.glob("app-*")):
+                cand = app_dir / "resources" / "batteryprofiles"
+                if cand.is_dir():
+                    return cand
+    repo_local = REPO_ROOT / "validation" / "profiles"
+    return repo_local  # may not exist; --all will report nothing found
+
+
+PROFILE_DIR = _default_profile_dir()
 
 # Default static-sweep load resistances (Ω). High → low forces a clear
 # sag curve; the final value back at the start is a recovery point.
@@ -644,7 +671,12 @@ def run_dynamic_pattern(*, profile_path: Path, load: _LoadAdapter,
                                 samples_out.append(rec)
                                 next_sample += sample_dt
                             else:
-                                time.sleep(min(0.005, end - now))
+                                # Clamp to positive — if we're behind
+                                # schedule end-now is negative and
+                                # time.sleep() would raise ValueError.
+                                wait = min(0.005, max(0.0, end - now))
+                                if wait > 0:
+                                    time.sleep(wait)
                 load.set_resistance(sleep_idle_R)
             finally:
                 load.teardown(sleep_idle_R)
@@ -835,6 +867,17 @@ def run_dynamic_hires(*, profile_path: Path, load: _LoadAdapter,
                 pinned_V = emu.state().output_voltage_V
             finally:
                 emu.stop()
+            # Sanity check before pinning: a 0 V / negative reading
+            # would silently produce a useless capture (load at 0 V,
+            # nothing sources). If we got here with a degenerate
+            # value, the emulator's first loop iteration likely
+            # failed; abort the scenario rather than waste a run.
+            if pinned_V is None or pinned_V < 0.1:
+                raise RuntimeError(
+                    f"hires: emulator state returned suspiciously low "
+                    f"pinned_V={pinned_V!r} — likely first-iteration read "
+                    f"failure or stuck regulation. Aborting scenario."
+                )
             time.sleep(0.3)
             # Re-pin V manually so the Arc still sources during the
             # recording — emulator is off, so OCV is frozen.
@@ -983,6 +1026,11 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
                      pattern_A: Optional[list[tuple[str, float, float]]] = None,
                      cycles: int = 1,
                      output_dir: Path = SCENARIO_DIR) -> dict[str, Any]:
+    if cycles <= 0:
+        # LIST count=0 means infinite playback in the firmware; the
+        # harness's `time.sleep(total_s + 0.3)` with total_s=0 would
+        # then exit immediately, leaving the load running forever.
+        raise ValueError(f"--cycles must be > 0 for dynamic-list, got {cycles}")
     """DL3031A-only: program a LIST sequence and play it from firmware.
 
     The pattern is (label, current_A, duration_s). The DL3031A executes
@@ -1023,15 +1071,18 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
     with SMU.open(**smu_kwargs) as smu:
         load.open()
         try:
-            load.setup(safety_R=safety_R, voltage_V=safety_V)
-            time.sleep(0.3)
-            # Use the profile's fresh OCV directly. Running the
-            # emulator first (then stopping it) leaves the Arc Pro in
-            # a regulation state that suppresses subsequent
-            # set_voltage; skipping the emulator avoids that and is
-            # fine here — SoC drift over a 5 s capture at < 60 mA is
-            # negligible (< 0.1 mAh).
+            # Pin the Arc at the profile's fresh OCV BEFORE touching
+            # the DL3031A — order matters. Bench-verified: with the
+            # DL3031A reset before the SMU is sourcing, LIST in high
+            # range doesn't fire (LiPo profiles). With the SMU
+            # sourcing first, then DL reset + program, LIST fires
+            # cleanly in any range.
             pinned_V = min(profile.ocv_at(0.0), cfg.safety_max_voltage_V)
+            if pinned_V < 0.1:
+                raise RuntimeError(
+                    f"dynamic-list: derived pinned_V={pinned_V!r} too low — "
+                    f"check profile.ocv_at(0) and safety_max_voltage_V"
+                )
             smu.set_range("low" if pinned_V <= 3.4 else "high")
             smu.set_current_limit(0.5)
             smu.set_current_limit_enabled(True)
@@ -1039,11 +1090,25 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
             smu.set_voltage(pinned_V)
             smu.set_output(True)
             time.sleep(0.5)
-            # Program the LIST on the DL3031A
+            # Now configure the DL3031A. NOTE: skip load.setup() —
+            # the standard setup() puts the DL in CR mode (for
+            # QR10x-style scenarios), and that mode change persists
+            # through *RST and breaks subsequent LIST mode.
             assert isinstance(load, _DL3031AAdapter) and load.dl is not None
             load.dl.reset()
             load.dl.clear_status()
             time.sleep(0.5)
+            info = load.dl.info()
+            load.bench_dict = {
+                "load_kind": "Rigol DL3031A electronic load (LIST mode)",
+                "model": info.model,
+                "serial": info.serial,
+                "firmware": info.firmware,
+                "resource": info.resource,
+                "current_range_A": 6.0,
+                "voltage_range_V": 36.0,
+                "note": "LIST sequence executed in firmware; no CR-mode setup",
+            }
             load.dl.set_voltage_range(36.0)
             load.dl.set_current_range(6.0)
             load.dl.program_list(
@@ -1109,15 +1174,28 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
                         "phase": phase,
                     })
             finally:
+                # KNOWN_LIMITATIONS § F-3: FUNC:MODE FIXed sometimes
+                # doesn't take. Read back and log if the device is
+                # stuck so the operator knows to power-cycle before
+                # the next scenario.
                 try:
                     load.dl.set_function_mode("FIXed")
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("DL3031A set_function_mode('FIXed') "
+                                "failed at teardown: %s", e)
+                try:
+                    actual = load.dl.get_function_mode()
+                    if actual and not actual.upper().startswith("FIX"):
+                        log.warning("DL3031A stuck in %s mode after teardown "
+                                    "(expected FIX) — power-cycle before reuse",
+                                    actual)
+                except Exception as e:
+                    log.warning("could not read back FUNC:MODE at teardown: %s", e)
                 load.teardown(0.0)
                 try:
                     smu.set_output(False)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("set_output(False) failed at teardown: %s", e)
         finally:
             load.close()
 
@@ -1233,9 +1311,22 @@ def main(argv: Optional[list[str]] = None) -> int:
                              "50 Hz for hires")
     parser.add_argument("--settle-s", type=float, default=1.2)
     parser.add_argument("--output-dir", default=str(SCENARIO_DIR))
+    parser.add_argument("--profile-dir", default=None,
+                        help="battery profile directory (default: $OPENSMU_BATTERY_PROFILE_DIR "
+                             "or Otii's bundled location under %%LOCALAPPDATA%%/otii3)")
     args = parser.parse_args(argv)
 
     out_dir = Path(args.output_dir)
+
+    # CLI flag overrides env / default
+    global PROFILE_DIR
+    if args.profile_dir:
+        PROFILE_DIR = Path(args.profile_dir)
+    if not PROFILE_DIR.is_dir():
+        parser.error(
+            f"profile directory not found: {PROFILE_DIR}\n"
+            f"  set OPENSMU_BATTERY_PROFILE_DIR or pass --profile-dir"
+        )
 
     targets: list[Path]
     if args.all:
@@ -1270,6 +1361,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                                     smu_port=args.smu_port, cycles=args.cycles,
                                     pattern=pattern, pattern_name=args.pattern,
                                     sample_hz=sample_hz, output_dir=out_dir)
+        except KeyboardInterrupt:
+            # Ctrl-C during a long --all matrix run: stop the whole
+            # sequence, don't just skip one profile.
+            print("[interrupted]", file=sys.stderr)
+            return 130
         except Exception as e:
             print(f"[error] {prof.stem}: {e}", file=sys.stderr)
             if not args.all:

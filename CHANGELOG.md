@@ -2,6 +2,164 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+Known limitations across all versions are tracked in
+[`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) (hardware caps,
+firmware quirks, harness workarounds). Read it before debugging a
+new failure — it's likely a documented limit.
+
+## [0.9.7] — adversarial-review fix-batch + LIST/battery firmware bugs unearthed
+
+### Fixed — compound silent-failure chain in `Emulator`
+
+Three independent bugs that compounded to produce "emulator runs
+silently, state() looks fine, but no DUT integration is happening":
+
+1. `Emulator.start()` wrapped every SMU config call (`set_range`,
+   `set_current_limit`, `set_current_limit_enabled`,
+   `set_power_regulation`) in `try/except Exception: log + pass`.
+   A typo, a wrong arg, or a missing mock method would silently
+   skip configuration and proceed to `set_output(True)` with the
+   device in an unknown state. **Now**: exceptions propagate;
+   start() aborts before enabling the output.
+2. `Emulator._read_current` had a bare `except Exception: return 0.0`
+   that v0.9.2 claimed to fix but didn't. Any read failure (queued
+   SCPI error, transport hiccup, etc.) produced "I = 0 forever,
+   v_out = OCV". The outer `_loop` already catches and logs+retries,
+   so the inner swallow was both redundant and harmful. **Now**:
+   exceptions propagate to the outer handler, which logs at warning
+   and continues.
+3. The test mock SMU (`_MockSMU` in `tests/test_battery_emulator.py`)
+   was missing the v0.9.1 methods. Combined with (1), the calls
+   silently no-op'd in tests. **Now**: the mock has all four
+   methods + matching `*_calls` lists, and new tests assert
+   `start()` actually calls them in order.
+
+New tests: `test_emulator_start_configures_smu_cv_mode`,
+`test_emulator_start_propagates_config_failures`,
+`test_emulator_loop_logs_and_retries_on_read_failure`.
+
+### Discovered — `:SOUR:LIST:STEP` semantics + STEP=4 firmware bug
+
+Bench investigation of the "5-step LIST onset slip" found two
+distinct issues:
+
+1. **`:SOUR:LIST:STEP N` means N total steps**, not N+1 as the
+   manual's application instance suggested. v0.9.6's driver was
+   sending `STEP N-1`, executing one fewer step than intended.
+   Captures for CR2032/CR123A still showed TX bursts because
+   `end_behavior="LAST"` held the (mis-played) TX step.
+2. **`STEP=4` is a firmware bug** (verified on fw 00.01.05.00.01):
+   regardless of how many steps are programmed, ``STEP=4`` fires
+   no steps at all. ``STEP=2``, ``STEP=3``, ``STEP=5``, etc. all
+   work. The driver now rejects 4-step programs at
+   `list_set_step_count(4)` and `program_list(steps=[...4...])`
+   with a clear error pointing to the workaround (use 3 or 5
+   steps with appropriate `count`).
+
+### Discovered — DL3031A `:SOUR:FUNC:MODE FIXed` is one-way
+
+Once the device enters LIST / WAV / BATTery / OCP / OPP mode,
+`:SOUR:FUNC:MODE FIXed` is silently rejected. `*RST`, `*WAI`,
+`*OPC?`, `*CLS`, input toggling, and cycling through other modes
+all fail to bring it back. **Only power-cycling** restores FIX
+mode. Documented in `KNOWN_LIMITATIONS.md` § F-3. The runner's
+`dynamic-list` teardown reads back `get_function_mode()` and logs
+*"DL3031A stuck in {MODE} mode after teardown — power-cycle before
+reuse"* so the operator sees the failure.
+
+### Discovered — `:FETCh:DISChargingTime?` returns H:MM:SS, not float
+
+The manual documents the return type as "a real number" but the
+device returns colon-delimited time (e.g. `"0:0:15"`).
+`battery_stats()` now parses both formats — H:M:S preferred, plain
+float fallback if a future firmware change matches the manual.
+4 new parser tests including malformed-input handling.
+
+### Discovered — `transient_set_frequency` takes Hz, not kHz
+
+Manual says kHz; bench-verified the device takes Hz. Sending
+`:SOUR:CURR:TRAN:FREQ 10` reads back as `0.1 s` period. The driver
+parameter name `hz` was already correct; the docstring was
+misleading and has been corrected. New hardware-marked test
+asserts period = 1/freq.
+
+### Fixed — `RigolDL3031A._autodiscover` ambiguity
+
+Now deterministic (sorted resource list). If multiple Rigol
+DL3000 devices are connected, raises with the list of candidate
+VISA resource strings so the caller can pass an explicit one.
+
+### Fixed — MCP exception types match driver hierarchies
+
+`_get_dl3031a()` now raises `RigolDLConnectionError` (was bare
+`RuntimeError`); `_get_qr10x()` raises `QR10xConnectionError`.
+Per-driver hierarchies stay consistent across SDK and MCP surfaces.
+
+### Fixed — `dl3031a_close` surfaces input-off failures
+
+Previously returned `{"closed": true}` even if `set_input(False)`
+raised, leaving the load potentially sinking current with the
+operator unaware. Now returns
+`{"closed": true, "input_off_failed": "...", "warning": "..."}`
+with a clear safety note when the input couldn't be disabled.
+
+### Added — SDK ↔ MCP parity catch-up for DL3031A
+
+The v0.9.6 review surfaced that the DL3031A had ~25 SDK methods
+without MCP equivalents — primarily `get_*` queryable state and
+individual `measure_*` / `fetch_*` methods. **Now**: 45 DL3031A
+MCP tools (was 25). Granular LIST / transient / battery setters
+remain SDK-only (the convenience wrappers `program_list` /
+`configure_transient_pulse` / `configure_battery_test` are the
+MCP-facing surface) — documented as SDK-only in the bench docs.
+
+### Added — `--profile-dir` + `OPENSMU_BATTERY_PROFILE_DIR`
+
+`validation/run_validation.py` no longer hardcodes a
+user-specific Otii install path. Resolution order: CLI
+`--profile-dir`, then `$OPENSMU_BATTERY_PROFILE_DIR`, then
+auto-detect under `%LOCALAPPDATA%/otii3/app-*/resources/batteryprofiles`,
+then repo-local `validation/profiles/`.
+
+### Added — `KNOWN_LIMITATIONS.md`
+
+Aggregated list of hardware caps, firmware quirks, and harness
+workarounds, in one file rather than buried under per-version
+CHANGELOG entries. Linked from the top of CHANGELOG.
+
+### Smaller fixes / tightenings
+
+- `dl3031a_program_list` MCP docstring now matches the driver's
+  validator (was `2-512`, driver enforces `2-512 \\ {4}`).
+- LIST test assertions are now exact wire-format matches (was
+  `startswith` which would let `:RANGE` typos pass).
+- Validation `time.sleep(min(0.005, end - now))` clamps to
+  non-negative (was a `ValueError` when the loop fell behind).
+- `--cycles 0` is rejected with a clear error (was infinite LIST
+  + zero sleep → load running indefinitely).
+- Ctrl-C during `--all` matrix runs now breaks cleanly (was
+  swallowed by the `except Exception` and continued to the next
+  profile).
+- Validation hires/dynamic-list runners reject `pinned_V < 0.1V`
+  before pinning (was a silent zero-output capture).
+- Loop pile-up / fetch_all aliasing now documented in docstrings.
+- Concurrency note added to MCP module docstring (single-client
+  serialization assumed).
+
+### Tests
+
+292 hardware-free tests passing (was 282 in v0.9.6, +10):
+- 4 emulator hardening tests (config-error propagation, mock
+  parity, read-failure retry)
+- 4 battery_stats parser tests (H:M:S, hour-minute-seconds,
+  float fallback, malformed input)
+- Tighter LIST wire-format assertions
+- MCP-level coercion and connection-error tests
+- Driver-exception type assertions
+
+Hardware-marked tests: 90+ (was 89; +2 new — battery discharge
+smoke + transient_set_frequency unit check).
+
 ## [0.9.6] — DL3031A built-in modes: LIST, transient, battery discharge
 
 ### Added — `RigolDL3031A.program_list` and friends (LIST mode)
@@ -109,14 +267,19 @@ response at the Arc Pro's native streaming rate (~4 kHz on I,
 with deterministic timing — no per-step USB-TMC round-trip.
 
 `DEFAULT_LIST_TX_PATTERN_A` is currently 3 steps (sleep / 50 ms TX
-/ sleep), chosen empirically: under the BUS-trigger path, programs
-with ≥ 5 steps sometimes don't fire cleanly via software trigger.
-The hardware tests confirm LIST executes correctly when triggered
-manually or with short total programs — investigation continued
-into v0.9.7.
+/ sleep). **Capability ceiling** (see `KNOWN_LIMITATIONS.md` § F-1):
+LIST programs with ≥ 5 steps under BUS trigger have a ~3 s onset
+slip — the LIST fires but the waveform doesn't start until well
+after `:TRIGger`. The SCPI strings the driver sends are individually
+correct; the cause is in the firmware/trigger interaction and is
+not yet isolated. Use 3 steps + `count=N` repeats as the reliable
+shape.
 
-Saved scenarios for CR2032 and CR123A (LiPo's high-V-range path is
-flaky in this flow and is excluded from the v0.9.6 set).
+Saved scenarios for CR2032 and CR123A. **LiPo dynamic-list is not
+supported in v0.9.6** (`KNOWN_LIMITATIONS.md` § F-2): with the Arc
+Pro in high range, the LIST playback shows zero current during
+capture even though the SCPI surface accepts the program. Use
+`--pattern hires` for LiPo transient validation in the meantime.
 
 ### Tests
 

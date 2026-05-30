@@ -197,24 +197,18 @@ class Emulator:
         """
         if self._thread is not None:
             raise SMUValueError("emulator is already running")
-        # Configure the SMU for voltage-source operation. Each call has a
-        # try/except so a failure on one step doesn't leave the device in
-        # an inconsistent state — the error propagates after we restore
-        # the output to a safe state.
+        # Configure the SMU for voltage-source operation. **No
+        # try/except here**: if any configuration call fails the
+        # device is in an unknown state — arming the output anyway
+        # would let the emulator run with the wrong range, missing
+        # current limit, or no CV regulation, silently producing
+        # garbage. Let the exception propagate; the caller can decide
+        # whether to retry or abort.
         rng = self._select_voltage_range()
-        try:
-            self.smu.set_range(rng)
-        except Exception:
-            log.debug("set_range(%r) failed", rng, exc_info=True)
-        try:
-            self.smu.set_current_limit(self.config.current_limit_A)
-            self.smu.set_current_limit_enabled(True)
-        except Exception:
-            log.warning("could not arm current limit", exc_info=True)
-        try:
-            self.smu.set_power_regulation("voltage")
-        except Exception:
-            log.debug("set_power_regulation('voltage') failed", exc_info=True)
+        self.smu.set_range(rng)
+        self.smu.set_current_limit(self.config.current_limit_A)
+        self.smu.set_current_limit_enabled(True)
+        self.smu.set_power_regulation("voltage")
 
         # Seed the output at the open-circuit voltage (no current → no sag).
         # Clamp to safety_max_voltage_V so a profile whose fresh OCV exceeds
@@ -407,7 +401,19 @@ class Emulator:
 
                 self._iteration += 1
 
-            # Drive the SMU (outside the lock to avoid blocking state())
+            # Drive the SMU outside the lock so state() doesn't block
+            # on slow USB writes. Trade-off: state() can observe
+            # _last_v_out (set inside the lock) updated before the
+            # SMU has actually received the new voltage. Acceptable
+            # for monitoring; not acceptable as a control signal —
+            # callers who need "SMU is definitely at v_out now" must
+            # use the SMU's own readback after start() settles.
+            #
+            # Also: if set_voltage is slower than update_interval_s
+            # (e.g. USB hub buffering delays), consecutive iterations
+            # can queue writes faster than the device drains them.
+            # Currently acceptable; if it becomes a problem, add a
+            # "in-flight" flag and skip the iteration.
             try:
                 self.smu.set_voltage(v_out)
             except Exception:
@@ -426,13 +432,19 @@ class Emulator:
             pass
 
     def _read_current(self) -> float:
-        """Read the main current. Falls back to 0.0 on transient timeout."""
-        try:
-            from opensmu import Channel
+        """Read the main current. Raises on read failure.
 
-            return self.smu.read_value(
-                Channel.MAIN_CURRENT,
-                timeout=self.config.current_read_timeout_s,
-            )
-        except Exception:
-            return 0.0
+        Earlier versions caught all exceptions and returned 0.0 here,
+        which converted hard failures (queued SCPI errors, transport
+        disconnects, etc.) into "I = 0 forever, V = OCV" — the loop
+        kept running and the saved ``state()`` looked plausible. The
+        outer loop already has a try/except around this call that
+        sleeps and continues, so retries on transient failures still
+        work — but real errors now surface in the warning log instead
+        of being silently swallowed."""
+        from opensmu import Channel
+
+        return self.smu.read_value(
+            Channel.MAIN_CURRENT,
+            timeout=self.config.current_read_timeout_s,
+        )

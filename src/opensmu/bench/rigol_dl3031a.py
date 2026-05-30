@@ -524,8 +524,17 @@ class RigolDL3031A:
 
     def fetch_all(self) -> dict[str, float]:
         """Non-blocking V / I / P / R snapshot — four fast SCPI queries
-        (~40-80 ms total) against the device's continuously-updated
-        measurement registers."""
+        (~4-8 ms each, ~20-40 ms total) against the device's
+        continuously-updated measurement registers.
+
+        **Aliasing note**: The DL3000's measurement subsystem
+        integrates at a fixed 10 PLC (~200 ms). All four reads here
+        return values from the *same* underlying integration window.
+        They look simultaneous but are samples of the same 200 ms
+        average — useful, but don't treat them as independent
+        synchronous V/I/P/R captures. For true high-rate synchronous
+        capture use the Arc Pro's :py:meth:`SMU.record`.
+        """
         return {
             "voltage_V": self.fetch_voltage(),
             "current_A": self.fetch_current(),
@@ -615,22 +624,30 @@ class RigolDL3031A:
         self.write(f":SOURce:LIST:COUNt {int(count)}")
 
     def list_set_step_count(self, steps: int) -> None:
-        """Set the LIST step count.
+        """Set the LIST step count — total number of steps per cycle.
 
-        Per the manual's application instance: ``:SOUR:LIST:STEP N``
-        means the device runs steps indexed ``0..N`` inclusive, i.e.
-        N+1 total steps. So a 3-step list sends ``STEP 2``.
+        Despite the manual's application-instance comment to the
+        contrary (which says STEP 2 = 3 steps), bench testing shows
+        ``:SOUR:LIST:STEP N`` plays **N total steps** (steps indexed
+        ``0..N-1``). Pass the total directly.
 
-        Pass ``steps`` as the **total** number of steps you want to
-        execute (≥ 3); the driver subtracts 1 internally to match the
-        firmware's convention. Maximum is 513 (firmware accepts
-        STEP up to 512).
+        **Firmware bug**: ``STEP 4`` specifically does not fire any
+        steps regardless of how many are programmed (reproducible on
+        firmware 00.01.05.00.01). Avoid 4-step programs — use 3 or 5
+        with the appropriate ``count`` for the same total play time.
+
+        Range: 2..512 (the firmware's documented limit).
         """
-        if not 3 <= steps <= 513:
+        if not 2 <= steps <= 512:
             raise RigolDLValueError(
-                f"LIST step count must be in [3, 513], got {steps}"
+                f"LIST step count must be in [2, 512], got {steps}"
             )
-        self.write(f":SOURce:LIST:STEP {int(steps) - 1}")
+        if steps == 4:
+            raise RigolDLValueError(
+                "LIST STEP=4 is a firmware bug — no steps fire. "
+                "Use 3 or 5 steps with appropriate count instead."
+            )
+        self.write(f":SOURce:LIST:STEP {int(steps)}")
 
     def list_set_step(self, step_index: int, level: float, width_s: float,
                       slew_A_per_us: Optional[float] = None) -> None:
@@ -705,9 +722,15 @@ class RigolDL3031A:
         ``:py:meth:`trigger_now`` to start. With ``"MANUal"`` the user
         presses the front-panel TRAN key.
         """
-        if not 3 <= len(steps) <= 513:
+        if not 2 <= len(steps) <= 512:
             raise RigolDLValueError(
-                f"LIST requires 3..513 steps, got {len(steps)}"
+                f"LIST requires 2..512 steps, got {len(steps)}"
+            )
+        if len(steps) == 4:
+            raise RigolDLValueError(
+                "4-step LIST programs hit a firmware bug — STEP=4 fires no "
+                "steps. Use 3 or 5 steps with appropriate `count` for the "
+                "same total play time."
             )
         self.list_set_mode(mode)
         if range_value is not None:
@@ -755,8 +778,9 @@ class RigolDL3031A:
         self.write(f":SOURce:CURRent:TRANsient:BWIDth {seconds:.6f}")
 
     def transient_set_frequency(self, hz: float) -> None:
-        """Pulse-stream frequency (kHz per the manual, but accepts Hz
-        as a real number)."""
+        """Pulse-stream frequency (Hz). Bench-verified v0.9.7:
+        the manual says kHz but the device actually takes Hz —
+        ``:SOUR:CURR:TRAN:FREQ 10`` reads back as 0.1 s period."""
         self.write(f":SOURce:CURRent:TRANsient:FREQuency {hz:.6f}")
 
     def transient_set_duty(self, percent: float) -> None:
@@ -845,15 +869,41 @@ class RigolDL3031A:
 
     def battery_stats(self) -> dict[str, float]:
         """Current battery-discharge stats from the firmware:
-        capacity (mAh), energy (Wh), discharge time (s), and the
-        instantaneous V/I."""
+        capacity (mAh), energy (Wh), discharge time (s, parsed from
+        the device's ``H:MM:SS`` format), and the instantaneous V/I."""
         return {
             "capacity_mAh": self.query_float(":FETCh:CAPability?"),
             "energy_Wh": self.query_float(":FETCh:WATThours?"),
-            "discharge_time_s": self.query_float(":FETCh:DISChargingTime?"),
+            "discharge_time_s": self._fetch_discharging_time_s(),
             "voltage_V": self.fetch_voltage(),
             "current_A": self.fetch_current(),
         }
+
+    def _fetch_discharging_time_s(self) -> float:
+        """Parse the device's ``H:MM:SS`` discharge-time response.
+
+        Bench-verified v0.9.7: ``:FETCh:DISChargingTime?`` returns a
+        colon-delimited time string (e.g. ``"0:0:15"``), not a float.
+        The manual documents the return as "a real number" which is
+        wrong.
+        """
+        raw = self.query(":FETCh:DISChargingTime?")
+        parts = raw.split(":")
+        if len(parts) != 3:
+            # Fallback to plain float in case future firmware changes
+            try:
+                return float(raw)
+            except ValueError as e:
+                raise RigolDLError(
+                    f"unexpected :FETCh:DISChargingTime? response: {raw!r}"
+                ) from e
+        try:
+            h, m, s = (int(p) for p in parts)
+        except ValueError as e:
+            raise RigolDLError(
+                f"could not parse :FETCh:DISChargingTime? H:M:S: {raw!r}"
+            ) from e
+        return h * 3600.0 + m * 60.0 + float(s)
 
 
 # ---------------------------------------------------------------------------
@@ -862,15 +912,26 @@ class RigolDL3031A:
 
 
 def _autodiscover(rm) -> str:
-    """Scan VISA resources for a Rigol DL3000-family USB device."""
-    resources = rm.list_resources()
+    """Scan VISA resources for a Rigol DL3000-family USB device.
+
+    If exactly one match is found, returns it. If more than one
+    DL3000 is connected (rare but possible), raises with the list
+    of candidate resource strings so the caller can pick explicitly.
+    Iteration is sorted for deterministic behavior across runs.
+    """
+    resources = sorted(rm.list_resources())
     # USB resources look like USB0::0x1AB1::0x0E11::SN::INSTR
     vid = f"0x{RIGOL_USB_VID:04X}".lower()
     pid = f"0x{DL3000_USB_PID:04X}".lower()
-    for r in resources:
-        rl = r.lower()
-        if "usb" in rl and vid in rl and pid in rl:
-            return r
+    matches = [r for r in resources
+               if "usb" in r.lower() and vid in r.lower() and pid in r.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise RigolDLConnectionError(
+            f"multiple Rigol DL3000 devices found — pass an explicit resource "
+            f"string. Candidates: {matches}"
+        )
     raise RigolDLConnectionError(
         f"no Rigol DL3000 (VID 0x{RIGOL_USB_VID:04X} / PID 0x{DL3000_USB_PID:04X}) "
         f"found in VISA resource list: {resources}"

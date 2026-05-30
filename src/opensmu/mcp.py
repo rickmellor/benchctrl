@@ -16,15 +16,31 @@ Only one tool drives voltage onto the output terminals: ``enable_output``.
 It refuses unless the caller passes ``confirm_dut_attached=True`` AND a
 ``current_limit`` has been set. Every other tool is non-destructive on a
 setup with nothing connected to the output.
+
+Concurrency
+-----------
+The server assumes **single-client serialization**: one MCP client
+sends tool calls sequentially. The ``_qr10x_lock`` / ``_dl3031a_lock``
+mutexes only guard open/close transitions against concurrent
+``*_open`` and ``*_close`` calls; per-tool calls do not take the lock
+because the singleton is only mutated by open/close. Running two
+concurrent clients against the same server is unsupported — a tool
+call against a freshly-closed instrument may dereference None and
+crash inside the underlying transport. If you need multi-client
+access, run separate server processes per client and have them
+hold separate sessions to the device.
 """
 
 from __future__ import annotations
 
+import logging
 import struct
 import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger("opensmu.mcp")
 
 from mcp.server.fastmcp import FastMCP
 
@@ -984,8 +1000,9 @@ _qr10x_lock = threading.RLock()
 
 
 def _get_qr10x() -> QR10x:
+    from opensmu.bench.qr10x import QR10xConnectionError
     if _qr10x is None or not _qr10x.is_open:
-        raise RuntimeError(
+        raise QR10xConnectionError(
             "QR10x not open — call qr10x_open(port=...) first."
         )
     return _qr10x
@@ -1109,8 +1126,9 @@ _dl3031a_lock = threading.RLock()
 
 
 def _get_dl3031a():
+    from opensmu.bench.rigol_dl3031a import RigolDLConnectionError
     if _dl3031a is None:
-        raise RuntimeError(
+        raise RigolDLConnectionError(
             "DL3031A not open — call dl3031a_open() first."
         )
     return _dl3031a
@@ -1154,13 +1172,24 @@ def dl3031a_close() -> dict:
     with _dl3031a_lock:
         if _dl3031a is None:
             return {"closed": False, "note": "no DL3031A was open"}
+        input_off_error: Optional[str] = None
         try:
             _dl3031a.set_input(False)
-        except Exception:
-            pass
+        except Exception as e:
+            input_off_error = f"{type(e).__name__}: {e}"
+            log.warning("DL3031A set_input(False) failed during close: %s",
+                        input_off_error)
         _dl3031a.close()
         _dl3031a = None
-    return {"closed": True}
+    result = {"closed": True}
+    if input_off_error is not None:
+        # SAFETY: the load may still be sinking current. Caller MUST
+        # verify the DUT is disconnected or the load is physically off.
+        result["input_off_failed"] = input_off_error
+        result["warning"] = (
+            "load input may still be enabled — verify DUT is safe"
+        )
+    return result
 
 
 @mcp.tool()
@@ -1284,6 +1313,112 @@ def dl3031a_last_error() -> dict:
 
 
 @mcp.tool()
+def dl3031a_clear_status() -> dict:
+    """``*CLS`` — clear status registers and the error queue."""
+    _get_dl3031a().clear_status()
+    return {"cleared": True}
+
+
+@mcp.tool()
+def dl3031a_raise_if_error() -> dict:
+    """Drain the error queue and raise on the first non-zero code.
+    Returns ``{"ok": true}`` if no errors were queued; otherwise the
+    tool surface raises (which the MCP layer will report as an
+    error to the caller)."""
+    _get_dl3031a().raise_if_error()
+    return {"ok": True}
+
+
+@mcp.tool()
+def dl3031a_get_current() -> dict:
+    """Return the CC-mode current setpoint (A)."""
+    return {"current_setpoint_A": _get_dl3031a().get_current()}
+
+
+@mcp.tool()
+def dl3031a_get_voltage() -> dict:
+    """Return the CV-mode voltage setpoint (V)."""
+    return {"voltage_setpoint_V": _get_dl3031a().get_voltage()}
+
+
+@mcp.tool()
+def dl3031a_get_resistance() -> dict:
+    """Return the CR-mode resistance setpoint (Ω)."""
+    return {"resistance_setpoint_ohm": _get_dl3031a().get_resistance()}
+
+
+@mcp.tool()
+def dl3031a_get_power() -> dict:
+    """Return the CP-mode power setpoint (W)."""
+    return {"power_setpoint_W": _get_dl3031a().get_power()}
+
+
+@mcp.tool()
+def dl3031a_get_current_range() -> dict:
+    return {"current_range_A": _get_dl3031a().get_current_range()}
+
+
+@mcp.tool()
+def dl3031a_get_voltage_range() -> dict:
+    return {"voltage_range_V": _get_dl3031a().get_voltage_range()}
+
+
+@mcp.tool()
+def dl3031a_get_slew() -> dict:
+    return {"slew_A_per_us": _get_dl3031a().get_slew()}
+
+
+@mcp.tool()
+def dl3031a_get_trigger_source() -> dict:
+    return {"trigger_source": _get_dl3031a().get_trigger_source()}
+
+
+@mcp.tool()
+def dl3031a_measure_voltage() -> dict:
+    """Single-shot voltage measurement (~200 ms integration)."""
+    return {"voltage_V": _get_dl3031a().measure_voltage()}
+
+
+@mcp.tool()
+def dl3031a_measure_current() -> dict:
+    """Single-shot current measurement (~200 ms integration)."""
+    return {"current_A": _get_dl3031a().measure_current()}
+
+
+@mcp.tool()
+def dl3031a_measure_power() -> dict:
+    return {"power_W": _get_dl3031a().measure_power()}
+
+
+@mcp.tool()
+def dl3031a_measure_resistance() -> dict:
+    return {"resistance_ohm": _get_dl3031a().measure_resistance()}
+
+
+@mcp.tool()
+def dl3031a_fetch_voltage() -> dict:
+    """Non-blocking V read (~1 ms). Reads the device's continuously-updated
+    measurement register without triggering a fresh integration."""
+    return {"voltage_V": _get_dl3031a().fetch_voltage()}
+
+
+@mcp.tool()
+def dl3031a_fetch_current() -> dict:
+    """Non-blocking I read (~1 ms)."""
+    return {"current_A": _get_dl3031a().fetch_current()}
+
+
+@mcp.tool()
+def dl3031a_fetch_power() -> dict:
+    return {"power_W": _get_dl3031a().fetch_power()}
+
+
+@mcp.tool()
+def dl3031a_fetch_resistance() -> dict:
+    return {"resistance_ohm": _get_dl3031a().fetch_resistance()}
+
+
+@mcp.tool()
 def dl3031a_fetch() -> dict:
     """Non-blocking V / I / P / R snapshot — reads the device's
     continuously-updated measurement register without triggering a fresh
@@ -1337,7 +1472,9 @@ def dl3031a_program_list(
     """Program a LIST sequence on the DL3031A and switch the device into
     LIST regulation mode.
 
-    ``steps`` is a list of ``[level, width_s]`` pairs (2-512 entries).
+    ``steps`` is a list of ``[level, width_s]`` pairs (2-512 entries,
+    but **NOT 4** — STEP=4 is a firmware bug that fires no steps;
+    use 3 or 5 with appropriate ``count`` for the same total time).
     ``level`` units depend on ``mode``: A for CC, V for CV, Ω for CR, W for CP.
     ``width_s`` accepts 50 µs to 3600 s. ``count = 0`` means infinite.
 

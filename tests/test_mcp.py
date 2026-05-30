@@ -174,3 +174,114 @@ def test_smu_state_snapshot_shape():
     # nothing has been set yet
     assert snap["voltage_V"] is None
     assert snap["enabled_channels"] == []
+
+
+# ---------------------------------------------------------------------------
+# DL3031A MCP layer — arg coercion & connection-state checks
+# ---------------------------------------------------------------------------
+
+
+class _FakeDL:
+    """Stub that mimics the RigolDL3031A surface the MCP tools touch."""
+    def __init__(self):
+        self.program_list_calls = []
+        self.set_input_calls = []
+        self._mode = "CC"
+        self._func_mode = "FIX"
+        self._closed = False
+
+    def program_list(self, *, steps, mode, count, range_value,
+                     slew_A_per_us, end_behavior, trigger_source):
+        # Record what the MCP layer coerced our args into
+        self.program_list_calls.append({
+            "steps": list(steps), "mode": mode, "count": count,
+            "range_value": range_value, "slew_A_per_us": slew_A_per_us,
+            "end_behavior": end_behavior, "trigger_source": trigger_source,
+        })
+
+    def get_function_mode(self): return self._func_mode
+    def get_mode(self): return self._mode
+    def get_input(self): return False
+    def set_input(self, on): self.set_input_calls.append(on)
+    def close(self): self._closed = True
+
+
+def test_dl3031a_program_list_coerces_int_and_float_step_pairs():
+    from opensmu import mcp as m
+    fake = _FakeDL()
+    m._dl3031a = fake
+    try:
+        result = m.dl3031a_program_list(
+            steps=[[1, 1], [0.030, 0.05], (1e-4, 1.0)],  # mixed int / float / tuple
+            mode="CC", count=2, range_value=6.0,
+            slew_A_per_us=0.5, end_behavior="LAST",
+            trigger_source="BUS",
+        )
+        assert fake.program_list_calls, "program_list was not called"
+        steps = fake.program_list_calls[0]["steps"]
+        # All steps coerced to (float, float) tuples
+        for level, width in steps:
+            assert isinstance(level, float)
+            assert isinstance(width, float)
+        assert steps[0] == pytest.approx((1.0, 1.0))
+        assert steps[1] == pytest.approx((0.030, 0.05))
+        assert steps[2] == pytest.approx((0.0001, 1.0))
+        assert result["function_mode"] == "FIX"
+        assert result["n_steps"] == 3
+        assert result["count"] == 2
+        assert result["trigger_source"] == "BUS"
+    finally:
+        m._dl3031a = None
+
+
+def test_dl3031a_program_list_rejects_malformed_steps():
+    from opensmu import mcp as m
+    fake = _FakeDL()
+    m._dl3031a = fake
+    try:
+        # Each step must be (level, width); a bare scalar is malformed
+        with pytest.raises((TypeError, IndexError, ValueError)):
+            m.dl3031a_program_list(steps=[0.030, 0.05], mode="CC")
+        # Non-numeric also rejected
+        with pytest.raises((TypeError, ValueError)):
+            m.dl3031a_program_list(steps=[["a", "b"], [0.0, 0.1]], mode="CC")
+    finally:
+        m._dl3031a = None
+
+
+def test_dl3031a_tools_raise_driver_connection_error_when_not_open():
+    """L2 fix: _get_dl3031a now raises RigolDLConnectionError, not
+    bare RuntimeError, when the singleton is None."""
+    from opensmu import mcp as m
+    from opensmu.bench.rigol_dl3031a import RigolDLConnectionError
+    m._dl3031a = None
+    with pytest.raises(RigolDLConnectionError):
+        m.dl3031a_info()
+
+
+def test_qr10x_tools_raise_driver_connection_error_when_not_open():
+    """Same as above for QR10x."""
+    from opensmu import mcp as m
+    from opensmu.bench.qr10x import QR10xConnectionError
+    m._qr10x = None
+    with pytest.raises(QR10xConnectionError):
+        m.qr10x_info()
+
+
+def test_dl3031a_close_surfaces_input_off_failure():
+    """H5 fix: dl3031a_close returns input_off_failed when set_input(False)
+    raises. Previously, errors were silently swallowed and the operator
+    got {"closed": True} even though the load could still be sinking."""
+    from opensmu import mcp as m
+    fake = _FakeDL()
+
+    def boom(_on):
+        raise RuntimeError("simulated set_input failure")
+    fake.set_input = boom  # type: ignore[method-assign]
+
+    m._dl3031a = fake
+    result = m.dl3031a_close()
+    assert result["closed"] is True
+    assert "input_off_failed" in result
+    assert "simulated set_input failure" in result["input_off_failed"]
+    assert "warning" in result
