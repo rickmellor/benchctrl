@@ -96,6 +96,22 @@ PATTERNS: dict[str, list[tuple[str, float, float]]] = {
     "hires":    DEFAULT_HIRES_IOT_PATTERN,
 }
 
+# CC-current sequence executed by the DL3031A's LIST mode in firmware.
+# Format: (label, current_A, duration_s). Widths down to 50 µs are
+# accepted by the device, and the LIST runs with deterministic
+# firmware timing — the actual headroom for short TX bursts.
+#
+# Default is 3 steps (sleep / 50 ms TX / sleep) — empirically the most
+# reliable shape under the host's :TRIGger:SOURce BUS path. With
+# --cycles N the firmware repeats this cycle N times. Longer programs
+# (≥ 5 steps) sometimes don't fire cleanly via BUS trigger — under
+# investigation; for now stick to 3-step + COUNt N for repeats.
+DEFAULT_LIST_TX_PATTERN_A = [
+    ("sleep", 0.0001, 1.000),   # 100 µA quiescent
+    ("tx",    0.0300, 0.050),   # 30 mA, 50 ms TX
+    ("sleep", 0.0001, 1.000),
+]
+
 PROFILE_OVERRIDES: dict[str, dict[str, Any]] = {
     # Keyed by the profile filename stem. Lets us tune safety caps per
     # chemistry: LiPo needs the Arc's high range; AA needs a lower
@@ -962,13 +978,240 @@ def run_dynamic_hires(*, profile_path: Path, load: _LoadAdapter,
     return scenario
 
 
+def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
+                     smu_port: Optional[str] = None,
+                     pattern_A: Optional[list[tuple[str, float, float]]] = None,
+                     cycles: int = 1,
+                     output_dir: Path = SCENARIO_DIR) -> dict[str, Any]:
+    """DL3031A-only: program a LIST sequence and play it from firmware.
+
+    The pattern is (label, current_A, duration_s). The DL3031A executes
+    the steps internally with sub-100 µs timing resolution — the right
+    tool for actual TX-burst transients. Host just captures the
+    response via :py:meth:`SMU.record` at the Arc's native rate (~4 kHz
+    on I, ~1 kHz on V). No host-side load control during the run.
+
+    Only DL3031A. QR10x doesn't have programmable sequences.
+    """
+    if load.kind != "dl3031a":
+        raise ValueError(f"--scenario dynamic-list requires --load dl3031a, got {load.kind}")
+    profile = BatteryProfile.load(profile_path)
+    stem = profile_path.stem
+    overrides = PROFILE_OVERRIDES.get(stem, {})
+    pattern_A = list(pattern_A if pattern_A is not None else DEFAULT_LIST_TX_PATTERN_A)
+    safety_R = overrides.get("qr_safety_R", 12.0)
+    safety_V = overrides.get("safety_max_V", 3.5)
+
+    scenario_name = f"{_slugify(stem)}_dynamic-list_{load.kind}_{_timestamp()}"
+    out_base = output_dir / scenario_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cycle_total = sum(d for _, _, d in pattern_A)
+    total_s = cycle_total * cycles
+    print(f"[list/{load.kind}] {stem}: {len(pattern_A)} steps × "
+          f"{cycles} cycles = {total_s:.3f}s in firmware, "
+          f"streaming MAIN_V + MAIN_C from Arc")
+
+    cfg = _make_emulator_config(profile, overrides)
+    samples_out: list[dict[str, Any]] = []
+    phase_events: list[dict[str, Any]] = []
+    pinned_V: Optional[float] = None
+    record_rate_v: Optional[int] = None
+    record_rate_i: Optional[int] = None
+
+    smu_kwargs = {"port": smu_port} if smu_port else {}
+    with SMU.open(**smu_kwargs) as smu:
+        load.open()
+        try:
+            load.setup(safety_R=safety_R, voltage_V=safety_V)
+            time.sleep(0.3)
+            # Use the profile's fresh OCV directly. Running the
+            # emulator first (then stopping it) leaves the Arc Pro in
+            # a regulation state that suppresses subsequent
+            # set_voltage; skipping the emulator avoids that and is
+            # fine here — SoC drift over a 5 s capture at < 60 mA is
+            # negligible (< 0.1 mAh).
+            pinned_V = min(profile.ocv_at(0.0), cfg.safety_max_voltage_V)
+            smu.set_range("low" if pinned_V <= 3.4 else "high")
+            smu.set_current_limit(0.5)
+            smu.set_current_limit_enabled(True)
+            smu.set_power_regulation("voltage")
+            smu.set_voltage(pinned_V)
+            smu.set_output(True)
+            time.sleep(0.5)
+            # Program the LIST on the DL3031A
+            assert isinstance(load, _DL3031AAdapter) and load.dl is not None
+            load.dl.reset()
+            load.dl.clear_status()
+            time.sleep(0.5)
+            load.dl.set_voltage_range(36.0)
+            load.dl.set_current_range(6.0)
+            load.dl.program_list(
+                steps=[(amps, dur) for _, amps, dur in pattern_A],
+                mode="CC",
+                count=cycles,
+                range_value=6.0,
+                slew_A_per_us=0.5,
+                end_behavior="LAST",  # hold final step, don't auto-disable input
+                trigger_source="BUS",
+            )
+            # Build phase_events ahead — we know exactly when each step
+            # will run since the firmware drives it.
+            t_cursor = 0.0
+            for cycle_idx in range(cycles):
+                for label, amps, dur in pattern_A:
+                    phase_events.append({
+                        "cycle": cycle_idx,
+                        "phase": label,
+                        "t_start_s": t_cursor,
+                        "current_A_setpoint": amps,
+                        "duration_s": dur,
+                    })
+                    t_cursor += dur
+            # Start recording, then arm the LIST by enabling input.
+            try:
+                with smu.record(Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT,
+                                name=scenario_name) as rec:
+                    load.dl.set_input(True)
+                    time.sleep(0.2)  # arm settles before trigger
+                    t_record_start = time.monotonic()
+                    load.dl.trigger_now()  # BUS trigger starts the list
+                    time.sleep(total_s + 0.3)
+                    load.dl.set_input(False)
+                vs = rec.data(Channel.MAIN_VOLTAGE)
+                ts_v = rec.timestamps(Channel.MAIN_VOLTAGE)
+                is_ = rec.data(Channel.MAIN_CURRENT)
+                ts_i = rec.timestamps(Channel.MAIN_CURRENT)
+                record_rate_v = rec.buffer(Channel.MAIN_VOLTAGE).sample_rate
+                record_rate_i = rec.buffer(Channel.MAIN_CURRENT).sample_rate
+                merged_ts = ts_i
+                merged_v: list[float] = []
+                vi = 0
+                for t_i in ts_i:
+                    while vi + 1 < len(ts_v) and ts_v[vi + 1] <= t_i:
+                        vi += 1
+                    merged_v.append(vs[vi] if vs else float("nan"))
+                # Subtract recording start so t=0 aligns with the
+                # LIST's first step (set_input(True)). Phase events
+                # already start at 0 so the alignment matches.
+                t_first = ts_i[0] if ts_i else 0.0
+                for t_s, v, i in zip(merged_ts, merged_v, is_):
+                    t_local = float(t_s) - float(t_first)
+                    phase = None
+                    for ev in phase_events:
+                        if ev["t_start_s"] <= t_local < ev["t_start_s"] + ev["duration_s"]:
+                            phase = ev["phase"]
+                            break
+                    samples_out.append({
+                        "t_s": t_local,
+                        "voltage_V": float(v),
+                        "current_A": float(i),
+                        "phase": phase,
+                    })
+            finally:
+                try:
+                    load.dl.set_function_mode("FIXed")
+                except Exception:
+                    pass
+                load.teardown(0.0)
+                try:
+                    smu.set_output(False)
+                except Exception:
+                    pass
+        finally:
+            load.close()
+
+    by_phase: dict[str, list[dict[str, Any]]] = {}
+    for s in samples_out:
+        if s["phase"] is None:
+            continue
+        by_phase.setdefault(s["phase"], []).append(s)
+    phase_summary: list[dict[str, Any]] = []
+    for label, rows in by_phase.items():
+        vs = [r["voltage_V"] for r in rows]
+        is_ = [r["current_A"] for r in rows]
+        phase_summary.append({
+            "phase": label,
+            "n_samples": len(rows),
+            "v_min_V": min(vs), "v_max_V": max(vs),
+            "v_mean_V": sum(vs) / len(vs),
+            "i_min_A": min(is_), "i_max_A": max(is_),
+            "i_mean_A": sum(is_) / len(is_),
+        })
+    for ps in phase_summary:
+        print(f"  phase {ps['phase']:>6}: n={ps['n_samples']:<5}  "
+              f"V[{ps['v_min_V']:.4f}..{ps['v_max_V']:.4f}]  "
+              f"I[{ps['i_min_A']*1000:+.2f}..{ps['i_max_A']*1000:+.2f}] mA")
+
+    scenario = {
+        "scenario": "dynamic_list_firmware",
+        "schema_version": 2,
+        "captured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "opensmu_version": OPENSMU_VERSION,
+        "profile": {
+            "path": str(profile_path), "stem": stem,
+            "battery": {
+                "manufacturer": profile.battery.manufacturer,
+                "model": profile.battery.model,
+                "nominal_voltage_V": profile.nominal_voltage,
+                "nominal_capacity_mAh": profile.nominal_capacity_mAh,
+                "cutoff_voltage_V": profile.cutoff_voltage,
+            },
+        },
+        "emulator_config": {
+            "initial_soc": cfg.initial_soc, "series": cfg.series,
+            "parallel": cfg.parallel, "soc_tracking": cfg.soc_tracking,
+            "safety_max_voltage_V": cfg.safety_max_voltage_V,
+            "current_limit_A": cfg.current_limit_A,
+            "update_interval_s": cfg.update_interval_s,
+            "voltage_range_resolved": ("high" if profile.ocv_at(0.0) > 3.4 else "low"),
+        },
+        "bench": {**load.bench_dict},
+        "list_program": [
+            {"phase": p[0], "current_A": p[1], "duration_s": p[2]}
+            for p in pattern_A
+        ],
+        "cycles": cycles,
+        "recording": {
+            "main_voltage_sample_rate_Hz": record_rate_v,
+            "main_current_sample_rate_Hz": record_rate_i,
+            "n_samples": len(samples_out),
+            "pinned_voltage_V": pinned_V,
+            "note": (
+                "DL3031A LIST mode executed entirely in firmware. Host "
+                "only enables input + waits. Arc Pro pinned at OCV; SoC "
+                "tracking off during recording. Phase events derived "
+                "from the LIST program (deterministic timing)."
+            ),
+        },
+        "phase_events": phase_events,
+        "phase_summary": phase_summary,
+        "samples": samples_out,
+    }
+
+    out_base.with_suffix(".json").write_text(
+        json.dumps(scenario, indent=2), encoding="utf-8")
+    _save_csv(out_base.with_suffix(".csv"), samples_out)
+    profile_copy = out_base.parent / f"{scenario_name}_profile.json"
+    shutil.copyfile(profile_path, profile_copy)
+    title = (f"{profile.battery.manufacturer} {profile.battery.model} — "
+             f"DL3031A LIST mode (firmware-timed, {record_rate_i} Hz I)")
+    has_plot = _save_hires_plot(out_base.with_suffix(".png"), samples_out,
+                                phase_events, title)
+    print(f"  → wrote {out_base.name}.json / .csv"
+          f"{' / .png' if has_plot else ''} and profile snapshot")
+    return scenario
+
+
 def _all_profile_stems() -> list[str]:
     return sorted(p.stem for p in PROFILE_DIR.glob("*.json"))
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--scenario", choices=["static", "dynamic"], default="static")
+    parser.add_argument("--scenario",
+                        choices=["static", "dynamic", "dynamic-list"],
+                        default="static")
     parser.add_argument("--profile", help="profile stem or full JSON path")
     parser.add_argument("--all", action="store_true",
                         help="run scenario across every bundled profile")
@@ -1013,6 +1256,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             if args.scenario == "static":
                 run_static_sweep(profile_path=prof, load=load,
                                  smu_port=args.smu_port, settle_s=args.settle_s,
+                                 output_dir=out_dir)
+            elif args.scenario == "dynamic-list":
+                run_dynamic_list(profile_path=prof, load=load,
+                                 smu_port=args.smu_port, cycles=args.cycles,
                                  output_dir=out_dir)
             elif args.pattern == "hires":
                 run_dynamic_hires(profile_path=prof, load=load,

@@ -1284,6 +1284,154 @@ def dl3031a_last_error() -> dict:
 
 
 @mcp.tool()
+def dl3031a_fetch() -> dict:
+    """Non-blocking V / I / P / R snapshot — reads the device's
+    continuously-updated measurement register without triggering a fresh
+    integration. Suitable for fast polling loops where ``dl3031a_measure``
+    (which forces a ~200 ms integration per call) would be too slow."""
+    return _get_dl3031a().fetch_all()
+
+
+@mcp.tool()
+def dl3031a_set_function_mode(mode: str) -> dict:
+    """Choose which subsystem drives the input regulation:
+    ``FIXed`` (static :SOUR:FUNC + setpoint), ``LIST`` (programmed sequence),
+    ``WAVe``, ``BATTery``, ``OCP``, ``OPP``."""
+    dl = _get_dl3031a()
+    dl.set_function_mode(mode)
+    return {"function_mode": dl.get_function_mode()}
+
+
+@mcp.tool()
+def dl3031a_get_function_mode() -> dict:
+    return {"function_mode": _get_dl3031a().get_function_mode()}
+
+
+@mcp.tool()
+def dl3031a_trigger() -> dict:
+    """Fire a software (BUS) trigger. Starts a LIST or transient
+    sequence after the trigger source has been set to ``BUS``."""
+    _get_dl3031a().trigger_now()
+    return {"triggered": True}
+
+
+@mcp.tool()
+def dl3031a_set_trigger_source(source: str) -> dict:
+    """Pick the trigger source: ``BUS`` (software / MCP),
+    ``EXTernal`` (rear-panel I/O), or ``MANUal`` (front-panel TRAN key)."""
+    dl = _get_dl3031a()
+    dl.set_trigger_source(source)
+    return {"trigger_source": dl.get_trigger_source()}
+
+
+@mcp.tool()
+def dl3031a_program_list(
+    steps: list,
+    mode: str = "CC",
+    count: int = 1,
+    range_value: Optional[float] = None,
+    slew_A_per_us: Optional[float] = None,
+    end_behavior: str = "OFF",
+    trigger_source: str = "BUS",
+) -> dict:
+    """Program a LIST sequence on the DL3031A and switch the device into
+    LIST regulation mode.
+
+    ``steps`` is a list of ``[level, width_s]`` pairs (2-512 entries).
+    ``level`` units depend on ``mode``: A for CC, V for CV, Ω for CR, W for CP.
+    ``width_s`` accepts 50 µs to 3600 s. ``count = 0`` means infinite.
+
+    LIST execution runs entirely in the device's firmware with
+    deterministic timing — the right tool for sub-100 ms TX bursts and
+    other transients that USB-TMC round-trips can't keep up with.
+    After programming, call ``dl3031a_set_input(True)`` to start.
+    """
+    dl = _get_dl3031a()
+    step_tuples = [(float(s[0]), float(s[1])) for s in steps]
+    dl.program_list(
+        steps=step_tuples, mode=mode, count=count,
+        range_value=range_value, slew_A_per_us=slew_A_per_us,
+        end_behavior=end_behavior, trigger_source=trigger_source,
+    )
+    return {
+        "function_mode": dl.get_function_mode(),
+        "n_steps": len(step_tuples),
+        "count": count,
+        "trigger_source": trigger_source,
+    }
+
+
+@mcp.tool()
+def dl3031a_configure_transient_pulse(
+    a_level_A: float,
+    b_level_A: float,
+    a_width_s: float,
+    b_width_s: float,
+    mode: str = "CONTinuous",
+) -> dict:
+    """Configure CC transient mode in one call.
+
+    The load toggles between ``a_level_A`` and ``b_level_A`` with
+    widths ``a_width_s`` / ``b_width_s``. ``mode`` is one of:
+
+    - ``CONTinuous`` — periodic A↔B pulse stream after trigger
+    - ``PULSe`` — single A pulse on trigger, returns to B
+    - ``TOGGle`` — A↔B toggle on each trigger
+
+    Arm with ``dl3031a_transient_enable(True)`` + ``dl3031a_set_input(True)``.
+    """
+    dl = _get_dl3031a()
+    dl.configure_transient_pulse(
+        a_level_A=a_level_A, b_level_A=b_level_A,
+        a_width_s=a_width_s, b_width_s=b_width_s, mode=mode,
+    )
+    return {"mode": dl.get_mode(), "transient_mode": mode}
+
+
+@mcp.tool()
+def dl3031a_transient_enable(on: bool) -> dict:
+    """Arm (``on=True``) or disarm the transient generator
+    (``:SOURce:TRANsient:STATe``)."""
+    _get_dl3031a().transient_enable(on)
+    return {"transient_armed": on}
+
+
+@mcp.tool()
+def dl3031a_configure_battery_test(
+    current_A: float,
+    v_stop_V: Optional[float] = None,
+    capacity_stop_mAh: Optional[float] = None,
+    time_stop_s: Optional[float] = None,
+    von_V: Optional[float] = None,
+    range_A: Optional[float] = None,
+) -> dict:
+    """Configure the DL3031A's built-in battery-discharge mode.
+
+    The load sinks ``current_A`` until any provided stop condition
+    fires (voltage drops to ``v_stop_V``, capacity reaches
+    ``capacity_stop_mAh``, or time exceeds ``time_stop_s``). At least
+    one stop condition is strongly recommended.
+
+    Start with ``dl3031a_set_input(True)``; monitor with
+    ``dl3031a_battery_stats``.
+    """
+    dl = _get_dl3031a()
+    dl.configure_battery_test(
+        current_A=current_A, v_stop_V=v_stop_V,
+        capacity_stop_mAh=capacity_stop_mAh, time_stop_s=time_stop_s,
+        von_V=von_V, range_A=range_A,
+    )
+    return {"function_mode": dl.get_function_mode()}
+
+
+@mcp.tool()
+def dl3031a_battery_stats() -> dict:
+    """Current battery-discharge stats from the firmware: capacity
+    (mAh), energy (Wh), discharge time (s), instantaneous V/I."""
+    return _get_dl3031a().battery_stats()
+
+
+@mcp.tool()
 def battery_profile_lookup(
     path: str,
     used_capacity_mAh: float,

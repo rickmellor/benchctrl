@@ -125,6 +125,22 @@ _MODE_SET_MAP = {
 # What the device returns from :SOURce:FUNCtion? — already two-letter.
 _MODE_QUERY_RETURNS = {"CC", "CV", "CR", "CP"}
 
+# Top-level regulation source — controls which subsystem drives the
+# load: FIXed (the :SOURce:FUNCtion + setpoint), LIST (programmed
+# sequence), WAVe (waveform display), BATTery (battery discharge),
+# OCP / OPP (protection tests).
+_FUNC_MODE_VALUES = {"FIXed", "FIX", "LIST", "WAVe", "WAV",
+                     "BATTery", "BATT", "OCP", "OPP"}
+
+# Transient sub-mode within CC TRANsient: CONTinuous (periodic),
+# PULSe (single pulse on trigger), TOGGle (alternate).
+_CC_TRAN_MODES = {"CONTinuous", "CONT", "PULSe", "PULS", "TOGGle", "TOGG"}
+
+# LIST step end behavior — per manual {LAST|OFF}:
+# - LAST: hold final step's value
+# - OFF:  disable the input when the list completes
+_LIST_END_VALUES = {"LAST", "OFF"}
+
 
 # ---------------------------------------------------------------------------
 # Driver
@@ -515,6 +531,328 @@ class RigolDL3031A:
             "current_A": self.fetch_current(),
             "power_W": self.fetch_power(),
             "resistance_ohm": self.fetch_resistance(),
+        }
+
+    # ------------------------------------------------------------------
+    # Trigger system (:TRIGger)
+    # ------------------------------------------------------------------
+
+    def set_trigger_source(self, source: str) -> None:
+        """Pick what fires a LIST / transient / OCP / OPP sequence.
+
+        - ``BUS`` — the host issues :py:meth:`trigger_now` (``:TRIGger``)
+        - ``EXTernal`` — rear-panel digital I/O trigger pulse
+        - ``MANUal`` — front-panel TRAN key
+        """
+        s = source.strip().upper()
+        if s not in {"BUS", "EXT", "EXTERNAL", "MAN", "MANUAL"}:
+            raise RigolDLValueError(
+                f"trigger source must be BUS/EXTernal/MANUal, got {source!r}"
+            )
+        canonical = {"BUS": "BUS", "EXT": "EXTernal", "EXTERNAL": "EXTernal",
+                     "MAN": "MANUal", "MANUAL": "MANUal"}[s]
+        self.write(f":TRIGger:SOURce {canonical}")
+
+    def get_trigger_source(self) -> str:
+        return self.query(":TRIGger:SOURce?")
+
+    def trigger_now(self) -> None:
+        """Fire a software (BUS) trigger. Requires
+        :py:meth:`set_trigger_source` to be ``BUS``."""
+        self.write(":TRIGger")
+
+    # ------------------------------------------------------------------
+    # Top-level regulation source (:SOURce:FUNCtion:MODE)
+    # ------------------------------------------------------------------
+
+    def set_function_mode(self, mode: str) -> None:
+        """Choose which subsystem drives the input regulation.
+
+        - ``FIXed`` — the static :py:meth:`set_mode` setpoint
+        - ``LIST`` — programmed step sequence (see :py:meth:`program_list`)
+        - ``WAVe`` — waveform display
+        - ``BATTery`` — battery discharge (see :py:meth:`configure_battery_test`)
+        - ``OCP`` / ``OPP`` — protection-trip tests
+        """
+        m = mode.strip()
+        if m not in _FUNC_MODE_VALUES:
+            raise RigolDLValueError(
+                f"function mode must be one of FIXed/LIST/WAVe/BATTery/OCP/OPP, "
+                f"got {mode!r}"
+            )
+        self.write(f":SOURce:FUNCtion:MODE {m}")
+
+    def get_function_mode(self) -> str:
+        """Returns FIX / LIST / WAV / BATT / OCP / OPP."""
+        return self.query(":SOURce:FUNCtion:MODE?").upper()
+
+    # ------------------------------------------------------------------
+    # LIST sequence mode
+    # ------------------------------------------------------------------
+
+    def list_set_mode(self, mode: str) -> None:
+        """Set the per-step regulation mode (CC/CV/CR/CP) for LIST."""
+        scpi = _MODE_SET_MAP.get(mode.upper())
+        if scpi is None:
+            raise RigolDLValueError(
+                f"LIST mode must be CC/CV/CR/CP, got {mode!r}"
+            )
+        # LIST:MODE uses the two-letter form not the long form
+        short = {"CURRent": "CC", "VOLTage": "CV",
+                 "RESistance": "CR", "POWer": "CP"}[scpi]
+        self.write(f":SOURce:LIST:MODE {short}")
+
+    def list_set_range(self, value: float) -> None:
+        """Set the current range used during LIST execution."""
+        self.write(f":SOURce:LIST:RANGe {value:.6f}")
+
+    def list_set_count(self, count: int) -> None:
+        """How many times the entire list cycles. 0 = infinite."""
+        if count < 0 or count > 99_999:
+            raise RigolDLValueError(
+                f"LIST count must be in [0, 99999], got {count}"
+            )
+        self.write(f":SOURce:LIST:COUNt {int(count)}")
+
+    def list_set_step_count(self, steps: int) -> None:
+        """Set the LIST step count.
+
+        Per the manual's application instance: ``:SOUR:LIST:STEP N``
+        means the device runs steps indexed ``0..N`` inclusive, i.e.
+        N+1 total steps. So a 3-step list sends ``STEP 2``.
+
+        Pass ``steps`` as the **total** number of steps you want to
+        execute (≥ 3); the driver subtracts 1 internally to match the
+        firmware's convention. Maximum is 513 (firmware accepts
+        STEP up to 512).
+        """
+        if not 3 <= steps <= 513:
+            raise RigolDLValueError(
+                f"LIST step count must be in [3, 513], got {steps}"
+            )
+        self.write(f":SOURce:LIST:STEP {int(steps) - 1}")
+
+    def list_set_step(self, step_index: int, level: float, width_s: float,
+                      slew_A_per_us: Optional[float] = None) -> None:
+        """Program one step of the list.
+
+        ``step_index`` is zero-based. ``level`` is interpreted per
+        :py:meth:`list_set_mode` (A in CC, V in CV, Ω in CR, W in CP).
+        ``width_s`` is the dwell time (50 µs to 3600 s). Optional
+        ``slew_A_per_us`` sets that step's slew rate.
+        """
+        if step_index < 0:
+            raise RigolDLValueError(f"step_index must be ≥ 0, got {step_index}")
+        if not 0.00005 <= width_s <= 3600.0:
+            raise RigolDLValueError(
+                f"step width must be in [50 µs, 3600 s], got {width_s} s"
+            )
+        self.write(f":SOURce:LIST:LEVel {int(step_index)},{level:.6f}")
+        self.write(f":SOURce:LIST:WIDth {int(step_index)},{width_s:.6f}")
+        if slew_A_per_us is not None:
+            if slew_A_per_us <= 0:
+                raise RigolDLValueError(
+                    f"step slew must be > 0, got {slew_A_per_us}"
+                )
+            self.write(f":SOURce:LIST:SLEW {int(step_index)},{slew_A_per_us:.6f}")
+
+    def list_set_slew(self, step_index: int, amps_per_us: float) -> None:
+        """Set the per-step slew rate (A/µs).
+
+        Per the manual, ``:SOUR:LIST:SLEW`` takes ``<step>,<value>`` —
+        it's per-step, not global. Apply to every step you've
+        programmed for a uniform slew.
+        """
+        if step_index < 0:
+            raise RigolDLValueError(f"step_index must be ≥ 0, got {step_index}")
+        if amps_per_us <= 0:
+            raise RigolDLValueError(f"LIST slew must be > 0, got {amps_per_us}")
+        self.write(f":SOURce:LIST:SLEW {int(step_index)},{amps_per_us:.6f}")
+
+    def list_set_end(self, behavior: str) -> None:
+        """What the load does when the list ends.
+
+        - ``LAST`` — hold the final step's value
+        - ``OFF``  — disable the input when the list completes
+        """
+        b = behavior.strip()
+        if b not in _LIST_END_VALUES:
+            raise RigolDLValueError(
+                f"LIST end behavior must be LAST or OFF, got {behavior!r}"
+            )
+        self.write(f":SOURce:LIST:END {b}")
+
+    def program_list(
+        self,
+        steps: "list[tuple[float, float]]",
+        *,
+        mode: str = "CC",
+        count: int = 1,
+        range_value: Optional[float] = None,
+        slew_A_per_us: Optional[float] = None,
+        end_behavior: str = "OFF",
+        trigger_source: str = "BUS",
+    ) -> None:
+        """Convenience: program an entire list from a Python sequence.
+
+        ``steps`` is a list of ``(level, width_s)`` tuples (3..513).
+        Sets mode, range, count, step count, end behavior, pushes
+        each step (with ``slew_A_per_us`` applied to every step when
+        provided), sets the trigger source, and switches
+        ``:SOUR:FUNC:MODE`` to LIST.
+
+        After programming: with ``trigger_source="BUS"`` (default), call
+        ``:py:meth:`trigger_now`` to start. With ``"MANUal"`` the user
+        presses the front-panel TRAN key.
+        """
+        if not 3 <= len(steps) <= 513:
+            raise RigolDLValueError(
+                f"LIST requires 3..513 steps, got {len(steps)}"
+            )
+        self.list_set_mode(mode)
+        if range_value is not None:
+            self.list_set_range(range_value)
+        self.list_set_count(count)
+        self.list_set_step_count(len(steps))
+        for i, (level, width) in enumerate(steps):
+            self.list_set_step(i, level, width, slew_A_per_us)
+        self.list_set_end(end_behavior)
+        self.set_trigger_source(trigger_source)
+        self.set_function_mode("LIST")
+
+    # ------------------------------------------------------------------
+    # CC transient mode (:SOURce:CURRent:TRANsient)
+    # ------------------------------------------------------------------
+
+    def transient_set_mode(self, mode: str) -> None:
+        """CC transient sub-mode: CONTinuous / PULSe / TOGGle.
+
+        - CONTinuous — periodic A↔B pulse stream after trigger
+        - PULSe — single A pulse on trigger, returns to B
+        - TOGGle — A↔B toggle each trigger
+        """
+        m = mode.strip()
+        if m not in _CC_TRAN_MODES:
+            raise RigolDLValueError(
+                f"transient mode must be CONTinuous/PULSe/TOGGle, got {mode!r}"
+            )
+        self.write(f":SOURce:CURRent:TRANsient:MODE {m}")
+
+    def transient_set_a_level(self, amps: float) -> None:
+        """High-level current (A)."""
+        self.write(f":SOURce:CURRent:TRANsient:ALEVel {amps:.6f}")
+
+    def transient_set_b_level(self, amps: float) -> None:
+        """Low-level current (A)."""
+        self.write(f":SOURce:CURRent:TRANsient:BLEVel {amps:.6f}")
+
+    def transient_set_a_width(self, seconds: float) -> None:
+        """Dwell time at A (s)."""
+        self.write(f":SOURce:CURRent:TRANsient:AWIDth {seconds:.6f}")
+
+    def transient_set_b_width(self, seconds: float) -> None:
+        """Dwell time at B (s)."""
+        self.write(f":SOURce:CURRent:TRANsient:BWIDth {seconds:.6f}")
+
+    def transient_set_frequency(self, hz: float) -> None:
+        """Pulse-stream frequency (kHz per the manual, but accepts Hz
+        as a real number)."""
+        self.write(f":SOURce:CURRent:TRANsient:FREQuency {hz:.6f}")
+
+    def transient_set_duty(self, percent: float) -> None:
+        """A-level duty cycle (%) in continuous mode."""
+        self.write(f":SOURce:CURRent:TRANsient:ADUTy {percent:.6f}")
+
+    def transient_enable(self, on: bool) -> None:
+        """Arm or disarm the transient generator (:SOURce:TRANsient[:STATe])."""
+        self.write(f":SOURce:TRANsient:STATe {1 if on else 0}")
+
+    def configure_transient_pulse(
+        self,
+        *,
+        a_level_A: float,
+        b_level_A: float,
+        a_width_s: float,
+        b_width_s: float,
+        mode: str = "CONTinuous",
+    ) -> None:
+        """Convenience: configure CC TOGG/PULS/CONT transient in one call."""
+        self.set_mode("CC")
+        self.transient_set_mode(mode)
+        self.transient_set_a_level(a_level_A)
+        self.transient_set_b_level(b_level_A)
+        self.transient_set_a_width(a_width_s)
+        self.transient_set_b_width(b_width_s)
+
+    # ------------------------------------------------------------------
+    # Battery discharge mode (:SOURce:BATTary)
+    # ------------------------------------------------------------------
+
+    def battery_set_range(self, amps: float) -> None:
+        self.write(f":SOURce:BATTary:RANGe {amps:.6f}")
+
+    def battery_set_level(self, amps: float) -> None:
+        """Discharge current (A) — like a CC load."""
+        self.write(f":SOURce:BATTary:LEVel:IMMediate {amps:.6f}")
+
+    def battery_set_voltage_stop(self, volts: float, enabled: bool = True) -> None:
+        """Cell voltage at which to stop discharge."""
+        self.write(f":SOURce:BATTary:VSTop {volts:.6f}")
+        self.write(f":SOURce:BATTary:VENabstop {1 if enabled else 0}")
+
+    def battery_set_capacity_stop(self, mAh: float, enabled: bool = True) -> None:
+        """Drawn capacity at which to stop discharge."""
+        self.write(f":SOURce:BATTary:CSTop {mAh:.6f}")
+        self.write(f":SOURce:BATTary:CENabstop {1 if enabled else 0}")
+
+    def battery_set_time_stop(self, seconds: float, enabled: bool = True) -> None:
+        """Wall-clock time at which to stop discharge."""
+        self.write(f":SOURce:BATTary:TIMestop {seconds:.6f}")
+        self.write(f":SOURce:BATTary:TENabstop {1 if enabled else 0}")
+
+    def battery_set_von(self, volts: float) -> None:
+        """Voltage threshold below which the load won't engage."""
+        self.write(f":SOURce:BATTary:VON {volts:.6f}")
+
+    def configure_battery_test(
+        self,
+        *,
+        current_A: float,
+        v_stop_V: Optional[float] = None,
+        capacity_stop_mAh: Optional[float] = None,
+        time_stop_s: Optional[float] = None,
+        von_V: Optional[float] = None,
+        range_A: Optional[float] = None,
+    ) -> None:
+        """Convenience: configure a battery discharge test in one call.
+
+        Stop conditions are individually enabled iff the corresponding
+        argument is non-None. Provide at least one stop condition or
+        the discharge runs until something else (panic-stop) ends it.
+        """
+        if range_A is not None:
+            self.battery_set_range(range_A)
+        self.battery_set_level(current_A)
+        if von_V is not None:
+            self.battery_set_von(von_V)
+        if v_stop_V is not None:
+            self.battery_set_voltage_stop(v_stop_V, enabled=True)
+        if capacity_stop_mAh is not None:
+            self.battery_set_capacity_stop(capacity_stop_mAh, enabled=True)
+        if time_stop_s is not None:
+            self.battery_set_time_stop(time_stop_s, enabled=True)
+        self.set_function_mode("BATTery")
+
+    def battery_stats(self) -> dict[str, float]:
+        """Current battery-discharge stats from the firmware:
+        capacity (mAh), energy (Wh), discharge time (s), and the
+        instantaneous V/I."""
+        return {
+            "capacity_mAh": self.query_float(":FETCh:CAPability?"),
+            "energy_Wh": self.query_float(":FETCh:WATThours?"),
+            "discharge_time_s": self.query_float(":FETCh:DISChargingTime?"),
+            "voltage_V": self.fetch_voltage(),
+            "current_A": self.fetch_current(),
         }
 
 

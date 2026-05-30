@@ -308,6 +308,256 @@ def test_close_is_idempotent():
 
 
 # ---------------------------------------------------------------------------
+# :FETCh: (non-blocking reads)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_voltage_uses_fetch_not_measure():
+    drv, inst = _make({":FETCh:VOLTage:DC?": "3.2"})
+    assert drv.fetch_voltage() == pytest.approx(3.2)
+    assert ":FETCh:VOLTage:DC?" in inst.writes
+    assert ":MEASure:VOLTage:DC?" not in inst.writes
+
+
+def test_fetch_all_returns_dict():
+    drv, _ = _make({
+        ":FETCh:VOLTage:DC?": "3.2",
+        ":FETCh:CURRent:DC?": "0.03",
+        ":FETCh:POWer:DC?": "0.096",
+        ":FETCh:RESistance:DC?": "106.6667",
+    })
+    snap = drv.fetch_all()
+    assert snap["voltage_V"] == pytest.approx(3.2)
+    assert snap["current_A"] == pytest.approx(0.03)
+
+
+# ---------------------------------------------------------------------------
+# Function mode (top-level regulation source)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("m", ["FIXed", "LIST", "WAVe", "BATTery", "OCP", "OPP"])
+def test_set_function_mode_accepts_canonical(m):
+    drv, inst = _make()
+    drv.set_function_mode(m)
+    assert inst.writes[-1] == f":SOURce:FUNCtion:MODE {m}"
+
+
+def test_set_function_mode_rejects_unknown():
+    drv, _ = _make()
+    with pytest.raises(RigolDLValueError):
+        drv.set_function_mode("BOGUS")
+
+
+# ---------------------------------------------------------------------------
+# LIST mode
+# ---------------------------------------------------------------------------
+
+
+def test_list_set_mode_uses_two_letter_form():
+    drv, inst = _make()
+    drv.list_set_mode("CC")
+    assert inst.writes[-1] == ":SOURce:LIST:MODE CC"
+    drv.list_set_mode("CR")
+    assert inst.writes[-1] == ":SOURce:LIST:MODE CR"
+
+
+def test_list_set_count_validates_range():
+    drv, _ = _make()
+    with pytest.raises(RigolDLValueError):
+        drv.list_set_count(-1)
+    with pytest.raises(RigolDLValueError):
+        drv.list_set_count(100_000)
+
+
+def test_list_set_step_count_validates_range():
+    drv, _ = _make()
+    with pytest.raises(RigolDLValueError):
+        drv.list_set_step_count(2)   # < min total of 3
+    with pytest.raises(RigolDLValueError):
+        drv.list_set_step_count(514)  # > max total of 513
+
+
+def test_list_set_step_count_subtracts_one_for_firmware():
+    """Manual: :SOUR:LIST:STEP N means steps 0..N inclusive (N+1 total)."""
+    drv, inst = _make()
+    drv.list_set_step_count(5)  # 5 total steps
+    assert inst.writes[-1] == ":SOURce:LIST:STEP 4"
+
+
+def test_list_set_step_writes_level_then_width():
+    drv, inst = _make()
+    drv.list_set_step(3, 0.030, 0.050)
+    # Last two writes are level then width for step 3
+    assert inst.writes[-2].startswith(":SOURce:LIST:LEVel 3,")
+    assert inst.writes[-1].startswith(":SOURce:LIST:WIDth 3,")
+    level_arg = inst.writes[-2].split(",", 1)[1]
+    width_arg = inst.writes[-1].split(",", 1)[1]
+    assert float(level_arg) == pytest.approx(0.030)
+    assert float(width_arg) == pytest.approx(0.050)
+
+
+def test_list_set_step_with_slew_writes_third_command():
+    drv, inst = _make()
+    drv.list_set_step(2, 0.030, 0.050, slew_A_per_us=0.5)
+    assert any(w.startswith(":SOURce:LIST:SLEW 2,") for w in inst.writes)
+
+
+def test_list_set_step_validates_width_lower_bound():
+    drv, _ = _make()
+    with pytest.raises(RigolDLValueError):
+        drv.list_set_step(0, 0.001, 0.00001)  # 10 µs < 50 µs minimum
+
+
+def test_list_set_step_validates_width_upper_bound():
+    drv, _ = _make()
+    with pytest.raises(RigolDLValueError):
+        drv.list_set_step(0, 0.001, 4000.0)
+
+
+def test_list_set_end_validates():
+    drv, _ = _make()
+    drv.list_set_end("OFF")
+    drv.list_set_end("LAST")
+    with pytest.raises(RigolDLValueError):
+        drv.list_set_end("BOGUS")
+
+
+def test_program_list_pushes_full_sequence():
+    drv, inst = _make()
+    drv.program_list(
+        steps=[(0.00001, 1.0), (0.030, 0.05), (0.00001, 1.0)],
+        mode="CC", count=3, range_value=6.0,
+        slew_A_per_us=0.5, end_behavior="OFF",
+        trigger_source="BUS",
+    )
+    # Final write should switch the device to LIST mode
+    assert inst.writes[-1] == ":SOURce:FUNCtion:MODE LIST"
+    # Should have pushed the three steps
+    level_writes = [w for w in inst.writes if w.startswith(":SOURce:LIST:LEVel")]
+    assert len(level_writes) == 3
+    # Step count = N - 1 (firmware convention)
+    assert ":SOURce:LIST:STEP 2" in inst.writes
+    assert ":SOURce:LIST:COUNt 3" in inst.writes
+    # Range applied
+    assert any(w.startswith(":SOURce:LIST:RANGe ") for w in inst.writes)
+    # Slew per-step (one write per step)
+    slew_writes = [w for w in inst.writes if w.startswith(":SOURce:LIST:SLEW ")]
+    assert len(slew_writes) == 3
+    # Trigger source set
+    assert ":TRIGger:SOURce BUS" in inst.writes
+
+
+def test_program_list_rejects_too_few_steps():
+    drv, _ = _make()
+    with pytest.raises(RigolDLValueError):
+        drv.program_list(steps=[(0.001, 0.001), (0.002, 0.001)], mode="CC")
+
+
+def test_trigger_now_writes_trigger():
+    drv, inst = _make()
+    drv.trigger_now()
+    assert inst.writes[-1] == ":TRIGger"
+
+
+@pytest.mark.parametrize("src,expected", [
+    ("BUS", "BUS"),
+    ("bus", "BUS"),
+    ("EXTernal", "EXTernal"),
+    ("MANUal", "MANUal"),
+])
+def test_set_trigger_source(src, expected):
+    drv, inst = _make()
+    drv.set_trigger_source(src)
+    assert inst.writes[-1] == f":TRIGger:SOURce {expected}"
+
+
+# ---------------------------------------------------------------------------
+# CC transient mode
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("m", ["CONTinuous", "PULSe", "TOGGle"])
+def test_transient_mode_canonical_forms(m):
+    drv, inst = _make()
+    drv.transient_set_mode(m)
+    assert inst.writes[-1] == f":SOURce:CURRent:TRANsient:MODE {m}"
+
+
+def test_transient_mode_rejects_unknown():
+    drv, _ = _make()
+    with pytest.raises(RigolDLValueError):
+        drv.transient_set_mode("FOO")
+
+
+def test_configure_transient_pulse_full_sequence():
+    drv, inst = _make()
+    drv.configure_transient_pulse(
+        a_level_A=0.030, b_level_A=0.0001,
+        a_width_s=0.050, b_width_s=1.0,
+        mode="TOGGle",
+    )
+    # Should have set CC mode + TOGG transient
+    assert ":SOURce:FUNCtion CURRent" in inst.writes
+    assert ":SOURce:CURRent:TRANsient:MODE TOGGle" in inst.writes
+    assert any(w.startswith(":SOURce:CURRent:TRANsient:ALEVel") for w in inst.writes)
+    assert any(w.startswith(":SOURce:CURRent:TRANsient:BLEVel") for w in inst.writes)
+
+
+def test_transient_enable_writes_state():
+    drv, inst = _make()
+    drv.transient_enable(True)
+    drv.transient_enable(False)
+    assert ":SOURce:TRANsient:STATe 1" in inst.writes
+    assert ":SOURce:TRANsient:STATe 0" in inst.writes
+
+
+# ---------------------------------------------------------------------------
+# Battery discharge mode
+# ---------------------------------------------------------------------------
+
+
+def test_battery_voltage_stop_writes_stop_then_enable():
+    drv, inst = _make()
+    drv.battery_set_voltage_stop(2.7, enabled=True)
+    vstop = [w for w in inst.writes if w.startswith(":SOURce:BATTary:VSTop")]
+    venab = [w for w in inst.writes if w.startswith(":SOURce:BATTary:VENabstop")]
+    assert vstop and venab
+    assert venab[-1].endswith(" 1")
+
+
+def test_configure_battery_test_full_setup():
+    drv, inst = _make()
+    drv.configure_battery_test(
+        current_A=0.050, v_stop_V=2.7,
+        capacity_stop_mAh=200.0, time_stop_s=1800.0,
+        range_A=6.0,
+    )
+    # Final write switches to BATTery function mode
+    assert inst.writes[-1] == ":SOURce:FUNCtion:MODE BATTery"
+    # All three stop conditions enabled
+    assert ":SOURce:BATTary:VENabstop 1" in inst.writes
+    assert ":SOURce:BATTary:CENabstop 1" in inst.writes
+    assert ":SOURce:BATTary:TENabstop 1" in inst.writes
+
+
+def test_battery_stats_returns_dict():
+    drv, _ = _make({
+        ":FETCh:CAPability?": "12.345",
+        ":FETCh:WATThours?": "0.0394",
+        ":FETCh:DISChargingTime?": "247.5",
+        ":FETCh:VOLTage:DC?": "3.05",
+        ":FETCh:CURRent:DC?": "0.050",
+    })
+    stats = drv.battery_stats()
+    assert stats["capacity_mAh"] == pytest.approx(12.345)
+    assert stats["energy_Wh"] == pytest.approx(0.0394)
+    assert stats["discharge_time_s"] == pytest.approx(247.5)
+    assert stats["voltage_V"] == pytest.approx(3.05)
+    assert stats["current_A"] == pytest.approx(0.050)
+
+
+# ---------------------------------------------------------------------------
 # Hardware-required tests
 # ---------------------------------------------------------------------------
 
@@ -338,9 +588,43 @@ def test_hardware_idn_and_basic_setpoints():
         load.set_mode("CC")
         load.set_current(0.005)
         assert load.get_mode() == "CC"
-        # No DUT connected → V and I both essentially zero
-        assert load.measure_voltage() < 0.5
-        assert abs(load.measure_current()) < 0.001
+        # V/I read should succeed (value depends on whether an SMU is
+        # also connected — don't assume open-circuit).
+        v = load.measure_voltage()
+        i = load.measure_current()
+        assert isinstance(v, float)
+        assert isinstance(i, float)
         assert load.last_error() is None
     finally:
+        load.close()
+
+
+@pytest.mark.hardware
+def test_hardware_list_program_accepted():
+    """Push a small LIST and verify the firmware accepts the program."""
+    pytest.importorskip("pyvisa")
+    resource = os.environ.get("OPENSMU_DL3031A_RESOURCE")
+    try:
+        load = RigolDL3031A.open(resource=resource)
+    except Exception as e:
+        pytest.skip(f"DL3031A unavailable: {e}")
+    try:
+        load.reset()
+        load.clear_status()
+        # Three-step CC list: idle / TX burst / idle
+        load.program_list(
+            steps=[(0.0001, 0.5), (0.030, 0.050), (0.0001, 0.5)],
+            mode="CC", count=1, range_value=6.0, end_behavior="OFF",
+        )
+        # Device should report LIST as the active function mode
+        assert load.get_function_mode().startswith("LIST")
+        # And no errors should have queued
+        assert load.last_error() is None
+    finally:
+        # Return to FIXed and disable
+        try:
+            load.set_function_mode("FIXed")
+            load.set_input(False)
+        except Exception:
+            pass
         load.close()

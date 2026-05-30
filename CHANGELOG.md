@@ -2,6 +2,144 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.6] — DL3031A built-in modes: LIST, transient, battery discharge
+
+### Added — `RigolDL3031A.program_list` and friends (LIST mode)
+
+Wraps `:SOURce:LIST:*` so a programmable CC/CV/CR/CP sequence can be
+pushed to the DL3031A and executed entirely in firmware with
+deterministic timing (step widths from 50 µs to 3600 s). The right
+tool for sub-100 ms TX bursts and other transients where USB-TMC
+round-trips can't keep up.
+
+API:
+
+- `list_set_mode` / `list_set_range` / `list_set_count` /
+  `list_set_step_count` / `list_set_step` / `list_set_slew` /
+  `list_set_end` — granular SCPI wrappers
+- `program_list(steps=..., mode='CC', count=1, range_value=...,
+  slew_A_per_us=..., end_behavior='OFF'|'LAST',
+  trigger_source='BUS'|'MANUal'|'EXTernal')` — convenience that
+  pushes a whole sequence in one call and switches the device to
+  LIST regulation mode
+
+Two manual-misread bugs ironed out:
+
+- `:SOUR:LIST:STEP N` means steps 0..N inclusive (so N+1 total).
+  The driver accepts the **total** step count and subtracts 1
+  internally to match the firmware's convention.
+- `:SOUR:LIST:SLEW <step>,<value>` is **per-step**, not global.
+  `program_list` applies the same `slew_A_per_us` to every step
+  when provided.
+
+Documented LIST-end behavior: `LAST` (hold final step's value) or
+`OFF` (disable input). The manual incorrectly suggests `NORMal|LAST`
+in places — the firmware accepts only `LAST|OFF`.
+
+### Added — trigger system (`:TRIGger`)
+
+- `set_trigger_source` ({BUS|EXTernal|MANUal}) / `get_trigger_source`
+- `trigger_now` — issues `:TRIGger` (software / BUS trigger)
+
+LIST and transient sequences default to MANUal trigger after `*RST`;
+the driver sets BUS as the default in `program_list` so a software
+trigger fires the sequence.
+
+### Added — CC transient mode (`:SOURce:CURRent:TRANsient:*`)
+
+- `transient_set_mode` (CONTinuous / PULSe / TOGGle)
+- `transient_set_a_level` / `transient_set_b_level` /
+  `transient_set_a_width` / `transient_set_b_width` /
+  `transient_set_frequency` / `transient_set_duty`
+- `transient_enable` — arm / disarm via `:SOURce:TRANsient[:STATe]`
+- `configure_transient_pulse(a_level_A, b_level_A, a_width_s,
+  b_width_s, mode)` — convenience
+
+### Added — battery discharge mode (`:SOURce:BATTary:*`)
+
+- `battery_set_range` / `battery_set_level` /
+  `battery_set_voltage_stop` (V_stop + VEN enabstop) /
+  `battery_set_capacity_stop` / `battery_set_time_stop` /
+  `battery_set_von`
+- `configure_battery_test(current_A, v_stop_V?, capacity_stop_mAh?,
+  time_stop_s?, von_V?, range_A?)` — convenience that pushes the
+  full setup and switches to `BATTery` function mode
+- `battery_stats()` — returns capacity (mAh), energy (Wh), discharge
+  time (s), and instantaneous V/I
+
+### Added — `set_function_mode` / `get_function_mode`
+
+Switch the top-level regulation source between FIXed / LIST / WAVe /
+BATTery / OCP / OPP. Implicitly set by the various
+`program_list` / `configure_*` helpers.
+
+### Added — `:FETCh:` query methods
+
+Already in v0.9.5 but consolidated here for clarity. `fetch_voltage`
+/ `fetch_current` / `fetch_power` / `fetch_resistance` / `fetch_all`
+read the device's continuously-updated measurement register
+(non-blocking ~1 ms each, vs `measure_*` which trigger a fresh
+~200 ms integration).
+
+### Added — `:SYSTem:KEY` 0 (CC) through 25 (numeric) etc
+
+Not exposed in this release; the driver leaves front-panel-key
+simulation as the user's job via `dl.write(":SYSTem:KEY <code>")`
+if needed.
+
+### Added — MCP tools for the new methods
+
+New tools (`dl3031a_*`):
+
+- `dl3031a_set_function_mode` / `dl3031a_get_function_mode`
+- `dl3031a_program_list` — push a LIST from a JSON `[level, width]` list
+- `dl3031a_set_trigger_source` / `dl3031a_trigger`
+- `dl3031a_configure_transient_pulse` / `dl3031a_transient_enable`
+- `dl3031a_configure_battery_test` / `dl3031a_battery_stats`
+- `dl3031a_fetch`
+
+DL3031A MCP tool count: 17 → **25**. Total MCP tools: 65 → **73**.
+
+### Added — `--scenario dynamic-list` validation runner
+
+New scenario type: programs a CC LIST on the DL3031A, fires it via
+software trigger inside an `SMU.record(...)` window, captures the
+response at the Arc Pro's native streaming rate (~4 kHz on I,
+~1 kHz on V). The DL3031A executes the steps entirely in firmware
+with deterministic timing — no per-step USB-TMC round-trip.
+
+`DEFAULT_LIST_TX_PATTERN_A` is currently 3 steps (sleep / 50 ms TX
+/ sleep), chosen empirically: under the BUS-trigger path, programs
+with ≥ 5 steps sometimes don't fire cleanly via software trigger.
+The hardware tests confirm LIST executes correctly when triggered
+manually or with short total programs — investigation continued
+into v0.9.7.
+
+Saved scenarios for CR2032 and CR123A (LiPo's high-V-range path is
+flaky in this flow and is excluded from the v0.9.6 set).
+
+### Tests
+
+72 hardware-free tests in `tests/test_bench_rigol_dl3031a.py`
+(was 36 in v0.9.3) — covering wire-format for every new method
+plus end-to-end mocks. Two hardware-marked tests including a
+real LIST program push.
+
+### Discovered
+
+- `:SOUR:LIST:STEP N` is highest-index, not total-count
+  (3-step list → STEP 2). Driver compensates.
+- `:SOUR:LIST:SLEW` is per-step, not global.
+- `:SOUR:LIST:END` accepts `LAST|OFF`, not `NORMal|LAST` as I
+  initially misread.
+- `:SOUR:FUNC:MODE` doesn't always honor `FIXed` after switching
+  away. Workaround: re-program the desired subsystem instead.
+- LIST integration timing inside `SMU.record()` is misaligned vs
+  the harness's phase events — the LIST plays but with delayed
+  onset (~3 s after `:TRIGger` in some flows). Tagged as a known
+  limit in `validation/README.md`; the captured waveforms still
+  show real LIST behavior.
+
 ## [0.9.5] — high-resolution dynamic capture via Arc Pro native streaming
 
 ### Added — `--pattern hires` dynamic scenario
