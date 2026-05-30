@@ -6,7 +6,7 @@ Run:
 
 from __future__ import annotations
 
-from benchctrl import SMU
+from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
 
 
 def main() -> None:

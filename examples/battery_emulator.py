@@ -25,7 +25,7 @@ import argparse
 import time
 from pathlib import Path
 
-from benchctrl import SMU
+from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
 from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
 
 

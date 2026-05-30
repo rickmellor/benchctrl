@@ -414,7 +414,7 @@ def duty_cycle_from_recording(
     — i.e. the cycle structure you observed in the recording, not an
     abstract duty cycle from a datasheet.
     """
-    from benchctrl import Channel
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
     ch = Channel.coerce(channel)
     if ch not in rec:

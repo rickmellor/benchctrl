@@ -36,7 +36,7 @@ from typing import Iterable, Protocol, Union, runtime_checkable
 # benchctrl.channels.Channel (Arc-specific). v1.0 phase 4 splits this
 # into a top-level StandardChannel + per-driver enums. For now the
 # Protocol accepts the Channel enum or a string code.
-from benchctrl.channels import Channel
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 from benchctrl.recording import Recording
 
 #: A channel reference — the canonical enum, or its two-letter code

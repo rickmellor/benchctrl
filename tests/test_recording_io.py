@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from benchctrl.channels import Channel
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 from benchctrl.exceptions import BenchValueError
 from benchctrl.recording import Recording
 

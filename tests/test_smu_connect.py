@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from benchctrl import SMU
+from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
 
 pytestmark = pytest.mark.hardware
 

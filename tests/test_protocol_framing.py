@@ -7,7 +7,7 @@ import struct
 import pytest
 
 from benchctrl.exceptions import BenchProtocolError
-from benchctrl.protocol import (
+from benchctrl.drivers.otii_arc.protocol import (
     WIRE_MAGIC,
     checksum,
     encode_frame,

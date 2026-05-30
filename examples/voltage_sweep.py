@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import time
 
-from benchctrl import SMU, Channel
+from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
 VOLTAGES = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.25]
 DWELL_SECONDS = 1.0

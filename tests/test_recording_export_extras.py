@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from benchctrl import Channel, Recording
+from benchctrl import Recording
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
 
 def _build_recording():

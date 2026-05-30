@@ -50,7 +50,7 @@ Series / parallel
 
 Example::
 
-    from benchctrl import SMU
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
     from benchctrl.battery import BatteryProfile
     from benchctrl.battery.emulator import Emulator, EmulatorConfig
 
@@ -84,7 +84,7 @@ from benchctrl.battery.profile import BatteryProfile
 from benchctrl.exceptions import BenchValueError
 
 if TYPE_CHECKING:
-    from benchctrl.device import SMU
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
 
 log = logging.getLogger("benchctrl.battery.emulator")
 
@@ -442,7 +442,7 @@ class Emulator:
         sleeps and continues, so retries on transient failures still
         work — but real errors now surface in the warning log instead
         of being silently swallowed."""
-        from benchctrl import Channel
+        from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
         return self.smu.read_value(
             Channel.MAIN_CURRENT,

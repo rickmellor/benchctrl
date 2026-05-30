@@ -77,7 +77,8 @@ def test_tools_have_docstrings():
 
 def _make_saved_recording(tmp_path):
     """Build + save a small synthetic recording. Returns the .opensmu path."""
-    from benchctrl import Channel, Recording
+    from benchctrl import Recording
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
     rec = Recording(name="hw-free-sync-test")
     mc = rec._ensure_buffer(Channel.MAIN_CURRENT, 4000)
@@ -160,9 +161,9 @@ def test_plot_recording_subset_of_channels(tmp_path):
 def test_smu_state_snapshot_shape():
     """The internal state-snapshot helper produces a well-formed dict for any
     SMU. Use a transport-less SMU stub to avoid hardware."""
-    from benchctrl.device import SMU
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
     from benchctrl.mcp import _smu_state
-    from benchctrl.transport import Transport
+    from benchctrl.drivers.otii_arc.transport import Transport
 
     smu = SMU(Transport("__dummy__"))  # never opened
     snap = _smu_state(smu)

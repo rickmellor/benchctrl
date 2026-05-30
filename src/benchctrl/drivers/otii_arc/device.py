@@ -1,4 +1,4 @@
-"""SMU — the public device class.
+"""OtiiArc — the public device class.
 
 Wraps a single Arc/Arc Pro for the lifetime of a connection. Owns:
 
@@ -20,7 +20,10 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
-from benchctrl.channels import WIRE_ID_TO_CHANNEL, Channel
+from benchctrl.drivers.otii_arc.channels import (
+    WIRE_ID_TO_CHANNEL,
+    OtiiArcChannel as Channel,
+)
 from benchctrl.exceptions import (
     BenchCommandError,
     BenchConnectionError,
@@ -28,7 +31,7 @@ from benchctrl.exceptions import (
     BenchTimeoutError,
     BenchValueError,
 )
-from benchctrl.protocol import (
+from benchctrl.drivers.otii_arc.protocol import (
     CMD_ENABLE_5V,
     CMD_ENABLE_LEGACY_SINK,
     CMD_GET_CHANNEL_INVENTORY,
@@ -77,7 +80,7 @@ from benchctrl.protocol import (
 )
 from benchctrl.recording import Recording
 from benchctrl.samples import Sample
-from benchctrl.transport import PortInfo, Transport, discover_arc_ports
+from benchctrl.drivers.otii_arc.transport import PortInfo, Transport, discover_arc_ports
 
 log = logging.getLogger("benchctrl.device")
 
@@ -88,7 +91,7 @@ VALID_POWER_REGULATIONS = ("voltage", "current", "inline", "off")
 
 
 @dataclass(frozen=True)
-class SMUInfo:
+class OtiiArcInfo:
     """Discovery-time descriptor for a connected device."""
 
     port: str
@@ -97,7 +100,7 @@ class SMUInfo:
     description: str
 
     @classmethod
-    def from_port(cls, p: PortInfo) -> SMUInfo:
+    def from_port(cls, p: PortInfo) -> OtiiArcInfo:
         return cls(
             port=p.device,
             name=p.name,
@@ -135,12 +138,12 @@ class _State:
     last_value: dict[Channel, float] = field(default_factory=dict)
 
 
-class SMU:
+class OtiiArc:
     """A connected source-measurement unit."""
 
     # ----- construction / discovery -------------------------------------
 
-    def __init__(self, transport: Transport, *, info: Optional[SMUInfo] = None):
+    def __init__(self, transport: Transport, *, info: Optional[OtiiArcInfo] = None):
         self._transport = transport
         self._info = info
         self._seq = 0x1000
@@ -165,19 +168,19 @@ class SMU:
         self._raw_window_buffer = bytearray()
 
     @classmethod
-    def discover(cls) -> list[SMUInfo]:
+    def discover(cls) -> list[OtiiArcInfo]:
         """List every connected Arc/Arc Pro."""
-        return [SMUInfo.from_port(p) for p in discover_arc_ports()]
+        return [OtiiArcInfo.from_port(p) for p in discover_arc_ports()]
 
     @classmethod
     def open(
         cls,
-        port: Optional[Union[str, SMUInfo, PortInfo]] = None,
+        port: Optional[Union[str, OtiiArcInfo, PortInfo]] = None,
         *,
         baudrate: int = 9600,
-    ) -> SMU:
+    ) -> OtiiArc:
         """Open a connection. If `port` is None, auto-discovers the first device."""
-        info: Optional[SMUInfo] = None
+        info: Optional[OtiiArcInfo] = None
         port_name: Optional[str] = None
         if port is None:
             discovered = cls.discover()
@@ -187,11 +190,11 @@ class SMU:
                 )
             info = discovered[0]
             port_name = info.port
-        elif isinstance(port, SMUInfo):
+        elif isinstance(port, OtiiArcInfo):
             info = port
             port_name = port.port
         elif isinstance(port, PortInfo):
-            info = SMUInfo.from_port(port)
+            info = OtiiArcInfo.from_port(port)
             port_name = port.device
         elif isinstance(port, str):
             port_name = port
@@ -241,7 +244,7 @@ class SMU:
 
     # ----- context manager ----------------------------------------------
 
-    def __enter__(self) -> SMU:
+    def __enter__(self) -> OtiiArc:
         return self
 
     def __exit__(self, *exc_info) -> None:
@@ -257,7 +260,7 @@ class SMU:
     # ----- identity & state queries -------------------------------------
 
     @property
-    def info(self) -> Optional[SMUInfo]:
+    def info(self) -> Optional[OtiiArcInfo]:
         return self._info
 
     @property

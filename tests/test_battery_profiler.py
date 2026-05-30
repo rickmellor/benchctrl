@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from benchctrl import Channel
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 from benchctrl.battery import (
     Battery,
     DischargeProfile,

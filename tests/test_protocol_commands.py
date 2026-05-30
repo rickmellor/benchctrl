@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 
-from benchctrl.protocol import (
+from benchctrl.drivers.otii_arc.protocol import (
     CMD_ENABLE_5V,
     CMD_SET_MAIN_VOLTAGE,
     CMD_SET_OC_PROTECTION,

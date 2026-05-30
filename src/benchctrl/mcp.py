@@ -44,7 +44,9 @@ log = logging.getLogger("benchctrl.mcp")
 
 from mcp.server.fastmcp import FastMCP
 
-from benchctrl import SMU, Channel, Recording
+from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
+from benchctrl.recording import Recording
 from benchctrl.battery import (
     Battery,
     BatteryProfile,
@@ -63,9 +65,9 @@ from benchctrl.battery import (
 from benchctrl.bench import QR10x
 # RigolDL3031A is imported lazily inside the tool functions so the MCP
 # server doesn't hard-require pyvisa to start.
-from benchctrl.channels import WIRE_ID_TO_CHANNEL
+from benchctrl.drivers.otii_arc.channels import WIRE_ID_TO_CHANNEL
 from benchctrl.exceptions import BenchError
-from benchctrl.protocol import iter_frames, iter_samples
+from benchctrl.drivers.otii_arc.protocol import iter_frames, iter_samples
 from benchctrl.samples import compute_statistics
 
 mcp = FastMCP("benchctrl")

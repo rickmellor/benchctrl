@@ -6,7 +6,8 @@ import time
 
 import pytest
 
-from benchctrl import Channel, Recording
+from benchctrl import Recording
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
 pytestmark = pytest.mark.hardware
 

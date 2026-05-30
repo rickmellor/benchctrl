@@ -58,7 +58,7 @@ from benchctrl.battery.profile import (
 from benchctrl.exceptions import BenchValueError
 
 if TYPE_CHECKING:
-    from benchctrl.device import SMU
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
 
 log = logging.getLogger("benchctrl.battery.profiler")
 
@@ -151,7 +151,7 @@ class Profiler:
 
     Usage:
 
-        from benchctrl import SMU
+        from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
         from benchctrl.battery import (
             Battery, DischargeProfile, DischargeStep, ExitConditions,
         )
@@ -199,7 +199,7 @@ class Profiler:
         progress: Optional[Callable[[ProfilerSample], None]] = None,
     ) -> ProfilerResult:
         """Execute the discharge cycle and return the resulting profile."""
-        from benchctrl import Channel
+        from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
         dp = self.config.discharge_profile
         high = dp.high

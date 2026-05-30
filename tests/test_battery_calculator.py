@@ -236,7 +236,8 @@ def test_profile_estimator_runs_against_bundled_cr2032():
 
 def test_duty_cycle_from_recording():
     """Given a synthetic recording with a step in mc, extract the duty cycle."""
-    from benchctrl import Channel, Recording
+    from benchctrl import Recording
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
     rec = Recording(name="dc-test")
     mc = rec._ensure_buffer(Channel.MAIN_CURRENT, 1000)
@@ -259,7 +260,8 @@ def test_duty_cycle_from_recording():
 
 
 def test_duty_cycle_from_recording_rejects_missing_channel():
-    from benchctrl import Channel, Recording
+    from benchctrl import Recording
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
     rec = Recording(name="missing")
     rec._ensure_buffer(Channel.MAIN_VOLTAGE, 1000)
@@ -270,7 +272,8 @@ def test_duty_cycle_from_recording_rejects_missing_channel():
 
 
 def test_duty_cycle_from_recording_rejects_empty_window():
-    from benchctrl import Channel, Recording
+    from benchctrl import Recording
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
     rec = Recording(name="empty")
     mc = rec._ensure_buffer(Channel.MAIN_CURRENT, 1000)

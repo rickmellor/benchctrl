@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from benchctrl.transport import PortInfo, discover_arc_ports
+from benchctrl.drivers.otii_arc.transport import PortInfo, discover_arc_ports
 
 
 def test_discover_returns_list():

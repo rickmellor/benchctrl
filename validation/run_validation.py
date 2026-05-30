@@ -53,7 +53,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from benchctrl import SMU, Channel
+from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 from benchctrl._version import __version__ as BENCHCTRL_VERSION
 from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
 from benchctrl.bench import QR10x

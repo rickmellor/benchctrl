@@ -16,8 +16,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from benchctrl.channels import WIRE_ID_TO_CHANNEL, Channel
-from benchctrl.protocol import (
+from benchctrl.drivers.otii_arc.channels import (
+    WIRE_ID_TO_CHANNEL,
+    OtiiArcChannel as Channel,
+)
+from benchctrl.drivers.otii_arc.protocol import (
     SAMPLE_RECORD_HEADER,
     SAMPLE_RECORD_LEN,
     SampleRecord,

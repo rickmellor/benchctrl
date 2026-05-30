@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from benchctrl.channels import WIRE_ID_TO_CHANNEL, Channel, ChannelInfo
+from benchctrl.drivers.otii_arc.channels import (
+    WIRE_ID_TO_CHANNEL,
+    ChannelInfo,
+    OtiiArcChannel as Channel,
+)
 
 
 def test_main_channels_have_correct_metadata():

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from benchctrl import Channel, Sample
+from benchctrl import Sample
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
 pytestmark = pytest.mark.hardware
 

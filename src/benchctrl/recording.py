@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 
-from benchctrl.channels import Channel
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 from benchctrl.exceptions import BenchNotImplementedError, BenchValueError
 from benchctrl.samples import (
     ChannelBuffer,

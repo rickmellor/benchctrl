@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import time
 
-from benchctrl import SMU, Channel, Recording
+from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
+from benchctrl.recording import Recording
 
 
 def main() -> None:

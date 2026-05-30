@@ -118,7 +118,7 @@ def test_write_tx_sends_bytes(smu):
 def test_recording_stop_includes_prepare_stop(smu):
     """The recording should still cleanly start + stop with the new
     0x7E prepare-stop frame inserted before the disable burst."""
-    from benchctrl import Channel
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
     import time
 
     smu.disable_all_channels()

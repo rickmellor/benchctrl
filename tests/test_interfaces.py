@@ -31,7 +31,7 @@ def test_otii_arc_class_implements_source_measurement_unit():
     """The Arc class (currently benchctrl.SMU; will become
     benchctrl.drivers.otii_arc.OtiiArc in phase 4) must expose every
     method the SourceMeasurementUnit Protocol declares."""
-    from benchctrl import SMU
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
     required = _protocol_members(SourceMeasurementUnit)
     missing = [name for name in required if not hasattr(SMU, name)]
     assert not missing, (

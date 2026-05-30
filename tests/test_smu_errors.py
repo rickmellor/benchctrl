@@ -16,7 +16,7 @@ def test_set_4v_in_low_range_eventually_raises(smu):
     background reader picks up the error frame quickly. The device's
     baseline streaming is ~6 Hz, so we wait generously for the rejection
     to land in our buffer."""
-    from benchctrl import Channel
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 
     smu.set_range("low")
     smu.disable_all_channels()

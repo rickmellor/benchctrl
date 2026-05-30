@@ -7,8 +7,8 @@ import struct
 
 import pytest
 
-from benchctrl.channels import Channel
-from benchctrl.protocol import (
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
+from benchctrl.drivers.otii_arc.protocol import (
     SAMPLE_RECORD_HEADER,
     encode_frame,
 )

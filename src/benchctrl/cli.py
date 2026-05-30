@@ -23,7 +23,8 @@ import sys
 import time
 from pathlib import Path
 
-from benchctrl import SMU, Channel
+from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 from benchctrl._version import __version__
 from benchctrl.exceptions import BenchError
 

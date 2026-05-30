@@ -20,7 +20,7 @@ def _disconnect_after_each_test():
 
 def _ensure_hardware_available():
     """Skip if no Arc is connected."""
-    from benchctrl import SMU
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
 
     if not SMU.discover():
         pytest.skip("no Arc Pro found")

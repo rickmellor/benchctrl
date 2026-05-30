@@ -14,7 +14,7 @@ import serial
 import serial.tools.list_ports as list_ports
 
 from benchctrl.exceptions import BenchConnectionError
-from benchctrl.protocol import PID, VID
+from benchctrl.drivers.otii_arc.protocol import PID, VID
 
 
 @dataclass(frozen=True)
