@@ -56,11 +56,10 @@ from benchctrl.battery.profile import (
     DischargeTable,
 )
 from benchctrl.channels import StandardChannel
-from benchctrl.exceptions import BenchValueError
+from benchctrl.exceptions import BenchError, BenchValueError
 
 if TYPE_CHECKING:
     from benchctrl.interfaces import SourceMeasurementUnit
-    SMU = SourceMeasurementUnit
 
 log = logging.getLogger("benchctrl.battery.profiler")
 
@@ -153,7 +152,7 @@ class Profiler:
 
     Usage:
 
-        from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+        from benchctrl.drivers.otii_arc import OtiiArc
         from benchctrl.battery import (
             Battery, DischargeProfile, DischargeStep, ExitConditions,
         )
@@ -173,13 +172,13 @@ class Profiler:
             temperature=25.0,
         )
 
-        with SMU.open() as smu:
+        with OtiiArc.open() as smu:
             profiler = Profiler(smu, config)
             result = profiler.run(progress=lambda s: print(s))
             result.profile.save("LP-1000-(25).json")
     """
 
-    def __init__(self, smu: "SMU", config: ProfilerConfig) -> None:
+    def __init__(self, smu: "SourceMeasurementUnit", config: ProfilerConfig) -> None:
         self.smu = smu
         self.config = config
         self._aborted = False
@@ -357,17 +356,28 @@ class Profiler:
     def _measure_v_i(self, v_channel, i_channel, window_s: float) -> tuple[float, float]:
         """Average voltage and current over a short measurement window.
 
-        Calls :py:meth:`SMU.read_window` to drain a window of inbound
-        samples, then returns the mean of the **most recent half** on
-        each channel. The most-recent-half trick gives the device's
-        measurement time to settle after the prior load step took
-        effect, avoiding stale carry-over.
+        Calls :py:meth:`SourceMeasurementUnit.read_window` to drain a
+        window of inbound samples, then returns the mean of the **most
+        recent half** on each channel. The most-recent-half trick gives
+        the device's measurement time to settle after the prior load
+        step took effect, avoiding stale carry-over.
+
+        Transient read failures (queued protocol error, transport
+        hiccup, etc.) are logged and surfaced as NaN samples so the
+        profiler can continue past a single bad window. A persistent
+        failure will tank every subsequent measurement and the caller
+        will see NaN propagating through the result — easier to spot
+        than a silent loop.
         """
         try:
             samples = self.smu.read_window(
                 [v_channel, i_channel], max(0.02, window_s)
             )
-        except Exception:
+        except BenchError as exc:
+            log.warning(
+                "read_window failed during step measurement: %r — "
+                "returning NaN for this sample", exc,
+            )
             return float("nan"), float("nan")
 
         def _avg_latest(ch) -> float:
@@ -404,12 +414,19 @@ class Profiler:
             hardware_id="",
             firmware_version="",
         )
-        # Best-effort: query the device for its real version + serial
+        # Best-effort: query the device for its real version + serial.
+        # The metadata is informational — if the device can't be queried
+        # we still want a saveable profile — but log so the operator sees
+        # missing fields rather than wondering why a saved profile has
+        # blank metadata.
         try:
             device_info.firmware_version = self.smu.get_fw_version()
             device_info.id = self.smu.get_device_id()
-        except Exception:
-            pass
+        except BenchError as exc:
+            log.warning(
+                "could not read device identity for profile metadata "
+                "(saving with blanks): %r", exc,
+            )
 
         table = DischargeTable(
             table=[

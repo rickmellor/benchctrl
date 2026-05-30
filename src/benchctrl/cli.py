@@ -23,20 +23,19 @@ import sys
 import time
 from pathlib import Path
 
-from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
-from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
+from benchctrl.drivers.otii_arc import OtiiArc, OtiiArcChannel
 from benchctrl._version import __version__
 from benchctrl.exceptions import BenchError
 
 
-def _open_smu(args) -> SMU:
+def _open_smu(args) -> OtiiArc:
     if args.port:
-        return SMU.open(args.port)
-    return SMU.open()
+        return OtiiArc.open(args.port)
+    return OtiiArc.open()
 
 
 def cmd_discover(args) -> int:
-    devices = SMU.discover()
+    devices = OtiiArc.discover()
     if not devices:
         print("No Arc Pro found.")
         return 1
@@ -109,7 +108,7 @@ def cmd_set_gpo(args) -> int:
 def cmd_capture(args) -> int:
     out_path = Path(args.path)
     suffix = out_path.suffix.lower()
-    channels = [Channel.from_code(c) for c in (args.channels or ["mv", "mc"])]
+    channels = [OtiiArcChannel.from_code(c) for c in (args.channels or ["mv", "mc"])]
 
     with _open_smu(args) as smu:
         smu.enable_channels(*channels)

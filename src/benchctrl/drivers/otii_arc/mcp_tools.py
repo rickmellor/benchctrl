@@ -16,30 +16,33 @@ in :py:mod:`benchctrl.mcp` since they're not driver-specific.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
+log = logging.getLogger("benchctrl.drivers.otii_arc.mcp_tools")
+
 from benchctrl.drivers.otii_arc.channels import (
     WIRE_ID_TO_CHANNEL,
-    OtiiArcChannel as Channel,
+    OtiiArcChannel,
 )
-from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+from benchctrl.drivers.otii_arc.device import OtiiArc
 from benchctrl.drivers.otii_arc.protocol import iter_frames, iter_samples
 from benchctrl.exceptions import BenchError
 from benchctrl.recording import Recording
 
-_smu: Optional[SMU] = None
+_smu: Optional[OtiiArc] = None
 _lock = threading.RLock()
 
 
-def _get_smu() -> SMU:
-    """Return the singleton SMU, opening it if not already connected."""
+def _get_smu() -> OtiiArc:
+    """Return the singleton Arc, opening it if not already connected."""
     global _smu
     with _lock:
         if _smu is None or not _smu.is_connected:
-            _smu = SMU.open()
+            _smu = OtiiArc.open()
         return _smu
 
 
@@ -49,12 +52,16 @@ def _close_smu() -> None:
         if _smu is not None:
             try:
                 _smu.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                # Best-effort during teardown — log so the operator can see
+                # transport / state issues, but don't propagate (the caller
+                # is closing for cleanup, not because they care about
+                # close() return values).
+                log.warning("OtiiArc.close() raised during shutdown: %r", exc)
             _smu = None
 
 
-def _smu_state(smu: SMU) -> dict:
+def _smu_state(smu: OtiiArc) -> dict:
     """Compact host-cached state snapshot for inclusion in tool responses."""
     return {
         "is_connected": smu.is_connected,
@@ -102,7 +109,7 @@ def _statistics_dict(rec: Recording) -> dict:
     """Per-channel statistics in JSON-friendly form."""
     out: dict = {}
     for ch_code in sorted({c.code for c in rec.channels}):
-        ch = Channel.from_code(ch_code)
+        ch = OtiiArcChannel.from_code(ch_code)
         stats = rec.statistics(ch)
         out[ch_code] = {
             "samples": stats.sample_count,
@@ -133,7 +140,7 @@ def _render_plot_png(
     matplotlib.use("Agg")  # headless backend — no display required
     import matplotlib.pyplot as plt
 
-    ch_objs = None if channels is None else [Channel.coerce(c) for c in channels]
+    ch_objs = None if channels is None else [OtiiArcChannel.coerce(c) for c in channels]
     fig = rec.plot(channels=ch_objs, show=False, title=title)
     out = Path(output_png)
     fig.savefig(out, dpi=150, bbox_inches="tight")
@@ -212,7 +219,7 @@ def list_channels() -> dict:
                 "subtype": c.subtype,
                 "toggleable": c.toggleable,
             }
-            for c in Channel
+            for c in OtiiArcChannel
         ]
     }
 
@@ -386,7 +393,7 @@ def live(channel: str = "mv", timeout_s: float = 1.5) -> dict:
     Example: ``live("mc")`` returns the next main-current sample.
     """
     smu = _get_smu()
-    ch = Channel.coerce(channel)
+    ch = OtiiArcChannel.coerce(channel)
     value = smu.read_value(ch, timeout=timeout_s)
     return {
         "channel": ch.code,

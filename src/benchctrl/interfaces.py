@@ -10,9 +10,8 @@ Currently defined:
 
 - :py:class:`SourceMeasurementUnit` — a device that both sources V/I
   AND measures V/I (Otii Arc, future Keithley / Keysight SMUs, etc.).
-  The Otii Arc class (``benchctrl.drivers.otii_arc.OtiiArc`` — still
-  ``benchctrl.SMU`` until Phase 4 of the v1.0 refactor lands)
-  implements this protocol.
+  :py:class:`benchctrl.drivers.otii_arc.OtiiArc` implements this
+  protocol.
 
 Deliberately deferred until the first concrete instance lands:
 
@@ -30,19 +29,26 @@ when the first driver in each category arrives.
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Iterable, Protocol, Union, runtime_checkable
+from typing import TYPE_CHECKING, Iterable, Protocol, Union, runtime_checkable
 
-# Import lazily-typed references — the Channel enum is currently
-# benchctrl.channels.Channel (Arc-specific). v1.0 phase 4 splits this
-# into a top-level StandardChannel + per-driver enums. For now the
-# Protocol accepts the Channel enum or a string code.
-from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
-from benchctrl.recording import Recording
+from benchctrl.channels import StandardChannel
 
-#: A channel reference — the canonical enum, or its two-letter code
-#: (``"mc"`` for MAIN_CURRENT, etc.). Future per-driver Channel enums
-#: that include the standard members will also satisfy this hint.
-ChannelLike = Union[Channel, str]
+# Recording is imported under TYPE_CHECKING to avoid a circular at
+# package import time: benchctrl/__init__.py → interfaces →
+# Recording → drivers.otii_arc.channels → drivers.otii_arc/__init__ →
+# device → Recording (not yet fully loaded). The Protocol surface
+# only mentions Recording in a return-type annotation, which works
+# fine with `from __future__ import annotations`.
+if TYPE_CHECKING:
+    from benchctrl.recording import Recording
+
+#: A channel reference accepted by Protocol methods. ``StandardChannel``
+#: is the framework-level enum (``MAIN_CURRENT`` / ``MAIN_VOLTAGE`` /
+#: ``MAIN_POWER``). The two-letter codes (``"mc"`` / ``"mv"`` / ``"mp"``)
+#: also work. Driver-specific enums (e.g. ``OtiiArcChannel``) carry the
+#: same codes for the standard subset, so passing one through is
+#: equivalent.
+ChannelLike = Union[StandardChannel, str]
 
 
 @runtime_checkable
@@ -52,8 +58,8 @@ class SourceMeasurementUnit(Protocol):
 
     Implementations:
 
-    - ``benchctrl.SMU`` (the Otii Arc / Arc Pro) — phase-4-rename will
-      land this as ``benchctrl.drivers.otii_arc.OtiiArc``.
+    - :py:class:`benchctrl.drivers.otii_arc.OtiiArc` (the Otii Arc /
+      Arc Pro).
 
     The class is decorated ``@runtime_checkable`` so callers can do
     ``isinstance(smu, SourceMeasurementUnit)`` for diagnostics, but

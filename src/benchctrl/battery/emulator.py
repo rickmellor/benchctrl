@@ -50,7 +50,7 @@ Series / parallel
 
 Example::
 
-    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+    from benchctrl.drivers.otii_arc import OtiiArc
     from benchctrl.battery import BatteryProfile
     from benchctrl.battery.emulator import Emulator, EmulatorConfig
 
@@ -61,7 +61,7 @@ Example::
         series=1, parallel=1,
         safety_max_voltage_V=3.5,
     )
-    with SMU.open() as smu:
+    with OtiiArc.open() as smu:
         emu = Emulator(smu, config)
         emu.start()
         try:
@@ -86,9 +86,6 @@ from benchctrl.exceptions import BenchValueError
 
 if TYPE_CHECKING:
     from benchctrl.interfaces import SourceMeasurementUnit
-    # Backward-compatible name in this module so the existing
-    # `smu: SMU` parameter annotations don't need to change.
-    SMU = SourceMeasurementUnit
 
 log = logging.getLogger("benchctrl.battery.emulator")
 
@@ -169,7 +166,7 @@ class Emulator:
     any thread.
     """
 
-    def __init__(self, smu: "SMU", config: EmulatorConfig) -> None:
+    def __init__(self, smu: "SourceMeasurementUnit", config: EmulatorConfig) -> None:
         self.smu = smu
         self.config = config
         self._validate()
@@ -429,11 +426,19 @@ class Emulator:
             if remaining > 0:
                 self._stop_event.wait(remaining)
 
-        # Loop exit — caller will disable output
+        # Loop exit — caller will disable output. Park the output at 0 V
+        # as a best-effort safety measure; log loud if it fails so the
+        # operator can see that the device's last-written voltage may
+        # still be live until set_output(False) takes effect.
         try:
             self.smu.set_voltage(0.0)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning(
+                "Emulator loop exit: set_voltage(0.0) raised %r — "
+                "output may still be at its last-written value until "
+                "set_output(False) takes effect",
+                exc,
+            )
 
     def _read_current(self) -> float:
         """Read the main current. Raises on read failure.

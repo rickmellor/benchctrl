@@ -18,9 +18,8 @@ import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
-from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 from benchctrl.exceptions import BenchNotImplementedError, BenchValueError
 from benchctrl.samples import (
     ChannelBuffer,
@@ -32,7 +31,26 @@ from benchctrl.samples import (
     write_raw,
 )
 
-ChannelLike = Union[Channel, str]
+# OtiiArcChannel is the only concrete channel enum today, and Recording
+# needs *some* coercion logic. We import it lazily inside _coerce /
+# from_code to avoid pulling drivers.otii_arc/__init__.py at module
+# import time — without this, benchctrl/__init__.py → recording.py
+# circles through drivers.otii_arc.__init__ → device.py → Recording
+# before Recording finishes loading.
+if TYPE_CHECKING:
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
+else:
+    Channel = "OtiiArcChannel"  # for runtime annotations via `from __future__ import annotations`
+
+ChannelLike = Union["Channel", str]
+
+
+def _get_channel_cls():
+    """Lazy accessor for the Arc channel enum used as Recording's
+    canonical channel type.  Imported here to break a circular at
+    package-load time (see comment above)."""
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel
+    return OtiiArcChannel
 
 
 @dataclass(frozen=True)
@@ -56,8 +74,8 @@ class ChannelInfoResult:
         }
 
 
-def _coerce(channel: ChannelLike) -> Channel:
-    return Channel.coerce(channel)
+def _coerce(channel: ChannelLike) -> "Channel":
+    return _get_channel_cls().coerce(channel)
 
 
 class Recording:
@@ -566,7 +584,7 @@ class Recording:
                     break
                 (bhlen,) = struct.unpack("<I", chunk)
                 bh = json.loads(f.read(bhlen).decode("utf-8"))
-                ch = Channel.from_code(bh["code"])
+                ch = _get_channel_cls().from_code(bh["code"])
                 buf = rec._ensure_buffer(ch, int(bh["sample_rate"]))
                 buf.t0 = float(bh.get("t0", 0.0))
                 count = int(bh["count"])
