@@ -156,17 +156,25 @@ Code reference: `validation/run_validation.py` — see the
 ### F-4. Manual misreads compensated by the driver
 
 Rigol's DL3000 programming guide is inconsistent in a few places.
-We follow the firmware's actual behavior:
+We follow the firmware's actual behavior (see F-1 for the LIST:STEP
+semantics, established v0.9.7):
 
-- `:SOUR:LIST:STEP N` means "play steps 0..N inclusive" (N+1
-  total). The driver accepts the total and subtracts 1.
+- `:SOUR:LIST:STEP N` plays **N total steps** (manual incorrectly
+  suggests N+1 in an application instance comment). Plus the
+  STEP=4 firmware bug — see F-1.
 - `:SOUR:LIST:SLEW <step>,<value>` is per-step, not global. The
   driver applies the same slew to every step in `program_list`.
 - `:SOUR:LIST:END` accepts `LAST|OFF`, not `NORMal|LAST` as the
   manual suggests in passing.
+- `:FETCh:DISChargingTime?` returns `H:MM:SS` (e.g. `"0:0:15"`),
+  not a "real number" as the manual documents. Driver parses both
+  H:M:S and plain float as a fallback.
+- `:SOUR:CURR:TRAN:FREQuency` takes **Hz**, not kHz as the manual
+  documents (bench-verified by period queries returning 1/freq).
 
 Code reference: `src/opensmu/bench/rigol_dl3031a.py` —
-`list_set_step_count`, `list_set_slew`, `_LIST_END_VALUES`.
+`list_set_step_count`, `list_set_slew`, `_LIST_END_VALUES`,
+`_fetch_discharging_time_s`, `transient_set_frequency`.
 
 ## Harness
 

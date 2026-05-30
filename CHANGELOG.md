@@ -75,6 +75,17 @@ device returns colon-delimited time (e.g. `"0:0:15"`).
 float fallback if a future firmware change matches the manual.
 4 new parser tests including malformed-input handling.
 
+### Discovered (workaround pending) — LiPo dynamic-list unreliable in high range
+
+With the Arc Pro in high range (LiPo profiles, 4.2 V), LIST
+playback fires a partial / misordered sequence — one TX burst at a
+non-deterministic time, then stops, instead of the expected
+`cycles × n_steps` repeats. CR2032 / CR123A in low range work
+correctly. Cause appears to interact with the FUNC:MODE-FIXed
+one-way bug (above); not isolated. Documented as
+`KNOWN_LIMITATIONS.md` § F-2. Use `--pattern hires` for LiPo
+transient validation in the meantime.
+
 ### Discovered — `transient_set_frequency` takes Hz, not kHz
 
 Manual says kHz; bench-verified the device takes Hz. Sending

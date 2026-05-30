@@ -1026,11 +1026,6 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
                      pattern_A: Optional[list[tuple[str, float, float]]] = None,
                      cycles: int = 1,
                      output_dir: Path = SCENARIO_DIR) -> dict[str, Any]:
-    if cycles <= 0:
-        # LIST count=0 means infinite playback in the firmware; the
-        # harness's `time.sleep(total_s + 0.3)` with total_s=0 would
-        # then exit immediately, leaving the load running forever.
-        raise ValueError(f"--cycles must be > 0 for dynamic-list, got {cycles}")
     """DL3031A-only: program a LIST sequence and play it from firmware.
 
     The pattern is (label, current_A, duration_s). The DL3031A executes
@@ -1041,6 +1036,11 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
 
     Only DL3031A. QR10x doesn't have programmable sequences.
     """
+    if cycles <= 0:
+        # LIST count=0 means infinite playback in the firmware; the
+        # harness's `time.sleep(total_s + 0.3)` with total_s=0 would
+        # then exit immediately, leaving the load running forever.
+        raise ValueError(f"--cycles must be > 0 for dynamic-list, got {cycles}")
     if load.kind != "dl3031a":
         raise ValueError(f"--scenario dynamic-list requires --load dl3031a, got {load.kind}")
     profile = BatteryProfile.load(profile_path)
@@ -1135,9 +1135,10 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
             try:
                 with smu.record(Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT,
                                 name=scenario_name) as rec:
+                    t_rec_open = time.monotonic()
                     load.dl.set_input(True)
                     time.sleep(0.2)  # arm settles before trigger
-                    t_record_start = time.monotonic()
+                    t_trigger = time.monotonic()
                     load.dl.trigger_now()  # BUS trigger starts the list
                     time.sleep(total_s + 0.3)
                     load.dl.set_input(False)
@@ -1154,12 +1155,21 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
                     while vi + 1 < len(ts_v) and ts_v[vi + 1] <= t_i:
                         vi += 1
                     merged_v.append(vs[vi] if vs else float("nan"))
-                # Subtract recording start so t=0 aligns with the
-                # LIST's first step (set_input(True)). Phase events
-                # already start at 0 so the alignment matches.
+                # Align t=0 with the LIST trigger, not the recording
+                # start. Recording opens ~200 ms before trigger_now()
+                # (input arm + settle). Phase_events have
+                # t_start_s == 0 for the first phase, so we want
+                # t_local == 0 to coincide with the trigger instant.
+                # rec.timestamps() are relative to the recording's
+                # start (t_rec_open), so the trigger landed at
+                # offset = (t_trigger - t_rec_open) in those
+                # timestamps. Subtract that offset; samples with
+                # negative t_local are pre-trigger and tagged with
+                # phase=None.
+                pre_trigger_offset = t_trigger - t_rec_open
                 t_first = ts_i[0] if ts_i else 0.0
                 for t_s, v, i in zip(merged_ts, merged_v, is_):
-                    t_local = float(t_s) - float(t_first)
+                    t_local = float(t_s) - float(t_first) - pre_trigger_offset
                     phase = None
                     for ev in phase_events:
                         if ev["t_start_s"] <= t_local < ev["t_start_s"] + ev["duration_s"]:

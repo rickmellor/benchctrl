@@ -227,10 +227,12 @@ def test_emulator_start_propagates_config_failures():
     emu = Emulator(smu, config)
     with pytest.raises(RuntimeError, match="simulated device error"):
         emu.start()
-    # Output never enabled, no voltage set after failure
-    assert all(call is False or call == enable for call, enable in
-               zip(smu.set_output_calls, []))
-    assert not smu.set_output_calls or smu.set_output_calls[0] is not True
+    # Output must never have been enabled — the config error fires
+    # before set_output(True). Any set_output(...) calls present must
+    # all be False (disable, e.g. from a defensive teardown).
+    assert all(call is False for call in smu.set_output_calls), (
+        f"set_output(True) called despite config failure: {smu.set_output_calls}"
+    )
 
 
 def test_emulator_loop_logs_and_retries_on_read_failure(caplog):

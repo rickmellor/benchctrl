@@ -623,6 +623,26 @@ class RigolDL3031A:
             )
         self.write(f":SOURce:LIST:COUNt {int(count)}")
 
+    @staticmethod
+    def _validate_list_step_count(steps: int) -> None:
+        """Validate a proposed LIST step count without sending SCPI.
+
+        Hoisted out so granular-API callers can pre-check before
+        starting a multi-write LIST configuration sequence; otherwise
+        a deferred raise inside ``list_set_step_count`` would leave
+        the device with ``:LIST:MODE`` / ``:LIST:RANGe`` /
+        ``:LIST:COUNt`` already written but no valid STEP.
+        """
+        if not 2 <= steps <= 512:
+            raise RigolDLValueError(
+                f"LIST step count must be in [2, 512], got {steps}"
+            )
+        if steps == 4:
+            raise RigolDLValueError(
+                "LIST STEP=4 is a firmware bug — no steps fire. "
+                "Use 3 or 5 steps with appropriate count instead."
+            )
+
     def list_set_step_count(self, steps: int) -> None:
         """Set the LIST step count — total number of steps per cycle.
 
@@ -637,16 +657,13 @@ class RigolDL3031A:
         with the appropriate ``count`` for the same total play time.
 
         Range: 2..512 (the firmware's documented limit).
+
+        Granular-API users: call :py:meth:`_validate_list_step_count`
+        first to pre-check the value before writing any LIST commands,
+        otherwise an invalid count here leaves the device partially
+        configured (clean up with ``*RST``).
         """
-        if not 2 <= steps <= 512:
-            raise RigolDLValueError(
-                f"LIST step count must be in [2, 512], got {steps}"
-            )
-        if steps == 4:
-            raise RigolDLValueError(
-                "LIST STEP=4 is a firmware bug — no steps fire. "
-                "Use 3 or 5 steps with appropriate count instead."
-            )
+        self._validate_list_step_count(steps)
         self.write(f":SOURce:LIST:STEP {int(steps)}")
 
     def list_set_step(self, step_index: int, level: float, width_s: float,
@@ -722,16 +739,9 @@ class RigolDL3031A:
         ``:py:meth:`trigger_now`` to start. With ``"MANUal"`` the user
         presses the front-panel TRAN key.
         """
-        if not 2 <= len(steps) <= 512:
-            raise RigolDLValueError(
-                f"LIST requires 2..512 steps, got {len(steps)}"
-            )
-        if len(steps) == 4:
-            raise RigolDLValueError(
-                "4-step LIST programs hit a firmware bug — STEP=4 fires no "
-                "steps. Use 3 or 5 steps with appropriate `count` for the "
-                "same total play time."
-            )
+        # Pre-validate before writing ANY SCPI so the device isn't
+        # left half-configured on a bad count.
+        self._validate_list_step_count(len(steps))
         self.list_set_mode(mode)
         if range_value is not None:
             self.list_set_range(range_value)
@@ -898,12 +908,15 @@ class RigolDL3031A:
                     f"unexpected :FETCh:DISChargingTime? response: {raw!r}"
                 ) from e
         try:
-            h, m, s = (int(p) for p in parts)
+            h, m = (int(p) for p in parts[:2])
+            # Seconds may carry sub-second precision in a future fw rev;
+            # accept either int ("15") or float ("15.250").
+            s = float(parts[2])
         except ValueError as e:
             raise RigolDLError(
                 f"could not parse :FETCh:DISChargingTime? H:M:S: {raw!r}"
             ) from e
-        return h * 3600.0 + m * 60.0 + float(s)
+        return h * 3600.0 + m * 60.0 + s
 
 
 # ---------------------------------------------------------------------------

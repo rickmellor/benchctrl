@@ -600,6 +600,21 @@ def test_battery_stats_handles_hour_minute_seconds():
     assert stats["discharge_time_s"] == pytest.approx(5025.0)
 
 
+def test_battery_stats_subsecond_in_h_m_s_format():
+    """Future firmware may include sub-second precision in the
+    seconds field (e.g. '0:0:15.250'). Driver accepts float seconds
+    while still parsing H and M as integers."""
+    drv, _ = _make({
+        ":FETCh:CAPability?": "10.0",
+        ":FETCh:WATThours?": "0.03",
+        ":FETCh:DISChargingTime?": "0:0:15.250",
+        ":FETCh:VOLTage:DC?": "3.05",
+        ":FETCh:CURRent:DC?": "0.050",
+    })
+    stats = drv.battery_stats()
+    assert stats["discharge_time_s"] == pytest.approx(15.25)
+
+
 def test_battery_stats_fallback_to_float_if_no_colon():
     """Belt-and-braces: if a future firmware revision returns a
     plain float instead of H:M:S, accept it."""
