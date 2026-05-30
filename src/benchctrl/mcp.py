@@ -60,6 +60,7 @@ from benchctrl.battery import (
 from benchctrl.drivers.eastwood_qr10x import mcp_tools as _qr10x_tools
 from benchctrl.drivers.otii_arc import mcp_tools as _arc_tools
 from benchctrl.drivers.rigol_dl3031a import mcp_tools as _dl3031a_tools
+from benchctrl.drivers.rigol_dp2031 import mcp_tools as _dp2031_tools
 from benchctrl.recording import Recording
 
 log = logging.getLogger("benchctrl.mcp")
@@ -74,6 +75,7 @@ mcp = FastMCP("benchctrl")
 _arc_tools.register_mcp_tools(mcp)
 _qr10x_tools.register_mcp_tools(mcp)
 _dl3031a_tools.register_mcp_tools(mcp)
+_dp2031_tools.register_mcp_tools(mcp)
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +178,40 @@ from benchctrl.drivers.rigol_dl3031a.mcp_tools import (
     dl3031a_set_voltage_range,
     dl3031a_transient_enable,
     dl3031a_trigger,
+)
+
+# DP2031 tools (Phase A surface)
+from benchctrl.drivers.rigol_dp2031.mcp_tools import (
+    dp2031_clear_status,
+    dp2031_close,
+    dp2031_current_channel,
+    dp2031_get_current,
+    dp2031_get_ocp_enabled,
+    dp2031_get_ocp_level,
+    dp2031_get_output,
+    dp2031_get_ovp_enabled,
+    dp2031_get_ovp_level,
+    dp2031_get_voltage,
+    dp2031_info,
+    dp2031_last_error,
+    dp2031_measure_all,
+    dp2031_measure_all_channels,
+    dp2031_measure_current,
+    dp2031_measure_power,
+    dp2031_measure_voltage,
+    dp2031_open,
+    dp2031_output_regulation,
+    dp2031_raise_if_error,
+    dp2031_reset,
+    dp2031_select_channel,
+    dp2031_set_current,
+    dp2031_set_ocp_enabled,
+    dp2031_set_ocp_level,
+    dp2031_set_output,
+    dp2031_set_output_all,
+    dp2031_set_ovp_enabled,
+    dp2031_set_ovp_level,
+    dp2031_set_voltage,
 )
 
 

@@ -139,8 +139,22 @@ toggling `:SOUR:INP`, and even cycling through other modes
 (BATT → FIX, OCP → FIX) all fail to bring the device back to
 FIX. Only **power-cycling the DL3031A** restores FIX mode.
 
+**v1.0 follow-up**: bench-discovered while building Phase A of
+the DP2031 closed-loop tests — `*RST` on its own can leave the
+device in WAV mode too (the post-reset default seems to vary by
+firmware / prior state). When stuck in WAV:
+- CC-mode setpoints are silently ignored (input only sinks the
+  ~10 mA bias from the input MOSFET);
+- CR mode partially engages (presents a real impedance) but the
+  load's `:MEASure:CURRent:DC?` returns 0 regardless of actual
+  current flow;
+- the FIXed-write workaround above remains the only fix that
+  doesn't require a power cycle.
+
 Affects: any workflow that programs LIST or transient mode and
-then expects the next test to start in a clean state.
+then expects the next test to start in a clean state, AND any
+DP2031 closed-loop test that relies on the load actually drawing
+its configured CC setpoint.
 
 Workaround:
 1. The runner's `finally` block tries `set_function_mode("FIXed")`
@@ -149,9 +163,13 @@ Workaround:
    after teardown (expected FIX) — power-cycle before reuse"*.
 2. The operator power-cycles the DL3031A between tests where
    FIX-mode start is required.
+3. DP2031 Phase A closed-loop tests were deferred until this
+   quirk is better understood — Phase A verifies the PSU side
+   only.
 
 Code reference: `scenarios/run.py` — see the
-`run_dynamic_list` `finally` block.
+`run_dynamic_list` `finally` block. `tests/test_bench_rigol_dp2031.py`
+— see the deferred-closed-loop comment block.
 
 ### F-4. Manual misreads compensated by the driver
 

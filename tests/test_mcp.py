@@ -291,3 +291,97 @@ def test_dl3031a_close_surfaces_input_off_failure():
     assert "input_off_failed" in result
     assert "simulated set_input failure" in result["input_off_failed"]
     assert "warning" in result
+
+
+# ---------------------------------------------------------------------------
+# DP2031 MCP layer — connection-state checks and singleton injection
+# ---------------------------------------------------------------------------
+
+
+class _FakeDP2031:
+    """Stub that mimics the RigolDP2031 surface the MCP tools touch."""
+    def __init__(self):
+        self.set_output_calls: list[tuple[int, bool]] = []
+        self.set_voltage_calls: list[tuple[int, float]] = []
+        self._closed = False
+
+    def set_voltage(self, ch, volts):
+        self.set_voltage_calls.append((int(ch), float(volts)))
+
+    def get_voltage(self, ch):
+        return 3.3
+
+    def set_output(self, ch, on):
+        self.set_output_calls.append((int(ch), bool(on)))
+
+    def close(self):
+        self._closed = True
+
+
+def test_dp2031_tools_raise_driver_connection_error_when_not_open():
+    """Same pattern as DL3031A/QR10x — clear singleton, expect a
+    driver-specific connection error from any tool that needs the device."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.rigol_dp2031 import mcp_tools as dp_tools
+    from benchctrl.drivers.rigol_dp2031.driver import RigolDP2031ConnectionError
+    dp_tools._dp2031 = None
+    with pytest.raises(RigolDP2031ConnectionError):
+        m.dp2031_info()
+    with pytest.raises(RigolDP2031ConnectionError):
+        m.dp2031_set_voltage(1, 3.3)
+
+
+def test_dp2031_set_voltage_calls_driver():
+    """Singleton-injection sanity: dp2031_set_voltage routes channel + V
+    correctly to the underlying driver."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.rigol_dp2031 import mcp_tools as dp_tools
+    fake = _FakeDP2031()
+    dp_tools._dp2031 = fake
+    try:
+        result = m.dp2031_set_voltage(2, 5.0)
+        assert result == {"channel": 2, "voltage_V": 5.0}
+        assert fake.set_voltage_calls == [(2, 5.0)]
+    finally:
+        dp_tools._dp2031 = None
+
+
+def test_dp2031_close_disables_all_three_channels():
+    """dp2031_close should call set_output(ch, False) for ch in 1/2/3
+    before close()."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.rigol_dp2031 import mcp_tools as dp_tools
+    fake = _FakeDP2031()
+    dp_tools._dp2031 = fake
+    result = m.dp2031_close()
+    assert result == {"closed": True}
+    assert fake.set_output_calls == [(1, False), (2, False), (3, False)]
+    assert fake._closed is True
+    assert dp_tools._dp2031 is None
+
+
+def test_dp2031_close_surfaces_per_channel_failure():
+    """If one channel's set_output(False) fails, the response dict
+    surfaces it under outputs_off_failed (parallels dl3031a_close H5
+    behaviour). Other channels are still attempted."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.rigol_dp2031 import mcp_tools as dp_tools
+    fake = _FakeDP2031()
+
+    original = fake.set_output
+
+    def flaky(ch, on):
+        if int(ch) == 2:
+            raise RuntimeError(f"simulated CH{ch} failure")
+        original(ch, on)
+    fake.set_output = flaky  # type: ignore[method-assign]
+
+    dp_tools._dp2031 = fake
+    result = m.dp2031_close()
+    assert result["closed"] is True
+    assert "outputs_off_failed" in result
+    assert any("CH2" in f for f in result["outputs_off_failed"])
+    assert "warning" in result
+    # CH1 and CH3 should still have been attempted via the original
+    assert (1, False) in fake.set_output_calls
+    assert (3, False) in fake.set_output_calls
