@@ -2,6 +2,66 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.5] — high-resolution dynamic capture via Arc Pro native streaming
+
+### Added — `--pattern hires` dynamic scenario
+
+`validation/run_validation.py --pattern hires` switches the dynamic
+runner to a dedicated implementation that uses `SMU.record(...)` for
+the actual V/I capture instead of host-side state polling. The Arc
+Pro streams ~4 kHz on `MAIN_CURRENT` (subtype-4 packed) and ~1 kHz on
+`MAIN_VOLTAGE`, which is enough to resolve the DL3031A's actual TX
+response shape — the standard pattern's 20 Hz polling could not.
+
+Three hires scenarios captured (CR2032, CR123A, LiPo @ +20 °C):
+
+- 4 000 Hz I time series, ~36 k samples in 10 s
+- TX I peaks: 71 mA (CR2032), 70 mA (CR123A), 86 mA (LiPo)
+- TX steady: ~30 mA across all chemistries
+- DL3031A inrush is consistently ~2× steady — closed-loop catch-up
+  artifact, documented for future LIST/transient-mode comparison
+
+### Discovered — emulator loop + recording reader deadlock
+
+The `Emulator._loop` thread writes `set_voltage` at 100 Hz while
+`SMU.record` consumes the transport at ~4 kHz. Running both
+concurrently against the same Arc Pro consistently deadlocks within
+~100 ms (transport-level contention).
+
+Workaround in the hires runner: settle the emulator at fresh OCV,
+read the resulting voltage, stop the emulator, pin the SMU at that
+voltage manually, then open the recording. SoC tracking is off for
+the duration. For 10 s × 30 mA peak, the SoC delta is ~0.08 mAh
+(< 0.04 % of CR2032's capacity) — meaningless for the hires use case.
+
+Saved scenarios document this with `"recording.pinned_voltage_V"` so
+it's recoverable from the JSON.
+
+### Discovered — DL3031A input-toggle latency ~700 ms
+
+The first hires runs used 100 ms TX phases (cycle: sleep → R=100 →
+sleep). At 4 kHz sampling the recording showed current spikes
+landing 700 ms after the `:SOUR:INP:STAT 1` command, well outside
+the labeled TX window. Toggling input state cycles the regulation
+loop's internal settling — much slower than just changing a
+setpoint.
+
+`DEFAULT_HIRES_IOT_PATTERN` widened to 300 ms TX. Sub-300 ms work
+needs "input always ON, toggle CC current setpoint" — left for a
+future scenario.
+
+### Added — `:FETCh:` query methods on `RigolDL3031A`
+
+`fetch_voltage` / `fetch_current` / `fetch_power` / `fetch_resistance`
+/ `fetch_all`. Non-blocking reads of the device's continuously-updated
+measurement registers, vs the existing `measure_*` which trigger a
+fresh 10 PLC (~200 ms) integration per call. Distinct use cases:
+`measure_*` for high-accuracy single-shot, `fetch_*` for fast loops.
+
+The DL3031A adapter (and the standard dynamic scenario's
+`load.measure()` hook) now use `fetch_*` so they don't get throttled
+by the 200 ms integration time.
+
 ## [0.9.4] — validation harness supports both loads; full matrix on DL3031A
 
 ### Added — `--load {qr10x,dl3031a}` in the validation harness

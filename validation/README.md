@@ -216,6 +216,68 @@ from the DL3031A's own `:MEASure:` queries (or its 400-point cached
 | Sub-ms transients | DL3031A | QR10x relays are too slow |
 | Built-in battery-discharge sequences | DL3031A | firmware does it |
 
+## High-resolution dynamic capture (v0.9.5)
+
+`--pattern hires` switches to a dedicated runner that uses the Arc Pro's
+native streaming (`SMU.record`) instead of state polling. Three things
+fall out:
+
+### Architecture: emulator-off during the recording window
+
+`Emulator._loop` writes `set_voltage` at 100 Hz while the recording
+reader thread is consuming the transport at ~4 kHz. The combination
+deadlocks consistently within ~100 ms.
+
+The hires runner sidesteps the deadlock: it lets the emulator settle to
+fresh OCV, captures that value, stops the emulator, pins the SMU at
+that voltage manually, then opens the recording. Battery dynamics
+(OCV-drop with SoC) are off during the 10 s capture — fine since the
+SoC delta over 10 s × 30 mA peak is ~0.08 mAh, sub-0.04 % of CR2032.
+
+Saved scenarios include `"recording": {"pinned_voltage_V": …}` so this
+is recoverable from the JSON.
+
+### Sample rates from Arc Pro native streaming
+
+| Channel | Rate |
+|---|---|
+| `MAIN_CURRENT` (mc, subtype-4 packed) | ~4 000 Hz |
+| `MAIN_VOLTAGE` (mv, subtype-1) | ~1 000 Hz |
+
+The harness merges to the I channel's timebase (interpolated V) so the
+saved samples are at the higher rate.
+
+### DL3031A switching latency: ~700 ms input-toggle
+
+The first hires runs used 100 ms TX phases (sleep → R=100 → sleep). At
+4 kHz sampling, the recording showed the current spike landing **700 ms
+after** the TX command — well into the post-TX sleep phase. Cause:
+toggling `:SOUR:INP:STAT` between sleeps cycles the regulation loop's
+internal settling.
+
+The default hires pattern was widened to **300 ms TX** windows to keep
+the spike inside its labeled phase. For sub-300 ms work, the right
+approach is "leave the input ON, toggle CC current setpoint instead"
+— left for a future scenario.
+
+### Headline results (v0.9.5 hires, 4 kHz)
+
+3 cycles × 2 TX bursts each = 6 TX events per scenario. Per-phase I
+peaks via the recording:
+
+| Profile             | TX I peak  | TX I steady | V at TX terminals  |
+|---------------------|-----------|-------------|--------------------|
+| CR2032-Energizer    | 71 mA     | ~30 mA      | 3.198 .. 3.227 V   |
+| CR123A-GP           | 70 mA     | ~30 mA      | 3.176 .. 3.204 V   |
+| LiPo @ +20 °C       | 86 mA     | ~40 mA      | 4.195 .. 4.210 V   |
+
+The DL3031A's inrush peak is consistently ~2× steady-state across all
+chemistries (V/100 Ω = ~30-40 mA expected steady; ~70-90 mA observed
+peak). That's an artifact of the DL3031A's CR-mode closed-loop
+catching up to a step change, not a property of the simulated battery.
+For real-DUT-shape current waveforms the next step is the DL3031A's
+LIST or transient modes (step 3 of the post-v0.9.4 roadmap).
+
 ## Notes / known limits
 
 - Arc Pro high range tops out at ≈ 4.2 V under load. LiPo profiles

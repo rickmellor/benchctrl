@@ -456,32 +456,65 @@ class RigolDL3031A:
     # ------------------------------------------------------------------
 
     def measure_voltage(self) -> float:
-        """Input voltage at the load terminals (V)."""
+        """Trigger a fresh integration and return input voltage (V).
+
+        Blocking — at the default 10 NPLC this takes ~200 ms. For
+        higher sample rates use :py:meth:`fetch_voltage` instead.
+        """
         return self.query_float(":MEASure:VOLTage:DC?")
 
     def measure_current(self) -> float:
-        """Input current sunk by the load (A)."""
+        """Trigger a fresh integration and return input current (A).
+
+        Blocking (see :py:meth:`measure_voltage`)."""
         return self.query_float(":MEASure:CURRent:DC?")
 
     def measure_power(self) -> float:
-        """Input power dissipated by the load (W)."""
         return self.query_float(":MEASure:POWer:DC?")
 
     def measure_resistance(self) -> float:
-        """Effective resistance V / I at the load terminals (Ω)."""
         return self.query_float(":MEASure:RESistance:DC?")
 
     def measure_all(self) -> dict[str, float]:
-        """Convenience: V / I / P / R in one shot.
-
-        Note: each ``:MEASure:`` invokes a fresh integration, so this
-        is four sequential captures, not a single atomic snapshot.
-        """
+        """Trigger fresh V / I / P / R measurements. Four sequential
+        integrations (~800 ms at 10 NPLC) — use :py:meth:`fetch_all`
+        instead for fast loops."""
         return {
             "voltage_V": self.measure_voltage(),
             "current_A": self.measure_current(),
             "power_W": self.measure_power(),
             "resistance_ohm": self.measure_resistance(),
+        }
+
+    # ------------------------------------------------------------------
+    # :FETCh: — non-blocking reads of the device's continuously-updated
+    # measurement registers. Use these in high-rate sample loops.
+    # ------------------------------------------------------------------
+
+    def fetch_voltage(self) -> float:
+        """Return the last-measured voltage without triggering a new
+        integration. ~10-20 ms USB-TMC round-trip; suitable for ≥ 50 Hz
+        sampling."""
+        return self.query_float(":FETCh:VOLTage:DC?")
+
+    def fetch_current(self) -> float:
+        return self.query_float(":FETCh:CURRent:DC?")
+
+    def fetch_power(self) -> float:
+        return self.query_float(":FETCh:POWer:DC?")
+
+    def fetch_resistance(self) -> float:
+        return self.query_float(":FETCh:RESistance:DC?")
+
+    def fetch_all(self) -> dict[str, float]:
+        """Non-blocking V / I / P / R snapshot — four fast SCPI queries
+        (~40-80 ms total) against the device's continuously-updated
+        measurement registers."""
+        return {
+            "voltage_V": self.fetch_voltage(),
+            "current_A": self.fetch_current(),
+            "power_W": self.fetch_power(),
+            "resistance_ohm": self.fetch_resistance(),
         }
 
 
