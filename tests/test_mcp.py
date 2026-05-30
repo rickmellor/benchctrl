@@ -209,8 +209,9 @@ class _FakeDL:
 
 def test_dl3031a_program_list_coerces_int_and_float_step_pairs():
     from benchctrl import mcp as m
+    from benchctrl.drivers.rigol_dl3031a import mcp_tools as dl_tools
     fake = _FakeDL()
-    m._dl3031a = fake
+    dl_tools._dl3031a = fake
     try:
         result = m.dl3031a_program_list(
             steps=[[1, 1], [0.030, 0.05], (1e-4, 1.0)],  # mixed int / float / tuple
@@ -232,13 +233,14 @@ def test_dl3031a_program_list_coerces_int_and_float_step_pairs():
         assert result["count"] == 2
         assert result["trigger_source"] == "BUS"
     finally:
-        m._dl3031a = None
+        dl_tools._dl3031a = None
 
 
 def test_dl3031a_program_list_rejects_malformed_steps():
     from benchctrl import mcp as m
+    from benchctrl.drivers.rigol_dl3031a import mcp_tools as dl_tools
     fake = _FakeDL()
-    m._dl3031a = fake
+    dl_tools._dl3031a = fake
     try:
         # Each step must be (level, width); a bare scalar is malformed
         with pytest.raises((TypeError, IndexError, ValueError)):
@@ -247,15 +249,16 @@ def test_dl3031a_program_list_rejects_malformed_steps():
         with pytest.raises((TypeError, ValueError)):
             m.dl3031a_program_list(steps=[["a", "b"], [0.0, 0.1]], mode="CC")
     finally:
-        m._dl3031a = None
+        dl_tools._dl3031a = None
 
 
 def test_dl3031a_tools_raise_driver_connection_error_when_not_open():
     """L2 fix: _get_dl3031a now raises RigolDLConnectionError, not
     bare RuntimeError, when the singleton is None."""
     from benchctrl import mcp as m
+    from benchctrl.drivers.rigol_dl3031a import mcp_tools as dl_tools
     from benchctrl.drivers.rigol_dl3031a.driver import RigolDLConnectionError
-    m._dl3031a = None
+    dl_tools._dl3031a = None
     with pytest.raises(RigolDLConnectionError):
         m.dl3031a_info()
 
@@ -263,8 +266,9 @@ def test_dl3031a_tools_raise_driver_connection_error_when_not_open():
 def test_qr10x_tools_raise_driver_connection_error_when_not_open():
     """Same as above for QR10x."""
     from benchctrl import mcp as m
+    from benchctrl.drivers.eastwood_qr10x import mcp_tools as qr_tools
     from benchctrl.drivers.eastwood_qr10x.driver import QR10xConnectionError
-    m._qr10x = None
+    qr_tools._qr10x = None
     with pytest.raises(QR10xConnectionError):
         m.qr10x_info()
 
@@ -274,13 +278,14 @@ def test_dl3031a_close_surfaces_input_off_failure():
     raises. Previously, errors were silently swallowed and the operator
     got {"closed": True} even though the load could still be sinking."""
     from benchctrl import mcp as m
+    from benchctrl.drivers.rigol_dl3031a import mcp_tools as dl_tools
     fake = _FakeDL()
 
     def boom(_on):
         raise RuntimeError("simulated set_input failure")
     fake.set_input = boom  # type: ignore[method-assign]
 
-    m._dl3031a = fake
+    dl_tools._dl3031a = fake
     result = m.dl3031a_close()
     assert result["closed"] is True
     assert "input_off_failed" in result
