@@ -172,20 +172,125 @@ exception won't leave the load sinking current.
 | `load.measure_current()` | float (A) | `:MEASure:CURRent:DC?` |
 | `load.measure_power()` | float (W) | `:MEASure:POWer:DC?` |
 | `load.measure_resistance()` | float (Ω) | `:MEASure:RESistance:DC?` |
-| `load.measure_all()` | dict | four sequential `:MEASure:*` |
+| `load.measure_all()` | dict | four sequential `:MEASure:*` (each ~200 ms NPLC integration) |
+| `load.fetch_voltage/current/power/resistance/all()` | float / dict | `:FETCh:*:DC?` — non-blocking reads of the device's continuously-updated register; ~1 ms each |
+
+### Firmware modes (v0.9.6+)
+
+The DL3000 series has several built-in subsystems that execute in
+firmware with deterministic timing. The driver wraps each:
+
+#### LIST mode — programmable step sequence
+
+```python
+load.program_list(
+    steps=[(0.0001, 1.0), (0.030, 0.050), (0.0001, 1.0)],  # (level, width_s)
+    mode="CC", count=3, range_value=6.0,
+    slew_A_per_us=0.5, end_behavior="LAST",
+    trigger_source="BUS",
+)
+load.set_input(True)
+load.trigger_now()          # BUS trigger fires the sequence
+```
+
+Step widths from 50 µs to 3600 s. Up to 513 total steps. The device
+runs the sequence internally — no USB-TMC round-trip per step. The
+right tool for sub-100 ms TX bursts and other transients where
+host-driven setpoint changes can't keep up.
+
+Granular SCPI wrappers also available: `list_set_mode` /
+`list_set_range` / `list_set_count` / `list_set_step_count` /
+`list_set_step` / `list_set_slew` / `list_set_end`.
+
+#### CC transient mode — A↔B pulse generator
+
+```python
+load.configure_transient_pulse(
+    a_level_A=0.030, b_level_A=0.0001,
+    a_width_s=0.050, b_width_s=1.0,
+    mode="CONTinuous",          # or PULSe / TOGGle
+)
+load.transient_enable(True)
+load.trigger_now()
+```
+
+CONTinuous = periodic A↔B stream, PULSe = single A pulse on trigger,
+TOGGle = alternate A/B on each trigger.
+
+#### Battery discharge mode — built-in test
+
+```python
+load.configure_battery_test(
+    current_A=0.050,            # discharge current
+    v_stop_V=2.7,                # cell-voltage cutoff
+    capacity_stop_mAh=200.0,     # capacity cap
+    time_stop_s=3600,            # wall-clock cap
+    range_A=6.0,
+)
+load.set_input(True)
+# poll while discharging
+while load.get_input():
+    stats = load.battery_stats()
+    # {capacity_mAh, energy_Wh, discharge_time_s, voltage_V, current_A}
+```
+
+Firmware tracks capacity, energy, and discharge time; stops on any
+configured cutoff. Useful for real-cell characterization or pack
+acceptance tests without writing host-side integration.
+
+#### Trigger system
+
+| Method | Wire form |
+|---|---|
+| `set_trigger_source({BUS\|EXTernal\|MANUal})` | `:TRIGger:SOURce` |
+| `get_trigger_source()` | `:TRIGger:SOURce?` |
+| `trigger_now()` | `:TRIGger` (software trigger) |
+
+#### Function mode
+
+`set_function_mode({FIXed\|LIST\|WAVe\|BATTery\|OCP\|OPP})` switches
+the top-level regulation source. Set implicitly by `program_list` /
+`configure_*` helpers; rarely needs to be called directly.
 
 ### MCP tools
 
 Per parity, every public method has a matching MCP tool. The server
 holds one DL3031A connection across tool calls until `dl3031a_close()`.
 
+**Core (v0.9.3):**
 - `dl3031a_open(resource=None)` / `dl3031a_close()`
 - `dl3031a_info()` / `dl3031a_reset()` / `dl3031a_last_error()`
 - `dl3031a_set_mode(mode)` / `dl3031a_get_mode()`
 - `dl3031a_set_input(on)` / `dl3031a_get_input()`
 - `dl3031a_set_current(A)` / `dl3031a_set_voltage(V)` / `dl3031a_set_resistance(Ω)` / `dl3031a_set_power(W)`
 - `dl3031a_set_current_range(A)` / `dl3031a_set_voltage_range(V)` / `dl3031a_set_slew(A/µs)`
-- `dl3031a_measure()` — V / I / P / R in one call
+- `dl3031a_measure()` — `:MEAS:*` (200 ms integration each)
+
+**Firmware modes (v0.9.6):**
+- `dl3031a_fetch()` — `:FETCh:*` (non-blocking, fast)
+- `dl3031a_set_function_mode(mode)` / `dl3031a_get_function_mode()`
+- `dl3031a_program_list(steps, mode, count, range_value, slew_A_per_us, end_behavior, trigger_source)`
+- `dl3031a_configure_transient_pulse(a_level_A, b_level_A, a_width_s, b_width_s, mode)`
+- `dl3031a_transient_enable(on)`
+- `dl3031a_configure_battery_test(current_A, v_stop_V, capacity_stop_mAh, time_stop_s, von_V, range_A)`
+- `dl3031a_battery_stats()`
+- `dl3031a_set_trigger_source(source)` / `dl3031a_trigger()`
+
+Total: 25 DL3031A MCP tools.
+
+### Manual-misread bugs ironed out in v0.9.6
+
+For anyone diving into the DL3000 programming guide — three places
+where the manual is misleading and the driver compensates:
+
+- **`:SOUR:LIST:STEP N` is highest-index, not total count.** A
+  3-step list sends `:SOUR:LIST:STEP 2`. `list_set_step_count`
+  accepts the **total** and subtracts 1 internally.
+- **`:SOUR:LIST:SLEW <step>,<value>` is per-step, not global.**
+  `program_list` applies the same `slew_A_per_us` to every step
+  when provided.
+- **`:SOUR:LIST:END` accepts `LAST|OFF`,** not `NORMal|LAST` as
+  the manual suggests in passing.
 
 ### DL3031A vs. QR10x
 

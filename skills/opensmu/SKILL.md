@@ -356,21 +356,73 @@ the Arc. Currently:
 
 - `opensmu.bench.QR10x` — Eastwood Tech QR10x programmable resistance
   substitution box (1 Ω-8.4 MΩ, USB-Serial, AT command set). Useful
-  for DUT load simulation during emulator validation, sensor
-  simulation, current-draw testing.
+  for sleep / quiescent / low-current scenarios where a passive load
+  is the right model.
+- `opensmu.bench.RigolDL3031A` — Rigol DL3031A programmable electronic
+  load (150 V / 60 A / 350 W, USB-TMC via pyvisa). CC / CV / CR / CP
+  modes plus firmware-side LIST / transient / battery-discharge
+  sequences. Right for active / TX-burst / high-current loads.
 
 ```python
-from opensmu.bench import QR10x
+from opensmu.bench import QR10x, RigolDL3031A
 
+# Passive resistor — ideal for sleep / quiescent current
 with QR10x.open("COM7") as qr:
-    qr.set_safety_limit(12.0)            # device-enforced min R
-    qr.set_resistance(10_000)             # 10 kΩ
-    qr.actual_resistance()                # what the device actually achieved
+    qr.set_safety_limit(12.0)             # device-enforced min R
+    qr.set_resistance(10_000)              # 10 kΩ
+
+# Active electronic load — ideal for high-current and transient
+with RigolDL3031A.open() as dl:            # auto-discover by VID/PID
+    dl.set_mode("CC"); dl.set_current(0.030)
+    dl.set_input(True)
 ```
 
-**Safety rule of thumb**: set `qr.set_safety_limit(V**2 / P_max)`
+**QR10x safety rule of thumb**: `qr.set_safety_limit(V**2 / P_max)`
 where V is the source voltage and P_max ≤ 1 W. At 3.2 V → 12 Ω, at
 5 V → 25 Ω.
+
+**DL3031A firmware modes** (v0.9.6) for sub-100 ms transients that
+host-driven setpoint changes can't keep up with:
+
+```python
+# Program a CC LIST and play it in firmware
+dl.program_list(
+    steps=[(0.0001, 1.0), (0.030, 0.050), (0.0001, 1.0)],
+    mode="CC", count=3, range_value=6.0,
+    slew_A_per_us=0.5, end_behavior="LAST",
+    trigger_source="BUS",
+)
+dl.set_input(True); dl.trigger_now()       # BUS trigger fires the sequence
+
+# CC transient toggle pulse
+dl.configure_transient_pulse(
+    a_level_A=0.030, b_level_A=0.0001,
+    a_width_s=0.050, b_width_s=1.0, mode="TOGGle",
+)
+dl.transient_enable(True); dl.trigger_now()
+
+# Built-in battery discharge test with stop conditions
+dl.configure_battery_test(
+    current_A=0.050, v_stop_V=2.7, capacity_stop_mAh=200.0,
+)
+dl.set_input(True)
+# poll dl.battery_stats() — {capacity_mAh, energy_Wh, discharge_time_s, V, I}
+```
+
+**DL3031A manual gotchas** (compensated by the driver):
+- `:SOUR:LIST:STEP` is highest-index, not count (3-step list = STEP 2).
+- `:SOUR:LIST:SLEW` is per-step, not global.
+- `:SOUR:LIST:END` accepts `LAST|OFF`, not `NORMal|LAST`.
+
+**Pick load by use case:**
+
+| Use case | Best load |
+|---|---|
+| Quiescent / sleep current (< 1 mA) | QR10x (passive, correct at any I) |
+| Steady-state ~30 mA | either |
+| Heavy DC pulse > 100 mA | DL3031A (QR10x's 1 W cap limits min R) |
+| Sub-ms / sub-100 ms transients | DL3031A LIST or transient mode |
+| Built-in battery discharge characterization | DL3031A |
 
 ## Anti-patterns — don't do these
 

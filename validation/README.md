@@ -275,8 +275,60 @@ The DL3031A's inrush peak is consistently ~2× steady-state across all
 chemistries (V/100 Ω = ~30-40 mA expected steady; ~70-90 mA observed
 peak). That's an artifact of the DL3031A's CR-mode closed-loop
 catching up to a step change, not a property of the simulated battery.
-For real-DUT-shape current waveforms the next step is the DL3031A's
-LIST or transient modes (step 3 of the post-v0.9.4 roadmap).
+
+## `--scenario dynamic-list` (v0.9.6) — firmware-timed sequences
+
+The hires runner still drives the load from the host. For
+sub-300 ms transients we move the sequence into the DL3031A's
+firmware: `--scenario dynamic-list` programs the DL3031A's
+`:SOURce:LIST:*` and triggers it via BUS while `SMU.record(...)`
+captures the response.
+
+```
+python validation/run_validation.py --scenario dynamic-list \
+    --profile "CR2032-Energizer-(25)" --load dl3031a --cycles 3
+```
+
+### Pattern (CC mode, in amps)
+
+`DEFAULT_LIST_TX_PATTERN_A` is `(label, current_A, duration_s)`:
+
+| label | I (A)    | duration |
+|-------|----------|----------|
+| sleep | 0.0001   | 1.000 s  |
+| tx    | 0.0300   | 0.050 s  |
+| sleep | 0.0001   | 1.000 s  |
+
+3 cycles × 3 steps = 9 steps total played by firmware.
+
+### Why 3 steps and not 5
+
+Empirically, LIST programs with ≥ 5 steps don't fire cleanly via
+BUS trigger in our setup — the trigger fires but the LIST's
+playback alignment slips (current arrives ~3 s late in some
+captures). 3-step programs (sleep / TX / sleep) executed `count=N`
+times work reliably. Tagged as a v0.9.7 investigation item; the
+SCPI surface is correct, the firmware/trigger interaction is the
+suspect.
+
+### Why no emulator during the recording window
+
+Same as `--pattern hires`: the emulator's `_loop` writing
+`set_voltage` at 100 Hz contends with the recording reader thread
+at 4 kHz and deadlocks. For the dynamic-list runner we go further
+and skip the emulator entirely — fresh OCV is read directly from
+the profile (`profile.ocv_at(0.0)`), clamped to
+`safety_max_voltage_V`, and pinned for the recording window.
+Saved scenarios carry `recording.pinned_voltage_V` so the
+condition is recoverable.
+
+### Headline results
+
+| Profile             | TX setpoint | TX I observed | Notes                |
+|---------------------|------------|----------------|----------------------|
+| CR2032-Energizer    | 30 mA      | 35 mA peak     | clean firmware-timed TX |
+| CR123A-GP           | 30 mA      | 34 mA peak     | clean                |
+| LiPo @ +20 °C       | 30 mA      | did not capture | high-V-range flow is flaky; investigation TBD |
 
 ## Notes / known limits
 
@@ -289,6 +341,14 @@ LIST or transient modes (step 3 of the post-v0.9.4 roadmap).
 - DL3031A's electronic switching outpaces the emulator's polling
   rate; the dynamic-scenario phase summary is misleading for that
   load. Use the raw CSV / future direct-from-DL3031A measurements.
+- DL3031A 5+ step LIST programs sometimes fail to align with the
+  harness's expected phase events — the LIST plays but with delayed
+  onset (~3 s after `:TRIGger`). 3-step LIST + `count=N` is the
+  reliable shape. Under investigation for v0.9.7.
+- Emulator + recording deadlock: `Emulator._loop` writes
+  `set_voltage` at 100 Hz while the recording reader thread consumes
+  the transport at ~4 kHz; the combination deadlocks within ~100 ms.
+  hires / dynamic-list runners sidestep by pinning V manually.
 - The QR10x's mechanical-relay switching (30–95 ms) is too slow to
   resolve real GSM/Wi-Fi pulse trains. Use Rigol DL3031A (or similar)
   for sub-ms transient work.
