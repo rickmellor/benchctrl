@@ -1,14 +1,14 @@
 ---
 name: benchctrl
-description: Use when controlling a Qoitech Otii Arc Pro source-measurement unit, writing code with the benchctrl Python library, analysing captured .opensmu recordings, or building measurement automation. Covers connection patterns, safety guards for output enable, the choice between MCP tools and the Python API, and common anti-patterns.
+description: Use when controlling a Qoitech Otii Arc Pro source-measurement unit (or companion bench instruments like Eastwood QR10x / Rigol DL3031A) via the benchctrl Python library, analysing captured .opensmu recordings, or building measurement automation. Covers connection patterns, safety guards for output enable, the choice between MCP tools and the Python API, and common anti-patterns.
 ---
 
 # benchctrl library guidance
 
-benchctrl is a Python library that drives a Qoitech Otii Arc Pro SMU directly
-over its USB CDC-ACM port. **No vendor server, no Automation Toolbox license,
-no GUI.** The wire protocol is fully reverse-engineered — see
-[`docs/protocol.md`](../../docs/protocol.md).
+benchctrl is a Python library that drives a Qoitech Otii Arc Pro SMU
+plus companion bench instruments (programmable loads, resistors)
+directly over USB from Python. The Arc wire protocol is documented in
+[`docs/otii_arc_protocol.md`](../../docs/otii_arc_protocol.md).
 
 Repo: `C:\Users\rickm\Desktop\benchctrl`.
 
@@ -190,16 +190,17 @@ parses error frames and queues them.
 
 ## Battery features
 
-`benchctrl.battery` ships a clean-room replacement for Qoitech's licensed
-Battery Toolbox. See [`docs/battery.md`](../../docs/battery.md) for the
-full feature plan.
+`benchctrl.battery` is the battery characterisation + emulation
+toolkit: profile I/O, life calculator, hardware profiler, host-side
+emulator. See [`docs/battery.md`](../../docs/battery.md) for the
+walkthrough and instrument-choice guidance.
 
 ### Profile I/O (v0.5.0)
 
 ```python
 from benchctrl.battery import BatteryProfile
 
-# Load Otii's bundled profile (or any compatible JSON)
+# Load a battery profile JSON (Otii-format interchange)
 profile = BatteryProfile.load("CR2032-Energizer-(25).json")
 profile.nominal_voltage              # 3.0 V
 profile.nominal_capacity_mAh         # 230.2 mAh
@@ -287,9 +288,8 @@ with SMU.open() as smu:
 ```
 
 Bandwidth: ~100 Hz host-side, suitable for IoT loads with > 10 ms
-response. Sub-ms ESR tracking would need firmware-level access. Otii's
-licensed device-side emulator handles that regime; for everything
-else, the benchctrl emulator works.
+response. Sub-ms ESR tracking would need firmware-level access we
+don't have today and is out of reach for a host-side loop.
 
 Safety: `safety_max_voltage_V` is a hard cap on output. Always set
 this to your DUT's max tolerable voltage. The loop also stops on
@@ -426,9 +426,9 @@ dl.set_input(True)
 
 ## Anti-patterns — don't do these
 
-- **Don't reach for the Otii server / Automation Toolbox / TCP port 1905.**
-  benchctrl talks to the device directly via pyserial. There is no server.
-  Code that imports `otii_tcp_client` is the wrong path.
+- **Don't reach for a vendor TCP server / external client library.**
+  benchctrl talks to the Arc directly via pyserial USB CDC-ACM. There
+  is no server. Code that imports `otii_tcp_client` is the wrong path.
 - **Don't call `smu.calibrate()`, `smu.firmware_upgrade()`, `smu.set_supply_battery_emulator()`,
   `smu.enable_battery_profiling()`, `smu.wait_for_battery_data()`,
   `smu.set_battery_profile()`** on the `SMU` class — they raise

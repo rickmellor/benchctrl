@@ -7,7 +7,7 @@ in `C:\Users\rickm\AppData\Local\Programs\Python\Python312\Lib\site-packages\oti
 Used as the parity target for benchctrl. Each row says how benchctrl maps it:
 
 - **mirror** — implemented in benchctrl with equivalent semantics (name may differ for clarity)
-- **drop** — not relevant (TCP server / licensing / project file format)
+- **drop** — not relevant to benchctrl's architecture (TCP server lifecycle, project file format, etc.)
 - **defer** — surface present but raises `BenchNotImplementedError`; tracked in `ROADMAP.md`
 
 ---
@@ -189,7 +189,8 @@ benchctrl has its own exception hierarchy (`BenchError` and subclasses).
 
 - **mirror**: ~48 methods (all non-server device/recording surface)
 - **defer**: ~17 methods (battery, calibration, firmware, log, sample-rate)
-- **drop**: ~24 methods (TCP server, licensing, project file format)
+- **drop**: ~24 methods (TCP-server lifecycle, project file format)
 
-Net result: every meaningful user-facing capability of the official client
-is reachable in benchctrl without a license fee or a running server.
+benchctrl's surface is a strict subset of the device-touching
+operations the official client offers — server-lifecycle and
+project-file-format operations are intentionally out of scope.

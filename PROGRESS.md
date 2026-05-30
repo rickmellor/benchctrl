@@ -50,7 +50,7 @@ Methodical sweep across phase33 + new captures phase34c, phase35-43.
 | Channel inventory (cmd=0x8D) | DONE | 256-byte response, structured |
 | Calibration via API | DECODED as no-op — Desktop path TBD |
 | set_channel_samplerate | DECODED as not-a-wire-command (server concept) |
-| Battery emulation | BLOCKED on Battery Toolbox license |
+| Device-side battery emulation | not observed in available captures |
 
 ## v0.1.1 update (today)
 
@@ -137,8 +137,7 @@ Useful for any measurement where sub-1-ms detail isn't needed.
 ### 2. Battery emulation is the biggest scope item for v0.2
 
 The user explicitly flagged battery emulation as the priority for the
-next pass — Qoitech's separate Battery Toolbox license can be
-obsoleted once it's working. Scoped in `ROADMAP.md`.
+next pass. Scoped in `ROADMAP.md`.
 
 ### 3. Floating-point boundaries in time-domain slicing
 
@@ -150,8 +149,8 @@ Semantics now: include sample `k` iff `start <= t_k < end`.
 
 In order of user-stated interest:
 
-1. **Battery emulation** — decode profile upload + SoC API + battery data
-   stream, obsoleting the Battery Toolbox.
+1. **Battery emulation** — host-side OCV/ESR control loop on top of
+   the existing wire vocabulary.
 2. **Full-rate streaming** — decode the unlock command so high-rate
    channels actually deliver 4 kHz.
 3. **Calibration** — capture the calibration flow, expose with

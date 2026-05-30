@@ -125,7 +125,7 @@ write, sample buffer mechanics.
 
 ### `benchctrl.battery`
 
-Replaces Qoitech's licensed Battery Toolbox in four phased modules:
+Four phased modules for battery characterisation and emulation:
 
 ```
 profile.py          BatteryProfile dataclass + Otii JSON round-trip

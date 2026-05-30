@@ -7,9 +7,9 @@ documented for contributors but not part of the stability surface.
 This document is structured by sub-package:
 
 - [`benchctrl` — SMU device control](#smu--the-device) (this layer)
-- [`benchctrl.battery` — Battery Toolbox replacement](#benchctrlbattery--battery-toolbox-replacement)
+- [`benchctrl.battery` — battery characterisation + emulation](#benchctrlbattery--battery-characterisation--emulation)
 - [`benchctrl.bench` — companion instrument drivers](#benchctrlbench--companion-instrument-drivers)
-- [`benchctrl.mcp` — Model Context Protocol server](docs/mcp.md) (separate doc — 93 tools)
+- [`benchctrl.mcp` — Model Context Protocol server](docs/mcp.md) (separate doc — 92 tools)
 
 ## `SMU` — the device
 
@@ -312,11 +312,11 @@ logging.getLogger("benchctrl.protocol").setLevel(logging.DEBUG)
 
 ---
 
-## `benchctrl.battery` — Battery Toolbox replacement
+## `benchctrl.battery` — battery characterisation + emulation
 
-Four phased modules that together replace Qoitech's licensed Battery
-Toolbox. Detailed walkthrough in [`battery.md`](battery.md); this
-section is the API surface.
+Four phased modules: profile I/O, life calculator, profiler, emulator.
+Detailed walkthrough in [`battery.md`](battery.md); this section is
+the API surface.
 
 ```python
 from benchctrl.battery import (

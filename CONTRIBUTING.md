@@ -230,7 +230,7 @@ benchctrl/
 │   ├── recording.py, samples.py         Recording + statistics + exports
 │   ├── mcp.py                           MCP orchestrator + cross-driver tools
 │   ├── cli.py                           benchctrl CLI entry
-│   ├── battery/                         Battery Toolbox replacement
+│   ├── battery/                         battery characterisation + emulation
 │   │   ├── profile.py                   profile JSON I/O
 │   │   ├── calculator.py                predicted runtime
 │   │   ├── profiler.py                  generate fresh profile (any SMU)

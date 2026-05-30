@@ -1,45 +1,68 @@
 # Battery features
 
-benchctrl's `benchctrl.battery` subpackage replaces Qoitech's licensed
-**Battery Toolbox** entirely on top of the wire vocabulary we already
-have. No extra licensing required — no separate server, no
-"Cannot read properties of undefined (reading 'something')" errors,
-no per-feature dongle.
+`benchctrl.battery` is the framework's battery characterisation and
+emulation toolkit. Four modules cover profile I/O, life-estimation,
+hardware-driven profile generation, and DUT-side emulation, all on
+top of the `SourceMeasurementUnit` Protocol so any conforming driver
+can drive them.
 
-## Why this exists
+## Capabilities
 
-Otii ships a "Battery Toolbox" as a paid add-on covering four features:
-
-| Otii feature | What it does |
+| Module | What it does |
 |---|---|
-| Battery Profile Manager | Browse / import / export battery profile JSON files |
-| Battery Life Calculator | Duty-cycle simulator: estimate runtime given active/sleep currents |
-| Battery Profiler | Discharge a real battery, measure V/I, build a profile |
-| Battery Emulator | Make the device act as a battery (OCV + ESR sag) for DUT testing |
+| `benchctrl.battery.profile` | Read / write battery profile JSON files (Otii-format interchange) + OCV/ESR interpolation |
+| `benchctrl.battery.calculator` | Duty-cycle life estimator: predict runtime given active/sleep currents |
+| `benchctrl.battery.profiler` | Orchestrated hardware discharge that emits a fresh profile |
+| `benchctrl.battery.emulator` | Host-side OCV + ESR control loop so the SMU presents as a battery to the DUT |
 
-All four sit on top of capabilities the device exposes through wire
-commands benchctrl already speaks. The Battery Toolbox license gates
-**access via the Otii server's API**, not the device itself — so we
-can ship the same features as benchctrl Python (and MCP tools) entirely
-without it.
+The profile format we read and write is the JSON shape used by the
+Otii desktop app, so bundled cell profiles (and anything you export
+from Otii) round-trip through benchctrl cleanly.
+
+## Choosing the right instrument
+
+The four pieces above run against the `SourceMeasurementUnit` Protocol,
+so they aren't tied to any one device. Practical guidance today:
+
+- **Profiling a small cell (CR2032, AA, LiPo at moderate currents)**:
+  use the **Otii Arc / Arc Pro** as both source and sink. The Arc's
+  CC range lets the profiler step a cell down through a few hundred mA
+  on its low/high ranges. Native ~4 kHz streaming on the current
+  channel captures fine transients.
+
+- **Profiling at higher currents or measuring deep discharge of a
+  larger battery**: use the **Rigol DL3031A** as the load. Its
+  firmware battery-discharge mode supports up to 60 A, stops on
+  voltage/capacity/time conditions, and reports capacity + energy
+  in real time. Pair it with a separate source (or use the cell
+  directly) to characterise discharge behaviour the Arc can't reach.
+
+- **Emulating a cell to a DUT for life-cycle testing**: the **Arc**
+  is currently the only driver that conforms to
+  `SourceMeasurementUnit` (so it's the one `Emulator` instantiates).
+  Source range tops out around 4.2 V under load on the high range —
+  fine for single-cell LiPo / Li-ion / alkaline at moderate currents,
+  not appropriate for multi-cell packs at high load.
 
 ## Status — phased rollout
 
 | Phase | Module | Status |
 |---|---|---|
-| 1 | `benchctrl.battery.profile` — Otii-compatible JSON I/O + interpolation | **shipped (v0.5.0)** |
+| 1 | `benchctrl.battery.profile` — JSON I/O + interpolation | **shipped (v0.5.0)** |
 | 2 | `benchctrl.battery.calculator` — duty-cycle life estimator | **shipped (v0.6.0)** |
 | 3 | `benchctrl.battery.profiler` — orchestrated hardware discharge | **shipped (v0.7.0)** |
 | 4 | `benchctrl.battery.emulator` — host-side OCV + ESR control loop | **shipped (v0.8.0)** |
 
 ## Phase 1 — `benchctrl.battery.profile`
 
-### Reads Otii's profile format directly
+### Reads the standard battery profile JSON format
 
-Tested against every profile that ships with Otii 3.7.2 (8 cells:
-AA, AAA, CR123A, CR2, CR2032, plus a LiPo at three temperatures).
-All eight load, round-trip through benchctrl, and re-save as
-bit-identical JSON. They re-import into Otii without complaint.
+Tested against the eight cell profiles bundled with Otii 3.7.2 (AA,
+AAA, CR123A, CR2, CR2032, plus a LiPo at three temperatures). All
+eight load, round-trip through benchctrl, and re-save as bit-identical
+JSON — they re-import into Otii without complaint. Profiles you
+generate with benchctrl's profiler are the same format and can be
+loaded by either tool.
 
 ```python
 from benchctrl.battery import BatteryProfile
@@ -245,8 +268,8 @@ est = estimate_life_from_profile(profile=profile, duty_cycle=duty)
 
 ## Phase 3 — `benchctrl.battery.profiler`
 
-Orchestrates a real-cell discharge to produce a `BatteryProfile`.
-Replaces Otii's Battery Profiler using only the existing wire vocabulary.
+Orchestrates a real-cell discharge to produce a `BatteryProfile` —
+load steps, settle, measure V/I, build the discharge table.
 
 ### Workflow
 
@@ -342,8 +365,9 @@ the run is aborted.
 ## Phase 4 — `benchctrl.battery.emulator`
 
 Host-side control loop that drives the SMU as a battery with OCV + ESR
-sag. Replaces Otii's licensed Battery Emulator using only benchctrl's
-existing wire vocabulary.
+sag. The DUT sees a programmable cell that drains, sags under load,
+and stops at safety limits — useful for life-cycle testing without a
+warehouse of real cells.
 
 ### Workflow
 
@@ -395,10 +419,9 @@ read+write cycle. The default 100 Hz update rate handles:
 - Slow transients (anything > 10 ms response time)
 - Typical IoT sleep/wake cycles (TX bursts, sensor sampling)
 
-For sub-ms ESR tracking (e.g. fast switching converters), Otii's
-licensed device-side emulator handles the regulation in the device's
-own MHz regulator. That regime is out of reach for a host-side loop
-and would require firmware-level access we don't have today.
+Sub-ms ESR tracking (e.g. fast switching converters) is out of reach
+for a host-side loop running at ~100 Hz — that regime needs a
+device-side regulator with firmware-level access we don't have today.
 
 ### Modes
 

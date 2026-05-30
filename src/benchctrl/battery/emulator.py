@@ -2,8 +2,9 @@
 
 Makes the SMU behave like a battery for DUT testing: dynamically adjusts
 output voltage based on instantaneous current draw and a profile's OCV
-+ ESR curves. Replaces Qoitech's licensed Battery Emulator entirely on
-top of benchctrl's existing wire vocabulary.
++ ESR curves. Drives any
+:py:class:`benchctrl.interfaces.SourceMeasurementUnit`-conforming
+driver on top of benchctrl's existing wire vocabulary.
 
 How it works
 ------------
@@ -19,9 +20,10 @@ A background thread runs at ``update_interval_s`` (default 10 ms ≈ 100 Hz):
 
 The control loop bandwidth is bounded by USB latency (~ms), so this
 emulator handles steady-state and slow transients well. Sub-ms ESR
-tracking would need the device's own regulator — Otii's licensed
-device-side emulator covers that range, but ~100 Hz is good enough for
-most IoT loads (TX bursts, sleep/wake cycles, sensor sampling).
+tracking would need device-side firmware-level regulation we don't
+have today — out of reach for a host-side loop. ~100 Hz is good
+enough for most IoT loads (TX bursts, sleep/wake cycles, sensor
+sampling).
 
 Safety
 ------

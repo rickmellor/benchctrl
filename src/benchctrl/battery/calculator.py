@@ -1,7 +1,7 @@
 """Battery life calculator — duty-cycle discharge simulator.
 
-Replaces Qoitech's Battery Life Calculator on top of benchctrl's open
-profile format. Pure-Python; no SMU connection required.
+Pure-Python life estimator on top of benchctrl's battery profile
+format. No SMU connection required.
 
 Two estimators:
 

@@ -2,9 +2,9 @@
 
 ## Goals
 
-1. **Replace the Qoitech vendor stack** for everyday measurement workflows.
-   Connect, configure, record, analyse, export — all without `otii_server`,
-   no Automation Toolbox license, no TCP socket.
+1. **Pure Python over USB.** Talk to an Otii Arc / Arc Pro directly
+   over its USB CDC-ACM port. Connect, configure, record, analyse,
+   export from one library, no extra runtime.
 2. **Modern Python**. Type hints everywhere. Dataclasses for value objects.
    Enums for choices. Context managers for resource lifecycles. Iterators
    for streams. No surprising mutable defaults.
@@ -15,11 +15,10 @@
 
 ## Non-goals
 
-- Network protocol parity with the official server. We do **not** speak the
-  Qoitech TCP protocol. Anyone running the official server gets no benefit
-  from benchctrl; the value proposition is *removing* that dependency.
-- Project file compatibility. Recordings serialise to our own self-contained
-  format plus standard CSV/JSON.
+- Project file compatibility with the Otii desktop app's session
+  format. Recordings serialise to our own self-contained format plus
+  standard CSV/JSON. (Battery profile JSONs do round-trip, since
+  that's a simple, documented format.)
 - Async API. The hardware is inherently sequential; the simple sync API is
   easier to use correctly. The single streaming iterator covers the
   "what's the value right now" use case without needing async machinery.

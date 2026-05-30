@@ -16,21 +16,23 @@ Companion docs to read alongside this:
 **One sentence**: benchctrl drives a Qoitech Otii Arc / Arc Pro
 source-measurement unit directly over its USB CDC-ACM port from
 Python, with built-in battery emulation, companion-instrument
-drivers, an MCP server, and a reproducible validation harness.
+drivers, an MCP server, and a reproducible scenarios harness.
 
-**Why it exists**: Qoitech's automation Python client requires a
-paid-licensed local server. benchctrl re-implements the same
-capability by talking to the hardware directly. The wire protocol is
-fully reverse-engineered (see [`protocol.md`](protocol.md)) and the
-device imposes no license check at the wire level.
+**Why it exists**: a single pure-Python entry point for an entire
+bench — talk to the SMU and the loads through one library, drive
+reproducible experiments from scripts, and expose the whole surface
+to LLM agents through MCP. The Arc wire protocol is documented in
+[`otii_arc_protocol.md`](otii_arc_protocol.md).
 
-The project has grown beyond just the SMU driver:
+The codebase has several subsystems:
 
-- **`benchctrl.battery`** — Battery Toolbox replacement: profile I/O,
-  life calculator, profiler, 100 Hz host-side emulator
-- **`benchctrl.bench`** — companion instrument drivers (QR10x
+- **`benchctrl.battery`** — battery characterisation + emulation:
+  profile I/O, life calculator, hardware profiler, 100 Hz host-side
+  emulator. Works against any `SourceMeasurementUnit`.
+- **`benchctrl.drivers`** — instrument drivers (Otii Arc, QR10x
   programmable resistor, Rigol DL3031A electronic load)
-- **`benchctrl.mcp`** — MCP server, 93 tools, exposes every SDK method
+- **`benchctrl.mcp`** — MCP server, 92 tools, registers each
+  driver's surface separately
 - **`scenarios/`** — top-level harness for reproducible scenarios
 
 ## Where things live
@@ -256,10 +258,12 @@ When you find an instrument behavior that contradicts the manufacturer's docs:
 
 ## What this library is not
 
-- Not a competitor to the Qoitech Otii desktop app for end-users — it's a programmatic interface for automation
-- Not affiliated with Qoitech AB or Rigol Technologies
-- Not licensed under their automation toolboxes (we don't use their servers)
+- Not affiliated with Qoitech AB, Rigol Technologies, or Eastwood Tech
+- Not a desktop app for end-users — it's a programmatic interface for
+  automation and scripting from Python
 - Not a sniffer / man-in-the-middle (talks to the device directly)
 - Not a firmware update tool (intentionally deferred for safety)
-- Not async — hardware is sequential; the streaming iterator covers "what's the value right now"
-- Not multi-device coordinated — one Arc per `SMU` instance is the supported topology
+- Not async — hardware is sequential; the streaming iterator covers
+  "what's the value right now"
+- Not multi-device coordinated — one Arc per `OtiiArc` instance is
+  the supported topology

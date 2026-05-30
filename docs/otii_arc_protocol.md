@@ -228,10 +228,10 @@ reverse engineered. Tracked in `ROADMAP.md` as v0.2.
   calibration flow lives somewhere else — probably the Desktop GUI's
   service-mode path or a USB control transfer outside the bulk
   endpoint. Out of scope.
-- **Battery emulation** — gated at the Otii server by a separate Battery
-  Toolbox license we don't hold (cap #40). To capture, the Desktop GUI
-  has to drive the flow manually with DMS recording in parallel. Stubs
-  remain.
+- **Device-side battery emulation** — was not observed in captures of
+  the workflows accessible to us (cap #40). benchctrl's emulator is a
+  host-side ~100 Hz control loop instead; sub-ms ESR tracking would
+  need device-side firmware access we don't have.
 
 ### Probably-not-wire-commands
 

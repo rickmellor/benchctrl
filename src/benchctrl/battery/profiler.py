@@ -1,9 +1,13 @@
 """Battery profiler — orchestrates a real-cell discharge to build a profile.
 
-Replaces Qoitech's Battery Profiler on top of benchctrl's existing wire
-vocabulary (CC mode, recording, voltage measurement). The result is a
-:class:`benchctrl.battery.BatteryProfile` that round-trips through Otii
-and benchctrl's other battery tools.
+Drives the SMU through alternating high/low load steps, measures V/I,
+and assembles the resulting OCV + ESR table into a
+:class:`benchctrl.battery.BatteryProfile`. Built on benchctrl's
+existing wire vocabulary (CC mode, recording, voltage measurement) so
+it works against any :py:class:`SourceMeasurementUnit`-conforming
+driver. The output JSON format round-trips with the format used by
+the Otii desktop app, so profiles benchctrl generates can be loaded
+by either tool.
 
 How it works
 ------------
@@ -27,17 +31,19 @@ The loop stops when an exit condition fires:
 Timing
 ------
 Step transitions and measurements are issued over USB and bounded by
-~ms-scale latency. Phase 3 enforces a minimum step duration of 50 ms
-to keep measurements reliable; profiles with shorter high-pulse times
-(e.g. Otii's CR2032 default of 2 ms) need lower-level firmware timing
-and are rejected with a clear error. Use the matching duty-cycle
-equivalent at slower rates for now.
+~ms-scale latency. The profiler enforces a minimum step duration of
+50 ms to keep measurements reliable; profiles with shorter
+high-pulse times (e.g. 2 ms steps that some bundled CR2032 profiles
+use) need lower-level firmware timing and are rejected with a clear
+error. Use the matching duty-cycle equivalent at slower rates for now.
 
 Hardware
 --------
-The profiler issues only commands benchctrl already speaks (``set_main_current``,
-``set_output``, recording, statistics). It does NOT require the licensed
-Battery Toolbox features and is interoperable with both Arc and Ace Pro.
+The profiler issues only commands the
+:py:class:`SourceMeasurementUnit` Protocol exposes (``set_main_current``,
+``set_output``, recording, statistics). Today the Arc / Arc Pro is the
+concrete implementer; future SMUs that conform to the Protocol work
+the same way.
 """
 
 from __future__ import annotations

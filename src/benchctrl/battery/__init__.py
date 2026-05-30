@@ -1,19 +1,19 @@
 """Battery emulation, profiling, and life-estimation features.
 
-This subpackage replaces Qoitech's licensed "Battery Toolbox" entirely
-on top of benchctrl's existing wire vocabulary — no extra licensing
-required.
+A four-piece battery workflow built on benchctrl's existing wire
+vocabulary and the :py:class:`SourceMeasurementUnit` Protocol — any
+conforming driver can run these.
 
 Phases:
 
-- ``benchctrl.battery.profile`` — Otii-compatible JSON profile format
-  (v0.5.0)
+- ``benchctrl.battery.profile`` — battery profile JSON format
+  (Otii-compatible interchange) (v0.5.0)
 - ``benchctrl.battery.calculator`` — battery life duty-cycle estimator
-  (v0.6.0, deferred)
+  (v0.6.0)
 - ``benchctrl.battery.profiler`` — hardware discharge orchestration to
-  build profiles from real batteries (v0.7.0, deferred)
+  build profiles from real batteries (v0.7.0)
 - ``benchctrl.battery.emulator`` — host-side control loop that drives the
-  SMU as a battery with realistic OCV + ESR sag (v0.8.0, deferred)
+  SMU as a battery with realistic OCV + ESR sag (v0.8.0)
 """
 
 from benchctrl.battery.calculator import (

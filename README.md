@@ -4,11 +4,8 @@ Open-source Python control stack for your lab bench. Drives the
 [Qoitech Otii Arc / Arc Pro][otii] SMU directly over USB CDC-ACM,
 plus a growing set of companion instruments (programmable loads,
 programmable resistors), with one MCP server that exposes the whole
-bench to LLM agents.
-
-No vendor server, no Automation Toolbox license, no GUI.
-Cross-platform (Windows / Linux / macOS) via [pyserial][pyserial] /
-[pyvisa][pyvisa].
+bench to LLM agents. Cross-platform (Windows / Linux / macOS) via
+[pyserial][pyserial] / [pyvisa][pyvisa].
 
 Driver-symmetric architecture: every instrument lives under
 `benchctrl.drivers.<vendor_model>/`, the Otii Arc included. Battery
@@ -30,15 +27,16 @@ slots in.
 
 ## What this is for
 
-You have an Otii Arc or Arc Pro on the bench. You want to:
+You have an Otii Arc / Arc Pro on the bench, maybe a programmable load
+or two, and you want to:
 
-- Drive it from your own Python scripts without running Qoitech's
-  server or owning their automation license.
+- Drive everything from your own Python scripts over plain USB.
 - Emulate a battery profile against a real DUT, with state-of-charge
-  tracking and proper OCV-IR-drop modeling — the same job Qoitech's
-  Battery Toolbox does, but free and scriptable.
-- Wire a programmable load (Eastwood QR10x resistor box, Rigol DL3031A
-  electronic load) into the same workflow.
+  tracking and OCV-IR-drop modeling — and pick which instrument
+  sources or sinks (the Arc plays battery; the DL3031A can play
+  battery-side discharge at higher current).
+- Wire a programmable load (Eastwood QR10x resistor box, Rigol
+  DL3031A electronic load) into the same workflow.
 - Hand a real bench to an LLM agent through the [Model Context
   Protocol][mcp] without writing your own tool surface.
 - Save reproducible test scenarios you can re-run as regression checks.
@@ -79,8 +77,7 @@ benchctrl is all of that, in one package.
 
 Connect, configure, source / measure, record at native streaming rates
 (~4 kHz on the current channel). Frame-aware error detection. Channel
-enable, expansion port, GPIO, UART. Everything the Qoitech Automation
-Toolbox does at the SMU layer, for $0.
+enable, expansion port, GPIO, UART. Pure Python over USB CDC-ACM.
 
 ```python
 import time
@@ -100,20 +97,23 @@ with OtiiArc.open() as smu:
 → [`docs/getting_started.md`](docs/getting_started.md),
 [`docs/api_reference.md`](docs/api_reference.md)
 
-### `benchctrl.battery` — Battery Toolbox replacement
+### `benchctrl.battery` — battery emulation + analytics
 
-Otii's Battery Toolbox is a paid license. The workflow it sells —
-profile a real cell, then emulate it against a DUT with SoC tracking —
-is in this package, in four phases:
+A four-piece battery workflow on top of any
+`SourceMeasurementUnit`-conforming driver:
 
-- **Battery profile I/O** — bit-identical round-trip with Otii's JSON
-  format (read/write Otii's bundled CR2032, CR123A, LiPo, etc.)
+- **Battery profile I/O** — read / write the Otii-format JSON profile
+  files (so the bundled CR2032, CR123A, LiPo profiles round-trip
+  cleanly through benchctrl)
 - **Battery life calculator** — predict runtime given a profile and a
-  load
+  duty cycle
 - **Profiler** — drive a discharge sweep against a real cell to
   generate a fresh profile
-- **Emulator** — Arc acts as a battery: 100 Hz host control loop runs
-  `V = OCV(SoC) − I·ESR(SoC)` and the DUT can't tell the difference
+- **Emulator** — host-side 100 Hz control loop runs
+  `V = OCV(SoC) − I·ESR(SoC)` so the DUT sees a battery's behaviour.
+  Today the Arc fills this role on its high range; for high-current
+  discharge characterisation the DL3031A's firmware battery-test mode
+  covers the sinking side.
 
 ```python
 from benchctrl.drivers.otii_arc import OtiiArc
@@ -323,12 +323,11 @@ pytest                                    # full suite (Arc Pro on USB)
 MIT. See [`LICENSE`](LICENSE).
 
 benchctrl is an independent open-source project. **Not affiliated with,
-endorsed by, or supported by Qoitech AB.** "Otii", "Arc", and related
-marks are trademarks of Qoitech AB. The DL3031A driver is not
-affiliated with Rigol Technologies.
+endorsed by, or supported by Qoitech AB, Rigol Technologies, or
+Eastwood Tech.** "Otii", "Arc", and related marks are trademarks of
+Qoitech AB. "Rigol" and "DL3031A" are trademarks of Rigol
+Technologies. "QR10x" is a trademark of Eastwood Tech.
 
-The wire protocol was reverse-engineered from passive observation of
-legitimate USB traffic between a user's own hardware and software they
-had licensed. The hardware enforces no license check on the wire;
-benchctrl simply opens the device's standard CDC-ACM endpoint, exactly
-as the operating system invites any application to do.
+Each driver opens its device's standard USB endpoint exactly the way
+the operating system invites any application to do — pyserial
+CDC-ACM for the Arc and QR10x, pyvisa USB-TMC for the DL3031A.

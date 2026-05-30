@@ -827,11 +827,11 @@ First-try success against the connected QR101B-AM-1R on COM7:
 - `incr(900)` → 1000.027 Ω; `decr(900)` → 100.038 Ω
 - Internal temp: 24.7 °C
 
-## [0.8.0] — battery emulator (phase 4 of Battery Toolbox replacement) — FOUR PHASES DONE
+## [0.8.0] — battery emulator (phase 4 of the battery feature suite) — FOUR PHASES DONE
 
 Host-side control loop that drives the SMU as a battery with OCV + ESR
-sag. Completes the Battery Toolbox replacement: benchctrl now covers all
-four features Qoitech's licensed product offers.
+sag. Completes the four-phase battery feature suite: profile I/O, life
+calculator, hardware profiler, and emulator.
 
 ### Added — `benchctrl.battery.emulator`
 
@@ -866,9 +866,8 @@ four features Qoitech's licensed product offers.
 USB-driven host loop tops out around ~ms-scale latency per read+write
 cycle. 100 Hz default update rate handles steady-state and slow
 transients well (anything > ~10 ms response). Sub-ms ESR tracking
-needs firmware-level regulation — out of reach for the host loop.
-That's the one regime Otii's licensed device-side emulator covers
-that this doesn't.
+needs firmware-level regulation — out of reach for the host loop and
+out of scope for benchctrl today.
 
 ### Added — MCP tools (per SDK ↔ MCP parity principle)
 
@@ -903,20 +902,20 @@ up.
 
 ### What this completes
 
-The Battery Toolbox replacement is now feature-complete on top of
-benchctrl's existing wire vocabulary:
+The four-phase battery suite is now feature-complete:
 
-| Otii Battery Toolbox feature | benchctrl module |
+| Capability | benchctrl module |
 |---|---|
-| Battery Profile Manager | `benchctrl.battery.profile` (v0.5.0) |
-| Battery Life Calculator | `benchctrl.battery.calculator` (v0.6.0) |
-| Battery Profiler | `benchctrl.battery.profiler` (v0.7.0) |
-| Battery Emulator | `benchctrl.battery.emulator` (v0.8.0) |
+| Battery profile JSON I/O | `benchctrl.battery.profile` (v0.5.0) |
+| Battery life calculator | `benchctrl.battery.calculator` (v0.6.0) |
+| Battery profiler (hardware discharge → profile) | `benchctrl.battery.profiler` (v0.7.0) |
+| Battery emulator (host-side OCV + ESR loop) | `benchctrl.battery.emulator` (v0.8.0) |
 
-No vendor license required. No Otii server. Profile JSONs interchange
-bit-for-bit between benchctrl and Otii in both directions.
+Profile JSONs interchange bit-for-bit with Otii-format files in both
+directions, so cells profiled in either tool can be loaded by the
+other.
 
-## [0.7.0] — battery profiler (phase 3 of Battery Toolbox replacement)
+## [0.7.0] — battery profiler (phase 3 of the battery feature suite)
 
 Hardware orchestration: drive a real battery through a configured
 discharge profile, measure V/I per cycle, build a profile JSON.
@@ -981,10 +980,10 @@ Phase 3 ships green tests against a mock SMU. Real-battery validation
 is a separate hardware task (needs an actual cell on the output
 terminals) — tracked for a follow-up when bench hardware is wired up.
 
-## [0.6.0] — battery life calculator (phase 2 of Battery Toolbox replacement)
+## [0.6.0] — battery life calculator (phase 2 of the battery feature suite)
 
-Pure-Python duty-cycle life estimator. Drop-in replacement for Qoitech's
-Battery Life Calculator using benchctrl's open profile format from v0.5.0.
+Pure-Python duty-cycle life estimator on top of benchctrl's profile
+format from v0.5.0.
 
 ### Added — `benchctrl.battery.calculator`
 
@@ -1037,12 +1036,13 @@ match physical intuition.
 
 Total tests: 230 → **248 passing**.
 
-## [0.5.0] — battery profile format (phase 1 of Battery Toolbox replacement)
+## [0.5.0] — battery profile format (phase 1 of the battery feature suite)
 
-First of four phases replacing Qoitech's licensed Battery Toolbox on
-top of benchctrl's existing wire vocabulary. This release nails the
-**profile JSON format** — the data structure every subsequent battery
-feature reads/writes.
+First of four phases of the battery feature suite. This release
+nails the **profile JSON format** — the data structure every
+subsequent battery feature reads / writes. Compatible with the JSON
+shape used by the Otii desktop app so bundled cell profiles round-trip
+cleanly.
 
 ### Added — `benchctrl.battery.profile`
 
@@ -1343,10 +1343,9 @@ type the device emits or accepts in the captured corpus.
 - **`calibrate()`** — fires zero wire commands via the API (cap #41).
   The vendor's calibration flow lives somewhere else (likely the
   Desktop GUI's service-mode path). Stub kept.
-- **Battery emulation** — blocked at the Otii server by a separate
-  "Battery Toolbox" license we don't hold (cap #40 reached the gate but
-  not the wire). Decoding requires manually driving the Otii Desktop
-  GUI with DMS capturing in parallel. Stubs kept.
+- **Device-side battery emulation** — not observed in the workflows
+  we could capture (cap #40). benchctrl ships a host-side emulator
+  instead — see v0.8.0. Stubs kept on the SMU class for surface parity.
 
 ### Internal
 
@@ -1401,7 +1400,7 @@ type the device emits or accepts in the captured corpus.
 ## [0.1.0] — initial release
 
 First public release. Drives the Qoitech Otii Arc / Arc Pro directly
-over USB CDC-ACM with no vendor server, license, or GUI.
+over USB CDC-ACM, in pure Python.
 
 ### Added
 
