@@ -50,7 +50,7 @@ jobs:
           pip install -e ".[dev,mcp,bench-visa]"
 
       - name: Ruff
-        run: ruff check src tests validation
+        run: ruff check src tests scenarios
 
       - name: Mypy
         run: mypy src

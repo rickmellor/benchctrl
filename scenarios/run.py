@@ -1,8 +1,8 @@
-"""Bench-validation harness for the benchctrl battery emulator.
+"""Bench scenarios harness for the benchctrl battery emulator.
 
 Runs reproducible "scenarios" that drive the Otii Arc Pro emulator
 against a programmable load and saves the captured response to disk
-as a JSON + CSV pair (optionally a PNG plot) under ``scenarios/``.
+as a JSON + CSV pair (optionally a PNG plot) under ``scenarios/saved/``.
 
 Two scenario types:
 
@@ -28,11 +28,11 @@ captured data.
 CLI (live capture)::
 
     # QR10x (default)
-    python validation/run_validation.py --profile CR2032-Energizer-(25) \\
+    python scenarios/run.py --profile CR2032-Energizer-(25) \\
         --scenario static
 
     # DL3031A
-    python validation/run_validation.py --profile CR2032-Energizer-(25) \\
+    python scenarios/run.py --profile CR2032-Energizer-(25) \\
         --scenario static --load dl3031a
 
 Use ``--all`` to run the full static matrix across every bundled profile.
@@ -48,7 +48,7 @@ import shutil
 import sys
 import time
 
-log = logging.getLogger("benchctrl.validation")
+log = logging.getLogger("benchctrl.scenarios")
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -60,7 +60,7 @@ from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
 from benchctrl.drivers.eastwood_qr10x import QR10x
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCENARIO_DIR = REPO_ROOT / "validation" / "scenarios"
+SCENARIO_DIR = REPO_ROOT / "scenarios" / "saved"
 
 
 def _default_profile_dir() -> Path:
@@ -69,7 +69,7 @@ def _default_profile_dir() -> Path:
     1. ``BENCHCTRL_BATTERY_PROFILE_DIR`` env var
     2. CLI ``--profile-dir`` (handled in :func:`main`)
     3. Otii bundled profile dir under ``%LOCALAPPDATA%\\otii3``
-    4. Repo-local ``validation/profiles/`` (if present — bring your own)
+    4. Repo-local ``scenarios/profiles/`` (if present — bring your own)
     """
     import os
     env = os.environ.get("BENCHCTRL_BATTERY_PROFILE_DIR")
@@ -84,7 +84,7 @@ def _default_profile_dir() -> Path:
                 cand = app_dir / "resources" / "batteryprofiles"
                 if cand.is_dir():
                     return cand
-    repo_local = REPO_ROOT / "validation" / "profiles"
+    repo_local = REPO_ROOT / "scenarios" / "profiles"
     return repo_local  # may not exist; --all will report nothing found
 
 

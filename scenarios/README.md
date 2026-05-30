@@ -1,4 +1,4 @@
-# Bench validation scenarios
+# Bench scenarios
 
 End-to-end hardware tests for the benchctrl battery emulator. Each
 scenario drives an Otii Arc Pro (acting as a virtual cell) into an
@@ -14,9 +14,9 @@ regardless of changes to the bundled profiles.
 ## What's in here
 
 ```
-validation/
-  run_validation.py        # the harness — see "Running" below
-  scenarios/               # captured artifacts (one set per run)
+scenarios/
+  run.py        # the harness — see "Running" below
+  saved/                   # captured artifacts (one set per run)
     <profile>_<kind>_<utc>.json   # full scenario record
     <profile>_<kind>_<utc>.csv    # tabular samples
     <profile>_<kind>_<utc>.png    # quick plot (if matplotlib installed)
@@ -46,13 +46,13 @@ Requires an Arc Pro on USB-CDC-ACM and a QR10x programmable load on
 ```powershell
 # Single profile static sweep
 set PYTHONIOENCODING=utf-8
-python validation\run_validation.py --scenario static --profile "CR2032-Energizer-(25)"
+python scenarios\run.py --scenario static --profile "CR2032-Energizer-(25)"
 
 # Full matrix
-python validation\run_validation.py --scenario static --all
+python scenarios\run.py --scenario static --all
 
 # Dynamic IoT-pattern (sleep / wake / TX burst), 3 cycles
-python validation\run_validation.py --scenario dynamic --profile "CR2032-Energizer-(25)" --cycles 3
+python scenarios\run.py --scenario dynamic --profile "CR2032-Energizer-(25)" --cycles 3
 ```
 
 `--profile` accepts either the bare stem (resolved against Otii's bundled
@@ -90,7 +90,7 @@ need a faster electronic load (e.g. Rigol DL3031A — coming soon).
 
 ## Per-profile safety overrides
 
-`run_validation.py` keys safety caps off the profile filename stem.
+`run.py` keys safety caps off the profile filename stem.
 Notable ones (see `PROFILE_OVERRIDES` in the script):
 
 | Profile family            | safety_max_V | QR R_min | Why |
@@ -285,7 +285,7 @@ firmware: `--scenario dynamic-list` programs the DL3031A's
 captures the response.
 
 ```
-python validation/run_validation.py --scenario dynamic-list \
+python scenarios/run.py --scenario dynamic-list \
     --profile "CR2032-Energizer-(25)" --load dl3031a --cycles 3
 ```
 
