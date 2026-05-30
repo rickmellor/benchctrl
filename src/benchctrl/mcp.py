@@ -62,7 +62,7 @@ from benchctrl.battery import (
     estimate_life_constant_current,
     estimate_life_from_profile,
 )
-from benchctrl.bench import QR10x
+from benchctrl.drivers.eastwood_qr10x import QR10x
 # RigolDL3031A is imported lazily inside the tool functions so the MCP
 # server doesn't hard-require pyvisa to start.
 from benchctrl.drivers.otii_arc.channels import WIRE_ID_TO_CHANNEL
@@ -994,7 +994,7 @@ def battery_emulator_stop() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# QR10x programmable resistance (benchctrl.bench)
+# QR10x programmable resistance (benchctrl.drivers.eastwood_qr10x)
 # ---------------------------------------------------------------------------
 
 _qr10x: Optional[QR10x] = None
@@ -1002,7 +1002,7 @@ _qr10x_lock = threading.RLock()
 
 
 def _get_qr10x() -> QR10x:
-    from benchctrl.bench.qr10x import QR10xConnectionError
+    from benchctrl.drivers.eastwood_qr10x.driver import QR10xConnectionError
     if _qr10x is None or not _qr10x.is_open:
         raise QR10xConnectionError(
             "QR10x not open — call qr10x_open(port=...) first."
@@ -1120,7 +1120,7 @@ def qr10x_decr(delta_ohm: float) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Rigol DL3031A programmable DC electronic load (benchctrl.bench)
+# Rigol DL3031A programmable DC electronic load (benchctrl.drivers.eastwood_qr10x)
 # ---------------------------------------------------------------------------
 
 _dl3031a = None  # actually Optional[RigolDL3031A] but kept Any to avoid eager import
@@ -1128,7 +1128,7 @@ _dl3031a_lock = threading.RLock()
 
 
 def _get_dl3031a():
-    from benchctrl.bench.rigol_dl3031a import RigolDLConnectionError
+    from benchctrl.drivers.rigol_dl3031a.driver import RigolDLConnectionError
     if _dl3031a is None:
         raise RigolDLConnectionError(
             "DL3031A not open — call dl3031a_open() first."
@@ -1147,7 +1147,7 @@ def dl3031a_open(resource: Optional[str] = None) -> dict:
     Returns the device's *IDN? identity on success.
     """
     global _dl3031a
-    from benchctrl.bench import RigolDL3031A
+    from benchctrl.drivers.rigol_dl3031a import RigolDL3031A
     with _dl3031a_lock:
         if _dl3031a is not None:
             info = _dl3031a.info()

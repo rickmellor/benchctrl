@@ -13,7 +13,7 @@ VISA backend that works out of the box.
 
 Typical use::
 
-    from benchctrl.bench import RigolDL3031A
+    from benchctrl.drivers.rigol_dl3031a import RigolDL3031A
 
     with RigolDL3031A.open() as load:        # auto-discover by VID/PID
         print(load.info())
@@ -40,7 +40,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional, Union
 
-log = logging.getLogger("benchctrl.bench.rigol_dl3031a")
+log = logging.getLogger("benchctrl.drivers.rigol_dl3031a.driver")
 
 # Rigol's USB-TMC VID/PID for the DL3000 family.
 RIGOL_USB_VID = 0x1AB1

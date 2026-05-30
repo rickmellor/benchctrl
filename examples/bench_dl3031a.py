@@ -31,7 +31,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from benchctrl.bench import RigolDL3031A
+from benchctrl.drivers.rigol_dl3031a import RigolDL3031A
 
 
 def demo_static_cc(dl: RigolDL3031A) -> None:

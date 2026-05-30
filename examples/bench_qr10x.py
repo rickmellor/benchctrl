@@ -27,7 +27,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from benchctrl.bench import QR10x
+from benchctrl.drivers.eastwood_qr10x import QR10x
 
 
 def main() -> None:

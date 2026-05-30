@@ -15,7 +15,7 @@ Wire protocol (per the manufacturer's spec):
 
 Typical use::
 
-    from benchctrl.bench import QR10x
+    from benchctrl.drivers.eastwood_qr10x import QR10x
 
     with QR10x.open("COM7") as qr:
         print(qr.info())
@@ -42,7 +42,7 @@ from typing import Optional
 
 import serial
 
-log = logging.getLogger("benchctrl.bench.qr10x")
+log = logging.getLogger("benchctrl.drivers.eastwood_qr10x.driver")
 
 
 # ---------------------------------------------------------------------------

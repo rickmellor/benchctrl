@@ -254,7 +254,7 @@ def test_dl3031a_tools_raise_driver_connection_error_when_not_open():
     """L2 fix: _get_dl3031a now raises RigolDLConnectionError, not
     bare RuntimeError, when the singleton is None."""
     from benchctrl import mcp as m
-    from benchctrl.bench.rigol_dl3031a import RigolDLConnectionError
+    from benchctrl.drivers.rigol_dl3031a.driver import RigolDLConnectionError
     m._dl3031a = None
     with pytest.raises(RigolDLConnectionError):
         m.dl3031a_info()
@@ -263,7 +263,7 @@ def test_dl3031a_tools_raise_driver_connection_error_when_not_open():
 def test_qr10x_tools_raise_driver_connection_error_when_not_open():
     """Same as above for QR10x."""
     from benchctrl import mcp as m
-    from benchctrl.bench.qr10x import QR10xConnectionError
+    from benchctrl.drivers.eastwood_qr10x.driver import QR10xConnectionError
     m._qr10x = None
     with pytest.raises(QR10xConnectionError):
         m.qr10x_info()

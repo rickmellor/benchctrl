@@ -11,7 +11,7 @@ from collections import deque
 
 import pytest
 
-from benchctrl.bench.rigol_dl3031a import (
+from benchctrl.drivers.rigol_dl3031a.driver import (
     RigolDL3031A,
     RigolDLCommandError,
     RigolDLError,

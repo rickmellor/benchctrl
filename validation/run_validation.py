@@ -57,7 +57,7 @@ from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
 from benchctrl.drivers.otii_arc.channels import OtiiArcChannel as Channel
 from benchctrl._version import __version__ as BENCHCTRL_VERSION
 from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
-from benchctrl.bench import QR10x
+from benchctrl.drivers.eastwood_qr10x import QR10x
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCENARIO_DIR = REPO_ROOT / "validation" / "scenarios"
@@ -266,7 +266,7 @@ class _DL3031AAdapter(_LoadAdapter):
         self._input_on = False
 
     def open(self) -> None:
-        from benchctrl.bench import RigolDL3031A
+        from benchctrl.drivers.rigol_dl3031a import RigolDL3031A
         self.dl = RigolDL3031A.open(self.resource)
 
     def setup(self, *, safety_R: float, voltage_V: float) -> None:

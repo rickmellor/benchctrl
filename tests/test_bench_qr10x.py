@@ -11,8 +11,11 @@ import os
 
 import pytest
 
-from benchctrl.bench import QR10x, QR10xInfo
-from benchctrl.bench.qr10x import QR10xValueError
+from benchctrl.drivers.eastwood_qr10x import (
+    QR10x,
+    QR10xInfo,
+    QR10xValueError,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +118,7 @@ def test_decr_rejects_negative_delta():
 
 
 def test_unopened_cmd_raises_connection_error():
-    from benchctrl.bench.qr10x import QR10xConnectionError
+    from benchctrl.drivers.eastwood_qr10x.driver import QR10xConnectionError
 
     qr = QR10x("__dummy__")  # not opened
     with pytest.raises(QR10xConnectionError):
