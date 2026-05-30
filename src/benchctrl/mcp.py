@@ -180,8 +180,9 @@ from benchctrl.drivers.rigol_dl3031a.mcp_tools import (
     dl3031a_trigger,
 )
 
-# DP2031 tools (Phase A surface)
+# DP2031 tools (Phase A + B surface)
 from benchctrl.drivers.rigol_dp2031.mcp_tools import (
+    # Phase A
     dp2031_clear_status,
     dp2031_close,
     dp2031_current_channel,
@@ -212,6 +213,42 @@ from benchctrl.drivers.rigol_dp2031.mcp_tools import (
     dp2031_set_ovp_enabled,
     dp2031_set_ovp_level,
     dp2031_set_voltage,
+    # Phase B — protection trip / clear / delay
+    dp2031_beep_once,
+    dp2031_channel_status_event,
+    dp2031_clear_ocp,
+    dp2031_clear_ovp,
+    dp2031_event_status_register,
+    dp2031_get_beeper,
+    dp2031_get_brightness,
+    dp2031_get_event_status_enable,
+    dp2031_get_ocp_delay_ms,
+    dp2031_get_service_request_enable,
+    dp2031_health_check,
+    dp2031_installed_options,
+    dp2031_ocp_tripped,
+    dp2031_operation_event,
+    dp2031_ovp_tripped,
+    dp2031_questionable_event,
+    dp2031_recall_state,
+    dp2031_save_state,
+    dp2031_scpi_version,
+    dp2031_self_test,
+    dp2031_set_beeper,
+    dp2031_set_brightness,
+    dp2031_set_event_status_enable,
+    dp2031_set_keyboard_lock,
+    dp2031_set_language,
+    dp2031_set_local,
+    dp2031_set_ocp_delay_ms,
+    dp2031_set_power_on_mode,
+    dp2031_set_power_on_status_clear,
+    dp2031_set_remote,
+    dp2031_set_screen_saver,
+    dp2031_set_service_request_enable,
+    dp2031_set_touchscreen_lock,
+    dp2031_status_byte,
+    dp2031_wait_op_complete,
 )
 
 

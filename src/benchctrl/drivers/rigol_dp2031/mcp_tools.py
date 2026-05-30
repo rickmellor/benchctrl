@@ -314,6 +314,215 @@ def dp2031_measure_all_channels() -> dict:
     return {"channels": _get_dp2031().measure_all_channels()}
 
 
+# ---------------------------------------------------------------------------
+# Protection — OVP / OCP trip + clear + delay (Phase B)
+# ---------------------------------------------------------------------------
+
+
+def dp2031_clear_ovp(channel: int) -> dict:
+    """Clear a latched OVP trip on CHn. Does NOT re-enable the output."""
+    _get_dp2031().clear_ovp(channel)
+    return {"channel": channel, "ovp_cleared": True}
+
+
+def dp2031_clear_ocp(channel: int) -> dict:
+    """Clear a latched OCP trip on CHn. Does NOT re-enable the output."""
+    _get_dp2031().clear_ocp(channel)
+    return {"channel": channel, "ocp_cleared": True}
+
+
+def dp2031_ovp_tripped(channel: int) -> dict:
+    """Is CHn's OVP currently latched?"""
+    return {"channel": channel,
+            "ovp_tripped": _get_dp2031().ovp_tripped(channel)}
+
+
+def dp2031_ocp_tripped(channel: int) -> dict:
+    """Is CHn's OCP currently latched?"""
+    return {"channel": channel,
+            "ocp_tripped": _get_dp2031().ocp_tripped(channel)}
+
+
+def dp2031_set_ocp_delay_ms(channel: int, milliseconds: int) -> dict:
+    """Set CHn OCP integration / debounce delay (0–1000 ms)."""
+    _get_dp2031().set_ocp_delay_ms(channel, milliseconds)
+    return {"channel": channel, "ocp_delay_ms": milliseconds}
+
+
+def dp2031_get_ocp_delay_ms(channel: int) -> dict:
+    return {"channel": channel,
+            "ocp_delay_ms": _get_dp2031().get_ocp_delay_ms(channel)}
+
+
+# ---------------------------------------------------------------------------
+# IEEE 488.2 status / OPC / options
+# ---------------------------------------------------------------------------
+
+
+def dp2031_event_status_register() -> dict:
+    """``*ESR?`` — standard event status register."""
+    return {"esr": _get_dp2031().event_status_register()}
+
+
+def dp2031_set_event_status_enable(mask: int) -> dict:
+    _get_dp2031().set_event_status_enable(mask)
+    return {"ese": mask}
+
+
+def dp2031_get_event_status_enable() -> dict:
+    return {"ese": _get_dp2031().get_event_status_enable()}
+
+
+def dp2031_status_byte() -> dict:
+    """``*STB?`` — status byte."""
+    return {"stb": _get_dp2031().status_byte()}
+
+
+def dp2031_set_service_request_enable(mask: int) -> dict:
+    _get_dp2031().set_service_request_enable(mask)
+    return {"sre": mask}
+
+
+def dp2031_get_service_request_enable() -> dict:
+    return {"sre": _get_dp2031().get_service_request_enable()}
+
+
+def dp2031_wait_op_complete() -> dict:
+    """``*OPC?`` — block until pending operations finish."""
+    return {"opc": _get_dp2031().wait_op_complete()}
+
+
+def dp2031_self_test() -> dict:
+    """``*TST?`` — device self-test; ``"result": 0`` is pass."""
+    return {"result": _get_dp2031().self_test()}
+
+
+def dp2031_installed_options() -> dict:
+    return {"options": _get_dp2031().installed_options()}
+
+
+def dp2031_set_power_on_status_clear(on: bool) -> dict:
+    _get_dp2031().set_power_on_status_clear(on)
+    return {"psc": on}
+
+
+def dp2031_save_state(slot: int) -> dict:
+    """Save device state to slot 0–9 (file ``RIGOLn.RSF``)."""
+    _get_dp2031().save_state(slot)
+    return {"saved_to_slot": slot}
+
+
+def dp2031_recall_state(slot: int) -> dict:
+    """Load device state from slot 0–9."""
+    _get_dp2031().recall_state(slot)
+    return {"recalled_from_slot": slot}
+
+
+# ---------------------------------------------------------------------------
+# :STATus subsystem
+# ---------------------------------------------------------------------------
+
+
+def dp2031_operation_event() -> dict:
+    """Latched operation event register (read clears)."""
+    return {"operation_event": _get_dp2031().operation_event()}
+
+
+def dp2031_questionable_event() -> dict:
+    """Latched questionable event register (read clears)."""
+    return {"questionable_event": _get_dp2031().questionable_event()}
+
+
+def dp2031_channel_status_event(channel: int) -> dict:
+    """Per-channel questionable event register (read clears)."""
+    return {"channel": channel,
+            "event": _get_dp2031().channel_status_event(channel)}
+
+
+def dp2031_health_check() -> dict:
+    """Snapshot of questionable + per-channel status registers.
+
+    Returns a structured dict with ``otp_global``, ``fan_failure``,
+    per-channel ``ch1/ch2/ch3`` bits (``vunreg`` / ``iunreg`` /
+    ``ovp`` / ``ocp`` / ``otp``), and the first non-zero error
+    queue entry. Reads the event registers — call once and store.
+    """
+    return _get_dp2031().health_check()
+
+
+# ---------------------------------------------------------------------------
+# System basics — beeper / brightness / lock / language / power-on
+# ---------------------------------------------------------------------------
+
+
+def dp2031_beep_once() -> dict:
+    """Single beep."""
+    _get_dp2031().beep_once()
+    return {"beeped": True}
+
+
+def dp2031_set_beeper(on: bool) -> dict:
+    _get_dp2031().set_beeper(on)
+    return {"beeper_on": on}
+
+
+def dp2031_get_beeper() -> dict:
+    return {"beeper_on": _get_dp2031().get_beeper()}
+
+
+def dp2031_set_brightness(percent: int) -> dict:
+    """Display brightness (1–100 %)."""
+    _get_dp2031().set_brightness(percent)
+    return {"brightness_percent": percent}
+
+
+def dp2031_get_brightness() -> dict:
+    return {"brightness_percent": _get_dp2031().get_brightness()}
+
+
+def dp2031_scpi_version() -> dict:
+    return {"scpi_version": _get_dp2031().scpi_version()}
+
+
+def dp2031_set_keyboard_lock(on: bool) -> dict:
+    _get_dp2031().set_keyboard_lock(on)
+    return {"keyboard_locked": on}
+
+
+def dp2031_set_touchscreen_lock(on: bool) -> dict:
+    _get_dp2031().set_touchscreen_lock(on)
+    return {"touchscreen_locked": on}
+
+
+def dp2031_set_remote() -> dict:
+    """Put device into remote mode (locks front panel)."""
+    _get_dp2031().set_remote()
+    return {"remote": True}
+
+
+def dp2031_set_local() -> dict:
+    """Return control to the front panel."""
+    _get_dp2031().set_local()
+    return {"remote": False}
+
+
+def dp2031_set_screen_saver(on: bool) -> dict:
+    _get_dp2031().set_screen_saver(on)
+    return {"screen_saver_on": on}
+
+
+def dp2031_set_language(language: str) -> dict:
+    """Set front-panel language: EN/CH/DE/ES/FR (long forms accepted)."""
+    _get_dp2031().set_language(language)
+    return {"language": language}
+
+
+def dp2031_set_power_on_mode(mode: str) -> dict:
+    """Set boot state: ``"DEFault"`` or ``"LAST"``."""
+    _get_dp2031().set_power_on_mode(mode)
+    return {"power_on_mode": mode}
+
+
 _TOOLS = (
     # Connection + identity
     dp2031_open, dp2031_close, dp2031_info,
@@ -337,6 +546,29 @@ _TOOLS = (
     dp2031_measure_voltage, dp2031_measure_current,
     dp2031_measure_power, dp2031_measure_all,
     dp2031_measure_all_channels,
+    # Phase B — protection trip / clear / delay
+    dp2031_clear_ovp, dp2031_clear_ocp,
+    dp2031_ovp_tripped, dp2031_ocp_tripped,
+    dp2031_set_ocp_delay_ms, dp2031_get_ocp_delay_ms,
+    # IEEE 488.2 status
+    dp2031_event_status_register,
+    dp2031_set_event_status_enable, dp2031_get_event_status_enable,
+    dp2031_status_byte,
+    dp2031_set_service_request_enable, dp2031_get_service_request_enable,
+    dp2031_wait_op_complete, dp2031_self_test,
+    dp2031_installed_options, dp2031_set_power_on_status_clear,
+    dp2031_save_state, dp2031_recall_state,
+    # :STATus subsystem
+    dp2031_operation_event, dp2031_questionable_event,
+    dp2031_channel_status_event, dp2031_health_check,
+    # System basics
+    dp2031_beep_once, dp2031_set_beeper, dp2031_get_beeper,
+    dp2031_set_brightness, dp2031_get_brightness,
+    dp2031_scpi_version,
+    dp2031_set_keyboard_lock, dp2031_set_touchscreen_lock,
+    dp2031_set_remote, dp2031_set_local,
+    dp2031_set_screen_saver,
+    dp2031_set_language, dp2031_set_power_on_mode,
 )
 
 

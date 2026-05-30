@@ -642,6 +642,407 @@ class RigolDP2031:
         """
         return {int(ch): self.measure_all(ch) for ch in DP2031Channel}
 
+    # ------------------------------------------------------------------
+    # Protection — OVP / OCP trip + clear + delay
+    # ------------------------------------------------------------------
+
+    def clear_ovp(self, channel: ChannelLike) -> None:
+        """Clear a latched OVP trip on the channel.
+
+        Per the manual, the ``:OUTPut:OVP:CLEar`` form clears the
+        latched alarm but does NOT re-enable the output — the
+        operator (or :py:meth:`set_output`) must re-enable it
+        explicitly.
+        """
+        ch = _coerce_channel(channel)
+        self.write(f":OUTPut:OVP:CLEar CH{ch}")
+
+    def clear_ocp(self, channel: ChannelLike) -> None:
+        """Clear a latched OCP trip on the channel.
+
+        Like :py:meth:`clear_ovp`, this clears the latch but does not
+        re-enable the output.
+        """
+        ch = _coerce_channel(channel)
+        self.write(f":OUTPut:OCP:CLEar CH{ch}")
+
+    def ovp_tripped(self, channel: ChannelLike) -> bool:
+        """Has the channel's OVP latched?"""
+        ch = _coerce_channel(channel)
+        return self.query_int(f":OUTPut:OVP:ALAR? CH{ch}") == 1
+
+    def ocp_tripped(self, channel: ChannelLike) -> bool:
+        """Has the channel's OCP latched?"""
+        ch = _coerce_channel(channel)
+        return self.query_int(f":OUTPut:OCP:ALAR? CH{ch}") == 1
+
+    def ovp_questionable(self, channel: ChannelLike) -> bool:
+        """Same value as :py:meth:`ovp_tripped` via the ``QUES`` query.
+
+        Manual exposes both ``ALAR`` and ``QUES`` queries that return
+        the same latched alarm bit; we expose both for completeness.
+        """
+        ch = _coerce_channel(channel)
+        return self.query_int(f":OUTPut:OVP:QUES? CH{ch}") == 1
+
+    def ocp_questionable(self, channel: ChannelLike) -> bool:
+        """Same value as :py:meth:`ocp_tripped` via the ``QUES`` query."""
+        ch = _coerce_channel(channel)
+        return self.query_int(f":OUTPut:OCP:QUES? CH{ch}") == 1
+
+    def set_ocp_delay_ms(self, channel: ChannelLike, milliseconds: int) -> None:
+        """Set the OCP integration / debounce delay in milliseconds.
+
+        Range 0 – 1000 ms. The over-current alarm only fires once the
+        threshold has been exceeded continuously for the delay window.
+        Useful for absorbing inrush spikes.
+        """
+        ch = _coerce_channel(channel)
+        if not isinstance(milliseconds, int) or isinstance(milliseconds, bool):
+            raise RigolDP2031ValueError(
+                f"OCP delay must be int ms, got {milliseconds!r}"
+            )
+        if milliseconds < 0 or milliseconds > 1000:
+            raise RigolDP2031ValueError(
+                f"OCP delay must be 0–1000 ms, got {milliseconds}"
+            )
+        self.write(f":OUTPut:OCP:DELay CH{ch},{milliseconds}")
+
+    def get_ocp_delay_ms(self, channel: ChannelLike) -> int:
+        """Read the OCP delay in milliseconds.
+
+        Note the device returns a string with a unit suffix (e.g.
+        ``"200ms"``) rather than a plain number. We parse and return
+        the int.
+        """
+        ch = _coerce_channel(channel)
+        raw = self.query(f":OUTPut:OCP:DELay? CH{ch}")
+        return _parse_delay_ms(raw)
+
+    # ------------------------------------------------------------------
+    # IEEE 488.2 status / OPC / options
+    # ------------------------------------------------------------------
+
+    def event_status_register(self) -> int:
+        """``*ESR?`` — read+clear the standard event status register."""
+        return self.query_int("*ESR?")
+
+    def set_event_status_enable(self, mask: int) -> None:
+        """``*ESE <mask>`` — set the event status enable mask (0–255)."""
+        _validate_mask(mask, "event status enable")
+        self.write(f"*ESE {mask}")
+
+    def get_event_status_enable(self) -> int:
+        return self.query_int("*ESE?")
+
+    def status_byte(self) -> int:
+        """``*STB?`` — read the status byte register."""
+        return self.query_int("*STB?")
+
+    def set_service_request_enable(self, mask: int) -> None:
+        """``*SRE <mask>`` — set the service request enable mask (0–255)."""
+        _validate_mask(mask, "service request enable")
+        self.write(f"*SRE {mask}")
+
+    def get_service_request_enable(self) -> int:
+        return self.query_int("*SRE?")
+
+    def mark_op_complete(self) -> None:
+        """``*OPC`` — set the OPC bit when pending operations finish."""
+        self.write("*OPC")
+
+    def wait_op_complete(self) -> int:
+        """``*OPC?`` — block until pending operations finish; returns 1."""
+        return self.query_int("*OPC?")
+
+    def wait(self) -> None:
+        """``*WAI`` — block subsequent commands until pending ops finish."""
+        self.write("*WAI")
+
+    def self_test(self) -> int:
+        """``*TST?`` — runs the device self-test; returns 0 on pass, non-zero on fail."""
+        return self.query_int("*TST?")
+
+    def installed_options(self) -> list[str]:
+        """``*OPT?`` — list installed option strings.
+
+        Returns ``[]`` when no options are installed (the device
+        returns ``"NONE"`` rather than an empty string in that case).
+        """
+        raw = self.query("*OPT?").strip()
+        if not raw or raw.upper() == "NONE":
+            return []
+        return [p.strip() for p in raw.split(",") if p.strip()]
+
+    def set_power_on_status_clear(self, on: bool) -> None:
+        """``*PSC <bool>`` — set the power-on status-clear flag."""
+        self.write(f"*PSC {1 if on else 0}")
+
+    def get_power_on_status_clear(self) -> bool:
+        return self.query_int("*PSC?") == 1
+
+    def save_state(self, slot: int) -> None:
+        """``*SAV n`` — save device state to slot 0–9 (file ``RIGOLn.RSF``)."""
+        if not isinstance(slot, int) or isinstance(slot, bool):
+            raise RigolDP2031ValueError(f"slot must be int 0–9, got {slot!r}")
+        if slot < 0 or slot > 9:
+            raise RigolDP2031ValueError(f"slot must be 0–9, got {slot}")
+        self.write(f"*SAV {slot}")
+
+    def recall_state(self, slot: int) -> None:
+        """``*RCL n`` — load device state from slot 0–9."""
+        if not isinstance(slot, int) or isinstance(slot, bool):
+            raise RigolDP2031ValueError(f"slot must be int 0–9, got {slot!r}")
+        if slot < 0 or slot > 9:
+            raise RigolDP2031ValueError(f"slot must be 0–9, got {slot}")
+        self.write(f"*RCL {slot}")
+
+    # ------------------------------------------------------------------
+    # :STATus subsystem — operation / questionable / per-channel summary
+    # ------------------------------------------------------------------
+
+    def operation_condition(self) -> int:
+        """``:STATus:OPERation:CONDition?`` — current operation condition register."""
+        return self.query_int(":STATus:OPERation:CONDition?")
+
+    def set_operation_enable(self, mask: int) -> None:
+        _validate_mask(mask, "operation enable", maximum=65535)
+        self.write(f":STATus:OPERation:ENABle {mask}")
+
+    def get_operation_enable(self) -> int:
+        return self.query_int(":STATus:OPERation:ENABle?")
+
+    def operation_event(self) -> int:
+        """Latched operation event register. Read clears."""
+        return self.query_int(":STATus:OPERation:EVENt?")
+
+    def preset_status(self) -> None:
+        """``:STATus:PRESet`` — reset operation and questionable enable masks to defaults."""
+        self.write(":STATus:PRESet")
+
+    def set_questionable_enable(self, mask: int) -> None:
+        _validate_mask(mask, "questionable enable", maximum=65535)
+        self.write(f":STATus:QUEStionable:ENABle {mask}")
+
+    def get_questionable_enable(self) -> int:
+        return self.query_int(":STATus:QUEStionable:ENABle?")
+
+    def questionable_event(self) -> int:
+        """Latched questionable event register. Read clears."""
+        return self.query_int(":STATus:QUEStionable:EVENt?")
+
+    def set_instrument_enable(self, mask: int) -> None:
+        _validate_mask(mask, "instrument enable", maximum=65535)
+        self.write(f":STATus:QUEStionable:INSTrument:ENABle {mask}")
+
+    def get_instrument_enable(self) -> int:
+        return self.query_int(":STATus:QUEStionable:INSTrument:ENABle?")
+
+    def instrument_event(self) -> int:
+        return self.query_int(":STATus:QUEStionable:INSTrument:EVENt?")
+
+    def channel_condition(self, channel: ChannelLike) -> int:
+        """Per-channel questionable condition register.
+
+        Bits per manual: 0=Vunreg, 1=Iunreg, 2=OVP, 3=OCP, 4=OTP.
+        """
+        ch = _coerce_channel(channel)
+        return self.query_int(
+            f":STATus:QUEStionable:INSTrument:ISUMmary{ch}:CONDition?"
+        )
+
+    def set_channel_status_enable(self, channel: ChannelLike, mask: int) -> None:
+        ch = _coerce_channel(channel)
+        _validate_mask(mask, f"channel status enable (CH{ch})", maximum=65535)
+        self.write(
+            f":STATus:QUEStionable:INSTrument:ISUMmary{ch}:ENABle {mask}"
+        )
+
+    def get_channel_status_enable(self, channel: ChannelLike) -> int:
+        ch = _coerce_channel(channel)
+        return self.query_int(
+            f":STATus:QUEStionable:INSTrument:ISUMmary{ch}:ENABle?"
+        )
+
+    def channel_status_event(self, channel: ChannelLike) -> int:
+        ch = _coerce_channel(channel)
+        return self.query_int(
+            f":STATus:QUEStionable:INSTrument:ISUMmary{ch}:EVENt?"
+        )
+
+    def health_check(self) -> dict:
+        """Poll the device's questionable + per-channel status registers.
+
+        Returns a structured snapshot:
+
+        - ``otp_global``: bit 4 of the top questionable register —
+          over-temperature alarm.
+        - ``fan_failure``: bit 11 of the top questionable register.
+        - ``ch{1,2,3}``: per-channel dict with ``vunreg`` / ``iunreg``
+          / ``ovp`` / ``ocp`` / ``otp`` bools.
+        - ``error_queue``: first non-zero ``:SYSTem:ERRor?`` entry, if any.
+
+        Reads the EVENT registers, which clears them — call once,
+        store the snapshot.
+        """
+        top_event = self.questionable_event()
+        result: dict = {
+            "otp_global": bool(top_event & (1 << 4)),
+            "fan_failure": bool(top_event & (1 << 11)),
+            "questionable_event_raw": top_event,
+        }
+        for ch in DP2031Channel:
+            cond = self.channel_condition(ch)
+            result[f"ch{int(ch)}"] = {
+                "vunreg": bool(cond & (1 << 0)),
+                "iunreg": bool(cond & (1 << 1)),
+                "ovp": bool(cond & (1 << 2)),
+                "ocp": bool(cond & (1 << 3)),
+                "otp": bool(cond & (1 << 4)),
+                "condition_raw": cond,
+            }
+        err = self.last_error()
+        result["error_queue"] = (
+            {"code": err[0], "message": err[1]} if err is not None else None
+        )
+        return result
+
+    # ------------------------------------------------------------------
+    # System basics — beeper / brightness / lock / language / power-on
+    # ------------------------------------------------------------------
+
+    def beep_once(self) -> None:
+        """``:SYSTem:BEEPer:IMMediate`` — one beep."""
+        self.write(":SYSTem:BEEPer:IMMediate")
+
+    def set_beeper(self, on: bool) -> None:
+        """Enable or disable the beeper globally."""
+        self.write(f":SYSTem:BEEPer:STATe {'ON' if on else 'OFF'}")
+
+    def get_beeper(self) -> bool:
+        return self.query_int(":SYSTem:BEEPer:STATe?") == 1
+
+    def set_brightness(self, percent: int) -> None:
+        """Set display brightness (1–100 %)."""
+        if not isinstance(percent, int) or isinstance(percent, bool):
+            raise RigolDP2031ValueError(
+                f"brightness must be int 1–100, got {percent!r}"
+            )
+        if percent < 1 or percent > 100:
+            raise RigolDP2031ValueError(
+                f"brightness must be 1–100 %, got {percent}"
+            )
+        self.write(f":SYSTem:BRIGhtness {percent}")
+
+    def get_brightness(self) -> int:
+        return self.query_int(":SYSTem:BRIGhtness?")
+
+    def scpi_version(self) -> str:
+        """``:SYSTem:VERSion?`` — SCPI standard version string (e.g. ``"1999.0"``)."""
+        return self.query(":SYSTem:VERSion?")
+
+    def set_keyboard_lock(self, on: bool) -> None:
+        """Lock or unlock the front-panel keypad."""
+        self.write(f":SYSTem:KLOCk:STATe {'ON' if on else 'OFF'}")
+
+    def get_keyboard_lock(self) -> bool:
+        return self.query_int(":SYSTem:KLOCk:STATe?") == 1
+
+    def set_touchscreen_lock(self, on: bool) -> None:
+        """Lock or unlock the touchscreen."""
+        self.write(f":SYSTem:TLOCk {'ON' if on else 'OFF'}")
+
+    def get_touchscreen_lock(self) -> bool:
+        return self.query_int(":SYSTem:TLOCk?") == 1
+
+    def set_remote(self) -> None:
+        """``:SYSTem:REMote`` — put the device into remote mode (locks front panel)."""
+        self.write(":SYSTem:REMote")
+
+    def set_local(self) -> None:
+        """``:SYSTem:LOCal`` — return control to the front panel."""
+        self.write(":SYSTem:LOCal")
+
+    def set_remote_lock(self, on: bool) -> None:
+        """``:SYSTem:RWLock <bool>`` — set/clear remote-with-lockout state.
+
+        The single ``:SYSTem:RWLock`` form (no boolean arg) is a
+        compatibility short-hand for ``ON``; we always send the
+        explicit boolean for clarity.
+        """
+        self.write(f":SYSTem:RWLock:STATe {'ON' if on else 'OFF'}")
+
+    _INTERFACE_STATE_VALUES = ("LOCal", "REMote", "RWLock")
+
+    def set_interface_state(self, mode: str) -> None:
+        """Set the remote-interface lock state.
+
+        Accepts ``"LOCal"`` / ``"REMote"`` / ``"RWLock"`` (any case;
+        we send the canonical case below).
+        """
+        norm = mode.strip()
+        for canonical in self._INTERFACE_STATE_VALUES:
+            if norm.upper() == canonical.upper() or norm.upper() == canonical[:3].upper():
+                self.write(f":SYSTem:COMMunicate:RLSTate {canonical}")
+                return
+        raise RigolDP2031ValueError(
+            f"interface state must be LOCal / REMote / RWLock, got {mode!r}"
+        )
+
+    def get_interface_state(self) -> str:
+        return self.query(":SYSTem:COMMunicate:RLSTate?")
+
+    def set_power_on_mode(self, mode: str) -> None:
+        """Set what state the device boots into: ``"DEFault"`` or ``"LAST"``."""
+        norm = mode.strip().upper()
+        if norm in ("DEFAULT", "DEF"):
+            self.write(":SYSTem:POWEron DEFault")
+        elif norm == "LAST":
+            self.write(":SYSTem:POWEron LAST")
+        else:
+            raise RigolDP2031ValueError(
+                f"power-on mode must be DEFault or LAST, got {mode!r}"
+            )
+
+    def get_power_on_mode(self) -> str:
+        """Returns the device's reply verbatim (typically the long form,
+        e.g. ``"DEFAULT"`` or ``"LAST"``)."""
+        return self.query(":SYSTem:POWEron?")
+
+    def set_screen_saver(self, on: bool) -> None:
+        """Enable or disable the display screen-saver."""
+        self.write(f":SYSTem:SAVer {'ON' if on else 'OFF'}")
+
+    def get_screen_saver(self) -> bool:
+        return self.query_int(":SYSTem:SAVer?") == 1
+
+    # Short → canonical SCPI short-form. The query returns the long
+    # form (e.g. ``"ENGLISH"``), which we also accept on input.
+    _LANGUAGE_ALIASES = {
+        "EN": "EN", "ENGLISH": "EN",
+        "CH": "CH", "CHINESE": "CH",
+        "DE": "DE", "GERMAN": "DE",
+        "ES": "ES", "SPANISH": "ES",
+        "FR": "FR", "FRENCH": "FR",
+    }
+
+    def set_language(self, language: str) -> None:
+        """Set front-panel language: ``"EN"`` / ``"CH"`` / ``"DE"`` / ``"ES"`` / ``"FR"``
+        (long forms ``"ENGLISH"`` etc. also accepted)."""
+        norm = language.strip().upper()
+        scpi = self._LANGUAGE_ALIASES.get(norm)
+        if scpi is None:
+            raise RigolDP2031ValueError(
+                f"language must be one of EN / CH / DE / ES / FR (or long form), "
+                f"got {language!r}"
+            )
+        self.write(f":SYSTem:LANGuage:TYPE {scpi}")
+
+    def get_language(self) -> str:
+        """Returns the device's reply verbatim (typically the long form,
+        e.g. ``"ENGLISH"``)."""
+        return self.query(":SYSTem:LANGuage:TYPE?")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -674,6 +1075,37 @@ def _validate(value: float, bounds: tuple[float, float], label: str) -> None:
         raise RigolDP2031ValueError(
             f"{label} must be in [{lo}, {hi}], got {value}"
         )
+
+
+def _validate_mask(value: int, label: str, *, maximum: int = 255) -> None:
+    """Raise RigolDP2031ValueError if value isn't a non-negative int ≤ maximum."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise RigolDP2031ValueError(f"{label} mask must be int, got {value!r}")
+    if value < 0 or value > maximum:
+        raise RigolDP2031ValueError(
+            f"{label} mask must be 0–{maximum}, got {value}"
+        )
+
+
+def _parse_delay_ms(raw: str) -> int:
+    """Parse ``:OUTPut:OCP:DELay?`` style response.
+
+    The device returns the value with a ``ms`` suffix (e.g. ``"200ms"``)
+    on this firmware. Some firmware revs may emit a plain number; we
+    accept both.
+    """
+    s = raw.strip().lower()
+    # Strip optional trailing unit
+    for suffix in ("ms",):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)].strip()
+            break
+    try:
+        return int(float(s))
+    except ValueError as e:
+        raise RigolDP2031Error(
+            f"could not parse OCP delay reply {raw!r}"
+        ) from e
 
 
 def _autodiscover(rm) -> str:
