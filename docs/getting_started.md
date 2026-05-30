@@ -30,18 +30,17 @@ sufficient. Linux and macOS need no additional setup.
 ## First connection
 
 ```python
-from benchctrl import SMU
+from benchctrl.drivers.otii_arc import OtiiArc
+print(OtiiArc.discover())
+# [OtiiArcInfo(port='COM6', name='Arc', serial='1234...', description='USB Serial Device')]
 
-print(SMU.discover())
-# [SMUInfo(port='COM6', name='Arc', serial='1234...', description='USB Serial Device')]
-
-with SMU.open() as smu:
+with OtiiArc.open() as smu:
     print(f"Connected to {smu.info.port}")
     print(f"Range: {smu.range}")
 ```
 
-The `SMU.open()` call automatically:
-- finds the first connected device (`SMU.discover()` returns the list)
+The `OtiiArc.open()` call automatically:
+- finds the first connected device (`OtiiArc.discover()` returns the list)
 - opens the serial port
 - sends the three-step session-init handshake the device requires
 
@@ -49,9 +48,9 @@ The `SMU.open()` call automatically:
 
 ```python
 import time
-from benchctrl import SMU, Channel
+from benchctrl.drivers.otii_arc import OtiiArc, OtiiArcChannel
 
-with SMU.open() as smu:
+with OtiiArc.open() as smu:
     smu.set_voltage(3.3)
     smu.set_current_limit(1.0)
     smu.set_output(True)
@@ -68,17 +67,17 @@ tolerate the configured voltage before enabling output.
 
 ```python
 import time
-from benchctrl import SMU, Channel
+from benchctrl.drivers.otii_arc import OtiiArc, OtiiArcChannel
 
-with SMU.open() as smu:
-    smu.enable_channels(Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT)
+with OtiiArc.open() as smu:
+    smu.enable_channels(OtiiArcChannel.MAIN_VOLTAGE, OtiiArcChannel.MAIN_CURRENT)
 
     with smu.record() as rec:
         smu.set_output(True)
         time.sleep(5.0)
         smu.set_output(False)
 
-    stats = rec.statistics(Channel.MAIN_CURRENT)
+    stats = rec.statistics(OtiiArcChannel.MAIN_CURRENT)
     print(f"Avg current: {stats.average*1000:.2f} mA, total charge: {stats.charge:.4f} C")
     rec.save_csv("run.csv")
 ```
@@ -102,32 +101,37 @@ rec = smu.stop_recording()
 Channels are an enum:
 
 ```python
-from benchctrl import Channel
+from benchctrl.drivers.otii_arc import OtiiArcChannel
 
-Channel.MAIN_CURRENT     # the headline 'mc' channel
-Channel.MAIN_VOLTAGE     # 'mv'
-Channel.MAIN_POWER       # 'mp'
-Channel.ADC_CURRENT      # 'ac'
-Channel.ADC_VOLTAGE      # 'av'
-Channel.SENSE_PLUS       # 'sp'
-Channel.SENSE_MINUS      # 'sn'
-Channel.VBUS             # 'vb'
-Channel.DC_JACK          # 'vj'
-Channel.TEMPERATURE      # 'tp' (always on)
-Channel.GPI1             # 'i1'
-Channel.GPI2             # 'i2'
-Channel.UART_RX          # 'rx'  (deferred parsing)
+OtiiArcChannel.MAIN_CURRENT     # the headline 'mc' channel
+OtiiArcChannel.MAIN_VOLTAGE     # 'mv'
+OtiiArcChannel.MAIN_POWER       # 'mp'
+OtiiArcChannel.ADC_CURRENT      # 'ac'
+OtiiArcChannel.ADC_VOLTAGE      # 'av'
+OtiiArcChannel.SENSE_PLUS       # 'sp'
+OtiiArcChannel.SENSE_MINUS      # 'sn'
+OtiiArcChannel.VBUS             # 'vb'
+OtiiArcChannel.DC_JACK          # 'vj'
+OtiiArcChannel.TEMPERATURE      # 'tp' (always on)
+OtiiArcChannel.GPI1             # 'i1'
+OtiiArcChannel.GPI2             # 'i2'
+OtiiArcChannel.UART_RX          # 'rx'  (deferred parsing)
 ```
+
+Framework subsystems that don't care about Arc-specific channels can
+import `StandardChannel` from `benchctrl.channels` — it covers the
+common `MAIN_CURRENT` / `MAIN_VOLTAGE` / `MAIN_POWER` subset and works
+with any SMU driver.
 
 Each channel carries metadata:
 
 ```python
-Channel.MAIN_CURRENT.code         # 'mc'
-Channel.MAIN_CURRENT.wire_id      # 0x00
-Channel.MAIN_CURRENT.subtype      # 4 (high-rate)
-Channel.MAIN_CURRENT.sample_rate  # 4000 (theoretical max)
-Channel.MAIN_CURRENT.unit         # 'A'
-Channel.MAIN_CURRENT.label        # 'Main Current'
+OtiiArcChannel.MAIN_CURRENT.code         # 'mc'
+OtiiArcChannel.MAIN_CURRENT.wire_id      # 0x00
+OtiiArcChannel.MAIN_CURRENT.subtype      # 4 (high-rate)
+OtiiArcChannel.MAIN_CURRENT.sample_rate  # 4000 (theoretical max)
+OtiiArcChannel.MAIN_CURRENT.unit         # 'A'
+OtiiArcChannel.MAIN_CURRENT.label        # 'Main Current'
 ```
 
 Strings work too at API boundaries:
@@ -157,11 +161,11 @@ stats = loaded.statistics("mc")
 For interactive monitoring without buffering:
 
 ```python
-from benchctrl import SMU, Channel
+from benchctrl.drivers.otii_arc import OtiiArc, OtiiArcChannel
 
-with SMU.open() as smu:
+with OtiiArc.open() as smu:
     for sample in smu.stream(seconds=10.0):
-        if sample.channel is Channel.MAIN_VOLTAGE:
+        if sample.channel is OtiiArcChannel.MAIN_VOLTAGE:
             print(f"V = {sample.value:.4f}")
 ```
 
@@ -171,10 +175,10 @@ It cannot run concurrently with a recording.
 ## Error handling
 
 ```python
-from benchctrl import SMU
+from benchctrl.drivers.otii_arc import OtiiArc
 from benchctrl.exceptions import BenchValueError, BenchCommandError
 
-with SMU.open() as smu:
+with OtiiArc.open() as smu:
     try:
         smu.set_voltage(10.0)      # out of client-side range
     except BenchValueError as e:

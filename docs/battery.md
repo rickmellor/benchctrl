@@ -251,7 +251,7 @@ Replaces Otii's Battery Profiler using only the existing wire vocabulary.
 ### Workflow
 
 ```python
-from benchctrl import SMU
+from benchctrl.drivers.otii_arc import OtiiArc
 from benchctrl.battery import (
     Battery, DischargeProfile, DischargeStep, ExitConditions,
 )
@@ -348,7 +348,7 @@ existing wire vocabulary.
 ### Workflow
 
 ```python
-from benchctrl import SMU
+from benchctrl.drivers.otii_arc import OtiiArc
 from benchctrl.battery import BatteryProfile
 from benchctrl.battery.emulator import Emulator, EmulatorConfig
 

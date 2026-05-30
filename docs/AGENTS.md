@@ -31,7 +31,7 @@ The project has grown beyond just the SMU driver:
 - **`benchctrl.bench`** — companion instrument drivers (QR10x
   programmable resistor, Rigol DL3031A electronic load)
 - **`benchctrl.mcp`** — MCP server, 93 tools, exposes every SDK method
-- **`validation/`** — top-level harness for reproducible scenarios
+- **`scenarios/`** — top-level harness for reproducible scenarios
 
 ## Where things live
 
@@ -74,8 +74,8 @@ benchctrl/
 │   │   └── rigol_dl3031a.py             Rigol electronic load
 │   └── mcp.py                           MCP server (93 tools)
 ├── tests/                               282 hw-free + 90 hw-marked
-├── validation/
-│   ├── run_validation.py                scenario harness
+├── scenarios/
+│   ├── run.py                scenario harness
 │   ├── README.md                        harness docs + results
 │   └── scenarios/                       saved captures (JSON / CSV / PNG)
 ├── skills/benchctrl/SKILL.md              Claude Code skill briefing
@@ -92,7 +92,7 @@ benchctrl/
 | Add bench instrument support | `src/benchctrl/bench/__init__.py` (lazy export pattern), then a new module modeled on `qr10x.py` or `rigol_dl3031a.py` |
 | Touch the battery emulator | `src/benchctrl/battery/emulator.py`. Pay attention to the explicit "no try/except" comments in `start()` — those are load-bearing |
 | Add an MCP tool | `src/benchctrl/mcp.py`. Every SDK public method should have a matching tool (SDK ↔ MCP parity — see CONTRIBUTING.md § 1) |
-| Add a validation scenario | `validation/run_validation.py`. Three existing kinds: static, dynamic, dynamic-list — model new ones on whichever is closest |
+| Add a validation scenario | `scenarios/run.py`. Three existing kinds: static, dynamic, dynamic-list — model new ones on whichever is closest |
 | Find out what's deferred | `ROADMAP.md` |
 | Resume mid-task | `PROGRESS.md` |
 | Find out why something doesn't work | `KNOWN_LIMITATIONS.md` |
@@ -102,9 +102,9 @@ benchctrl/
 When generating code for benchctrl users:
 
 ```python
-from benchctrl import SMU, Channel
+from benchctrl.drivers.otii_arc import OtiiArc, Channel
 from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
-from benchctrl.bench import QR10x, RigolDL3031A
+from benchctrl.drivers.eastwood_qr10x import QR10x, RigolDL3031A
 
 with SMU.open() as smu:
     smu.set_voltage(3.3)

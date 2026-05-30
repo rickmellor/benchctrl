@@ -1,152 +1,200 @@
 # Architecture
 
 One-page tour of the benchctrl codebase. Read this before
-[`docs/design.md`](docs/design.md) — design.md covers the SMU layer in
-depth; this file is the wide view.
+[`docs/design.md`](docs/design.md) — design.md covers the Otii Arc
+driver in depth; this file is the wide view.
 
-## The five subsystems
+## Driver-symmetric layout
 
-```
-                          ┌──────────────────────────────────────┐
-                          │   MCP server  (benchctrl.mcp)          │
-                          │   93 tools — thin wrappers around    │
-                          │   the SDK methods below              │
-                          └──────────────────────────────────────┘
-                              │           │            │
-                              ▼           ▼            ▼
-              ┌───────────────────┐ ┌──────────┐ ┌──────────────┐
-              │   benchctrl.SMU     │ │ battery  │ │   bench      │
-              │   (Arc / Arc Pro) │ │ profile/ │ │ QR10x        │
-              │                   │ │ profiler/│ │ RigolDL3031A │
-              │ source • measure  │ │ emulator/│ │              │
-              │ record • stream   │ │ life-calc│ │              │
-              └───────────────────┘ └──────────┘ └──────────────┘
-                        ▲                ▲            ▲
-                        │                │            │
-                        │       ┌────────┴────────────┘
-                        │       │
-                        │       │  (load adapter abstracts
-                        │       │   QR10x vs DL3031A)
-                        │       │
-                        │       ▼
-                ┌───────────────────────────────────┐
-                │   validation/run_validation.py    │
-                │   reproducible scenario harness   │
-                │   (static / dynamic / dynamic-list)│
-                └───────────────────────────────────┘
-```
-
-Five subsystems, three layers. The bottom layer (SMU + bench) talks
-directly to instruments. The middle layer (battery) builds on SMU but
-not on bench. The top layer (MCP, validation) consumes everything but
-doesn't expose it to lower layers.
-
-## Layer 1 — instrument I/O
-
-### `benchctrl.SMU` and friends
-
-The original library. Drives the Otii Arc / Arc Pro over USB CDC-ACM.
-Internal layering (covered in detail in [`docs/design.md`](docs/design.md)):
+Every instrument benchctrl can talk to is a peer driver under
+`benchctrl.drivers.<vendor_model>/`. The Otii Arc / Arc Pro is one
+driver among others; battery emulation, scenarios, analytics, and the
+MCP server build on top of a Protocol the drivers conform to, not on
+any concrete driver.
 
 ```
-SMU + Recording        public API
-        ↓
-samples + protocol     pure functions (frame encode/decode, stats, exports)
-        ↓
-transport              pyserial wrapper (open/close/read/write/probe)
-        ↓
-pyserial
+                           ┌──────────────────────────────────────────┐
+                           │   MCP server  (benchctrl.mcp)            │
+                           │   92 tools — orchestrator that calls     │
+                           │   each driver's register_mcp_tools(mcp)  │
+                           └──────────────────────────────────────────┘
+                              │                │                 │
+                              ▼                ▼                 ▼
+              ┌──────────────────────┐  ┌──────────────┐  ┌──────────────┐
+              │ drivers.otii_arc     │  │ drivers.     │  │ drivers.     │
+              │   OtiiArc            │  │ eastwood_    │  │ rigol_       │
+              │   OtiiArcChannel     │  │ qr10x.QR10x  │  │ dl3031a.     │
+              │   mcp_tools          │  │   mcp_tools  │  │ RigolDL3031A │
+              │                      │  │              │  │   mcp_tools  │
+              └──────────────────────┘  └──────────────┘  └──────────────┘
+                        ▲                       ▲                ▲
+                        │                       │                │
+              ┌─────────┴───────────────────────┴────────────────┘
+              │            SourceMeasurementUnit Protocol
+              │            (benchctrl.interfaces)
+              │            StandardChannel (benchctrl.channels)
+              ▼
+       ┌────────────────────┐         ┌────────────────────────┐
+       │ benchctrl.battery  │         │ scenarios/             │
+       │   Profiler         │         │   run.py harness       │
+       │   Emulator         │         │   reproducible bench   │
+       │   BatteryProfile   │         │   experiments          │
+       │   life calculator  │         │                        │
+       └────────────────────┘         └────────────────────────┘
 ```
 
-Public surface: `SMU`, `Recording`, `Channel`, the `BenchError`
-hierarchy. Wire-protocol details and channel IDs are internal.
+Three layers. The bottom layer is drivers. The middle layer is the
+Protocol contract + framework primitives (Recording, samples,
+StandardChannel, BenchError). The top layer is vendor-agnostic
+subsystems that depend only on the Protocol (battery emulator,
+scenarios harness) plus the MCP orchestrator that wires it all
+together.
 
-Key files:
-- `src/benchctrl/device.py` — `SMU` class
-- `src/benchctrl/recording.py` — `Recording` class
-- `src/benchctrl/protocol.py` — frame framing, command codes
-- `src/benchctrl/samples.py` — sample parsing, statistics, exports
-- `src/benchctrl/transport.py` — pyserial wrapper
-- `src/benchctrl/channels.py` — `Channel` enum
+## Layer 1 — drivers
 
-Hardware constants (USB VID/PID, channel wire-IDs, command opcodes)
-live in `protocol.py` and `channels.py`. The session-init handshake
-the device requires is implemented in `SMU.open()`.
+Every driver lives in `src/benchctrl/drivers/<vendor_model>/`. Each
+subpackage owns its wire protocol, transport, channels (if any), and
+MCP tool surface.
 
-### `benchctrl.bench` — companion instrument drivers
+### Conventions
 
-Parallel to `SMU`, not built on top of it — both subsystems are
-peers at the I/O boundary. Bench drivers exist so a battery emulator
-running on the Arc can have a real DUT load attached without users
-having to write their own RS232 / VISA glue.
+- `__init__.py` — re-exports the driver's public surface (class,
+  info dataclass, exception hierarchy) and nothing else.
+- `device.py` or `driver.py` — the main class.
+- `transport.py`, `protocol.py`, `channels.py` — driver-internal
+  modules. Only the Arc driver has all three today.
+- `mcp_tools.py` — driver-specific MCP tool functions plus
+  `register_mcp_tools(mcp)`. Connection singletons live here so
+  tests can inject fakes by mutating the driver module directly.
 
-Each driver is independent:
+### Current drivers
 
-- `benchctrl.bench.QR10x` — Eastwood Tech programmable resistor.
-  USB-Serial via pyserial. Private AT command set. ~280 lines.
-- `benchctrl.bench.RigolDL3031A` — Rigol DL3000-series electronic
-  load. USB-TMC + SCPI via pyvisa (or LAN/RS232). LIST sequence
-  mode + transient + battery-discharge + trigger system. ~900
-  lines.
+- `benchctrl.drivers.otii_arc.OtiiArc` — Qoitech Otii Arc / Arc Pro
+  source-measurement unit. USB CDC-ACM, reverse-engineered binary
+  wire protocol (see [`docs/otii_arc_protocol.md`](docs/otii_arc_protocol.md)).
+  Conforms to `SourceMeasurementUnit` Protocol.
+- `benchctrl.drivers.eastwood_qr10x.QR10x` — Eastwood Tech
+  programmable resistor. USB-Serial via pyserial. AT command set.
+  Concrete class; doesn't fit the SMU Protocol (it's pure load).
+- `benchctrl.drivers.rigol_dl3031a.RigolDL3031A` — Rigol DL3000-series
+  electronic load. USB-TMC + SCPI via pyvisa (or LAN/RS232). LIST
+  sequence + transient + battery-discharge + trigger system.
+  Concrete class.
 
-`benchctrl.bench.__init__` uses PEP 562 lazy attribute lookup so
-`from benchctrl.bench import QR10x` doesn't pull in pyvisa for users
-who only have the QR10x.
-
-Drivers expose their own exception hierarchies
+Each driver exposes its own exception hierarchy
 (`QR10xConnectionError`, `RigolDLCommandError`, etc.) so callers can
-catch instrument-specific errors without depending on the SMU's
-hierarchy.
+catch instrument-specific errors without coupling to other drivers.
 
-Manufacturer-specific quirks (Rigol's `:SOUR:LIST:STEP=4` firmware
-bug, `:SOUR:LIST:STEP` actually being "play N steps" not "highest
-index", `:FETCh:DISChargingTime?` returning H:MM:SS not float,
-`transient_set_frequency` taking Hz not kHz despite the manual) are
-documented in driver docstrings and in
-[`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) § F-1 through F-4.
-The driver rejects known-bad inputs at the SDK boundary.
+## Layer 2 — Protocol + framework primitives
 
-## Layer 2 — battery toolbox
+### `benchctrl.interfaces.SourceMeasurementUnit`
 
-`benchctrl.battery` replaces Qoitech's licensed Battery Toolbox in four
-phased modules:
+`@runtime_checkable` Protocol describing the surface any vendor-agnostic
+subsystem needs from an SMU: source-side setters
+(`set_voltage`, `set_main_current`, `set_output`, `set_range`,
+`set_power_regulation`, `set_current_limit`,
+`set_current_limit_enabled`), measurement (`read_value`, `read_window`,
+`record`), and identity (`get_fw_version`, `get_device_id`).
+
+Today only the Arc driver implements it. New SMUs (Keithley 24xx,
+Keysight modules, future DACs) implement the Protocol and slot in.
+
+### `benchctrl.channels.StandardChannel`
+
+Minimal channel inventory framework subsystems depend on:
+`MAIN_CURRENT` (`"mc"`), `MAIN_VOLTAGE` (`"mv"`), `MAIN_POWER` (`"mp"`).
+Driver-specific enums (`OtiiArcChannel`) extend this with the device's
+full channel inventory. Where a driver implements the standard subset,
+its members carry the same two-letter `code` so a string code can be
+used interchangeably across drivers.
+
+### Framework primitives
+
+`benchctrl.Recording` — captured measurement data per session, with
+statistics, export, in-memory slicing, file load. Driver-agnostic at
+the surface but presently delegates channel coercion to the Arc enum.
+
+`benchctrl.samples` — pure functions for statistics, CSV/JSON/Parquet
+write, sample buffer mechanics.
+
+`benchctrl.exceptions` — generic `BenchError` hierarchy
+(`BenchConnectionError`, `BenchValueError`, `BenchTimeoutError`,
+`BenchCommandError`, `BenchProtocolError`, `BenchNotImplementedError`).
+
+## Layer 3 — vendor-agnostic subsystems
+
+### `benchctrl.battery`
+
+Replaces Qoitech's licensed Battery Toolbox in four phased modules:
 
 ```
 profile.py          BatteryProfile dataclass + Otii JSON round-trip
         │
-        ├─→ life_calculator.py    predict runtime given profile + load
+        ├─→ calculator.py         predict runtime given profile + load
         │
-        ├─→ profiler.py           drive a discharge sweep; emit a fresh profile
+        ├─→ profiler.py           drive a discharge sweep against any
+        │                         SourceMeasurementUnit; emit a fresh
+        │                         profile
         │
-        └─→ emulator.py           run a 100 Hz control loop:
+        └─→ emulator.py           run a 100 Hz control loop on any
+                                  SourceMeasurementUnit:
                                   V = OCV(SoC) − I·ESR(SoC)
 ```
 
-The emulator is the most complex piece. It runs a daemon thread that
-polls the SMU's main current channel, integrates charge to update
-SoC, looks up OCV and ESR from the discharge table, and writes the
-result back via `set_voltage`. Safety: explicit clamp to
-`safety_max_voltage_V` at startup (the Arc Pro's high range tops out
-at ~4.2 V under load — see KNOWN_LIMITATIONS § H-1) and a watchdog
-that stops on `safety_max_used_mAh` or `soc_floor`.
+Both `Emulator` and `Profiler` type-hint
+`SourceMeasurementUnit` (Protocol), reference `StandardChannel.MAIN_*`
+for measurement, and don't import any concrete driver. The Arc driver
+is what binds at runtime today.
 
-The profiler runs in the opposite direction — drives load steps and
-records V/I to characterize a real cell into the Otii JSON format.
+Safety: explicit clamp to `safety_max_voltage_V` at emulator startup
+(the Arc Pro's high range tops out at ~4.2 V under load — see
+KNOWN_LIMITATIONS § H-1) and a watchdog that stops on
+`safety_max_used_mAh` or `soc_floor`.
 
-## Layer 3 — composition
+### `scenarios/`
 
-### `benchctrl.mcp` — Model Context Protocol server
+Top-level directory, not under `src/benchctrl/`. CLI that drives the
+emulator against a programmable load and saves the captured response
+as a self-describing artifact bundle.
 
-Wraps the entire SDK as MCP tools so LLM agents can drive a real
-bench. 93 tools at v0.9.7:
+```
+scenarios/
+├── run.py                      CLI + scenario runners
+├── README.md                   harness docs + headline results
+└── saved/
+    └── <profile>_<scenario>_<load>_<utc>.{json,csv,png}
+        plus a copy of the input battery profile JSON
+```
+
+Internal `_LoadAdapter` abstraction lets one scenario runner target
+either QR10x or DL3031A. Three scenario kinds:
+
+- `static` — load sweep at QR's relay timing, V/I snapshot per step
+- `dynamic` — host-driven IoT pattern at 20 Hz polling
+- `dynamic-list` — DL3031A's firmware LIST mode + Arc Pro's native
+  ~4 kHz `record()` streaming
+
+### `benchctrl.mcp` — orchestrator
+
+Each driver owns its MCP surface and exposes a
+`register_mcp_tools(mcp)` function. `benchctrl/mcp.py` instantiates the
+shared `FastMCP` server, calls each driver's `register_mcp_tools`, and
+defines the cross-driver tools (battery analytics, recording I/O on
+saved files, emulator).
+
+Connection singletons (`_smu`, `_qr10x`, `_dl3031a`) live in each
+driver's `mcp_tools` module — tests inject fakes by mutating that
+module.
+
+Tool inventory at v1.0:
 
 | Subsystem | Tools |
 |---|---|
-| SMU (connect, configure, source/measure, record) | ~30 |
-| Battery (profile lookup, life calc, emulator) | ~10 |
-| QR10x bench driver | 11 |
-| RigolDL3031A bench driver | 45 |
-| Recording I/O (export, summary, plot) | ~8 |
+| Otii Arc SMU | 24 |
+| QR10x | 11 |
+| Rigol DL3031A | 45 |
+| Cross-driver (recording I/O, battery, emulator) | 12 |
+| **Total** | **92** |
 
 The MCP layer is intentionally thin: each tool wraps one SDK method,
 coerces JSON-friendly argument types where needed, returns a dict.
@@ -155,38 +203,15 @@ MCP clients against the same server is unsupported (documented in
 the module docstring).
 
 The SDK ↔ MCP parity principle is load-bearing: every public SDK
-method has a matching MCP tool. The v0.9.7 review caught ~20 missing
-parity entries on the DL3031A driver, all fixed in the same release.
+method has a matching MCP tool.
 
-### `validation/` — reproducible scenario harness
+### `benchctrl.analysis/` and `benchctrl.dashboards/`
 
-Top-level directory, not under `src/benchctrl/`. Contains a CLI that
-drives the emulator against a programmable load and saves the
-captured response as a self-describing artifact bundle.
-
-```
-validation/
-├── run_validation.py          CLI + scenario runners
-├── README.md                  harness docs + headline results
-└── scenarios/
-    └── <profile>_<scenario>_<load>_<utc>.{json,csv,png}
-        plus a copy of the input battery profile JSON
-```
-
-The harness uses an internal `_LoadAdapter` abstraction so a single
-scenario runner can target either QR10x or DL3031A. Three scenario
-kinds:
-
-- `static` — load sweep at QR's relay timing, V/I snapshot per step
-- `dynamic` — host-driven IoT pattern at 20 Hz polling
-- `dynamic-list` — DL3031A's firmware LIST mode + Arc Pro's native
-  ~4 kHz `SMU.record()` streaming
-
-The harness is meant to be **regression-quality**: re-running a
-saved scenario on a new build should produce the same V/I curves
-modulo hardware noise. Each saved scenario embeds a copy of the
-input battery profile so it's fully reproducible without the
-external Otii profile bundle.
+Placeholder packages reserved for v1.x. Analytics features that span
+drivers (anomaly detection, multi-recording comparison, custom
+statistics) go in `analysis/`. Live graphical UIs (matplotlib live
+plots, web dashboards) go in `dashboards/`. Both ship empty at v1.0
+with a README explaining their intended role.
 
 ## Cross-cutting concerns
 
@@ -194,7 +219,8 @@ external Otii profile bundle.
 
 `benchctrl.samples` knows how to export `Recording` data in:
 
-- Native `.opensmu` binary (lossless, the canonical format)
+- Native `.opensmu` binary (lossless, the canonical format —
+  filename suffix preserved for backward read of v0.x captures)
 - CSV / JSON
 - pandas DataFrame
 - numpy arrays
@@ -208,21 +234,21 @@ extras. Format selection happens at the call site
 
 ### Threading
 
-Only one piece of the system runs background threads:
+Only two pieces of the system run background threads:
 
 - `Emulator._loop` — daemon thread at 100 Hz reading current and
   writing voltage to the SMU
-- `SMU._reader_thread` (during `start_recording`) — daemon thread
+- `OtiiArc._reader_thread` (during `start_recording`) — daemon thread
   consuming inbound bytes and demuxing into channel buffers
 
 These two cannot run concurrently against the same Arc Pro — they
 deadlock at the transport layer (`KNOWN_LIMITATIONS` § A-1). The
-hires validation runner sidesteps the deadlock by stopping the
+hires scenarios runner sidesteps the deadlock by stopping the
 emulator before opening the recording.
 
 ### Error model
 
-Two-level exception hierarchy:
+Generic + driver-specific hierarchies:
 
 ```
 BenchError                                 (in benchctrl.exceptions)
@@ -230,42 +256,43 @@ BenchError                                 (in benchctrl.exceptions)
 ├── BenchValueError                        client-side validation
 ├── BenchTimeoutError                      no expected response
 ├── BenchCommandError                      device rejected with -101 etc.
+├── BenchProtocolError                     malformed frame / unparseable
 └── BenchNotImplementedError               vendor-only methods we don't expose
 
-QR10xError                               (in benchctrl.bench.qr10x)
+QR10xError                                 (in benchctrl.drivers.eastwood_qr10x)
 ├── QR10xConnectionError
 ├── QR10xProtocolError
 ├── QR10xTimeoutError
 └── QR10xValueError
 
-RigolDLError                             (in benchctrl.bench.rigol_dl3031a)
+RigolDLError                               (in benchctrl.drivers.rigol_dl3031a)
 ├── RigolDLConnectionError
-├── RigolDLCommandError                  device -101 from :SYSTem:ERRor?
-├── RigolDLTimeoutError                  VI_ERROR_TMO
+├── RigolDLCommandError                    device -101 from :SYSTem:ERRor?
+├── RigolDLTimeoutError                    VI_ERROR_TMO
 └── RigolDLValueError
 ```
 
-Each driver has its own hierarchy so user code can catch
-instrument-specific errors without coupling to SMU's hierarchy. The
-SCPI error queue is drained explicitly via `raise_if_error()` on
-DL3031A; the Arc Pro's async error frames are detected in-band by
-the transport reader.
+The Arc driver raises `BenchError` subclasses. Each non-SMU driver has
+its own hierarchy so user code can catch instrument-specific errors
+without coupling to the SMU's hierarchy. The SCPI error queue is
+drained explicitly via `raise_if_error()` on DL3031A; the Arc's async
+error frames are detected in-band by the transport reader.
 
 ### Testing pattern
 
 `tests/` has two kinds of tests:
 
-- **Hardware-free** (default): use `FakeInstrument` / mock objects
-  that record SCPI writes and reply to queries from a scripted dict.
-  Run in ~3 minutes, no device needed. 292 tests at v0.9.7.
+- **Hardware-free** (default): use mock SMUs / instruments. Run in
+  ~3 minutes, no device needed. 313 tests at v1.0.0.
 - **Hardware-marked** (`@pytest.mark.hardware`): require real
-  instruments. Skip gracefully if hardware is absent. ~90 tests at
-  v0.9.7.
+  instruments. Skip gracefully if hardware is absent. 86 tests
+  passing at v1.0 (Arc + DL3031A), 6 QR10x skipped when not
+  connected.
 
-The mocks mirror real-instrument method names exactly so a renamed
-method breaks tests. (The v0.9.7 release was prompted in part by a
-mock that omitted v0.9.1's new SMU methods, which combined with a
-silent try/except to hide a real bug.)
+Mock SMUs in battery tests partially implement the
+`SourceMeasurementUnit` Protocol — the methods the subsystem under
+test actually calls. A renamed method on the Protocol therefore breaks
+the relevant mock test.
 
 ## What this isn't
 
@@ -276,17 +303,17 @@ A few intentional non-goals worth knowing:
   server if you need that.
 - **Not async.** Hardware is sequential. The streaming iterator
   covers "what's the value right now" without async machinery.
-- **Not a GUI.** The MCP server is the closest thing — agents drive
-  through it. Plot output is matplotlib PNG.
-- **Not multi-device coordinated.** One Arc per `SMU` instance.
-  Coordinating multiple Arcs is a v1.0+ item.
+- **Not a GUI** (yet). `dashboards/` is reserved for v1.x. Plot
+  output today is matplotlib PNG.
+- **Not multi-device coordinated.** One Arc per `OtiiArc` instance.
+  Coordinating multiple Arcs is v1.x work.
 
 ## See also
 
-- [`docs/design.md`](docs/design.md) — SMU-layer architecture in depth
+- [`docs/design.md`](docs/design.md) — Arc driver internals in depth
 - [`docs/getting_started.md`](docs/getting_started.md) — tutorial
 - [`docs/api_reference.md`](docs/api_reference.md) — exhaustive API
-- [`docs/protocol.md`](docs/protocol.md) — USB wire protocol
+- [`docs/otii_arc_protocol.md`](docs/otii_arc_protocol.md) — USB wire protocol
 - [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) — caps, quirks,
   workarounds
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, conventions

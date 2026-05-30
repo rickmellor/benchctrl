@@ -1,27 +1,32 @@
 # benchctrl
 
-Open-source Python control stack for USB source-measurement units. Drives
-the [Qoitech Otii Arc / Arc Pro][otii] directly over its USB CDC-ACM
-interface — no vendor server, no Automation Toolbox license, no GUI.
-Cross-platform (Windows / Linux / macOS) via [pyserial][pyserial].
+Open-source Python control stack for your lab bench. Drives the
+[Qoitech Otii Arc / Arc Pro][otii] SMU directly over USB CDC-ACM,
+plus a growing set of companion instruments (programmable loads,
+programmable resistors), with one MCP server that exposes the whole
+bench to LLM agents.
 
-What started as an SMU driver has grown into a bench-instrument stack:
-SMU control, a full battery-emulator pipeline that replaces Qoitech's
-licensed Battery Toolbox, drivers for companion instruments
-(programmable resistors and electronic loads), an MCP server so LLM
-agents can drive a real bench, and a validation harness that captures
-reproducible regression-quality scenarios.
+No vendor server, no Automation Toolbox license, no GUI.
+Cross-platform (Windows / Linux / macOS) via [pyserial][pyserial] /
+[pyvisa][pyvisa].
+
+Driver-symmetric architecture: every instrument lives under
+`benchctrl.drivers.<vendor_model>/`, the Otii Arc included. Battery
+emulator / profiler / analytics depend on a `SourceMeasurementUnit`
+Protocol, not on any concrete driver — bring your own SMU and it
+slots in.
 
 | | |
 |---|---|
-| **Version** | 0.9.7 (beta) |
-| **Tests** | 292 hardware-free + ~90 hardware-marked passing |
+| **Version** | 1.0.0 |
+| **Tests** | 313 hardware-free + 86 hardware-marked passing |
 | **License** | MIT |
 | **Python** | 3.9 – 3.13 |
-| **Hardware** | Qoitech Otii Arc / Arc Pro (USB CDC-ACM) |
+| **Hardware (today)** | Qoitech Otii Arc / Arc Pro (SMU), Eastwood Tech QR10x (load), Rigol DL3031A (load) |
 
 [otii]: https://www.qoitech.com/otii/
 [pyserial]: https://pyserial.readthedocs.io/
+[pyvisa]: https://pyvisa.readthedocs.io/
 
 ## What this is for
 
@@ -42,31 +47,35 @@ benchctrl is all of that, in one package.
 
 [mcp]: https://modelcontextprotocol.io
 
-## The five subsystems
+## Architecture
 
 ```
-            +-------------------------+
-            |  MCP server             |   93 tools — drive any subsystem
-            |  (benchctrl.mcp)          |   from Claude Code / Desktop / etc
-            +-------------------------+
-              |          |        |
-              v          v        v
-    +-------------+ +---------+ +--------+
-    | SMU         | | battery | | bench  |   Public SDK
-    | (Arc / Pro) | | profile | | drivers|
-    +-------------+ | profiler| +--------+
-              ^     | emulator|     ^
-              |     +---------+     |
-              |          |          |
-              +----------+----------+
-                         |
-              +-------------------------+
-              | validation/             |   Reproducible scenario
-              | (run_validation.py)     |   harness for the bench
-              +-------------------------+
+            +-----------------------------------------+
+            |  MCP server (benchctrl.mcp)             |   92 tools — drives every driver
+            |    orchestrates per-driver registration |   from Claude Code / Desktop / etc
+            +-----------------------------------------+
+                  |              |              |
+                  v              v              v
+            +-----------+ +-------------+ +-----------+
+            | Otii Arc  | | QR10x       | | DL3031A   |   Drivers (peers)
+            | driver    | | driver      | | driver    |
+            +-----------+ +-------------+ +-----------+
+                  ^              ^              ^
+                  |              |              |
+            +-----+--------------+--------------+-----+
+            |       SourceMeasurementUnit             |   Protocol — drivers conform
+            |       (benchctrl.interfaces)            |
+            +-----------------------------------------+
+                  ^                            ^
+                  |                            |
+            +-----+----+              +--------+--------+
+            | battery  |              | scenarios/      |   Vendor-agnostic
+            | emulator |              | run.py harness  |   subsystems
+            | profiler |              +-----------------+
+            +----------+
 ```
 
-### 1. `benchctrl.SMU` — direct hardware control
+### `benchctrl.drivers.otii_arc.OtiiArc` — direct hardware control
 
 Connect, configure, source / measure, record at native streaming rates
 (~4 kHz on the current channel). Frame-aware error detection. Channel
@@ -74,23 +83,24 @@ enable, expansion port, GPIO, UART. Everything the Qoitech Automation
 Toolbox does at the SMU layer, for $0.
 
 ```python
-from benchctrl import SMU, Channel
+import time
+from benchctrl.drivers.otii_arc import OtiiArc, OtiiArcChannel
 
-with SMU.open() as smu:
+with OtiiArc.open() as smu:
     smu.set_voltage(3.3)
     smu.set_current_limit(1.0)
-    with smu.record(Channel.MAIN_CURRENT, Channel.MAIN_VOLTAGE) as rec:
+    with smu.record(OtiiArcChannel.MAIN_CURRENT, OtiiArcChannel.MAIN_VOLTAGE) as rec:
         smu.set_output(True)
         time.sleep(5)
         smu.set_output(False)
-    print(rec.statistics(Channel.MAIN_CURRENT))
+    print(rec.statistics(OtiiArcChannel.MAIN_CURRENT))
     rec.save_csv("run.csv")
 ```
 
 → [`docs/getting_started.md`](docs/getting_started.md),
 [`docs/api_reference.md`](docs/api_reference.md)
 
-### 2. `benchctrl.battery` — Battery Toolbox replacement
+### `benchctrl.battery` — Battery Toolbox replacement
 
 Otii's Battery Toolbox is a paid license. The workflow it sells —
 profile a real cell, then emulate it against a DUT with SoC tracking —
@@ -106,11 +116,11 @@ is in this package, in four phases:
   `V = OCV(SoC) − I·ESR(SoC)` and the DUT can't tell the difference
 
 ```python
-from benchctrl import SMU
+from benchctrl.drivers.otii_arc import OtiiArc
 from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
 
 profile = BatteryProfile.load("CR2032-Energizer-(25).json")
-with SMU.open() as smu:
+with OtiiArc.open() as smu:
     emu = Emulator(smu, EmulatorConfig(
         profile=profile, initial_soc=1.0,
         safety_max_voltage_V=3.5, current_limit_A=0.5,
@@ -120,20 +130,23 @@ with SMU.open() as smu:
     emu.stop()
 ```
 
+`Emulator` and `Profiler` accept any object conforming to
+`benchctrl.interfaces.SourceMeasurementUnit`, not just the Arc.
+
 → [`docs/battery.md`](docs/battery.md)
 
-### 3. `benchctrl.bench` — companion instrument drivers
+### Companion drivers — load + resistor
 
-Drivers for the other instruments that share the bench with the Arc.
-Each is independent; import only what you have.
+Each driver lives in its own subpackage; import only what you have.
 
 | Driver | Class | Wire stack | Use case |
 |---|---|---|---|
-| Eastwood Tech QR10x | `benchctrl.bench.QR10x` | USB-Serial (CH340), AT commands | Passive load — sleep current / quiescent / low-mA |
-| Rigol DL3031A | `benchctrl.bench.RigolDL3031A` | USB-TMC + SCPI via pyvisa | Active load — high-current / fast transients / built-in LIST / battery-discharge mode |
+| Eastwood Tech QR10x | `benchctrl.drivers.eastwood_qr10x.QR10x` | USB-Serial (CH340), AT commands | Passive load — sleep current / quiescent / low-mA |
+| Rigol DL3031A | `benchctrl.drivers.rigol_dl3031a.RigolDL3031A` | USB-TMC + SCPI via pyvisa | Active load — high-current / fast transients / built-in LIST / battery-discharge mode |
 
 ```python
-from benchctrl.bench import QR10x, RigolDL3031A
+from benchctrl.drivers.eastwood_qr10x import QR10x
+from benchctrl.drivers.rigol_dl3031a import RigolDL3031A
 
 with QR10x.open("COM7") as qr:
     qr.set_safety_limit(12.0)
@@ -148,14 +161,15 @@ with RigolDL3031A.open() as dl:        # auto-discover by Rigol VID/PID
     dl.trigger_now()                   # firmware plays 50 ms TX bursts
 ```
 
-→ [`docs/bench.md`](docs/bench.md)
+→ [`docs/drivers.md`](docs/drivers.md)
 
-### 4. `benchctrl.mcp` — Model Context Protocol server
+### `benchctrl.mcp` — Model Context Protocol server
 
-93 tools exposing the whole SDK to MCP-aware clients (Claude Code,
-Claude Desktop, etc). Lets an LLM agent run real measurements:
-"discover the Arc, set 3.3 V, enable output, record for 10 seconds,
-report mean current."
+92 tools exposing the whole SDK to MCP-aware clients (Claude Code,
+Claude Desktop, etc). Each driver registers its own tools via
+`register_mcp_tools(mcp)` and the orchestrator wires them together.
+Lets an LLM agent run real measurements: "discover the Arc, set
+3.3 V, enable output, record for 10 seconds, report mean current."
 
 ```bash
 pip install benchctrl[mcp]
@@ -169,7 +183,7 @@ arguments.
 
 → [`docs/mcp.md`](docs/mcp.md)
 
-### 5. `validation/` — reproducible scenario harness
+### `scenarios/` — reproducible scenario harness
 
 End-to-end scenarios that drive the emulator against a programmable
 load and save the captured response to disk as self-describing
@@ -188,9 +202,9 @@ Three scenario kinds:
   Arc's native ~4 kHz V/I stream.
 
 ```bash
-python validation/run_validation.py --scenario static --all
-python validation/run_validation.py --scenario dynamic --profile "CR2032-Energizer-(25)" --cycles 3
-python validation/run_validation.py --scenario dynamic-list --profile "CR2032-Energizer-(25)" --load dl3031a
+python scenarios/run.py --scenario static --all
+python scenarios/run.py --scenario dynamic --profile "CR2032-Energizer-(25)" --cycles 3
+python scenarios/run.py --scenario dynamic-list --profile "CR2032-Energizer-(25)" --load dl3031a
 ```
 
 27 scenarios shipped with the repo as reference data. Headline:
@@ -198,7 +212,7 @@ LiPo at 12 Ω, −10 °C sags to 3.24 V at 324 mA (10× ESR rise vs +20 °C)
 — exactly what a real cold-soaked LiPo does, captured against an
 emulated cell.
 
-→ [`validation/README.md`](validation/README.md)
+→ [`scenarios/README.md`](scenarios/README.md)
 
 ## Install
 
@@ -218,15 +232,15 @@ everyday work. See [extras matrix](docs/output_formats.md#install).
 
 ```python
 import time
-from benchctrl import SMU, Channel
+from benchctrl.drivers.otii_arc import OtiiArc, OtiiArcChannel
 
 # 1. Discover & connect (auto-detects the first connected Arc / Pro)
-with SMU.open() as smu:
+with OtiiArc.open() as smu:
     print(smu.info)
 
     # 2. Configure
     smu.set_current_limit(0.5)           # 500 mA over-current trip
-    smu.enable_channels(Channel.MAIN_CURRENT, Channel.MAIN_VOLTAGE)
+    smu.enable_channels(OtiiArcChannel.MAIN_CURRENT, OtiiArcChannel.MAIN_VOLTAGE)
 
     # 3. Source 3.3 V and record for 5 seconds
     smu.set_voltage(3.3)
@@ -236,8 +250,8 @@ with SMU.open() as smu:
         smu.set_output(False)
 
     # 4. Inspect
-    stats = rec.statistics(Channel.MAIN_CURRENT)
-    print(f"I: mean={stats.mean*1000:.2f} mA  max={stats.max*1000:.2f} mA")
+    stats = rec.statistics(OtiiArcChannel.MAIN_CURRENT)
+    print(f"I: mean={stats.average*1000:.2f} mA  max={stats.max*1000:.2f} mA")
 
     # 5. Save (native format preserves the full sample timeline)
     rec.save("run.opensmu")
@@ -252,15 +266,15 @@ More: [`docs/getting_started.md`](docs/getting_started.md).
 |---|---|
 | [`docs/getting_started.md`](docs/getting_started.md) | Install + first capture tutorial |
 | [`docs/api_reference.md`](docs/api_reference.md) | Every public class and method |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | One-page tour of the five subsystems and how they layer |
-| [`docs/design.md`](docs/design.md) | SMU-layer architecture + design decisions |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Driver-symmetric layout, Protocol contract, registration model |
+| [`docs/design.md`](docs/design.md) | Arc driver internals + design decisions |
 | [`docs/battery.md`](docs/battery.md) | Battery profile / emulator / profiler / life calculator |
-| [`docs/bench.md`](docs/bench.md) | QR10x + DL3031A drivers, firmware modes |
+| [`docs/drivers.md`](docs/drivers.md) | QR10x + DL3031A drivers, firmware modes |
 | [`docs/mcp.md`](docs/mcp.md) | MCP server setup + tool inventory |
 | [`docs/output_formats.md`](docs/output_formats.md) | `.opensmu` / Parquet / CSV / JSON / numpy / pandas / matplotlib |
-| [`docs/protocol.md`](docs/protocol.md) | USB wire protocol reference (reverse-engineered) |
+| [`docs/otii_arc_protocol.md`](docs/otii_arc_protocol.md) | Arc USB wire protocol reference (reverse-engineered) |
 | [`docs/AGENTS.md`](docs/AGENTS.md) | Briefing for AI agents picking up the codebase |
-| [`validation/README.md`](validation/README.md) | Scenario harness + saved captures |
+| [`scenarios/README.md`](scenarios/README.md) | Scenario harness + saved captures |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release-by-release |
 | [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) | Hardware caps, firmware quirks, harness workarounds — **read this before debugging a new failure** |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Dev setup, testing, conventions |
@@ -271,7 +285,7 @@ More: [`docs/getting_started.md`](docs/getting_started.md).
 benchctrl is in **beta** (`Development Status :: 4 - Beta`). The SDK
 surface is stable; we're not planning breaking changes before 1.0.
 The validation harness is the most active area — new scenario types
-land in `validation/` as they're characterized.
+land in `scenarios/` as they're characterized.
 
 We document hardware caps, firmware quirks, and harness workarounds
 explicitly in [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) rather

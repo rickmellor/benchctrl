@@ -41,7 +41,7 @@ via Zadig).
 The test suite is split by hardware requirement using pytest markers.
 
 ```bash
-pytest -m "not hardware" -q       # ~3 minutes, no device needed (282 tests)
+pytest -m "not hardware" -q       # ~3 minutes, no device needed (313 tests)
 pytest -m hardware -q              # requires Arc Pro + companion instruments
 pytest -q                          # both (~5 minutes with hardware)
 ```
@@ -76,7 +76,7 @@ def test_hardware_my_thing():
 ## Lint and type-check
 
 ```bash
-ruff check src tests validation
+ruff check src tests scenarios
 mypy src
 ```
 
@@ -93,8 +93,9 @@ them.
 ### 1. SDK ↔ MCP parity
 
 Every public SDK method has a matching MCP tool. When you add a
-public method to `SMU` / `Emulator` / `QR10x` / `RigolDL3031A`, add
-the matching `@mcp.tool()` in `src/benchctrl/mcp.py` in the same PR.
+public method to `OtiiArc` / `Emulator` / `QR10x` / `RigolDL3031A`,
+add the matching MCP tool to that driver's `mcp_tools.py` (or, for
+cross-driver tools, `src/benchctrl/mcp.py`) in the same PR.
 
 The MCP tool wraps the SDK method, coerces arguments to JSON-friendly
 types where needed, and returns a dict (never a custom dataclass).
@@ -105,8 +106,8 @@ appropriate).
 
 Granular wrappers behind a convenience helper (e.g. the individual
 `list_set_*` methods behind `program_list`) can be SDK-only —
-document them in `docs/bench.md` as such. The opposite isn't allowed:
-no MCP tool without a corresponding SDK method.
+document them in `docs/drivers.md` as such. The opposite isn't
+allowed: no MCP tool without a corresponding SDK method.
 
 ### 2. Every public method has a test
 
@@ -120,19 +121,29 @@ rename would break tests.
 ### 3. Layers do not skip
 
 ```
-Application / examples / CLI
+Application / examples / CLI / scenarios
     ↓
-SMU + Recording (public API)
+Vendor-agnostic subsystems (battery, scenarios harness, mcp)
     ↓
-samples / protocol (pure)
+SourceMeasurementUnit Protocol + framework primitives
     ↓
-transport (pyserial I/O)
+Driver public API (OtiiArc / QR10x / RigolDL3031A)
+    ↓
+Driver-internal modules (channels / protocol / transport)
+    ↓
+pyserial / pyvisa
 ```
 
-`Recording` never reaches into `Transport`. `SMU` never imports
-`pyserial` directly. Same layering applies in `battery/`, `bench/`,
-and the validation harness. If you find yourself wanting to skip a
+`Recording` never reaches into a driver's transport. The battery
+emulator never imports a concrete driver class. The MCP orchestrator
+never imports `pyserial`. If you find yourself wanting to skip a
 layer, that's a signal something's at the wrong height in the stack.
+
+Adding a new instrument means a new `benchctrl.drivers.<vendor_model>/`
+subpackage with a `register_mcp_tools(mcp)` function. If it's an SMU,
+it conforms to `SourceMeasurementUnit`. If it's a different category
+(load, switch, DAC), define a new Protocol when the second concrete
+instance lands — premature Protocols are overhead without payoff.
 
 ### 4. Errors propagate; silent fallbacks are bugs
 
@@ -212,34 +223,47 @@ benchctrl/
 ├── PROGRESS.md                         live build snapshot
 ├── pyproject.toml                      package config
 ├── src/benchctrl/
-│   ├── device.py, transport.py,        SMU core
-│   │   protocol.py, samples.py,
-│   │   recording.py, channels.py
-│   ├── exceptions.py
-│   ├── battery/                        Battery Toolbox replacement
-│   │   ├── profile.py                  profile JSON I/O
-│   │   ├── life_calculator.py          predicted runtime
-│   │   ├── profiler.py                 generate fresh profile
-│   │   └── emulator.py                 act as a battery
-│   ├── bench/                          companion instruments
-│   │   ├── qr10x.py                    Eastwood programmable resistor
-│   │   └── rigol_dl3031a.py            Rigol electronic load
-│   ├── mcp.py                          MCP server (93 tools)
-│   └── cli.py                          benchctrl CLI entry
+│   ├── __init__.py                      framework primitives only
+│   ├── channels.py                      StandardChannel enum
+│   ├── interfaces.py                    SourceMeasurementUnit Protocol
+│   ├── exceptions.py                    BenchError hierarchy
+│   ├── recording.py, samples.py         Recording + statistics + exports
+│   ├── mcp.py                           MCP orchestrator + cross-driver tools
+│   ├── cli.py                           benchctrl CLI entry
+│   ├── battery/                         Battery Toolbox replacement
+│   │   ├── profile.py                   profile JSON I/O
+│   │   ├── calculator.py                predicted runtime
+│   │   ├── profiler.py                  generate fresh profile (any SMU)
+│   │   └── emulator.py                  act as a battery (any SMU)
+│   ├── analysis/                        v1.x placeholder
+│   ├── dashboards/                      v1.x placeholder
+│   └── drivers/
+│       ├── otii_arc/                    Qoitech Otii Arc / Arc Pro SMU
+│       │   ├── device.py                OtiiArc class
+│       │   ├── protocol.py              wire framing + codec
+│       │   ├── transport.py             pyserial wrapper
+│       │   ├── channels.py              OtiiArcChannel enum
+│       │   └── mcp_tools.py             register_mcp_tools(mcp)
+│       ├── eastwood_qr10x/              Eastwood QR10x programmable resistor
+│       │   ├── driver.py                QR10x class
+│       │   └── mcp_tools.py
+│       └── rigol_dl3031a/               Rigol DL3031A electronic load
+│           ├── driver.py                RigolDL3031A class
+│           └── mcp_tools.py
 ├── tests/                              hw-free + hardware-marked
 ├── docs/                               topical docs
-├── validation/
-│   ├── run_validation.py               scenario harness
+├── scenarios/
+│   ├── run.py                          scenario harness
 │   ├── README.md                       harness docs + results
-│   └── scenarios/                      saved captures (JSON / CSV / PNG)
-├── skills/benchctrl/SKILL.md             Claude Code skill briefing
+│   └── saved/                          saved captures (JSON / CSV / PNG)
+├── skills/benchctrl/SKILL.md            Claude Code skill briefing
 └── .github/                            PR + issue templates, CI workflow
 ```
 
 When you're hunting for something:
 
 - **"Where does X live?"** — search `src/benchctrl/` first, then
-  `validation/` if it's harness-related.
+  `scenarios/` if it's harness-related.
 - **"How does X work?"** — `docs/` is topical; `ARCHITECTURE.md` is
   the overview.
 - **"Why was X done this way?"** — `CHANGELOG.md` and

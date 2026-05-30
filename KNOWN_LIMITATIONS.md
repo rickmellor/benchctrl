@@ -37,7 +37,7 @@ Workaround: use QR10x for light loads, DL3031A for active /
 TX-burst loads. The validation harness's adapter does this
 automatically by translating R > `r_max` to `set_input(False)`.
 
-Code reference: `validation/run_validation.py` `_DL3031AAdapter.set_resistance`.
+Code reference: `scenarios/run.py` `_DL3031AAdapter.set_resistance`.
 
 ### H-3. DL3031A measurement integration is fixed at 10 PLC (~200 ms)
 Per the programming guide, `:MEASure:TIME?` returns 200 ms and is
@@ -71,7 +71,7 @@ dynamic pattern uses 300 ms TX phases (long enough to catch the
 spike inside the labeled window). The dynamic-list scenario keeps
 input on for the whole list and changes only the LIST setpoints.
 
-Code reference: `validation/README.md` § "DL3031A switching latency".
+Code reference: `scenarios/README.md` § "DL3031A switching latency".
 
 ## Driver / firmware interactions
 
@@ -128,7 +128,7 @@ load control, not LIST) for LiPo transient validation. A
 power-cycle of the DL3031A before each LiPo run sometimes
 restores correct behavior — sometimes not.
 
-Code reference: `validation/README.md` § "Headline results" notes
+Code reference: `scenarios/README.md` § "Headline results" notes
 the LiPo "did not capture" cell.
 
 ### F-3. DL3031A FUNC:MODE only escapable by power-cycle once stuck
@@ -150,7 +150,7 @@ Workaround:
 2. The operator power-cycles the DL3031A between tests where
    FIX-mode start is required.
 
-Code reference: `validation/run_validation.py` — see the
+Code reference: `scenarios/run.py` — see the
 `run_dynamic_list` `finally` block.
 
 ### F-4. Manual misreads compensated by the driver
@@ -196,7 +196,7 @@ For 10 s × 30 mA peak, SoC drift is 0.08 mAh — negligible vs CR2032's
 230 mAh capacity. For longer captures, consider running the
 emulator and recording in alternating windows.
 
-Code reference: `validation/run_validation.py` —
+Code reference: `scenarios/run.py` —
 `run_dynamic_hires` and `run_dynamic_list`.
 
 ### A-2. Validation phase-summary aggregates include settling
@@ -210,7 +210,7 @@ Workaround: use the raw CSV / JSON samples for accurate per-phase
 analysis, or use `--scenario dynamic-list` which uses firmware
 timing and avoids the toggle.
 
-Code reference: `validation/README.md` § "Notes / known limits".
+Code reference: `scenarios/README.md` § "Notes / known limits".
 
 ## What's not in this list
 

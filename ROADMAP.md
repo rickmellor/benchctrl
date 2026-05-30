@@ -101,7 +101,7 @@ server-managed format we don't replicate.
 
 **Why deferred**: their project format is server-internal; opening
 project files cross-vendor isn't a priority. The scenario harness in
-`validation/` covers the "save a captured experiment" use case
+`scenarios/` covers the "save a captured experiment" use case
 cleanly.
 
 ### UART log channel parsing

@@ -298,8 +298,8 @@ logger. Sub-loggers:
 - `benchctrl.protocol` — frame hex dumps (DEBUG only)
 - `benchctrl.battery.emulator` — emulator loop tick + warnings
 - `benchctrl.battery.profiler` — profiler step transitions
-- `benchctrl.bench.qr10x` — QR10x AT command traffic
-- `benchctrl.bench.rigol_dl3031a` — DL3031A SCPI traffic
+- `benchctrl.drivers.eastwood_qr10x` — QR10x AT command traffic
+- `benchctrl.drivers.rigol_dl3031a` — DL3031A SCPI traffic
 - `benchctrl.mcp` — MCP server lifecycle + tool warnings
 
 Enable hex dumps:
@@ -438,8 +438,8 @@ sequence propagate (no silent swallow — see CONTRIBUTING.md § 4).
 ## `benchctrl.bench` — companion instrument drivers
 
 ```python
-from benchctrl.bench import QR10x, QR10xInfo, QR10xError
-from benchctrl.bench import RigolDL3031A, RigolDLInfo, RigolDLError
+from benchctrl.drivers.eastwood_qr10x import QR10x, QR10xInfo, QR10xError
+from benchctrl.drivers.rigol_dl3031a import RigolDL3031A, RigolDLInfo, RigolDLError
 ```
 
 `RigolDL3031A` is lazily imported (PEP 562) so users without

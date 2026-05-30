@@ -7,6 +7,95 @@ Known limitations across all versions are tracked in
 firmware quirks, harness workarounds). Read it before debugging a
 new failure — it's likely a documented limit.
 
+## [1.0.0] — driver-symmetric architecture + package rename
+
+The first public release. The v0.x tree was called `opensmu` and
+treated the Otii Arc Pro as a first-class top-level class while
+companion instruments lived under `bench/`. v1.0 renames the package
+to `benchctrl` (broader scope than just SMUs) and makes every
+instrument a peer driver under `benchctrl.drivers.<vendor_model>/`.
+
+This is a **clean break** — the package never shipped publicly, so
+no backwards-compatibility shims, no v0.x aliases. Code that ran
+against `opensmu.SMU` will fail to import and needs to be updated to
+`from benchctrl.drivers.otii_arc import OtiiArc`.
+
+### Architecture
+
+- `opensmu` → `benchctrl` (new top-level package name)
+- `opensmu.SMU` → `benchctrl.drivers.otii_arc.OtiiArc`
+- `opensmu.Channel` → split into `benchctrl.channels.StandardChannel`
+  (common subset used by framework subsystems) and
+  `benchctrl.drivers.otii_arc.OtiiArcChannel` (Arc's full inventory)
+- `opensmu.bench.QR10x` → `benchctrl.drivers.eastwood_qr10x.QR10x`
+- `opensmu.bench.RigolDL3031A` → `benchctrl.drivers.rigol_dl3031a.RigolDL3031A`
+- `opensmu.SMUError`, `SMUConnectionError`, ... →
+  `benchctrl.BenchError`, `BenchConnectionError`, ...
+- New `benchctrl.interfaces.SourceMeasurementUnit` Protocol — battery
+  emulator + profiler + scenarios depend on the Protocol, not the
+  concrete Arc class. Adding a new SMU means implementing the
+  Protocol; battery emulation against it works for free.
+- New `benchctrl.analysis/` and `benchctrl.dashboards/` packages —
+  intentionally empty placeholders reserved for v1.x analytics and
+  graphical UIs.
+
+### MCP server reorganisation
+
+Each driver now owns its MCP surface. `benchctrl.drivers.<X>.mcp_tools`
+exposes a `register_mcp_tools(mcp)` function that the top-level
+`benchctrl/mcp.py` orchestrator calls at startup. Per-driver
+connection singletons (`_smu`, `_qr10x`, `_dl3031a`) live in the
+driver mcp_tools modules — tests inject fakes by mutating the driver
+module directly.
+
+Tool count: **92** (vs ~93 at v0.9.7 — no functionality lost; the
+delta is from the removal of one duplicate). Tool names within each
+driver are unchanged for stability.
+
+### `validation/` → `scenarios/`
+
+The harness directory was always wider in scope than "validation":
+
+- `validation/` → `scenarios/`
+- `validation/run_validation.py` → `scenarios/run.py`
+- `validation/scenarios/` → `scenarios/saved/`
+
+All 100+ saved captures move via `git mv` so history is preserved.
+The CLI now reads `python scenarios/run.py --scenario static …`.
+
+### What stays unchanged
+
+- `.opensmu` saved-recording file format — it's a filename suffix,
+  not an import path, and v0.x captures load against v1.0 with no
+  changes. Possible future format rename is v1.x cosmetics.
+- Battery profile JSON round-trip (bit-identical with Otii's bundled
+  format).
+- Hardware behavior on every driver — public method names within
+  each driver are stable (`set_voltage`, `set_resistance`,
+  `program_list`, etc.).
+- The 27+ captured scenarios — moved location, content unchanged.
+- KNOWN_LIMITATIONS findings (firmware bugs, hardware caps, etc.).
+
+### Tests
+
+- **313 hardware-free** (+21 vs v0.9.7, mostly new Protocol +
+  StandardChannel coverage)
+- **86 hardware-marked** (+0; full coverage retained against Arc
+  Pro + DL3031A); 6 QR10x tests skip when not connected
+
+### Migration cheat sheet
+
+| Old (v0.x) | New (v1.0) |
+|---|---|
+| `from opensmu import SMU` | `from benchctrl.drivers.otii_arc import OtiiArc` |
+| `from opensmu import Channel` | `from benchctrl.drivers.otii_arc import OtiiArcChannel` (or `from benchctrl.channels import StandardChannel`) |
+| `from opensmu import Recording` | `from benchctrl import Recording` |
+| `from opensmu.bench import QR10x` | `from benchctrl.drivers.eastwood_qr10x import QR10x` |
+| `from opensmu.bench import RigolDL3031A` | `from benchctrl.drivers.rigol_dl3031a import RigolDL3031A` |
+| `from opensmu.exceptions import SMUError` | `from benchctrl.exceptions import BenchError` |
+| `opensmu-mcp` CLI | `benchctrl-mcp` CLI |
+| `python validation/run_validation.py …` | `python scenarios/run.py …` |
+
 ## [0.9.7] — adversarial-review fix-batch + LIST/battery firmware bugs unearthed
 
 ### Fixed — compound silent-failure chain in `Emulator`
@@ -126,11 +215,11 @@ MCP-facing surface) — documented as SDK-only in the bench docs.
 
 ### Added — `--profile-dir` + `BENCHCTRL_BATTERY_PROFILE_DIR`
 
-`validation/run_validation.py` no longer hardcodes a
+`scenarios/run.py` no longer hardcodes a
 user-specific Otii install path. Resolution order: CLI
 `--profile-dir`, then `$BENCHCTRL_BATTERY_PROFILE_DIR`, then
 auto-detect under `%LOCALAPPDATA%/otii3/app-*/resources/batteryprofiles`,
-then repo-local `validation/profiles/`.
+then repo-local `scenarios/profiles/`.
 
 ### Added — `KNOWN_LIMITATIONS.md`
 
@@ -311,14 +400,14 @@ real LIST program push.
 - LIST integration timing inside `SMU.record()` is misaligned vs
   the harness's phase events — the LIST plays but with delayed
   onset (~3 s after `:TRIGger` in some flows). Tagged as a known
-  limit in `validation/README.md`; the captured waveforms still
+  limit in `scenarios/README.md`; the captured waveforms still
   show real LIST behavior.
 
 ## [0.9.5] — high-resolution dynamic capture via Arc Pro native streaming
 
 ### Added — `--pattern hires` dynamic scenario
 
-`validation/run_validation.py --pattern hires` switches the dynamic
+`scenarios/run.py --pattern hires` switches the dynamic
 runner to a dedicated implementation that uses `SMU.record(...)` for
 the actual V/I capture instead of host-side state polling. The Arc
 Pro streams ~4 kHz on `MAIN_CURRENT` (subtype-4 packed) and ~1 kHz on
@@ -378,7 +467,7 @@ by the 200 ms integration time.
 
 ### Added — `--load {qr10x,dl3031a}` in the validation harness
 
-`validation/run_validation.py` now accepts either programmable load
+`scenarios/run.py` now accepts either programmable load
 via a single CLI switch. The harness wires through a thin
 `_LoadAdapter` abstraction that owns each instrument's lifecycle
 (open / setup / set_resistance / teardown / close) so the scenario
@@ -417,18 +506,18 @@ findings vs the QR10x v0.9.2 baseline:
   summary reports near-zero TX current. Documented; sets up the next
   pass (read directly from DL3031A `:MEASure:` queries).
 
-See `validation/README.md` for the full per-load takeaway table.
+See `scenarios/README.md` for the full per-load takeaway table.
 
 ### Tests / parity
 
 No new test files (harness changes covered by existing scenario
 captures); existing test suite still passes (248 hardware-free).
 
-## [0.9.3] — Rigol DL3031A driver (`benchctrl.bench.RigolDL3031A`)
+## [0.9.3] — Rigol DL3031A driver (`benchctrl.drivers.rigol_dl3031a.RigolDL3031A`)
 
 ### Added — SCPI-over-USB-TMC driver for the Rigol DL3000 series
 
-`benchctrl.bench.RigolDL3031A` — pyvisa-based driver for the Rigol
+`benchctrl.drivers.rigol_dl3031a.RigolDL3031A` — pyvisa-based driver for the Rigol
 DL3021A / DL3031A programmable DC electronic load. Auto-discovers by
 USB VID/PID (`0x1AB1`/`0x0E11`) or accepts an explicit VISA resource
 string (USB-TMC or LXI).
@@ -490,10 +579,10 @@ measurement round-trip; hardware-marked test passes.
 
 ## [0.9.2] — bench validation harness + multi-profile matrix + LiPo support
 
-### Added — `validation/` harness with reusable scenarios
+### Added — `scenarios/` harness with reusable scenarios
 
-New top-level `validation/` directory holds an end-to-end test harness
-(`run_validation.py`) plus 11 saved scenarios captured against real
+New top-level `scenarios/` directory holds an end-to-end test harness
+(`run.py`) plus 11 saved scenarios captured against real
 hardware (Arc Pro + Eastwood QR10x on COM7). Each scenario is a
 self-describing JSON + CSV + PNG bundle that embeds a copy of the
 input battery profile, so a saved scenario is fully reproducible
@@ -508,11 +597,11 @@ Two scenario kinds:
 
 CLI::
 
-    python validation/run_validation.py --scenario static --all
-    python validation/run_validation.py --scenario dynamic \
+    python scenarios/run.py --scenario static --all
+    python scenarios/run.py --scenario dynamic \
         --profile "CR2032-Energizer-(25)" --cycles 3
 
-See `validation/README.md` for the full results table.
+See `scenarios/README.md` for the full results table.
 
 ### Added — multi-profile validation matrix
 
@@ -564,7 +653,7 @@ Override with `voltage_range="high"` or `"low"` for explicit control.
 ### Discovered — Arc Pro high-range output caps at ≈ 4.2 V under load
 
 Bench-measured. `set_voltage(4.31)` is silently rejected with error
--101 / `last_good_value=4200000`. Documented in `validation/README.md`
+-101 / `last_good_value=4200000`. Documented in `scenarios/README.md`
 under "Known limits" and `PROFILE_OVERRIDES` in the harness sets
 LiPo's `safety_max_V` to 4.2 V to work with this constraint.
 
@@ -684,7 +773,7 @@ on model, ±0.02-0.05% accuracy, AT commands over USB-Serial (CH340
 chip, 115200 8N1).
 
 ```python
-from benchctrl.bench import QR10x
+from benchctrl.drivers.eastwood_qr10x import QR10x
 
 with QR10x.open("COM7") as qr:
     print(qr.info())

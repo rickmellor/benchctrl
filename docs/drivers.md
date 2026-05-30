@@ -1,9 +1,11 @@
-# Bench instruments — `benchctrl.bench`
+# Drivers — `benchctrl.drivers`
 
-benchctrl's `bench` subpackage hosts drivers for other lab instruments
-typically wired alongside an Otii Arc Pro: programmable loads,
-programmable resistors, DMMs, etc. They share benchctrl's connection
-patterns and ship MCP tools alongside the Python API.
+Every instrument benchctrl can talk to lives under
+`benchctrl.drivers.<vendor_model>/`. The Qoitech Otii Arc / Arc Pro
+SMU is a peer driver alongside other bench instruments — programmable
+loads, programmable resistors, DMMs, DACs, switches. They share
+benchctrl's connection patterns and ship MCP tools alongside the Python
+API.
 
 Each driver is independent and optional. Import only what you need.
 
@@ -11,8 +13,8 @@ Each driver is independent and optional. Import only what you need.
 
 | Driver | Class | Wire stack | Status |
 |---|---|---|---|
-| Eastwood Tech QR10x programmable resistance | `benchctrl.bench.QR10x` | USB-Serial (CH340) | **shipped (v0.9.0)** |
-| Rigol DL3031A electronic load | `benchctrl.bench.RigolDL3031A` | USB-TMC + SCPI via pyvisa | **shipped (v0.9.3)** |
+| Eastwood Tech QR10x programmable resistance | `benchctrl.drivers.eastwood_qr10x.QR10x` | USB-Serial (CH340) | **shipped (v0.9.0)** |
+| Rigol DL3031A electronic load | `benchctrl.drivers.rigol_dl3031a.RigolDL3031A` | USB-TMC + SCPI via pyvisa | **shipped (v0.9.3)** |
 
 ## QR10x — programmable resistance
 
@@ -23,7 +25,7 @@ model, ±0.02% to ±0.05% accuracy. Talks AT commands over USB-Serial.
 ### Quick start
 
 ```python
-from benchctrl.bench import QR10x
+from benchctrl.drivers.eastwood_qr10x import QR10x
 
 with QR10x.open("COM7") as qr:
     print(qr.info())                  # device identity
@@ -127,7 +129,7 @@ built-in transient, LIST sequence, and battery-discharge test modes.
 ### Quick start
 
 ```python
-from benchctrl.bench import RigolDL3031A
+from benchctrl.drivers.rigol_dl3031a import RigolDL3031A
 
 with RigolDL3031A.open() as load:        # auto-discover by USB VID/PID
     print(load.info())

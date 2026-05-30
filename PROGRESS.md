@@ -16,7 +16,7 @@ exactly where it is. Updated after every milestone; latest entry on top.
     at 100 Ω), cell "collapses" at 12 Ω as a real CR2032 would, SoC recovery shows new
     OCV at lower SoC
   - **Multi-profile matrix (v0.9.2)**: 8 profiles × static sweep + 3 × dynamic IoT pattern
-    saved as reusable test scenarios in `validation/scenarios/`. Validates chemistry-specific
+    saved as reusable test scenarios in `scenarios/saved/`. Validates chemistry-specific
     behavior (CR2032 collapse, CR123A pulse capability) and LiPo temperature dependency
     (ESR rises ~10× from +20 °C to −10 °C).
   - **LiPo support**: auto-range to `set_range("high")` + safety_max clamp at startup.
