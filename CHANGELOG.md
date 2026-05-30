@@ -2,6 +2,56 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.4] — validation harness supports both loads; full matrix on DL3031A
+
+### Added — `--load {qr10x,dl3031a}` in the validation harness
+
+`validation/run_validation.py` now accepts either programmable load
+via a single CLI switch. The harness wires through a thin
+`_LoadAdapter` abstraction that owns each instrument's lifecycle
+(open / setup / set_resistance / teardown / close) so the scenario
+logic stays load-agnostic.
+
+DL3031A specifics handled in the adapter:
+
+- Out-of-range R (> DL3031A CR max, ~16 kΩ) translates to
+  `set_input(False)` — open circuit. Better physical model for a
+  sleeping IoT device than a finite 100 kΩ anyway.
+- CR min and max are queried at runtime from the device, not hardcoded.
+- `*RST` settles for 200 ms before subsequent commands.
+- `__exit__` (and `teardown`) always disables the load input.
+
+Bench dict in saved scenarios now carries an additional `load_kind`
+field so post-hoc analysis can group / filter by which load produced
+each capture. Scenario filenames are now `<profile>_<scenario>_<load>_<utc>.{json,csv,png}`,
+schema_version bumped to 2.
+
+### Captured — 11 new DL3031A scenarios
+
+Full static matrix (8 profiles) + dynamic IoT pattern (CR2032, CR123A,
+LiPo @ +20 °C) re-captured with the DL3031A as the load. Headline
+findings vs the QR10x v0.9.2 baseline:
+
+- **LiPo at 12 Ω**: QR10x was capped at 20 Ω (1 W safety). DL3031A
+  pulled true high-current behavior — at −10 °C, V sagged to **3.24 V
+  at 324 mA**, vs 3.70 V at 185 mA on QR10x. Real cold-soaked LiPo
+  behavior, previously beyond our reach.
+- **Light loads (< 1 mA)**: DL3031A's CR-mode regulation breaks
+  down. The 10 kΩ / 1 kΩ steps appear as input-off in the captures
+  because the load can't sink that little. QR10x remains correct at
+  any current.
+- **Dynamic phase alignment**: DL3031A switches in microseconds; the
+  emulator's ~100 Hz polling can't keep up. The dl3031a dynamic phase
+  summary reports near-zero TX current. Documented; sets up the next
+  pass (read directly from DL3031A `:MEASure:` queries).
+
+See `validation/README.md` for the full per-load takeaway table.
+
+### Tests / parity
+
+No new test files (harness changes covered by existing scenario
+captures); existing test suite still passes (248 hardware-free).
+
 ## [0.9.3] — Rigol DL3031A driver (`opensmu.bench.RigolDL3031A`)
 
 ### Added — SCPI-over-USB-TMC driver for the Rigol DL3000 series

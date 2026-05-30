@@ -1,8 +1,8 @@
 """Bench-validation harness for the OpenSMU battery emulator.
 
-Runs reproducible "scenarios" that drive the Otii Arc Pro emulator against
-a programmable load (Eastwood QR10x) and saves the captured response to
-disk as a JSON + CSV pair (optionally a PNG plot) under ``scenarios/``.
+Runs reproducible "scenarios" that drive the Otii Arc Pro emulator
+against a programmable load and saves the captured response to disk
+as a JSON + CSV pair (optionally a PNG plot) under ``scenarios/``.
 
 Two scenario types:
 
@@ -10,22 +10,30 @@ Two scenario types:
   step settle, record the emulator's V/I/SoC/ESR snapshot. Use this to
   verify the emulator's ESR sag matches what the profile predicts.
 
-* ``dynamic`` — drive the QR through a time-varying pattern (e.g. an
+* ``dynamic`` — drive the load through a time-varying pattern (e.g. an
   IoT sleep / wake / TX cycle) while polling the emulator's state at a
   fixed rate. Use this to verify transient response.
 
+The load can be either:
+
+* ``qr10x`` — Eastwood Tech QR10x programmable resistor (relay-based,
+  30–95 ms switching, no transients below ~50 ms)
+* ``dl3031a`` — Rigol DL3031A electronic load in CR mode (electronic,
+  sub-ms switching, much wider current envelope)
+
 Each saved scenario is self-contained: it embeds a copy of the battery
 profile JSON, the emulator config, the bench config, and the raw
-captured data. Re-running ``run_validation.py --replay <scenario.json>``
-is a future regression-test entry point.
+captured data.
 
 CLI (live capture)::
 
+    # QR10x (default)
     python validation/run_validation.py --profile CR2032-Energizer-(25) \\
-        --scenario static --qr-port COM7
+        --scenario static
 
-    python validation/run_validation.py --scenario dynamic \\
-        --profile CR2032-Energizer-(25) --cycles 3
+    # DL3031A
+    python validation/run_validation.py --profile CR2032-Energizer-(25) \\
+        --scenario static --load dl3031a
 
 Use ``--all`` to run the full static matrix across every bundled profile.
 """
@@ -34,10 +42,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import re
 import shutil
 import sys
 import time
+
+log = logging.getLogger("opensmu.validation")
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -82,6 +93,181 @@ PROFILE_OVERRIDES: dict[str, dict[str, Any]] = {
     "LiPo_ICP632136HPST-Renata-(5)":   {"safety_max_V": 4.2, "qr_safety_R": 20.0},
     "LiPo_ICP632136HPST-Renata-(-10)": {"safety_max_V": 4.2, "qr_safety_R": 20.0},
 }
+
+
+# ---------------------------------------------------------------------------
+# Load adapters — thin wrappers that hide the per-instrument quirks so the
+# scenario logic stays load-agnostic. Each adapter owns the lifecycle of one
+# instrument: open → setup → set_resistance loop → teardown → close.
+# ---------------------------------------------------------------------------
+
+
+class _LoadAdapter:
+    """Common interface; subclasses implement the wire ops."""
+
+    kind: str
+    bench_dict: dict[str, Any]
+
+    def open(self) -> None:
+        raise NotImplementedError
+
+    def setup(self, *, safety_R: float, voltage_V: float) -> None:
+        """Apply safety params and put the load into its baseline state."""
+        raise NotImplementedError
+
+    def set_resistance(self, ohms: float) -> float:
+        """Command R, return the actual achieved R (or NaN if unmeasurable)."""
+        raise NotImplementedError
+
+    def teardown(self, idle_R: float) -> None:
+        """Return to a safe idle state before close()."""
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+class _QR10xAdapter(_LoadAdapter):
+    kind = "qr10x"
+
+    def __init__(self, port: str):
+        self.port = port
+        self.qr: Optional[QR10x] = None
+        self.bench_dict = {}
+        self.safety_R = 12.0
+
+    def open(self) -> None:
+        self.qr = QR10x.open(self.port)
+
+    def setup(self, *, safety_R: float, voltage_V: float) -> None:
+        assert self.qr is not None
+        self.safety_R = safety_R
+        info = self.qr.info()
+        self.bench_dict = {
+            "load_kind": "Eastwood QR10x programmable resistor",
+            "device_type": info.device_type,
+            "serial": info.serial,
+            "hardware_version": info.hardware_version,
+            "firmware_version": info.firmware_version,
+            "port": self.port,
+            "safety_limit_ohm_applied": safety_R,
+        }
+        self.qr.set_safety_limit(safety_R)
+
+    def set_resistance(self, ohms: float) -> float:
+        assert self.qr is not None
+        self.qr.set_resistance(ohms)
+        return self.qr.actual_resistance()
+
+    def teardown(self, idle_R: float) -> None:
+        if self.qr is None:
+            return
+        try:
+            self.qr.set_resistance(idle_R)
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        if self.qr is not None:
+            self.qr.close()
+            self.qr = None
+
+
+class _DL3031AAdapter(_LoadAdapter):
+    """Drives the DL3031A in CR mode with input ON.
+
+    The DL3031A's CR range is **~2 Ω to 16 kΩ** (queried at runtime).
+    Setpoints outside that window get translated to ``input = OFF``,
+    which presents high impedance at the terminals — a more honest
+    representation of an IoT device's deep-sleep state than e.g. a
+    100 kΩ programmable resistor anyway.
+    """
+
+    kind = "dl3031a"
+
+    def __init__(self, resource: Optional[str] = None):
+        self.resource = resource
+        self.dl = None
+        self.bench_dict = {}
+        self.r_min = 2.0
+        self.r_max = 16_000.0
+        self._input_on = False
+
+    def open(self) -> None:
+        from opensmu.bench import RigolDL3031A
+        self.dl = RigolDL3031A.open(self.resource)
+
+    def setup(self, *, safety_R: float, voltage_V: float) -> None:
+        assert self.dl is not None
+        self.dl.reset()
+        self.dl.clear_status()
+        time.sleep(0.2)  # *RST takes a beat to settle
+        self.dl.set_voltage_range(36.0)
+        self.dl.set_current_range(6.0)
+        self.dl.set_mode("CR")
+        # Discover the actual CR bounds the firmware reports — these
+        # vary slightly between DL3000 models.
+        try:
+            self.r_min = float(self.dl.query(":SOURce:RESistance:LEVel:IMMediate? MIN"))
+            self.r_max = float(self.dl.query(":SOURce:RESistance:LEVel:IMMediate? MAX"))
+        except Exception:
+            log.warning("could not query DL3031A R bounds; using defaults", exc_info=True)
+        info = self.dl.info()
+        self.bench_dict = {
+            "load_kind": "Rigol DL3031A electronic load (CR mode)",
+            "model": info.model,
+            "serial": info.serial,
+            "firmware": info.firmware,
+            "resource": info.resource,
+            "current_range_A": self.dl.get_current_range(),
+            "voltage_range_V": self.dl.get_voltage_range(),
+            "cr_min_ohm": self.r_min,
+            "cr_max_ohm": self.r_max,
+            "note": (
+                "no fixed safety_limit_ohm; protected via current/voltage "
+                "ranges. R > cr_max_ohm is realized as input=OFF (open)."
+            ),
+        }
+        self._input_on = False
+
+    def set_resistance(self, ohms: float) -> float:
+        assert self.dl is not None
+        if ohms > self.r_max:
+            # Out of CR range — present open circuit instead.
+            if self._input_on:
+                self.dl.set_input(False)
+                self._input_on = False
+            return float("inf")
+        # Clamp to the device's regulation floor; the device would
+        # error out (-220) on a raw < r_min anyway.
+        cmd_r = max(ohms, self.r_min)
+        self.dl.set_resistance(cmd_r)
+        if not self._input_on:
+            self.dl.set_input(True)
+            self._input_on = True
+        return cmd_r
+
+    def teardown(self, idle_R: float) -> None:
+        if self.dl is None:
+            return
+        try:
+            self.dl.set_input(False)
+            self._input_on = False
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        if self.dl is not None:
+            self.dl.close()
+            self.dl = None
+
+
+def _make_load(load_kind: str, qr_port: str, dl_resource: Optional[str]) -> _LoadAdapter:
+    if load_kind == "qr10x":
+        return _QR10xAdapter(qr_port)
+    if load_kind == "dl3031a":
+        return _DL3031AAdapter(dl_resource)
+    raise ValueError(f"unknown load {load_kind!r}; expected qr10x or dl3031a")
 
 
 def _slugify(name: str) -> str:
@@ -220,63 +406,56 @@ def _save_dynamic_plot(path: Path, samples: list[dict[str, Any]], title: str) ->
     return True
 
 
-def run_static_sweep(*, profile_path: Path, qr_port: str, smu_port: Optional[str] = None,
+def run_static_sweep(*, profile_path: Path, load: _LoadAdapter,
+                     smu_port: Optional[str] = None,
                      r_steps: Optional[list[float]] = None, settle_s: float = 1.2,
                      output_dir: Path = SCENARIO_DIR) -> dict[str, Any]:
     profile = BatteryProfile.load(profile_path)
     stem = profile_path.stem
     overrides = PROFILE_OVERRIDES.get(stem, {})
     r_steps = list(r_steps if r_steps is not None else DEFAULT_STATIC_STEPS)
-    qr_safety = overrides.get("qr_safety_R", 12.0)
+    safety_R = overrides.get("qr_safety_R", 12.0)
+    safety_V = overrides.get("safety_max_V", 3.5)
 
-    scenario_name = f"{_slugify(stem)}_static_{_timestamp()}"
+    scenario_name = f"{_slugify(stem)}_static_{load.kind}_{_timestamp()}"
     out_base = output_dir / scenario_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[static] {stem}: {len(r_steps)} steps, settle={settle_s}s, "
-          f"V_safe={overrides.get('safety_max_V', 3.5)}, QR R_min={qr_safety}Ω")
+    print(f"[static/{load.kind}] {stem}: {len(r_steps)} steps, "
+          f"settle={settle_s}s, V_safe={safety_V}, load R_min={safety_R}Ω")
 
     cfg = _make_emulator_config(profile, overrides)
     steps_out: list[dict[str, Any]] = []
-    qr_info: dict[str, Any] = {}
 
     smu_kwargs = {"port": smu_port} if smu_port else {}
-    with SMU.open(**smu_kwargs) as smu, QR10x.open(qr_port) as qr:
-        info = qr.info()
-        qr_info = {
-            "device_type": info.device_type, "serial": info.serial,
-            "hardware_version": info.hardware_version,
-            "firmware_version": info.firmware_version,
-            "port": qr_port,
-            "safety_limit_ohm_applied": qr_safety,
-        }
-        qr.set_safety_limit(qr_safety)
-        qr.set_resistance(r_steps[0])
-        time.sleep(0.3)
-        emu = Emulator(smu, cfg)
-        emu.start()
+    with SMU.open(**smu_kwargs) as smu:
+        load.open()
         try:
-            time.sleep(2.0)  # let emulator settle on its first OCV setpoint
-            for r in r_steps:
-                qr.set_resistance(r)
-                r_actual = qr.actual_resistance()
-                time.sleep(settle_s)
-                rec = _step_record(emu, r_setpoint=r, r_actual=r_actual)
-                steps_out.append(rec)
-                print(f"  R={r:>8.1f}Ω  Vout={rec['v_out_V']:.4f}V  "
-                      f"I={rec['i_measured_A']*1000:+.3f}mA  "
-                      f"ΔV={rec['voltage_error_mV']:+.2f}mV  "
-                      f"SoC={rec['soc_pct']:.3f}%")
-        finally:
+            load.setup(safety_R=safety_R, voltage_V=safety_V)
+            load.set_resistance(r_steps[0])
+            time.sleep(0.3)
+            emu = Emulator(smu, cfg)
+            emu.start()
             try:
-                qr.set_resistance(r_steps[0])
-            except Exception:
-                pass
-            emu.stop()
+                time.sleep(2.0)  # let emulator settle on its first OCV setpoint
+                for r in r_steps:
+                    r_actual = load.set_resistance(r)
+                    time.sleep(settle_s)
+                    rec = _step_record(emu, r_setpoint=r, r_actual=r_actual)
+                    steps_out.append(rec)
+                    print(f"  R={r:>8.1f}Ω  Vout={rec['v_out_V']:.4f}V  "
+                          f"I={rec['i_measured_A']*1000:+.3f}mA  "
+                          f"ΔV={rec['voltage_error_mV']:+.2f}mV  "
+                          f"SoC={rec['soc_pct']:.3f}%")
+            finally:
+                load.teardown(r_steps[0])
+                emu.stop()
+        finally:
+            load.close()
 
     scenario = {
         "scenario": "static_load_sweep",
-        "schema_version": 1,
+        "schema_version": 2,
         "captured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "opensmu_version": OPENSMU_VERSION,
         "profile": {
@@ -301,8 +480,7 @@ def run_static_sweep(*, profile_path: Path, qr_port: str, smu_port: Optional[str
             "voltage_range_resolved": ("high" if profile.ocv_at(0.0) > 3.4 else "low"),
         },
         "bench": {
-            "load_kind": "Eastwood QR10x programmable resistor",
-            **qr_info,
+            **load.bench_dict,
             "settle_time_per_step_s": settle_s,
         },
         "r_steps_ohm": r_steps,
@@ -322,7 +500,7 @@ def run_static_sweep(*, profile_path: Path, qr_port: str, smu_port: Optional[str
     return scenario
 
 
-def run_dynamic_pattern(*, profile_path: Path, qr_port: str,
+def run_dynamic_pattern(*, profile_path: Path, load: _LoadAdapter,
                         smu_port: Optional[str] = None,
                         pattern: Optional[list[tuple[str, float, float]]] = None,
                         cycles: int = 1, sample_hz: float = 20.0,
@@ -331,72 +509,68 @@ def run_dynamic_pattern(*, profile_path: Path, qr_port: str,
     stem = profile_path.stem
     overrides = PROFILE_OVERRIDES.get(stem, {})
     pattern = list(pattern if pattern is not None else DEFAULT_IOT_PATTERN)
-    qr_safety = overrides.get("qr_safety_R", 12.0)
+    safety_R = overrides.get("qr_safety_R", 12.0)
+    safety_V = overrides.get("safety_max_V", 3.5)
     sample_dt = 1.0 / sample_hz
 
-    scenario_name = f"{_slugify(stem)}_dynamic_{_timestamp()}"
+    scenario_name = f"{_slugify(stem)}_dynamic_{load.kind}_{_timestamp()}"
     out_base = output_dir / scenario_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cycle_total = sum(d for _, _, d in pattern)
     total_s = cycle_total * cycles
-    print(f"[dynamic] {stem}: {cycles} cycles × "
+    print(f"[dynamic/{load.kind}] {stem}: {cycles} cycles × "
           f"{len(pattern)} phases = {total_s:.1f}s @ {sample_hz:.0f}Hz")
 
     cfg = _make_emulator_config(profile, overrides)
     samples_out: list[dict[str, Any]] = []
     phase_events: list[dict[str, Any]] = []
-    qr_info: dict[str, Any] = {}
 
     smu_kwargs = {"port": smu_port} if smu_port else {}
     sleep_idle_R = pattern[0][1]
-    with SMU.open(**smu_kwargs) as smu, QR10x.open(qr_port) as qr:
-        info = qr.info()
-        qr_info = {"device_type": info.device_type, "serial": info.serial,
-                   "hardware_version": info.hardware_version,
-                   "firmware_version": info.firmware_version,
-                   "port": qr_port,
-                   "safety_limit_ohm_applied": qr_safety}
-        qr.set_safety_limit(qr_safety)
-        qr.set_resistance(sleep_idle_R)
-        time.sleep(0.3)
-        emu = Emulator(smu, cfg)
-        emu.start()
+    with SMU.open(**smu_kwargs) as smu:
+        load.open()
         try:
-            time.sleep(2.0)
-            t0 = time.monotonic()
-            for cycle_idx in range(cycles):
-                for label, r_ohm, dur in pattern:
-                    qr.set_resistance(r_ohm)
-                    phase_start = time.monotonic()
-                    phase_events.append({
-                        "cycle": cycle_idx,
-                        "phase": label,
-                        "t_start_s": phase_start - t0,
-                        "r_setpoint_ohm": r_ohm,
-                        "duration_s": dur,
-                    })
-                    next_sample = phase_start
-                    end = phase_start + dur
-                    while time.monotonic() < end:
-                        now = time.monotonic()
-                        if now >= next_sample:
-                            rec = _step_record(emu, r_setpoint=r_ohm,
-                                               r_actual=float("nan"),
-                                               phase=label)
-                            rec["t_s"] = now - t0
-                            rec["cycle"] = cycle_idx
-                            samples_out.append(rec)
-                            next_sample += sample_dt
-                        else:
-                            time.sleep(min(0.005, end - now))
-            qr.set_resistance(sleep_idle_R)
-        finally:
+            load.setup(safety_R=safety_R, voltage_V=safety_V)
+            load.set_resistance(sleep_idle_R)
+            time.sleep(0.3)
+            emu = Emulator(smu, cfg)
+            emu.start()
             try:
-                qr.set_resistance(sleep_idle_R)
-            except Exception:
-                pass
-            emu.stop()
+                time.sleep(2.0)
+                t0 = time.monotonic()
+                for cycle_idx in range(cycles):
+                    for label, r_ohm, dur in pattern:
+                        load.set_resistance(r_ohm)
+                        phase_start = time.monotonic()
+                        phase_events.append({
+                            "cycle": cycle_idx,
+                            "phase": label,
+                            "t_start_s": phase_start - t0,
+                            "r_setpoint_ohm": r_ohm,
+                            "duration_s": dur,
+                        })
+                        next_sample = phase_start
+                        end = phase_start + dur
+                        while time.monotonic() < end:
+                            now = time.monotonic()
+                            if now >= next_sample:
+                                rec = _step_record(
+                                    emu, r_setpoint=r_ohm,
+                                    r_actual=float("nan"), phase=label,
+                                )
+                                rec["t_s"] = now - t0
+                                rec["cycle"] = cycle_idx
+                                samples_out.append(rec)
+                                next_sample += sample_dt
+                            else:
+                                time.sleep(min(0.005, end - now))
+                load.set_resistance(sleep_idle_R)
+            finally:
+                load.teardown(sleep_idle_R)
+                emu.stop()
+        finally:
+            load.close()
 
     # Per-phase summary (V min/max and mean I)
     by_phase: dict[str, list[dict[str, Any]]] = {}
@@ -423,7 +597,7 @@ def run_dynamic_pattern(*, profile_path: Path, qr_port: str,
 
     scenario = {
         "scenario": "dynamic_load_pattern",
-        "schema_version": 1,
+        "schema_version": 2,
         "captured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "opensmu_version": OPENSMU_VERSION,
         "profile": {
@@ -445,10 +619,7 @@ def run_dynamic_pattern(*, profile_path: Path, qr_port: str,
             "update_interval_s": cfg.update_interval_s,
             "voltage_range_resolved": ("high" if profile.ocv_at(0.0) > 3.4 else "low"),
         },
-        "bench": {
-            "load_kind": "Eastwood QR10x programmable resistor",
-            **qr_info,
-        },
+        "bench": {**load.bench_dict},
         "pattern": [{"phase": p[0], "r_ohm": p[1], "duration_s": p[2]} for p in pattern],
         "cycles": cycles,
         "sample_hz": sample_hz,
@@ -480,7 +651,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--profile", help="profile stem or full JSON path")
     parser.add_argument("--all", action="store_true",
                         help="run scenario across every bundled profile")
-    parser.add_argument("--qr-port", default="COM7")
+    parser.add_argument("--load", choices=["qr10x", "dl3031a"], default="qr10x",
+                        help="which programmable load to drive (default: qr10x)")
+    parser.add_argument("--qr-port", default="COM7",
+                        help="QR10x COM port (--load qr10x only)")
+    parser.add_argument("--dl-resource", default=None,
+                        help="DL3031A VISA resource string (--load dl3031a only); "
+                             "auto-discovers Rigol VID/PID if omitted")
     parser.add_argument("--smu-port", default=None,
                         help="explicit Arc Pro COM port; auto-discover if omitted")
     parser.add_argument("--cycles", type=int, default=1,
@@ -501,13 +678,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error("--profile or --all is required")
 
     for prof in targets:
+        load = _make_load(args.load, args.qr_port, args.dl_resource)
         try:
             if args.scenario == "static":
-                run_static_sweep(profile_path=prof, qr_port=args.qr_port,
+                run_static_sweep(profile_path=prof, load=load,
                                  smu_port=args.smu_port, settle_s=args.settle_s,
                                  output_dir=out_dir)
             else:
-                run_dynamic_pattern(profile_path=prof, qr_port=args.qr_port,
+                run_dynamic_pattern(profile_path=prof, load=load,
                                     smu_port=args.smu_port, cycles=args.cycles,
                                     sample_hz=args.sample_hz, output_dir=out_dir)
         except Exception as e:

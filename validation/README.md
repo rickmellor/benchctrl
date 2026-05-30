@@ -145,11 +145,88 @@ in the first place — a CR2032 makes for a terrible LoRaWAN TX battery
 because of the sag/recovery dynamics, and the emulator reproduces that
 without anyone having to wreck a real cell.
 
+## DL3031A vs QR10x — same matrix, two loads (v0.9.4)
+
+The harness now accepts `--load {qr10x,dl3031a}`. Both loads were run
+through the full static matrix and the dynamic IoT pattern. Each
+instrument has a regime where it shines and a regime where the other
+takes over — the point of having both on the bench.
+
+### Static @ 12 Ω — high-current LiPo behavior previously hidden
+
+QR10x set `R_min = 20 Ω` for LiPo profiles (1 W cap at 4.2 V).
+The DL3031A has no such constraint and reveals what the cell actually
+does at 12 Ω with full 4.2 V applied — a higher-current regime where
+ESR-driven sag is much more dramatic.
+
+| LiPo °C | V @ 12 Ω (QR10x, clamped to 20 Ω) | V @ 12 Ω (DL3031A, actual) | Δ |
+|---------|------------------------------------|----------------------------|---|
+| +20     | 4.20 V (clamped, 197 mA)           | 4.15 V (355 mA)            | DL3031A pulled 1.8× more current |
+| +5      | 4.11 V (197 mA)                    | 3.94 V (350 mA)            | 170 mV deeper sag |
+| −10     | 3.70 V (185 mA)                    | **3.24 V (324 mA)**        | nearly 500 mV deeper sag |
+
+The QR10x's safety-limited measurement at 20 Ω was already meaningful
+("ESR rises ~10× cold") — but the DL3031A's unrestricted 12 Ω reading
+on −10 °C LiPo shows the cell hitting **3.24 V at 324 mA**, well into
+the lower part of LiPo's usable range. That's what a real cold-soaked
+LiPo does and it was sitting beyond our reach with the QR alone.
+
+### Static @ light load — QR10x wins below ~1 mA
+
+The DL3031A is an active electronic load: closed-loop regulation needs
+enough current to work. Below roughly **1 mA target current**, CR mode
+loses regulation and the load reads as effectively open. The QR10x is
+a passive resistor network, so it stays correct down to whatever the
+SMU can measure.
+
+Concrete: at the 10 kΩ step against CR123A (3.20 V, expected 0.32 mA),
+the QR10x measured 0.322 mA cleanly; the DL3031A measured 0.012 mA
+(SMU current noise floor).
+
+Result: **QR10x is the right tool for sleep-current and quiescent
+characterization**; DL3031A is the right tool for active / TX / load
+phases.
+
+### Dynamic — the polling-rate bottleneck shows up
+
+With the QR10x's 30–95 ms relay switching, the emulator's ~100 Hz
+control loop is fast enough to keep up with phase transitions, so the
+saved samples align with the phase labels.
+
+The DL3031A switches in microseconds. The emulator polls current via
+`read_value(MAIN_CURRENT)` which has its own ~10–100 ms latency on top
+of the 100 Hz loop. So when we tag a sample as "TX phase 50 ms after
+the load went to 100 Ω", the current value we just read might still
+be the previous phase's value. Result: the dl3031a dynamic phase
+summary reports near-zero TX current. The raw V/I traces tell the
+real story — but the per-phase summary is misleading at the QR10x's
+phase durations.
+
+This is what motivates step 2 of the v0.9.4+ roadmap: read directly
+from the DL3031A's own `:MEASure:` queries (or its 400-point cached
+`:MEASure:WAVedata?`) instead of the emulator's lagged copy.
+
+### Per-load takeaway
+
+| Use case | Best load | Why |
+|---|---|---|
+| Quiescent / sleep current (< 1 mA) | QR10x | passive, correct at any current |
+| Steady-state mid-load (~30 mA) | either | both regulate cleanly here |
+| Heavy DC pulse (> 100 mA) | DL3031A | QR10x's W rating caps the safe R |
+| Sub-ms transients | DL3031A | QR10x relays are too slow |
+| Built-in battery-discharge sequences | DL3031A | firmware does it |
+
 ## Notes / known limits
 
 - Arc Pro high range tops out at ≈ 4.2 V under load. LiPo profiles
   with fresh OCV > 4.2 V are clamped — useful behavior to be aware of
   when interpreting clamped V_out values at high SoC.
+- DL3031A CR mode regulation breaks down below ~1 mA target current.
+  Light-load steps appear as input-off in the captures (which is
+  arguably the better physical model for a sleeping IoT device).
+- DL3031A's electronic switching outpaces the emulator's polling
+  rate; the dynamic-scenario phase summary is misleading for that
+  load. Use the raw CSV / future direct-from-DL3031A measurements.
 - The QR10x's mechanical-relay switching (30–95 ms) is too slow to
   resolve real GSM/Wi-Fi pulse trains. Use Rigol DL3031A (or similar)
   for sub-ms transient work.

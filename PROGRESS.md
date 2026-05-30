@@ -5,8 +5,9 @@ exactly where it is. Updated after every milestone; latest entry on top.
 
 ## Status snapshot
 
-- **Phase**: v0.9.3 shipped — Rigol DL3031A driver via SCPI/USB-TMC
+- **Phase**: v0.9.4 shipped — validation harness supports both loads; full matrix on DL3031A
 - **Tests**: 336 / 337 passing (248 hw-free + 89 hardware)
+- **Scenarios captured**: 22 total — 11 QR10x (v0.9.2) + 11 DL3031A (v0.9.4)
 - **Hardware validation milestones**:
   - **Profiler**: AA pair, OCV 3.19 V, ESR 3.18 Ω, 10-cycle short profile (15 s, 10.6 µAh used)
   - **Emulator**: CR2032 profile + QR10x load sweep (100 kΩ → 12 Ω), voltage sag tracks ESR
