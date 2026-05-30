@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from benchctrl.channels import Channel
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 from benchctrl.recording import Recording
 
 
@@ -35,7 +35,7 @@ def test_save_csv_wide_format(tmp_path):
 
 def test_save_csv_rejects_unknown_format(tmp_path):
     rec = _filled_recording()
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         rec.save_csv(tmp_path / "bad.csv", format="something")
 
 
@@ -70,7 +70,7 @@ def test_native_binary_round_trip(tmp_path):
 def test_native_binary_load_rejects_bad_magic(tmp_path):
     p = tmp_path / "bad.opensmu"
     p.write_bytes(b"WRONGMAG" + b"\x00" * 32)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         Recording.load(p)
 
 

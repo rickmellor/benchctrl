@@ -25,7 +25,7 @@ from pathlib import Path
 
 from benchctrl import SMU, Channel
 from benchctrl._version import __version__
-from benchctrl.exceptions import SMUError
+from benchctrl.exceptions import BenchError
 
 
 def _open_smu(args) -> SMU:
@@ -207,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except SMUError as exc:
+    except BenchError as exc:
         print(f"benchctrl error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

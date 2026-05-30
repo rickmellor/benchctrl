@@ -81,7 +81,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 from benchctrl.battery.profile import BatteryProfile
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 
 if TYPE_CHECKING:
     from benchctrl.device import SMU
@@ -196,7 +196,7 @@ class Emulator:
         to bound fault current.
         """
         if self._thread is not None:
-            raise SMUValueError("emulator is already running")
+            raise BenchValueError("emulator is already running")
         # Configure the SMU for voltage-source operation. **No
         # try/except here**: if any configuration call fails the
         # device is in an unknown state — arming the output anyway
@@ -301,25 +301,25 @@ class Emulator:
 
     def _validate(self) -> None:
         if not 0.0 <= self.config.initial_soc <= 1.0:
-            raise SMUValueError(
+            raise BenchValueError(
                 f"initial_soc must be in [0, 1], got {self.config.initial_soc}"
             )
         if self.config.series < 1:
-            raise SMUValueError(f"series must be >= 1, got {self.config.series}")
+            raise BenchValueError(f"series must be >= 1, got {self.config.series}")
         if self.config.parallel < 1:
-            raise SMUValueError(f"parallel must be >= 1, got {self.config.parallel}")
+            raise BenchValueError(f"parallel must be >= 1, got {self.config.parallel}")
         if self.config.update_interval_s <= 0:
-            raise SMUValueError(
+            raise BenchValueError(
                 f"update_interval_s must be > 0, got {self.config.update_interval_s}"
             )
         if not 0.0 <= self.config.soc_floor <= 1.0:
-            raise SMUValueError(
+            raise BenchValueError(
                 f"soc_floor must be in [0, 1], got {self.config.soc_floor}"
             )
         if self.config.safety_max_voltage_V <= 0:
-            raise SMUValueError("safety_max_voltage_V must be > 0")
+            raise BenchValueError("safety_max_voltage_V must be > 0")
         if self.config.profile.nominal_capacity_mAh <= 0:
-            raise SMUValueError("profile.nominal_capacity_mAh must be > 0")
+            raise BenchValueError("profile.nominal_capacity_mAh must be > 0")
 
     def _bank_capacity_mAh(self) -> float:
         return (

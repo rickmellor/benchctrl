@@ -20,13 +20,13 @@ from benchctrl._version import __version__
 from benchctrl.channels import Channel, ChannelInfo
 from benchctrl.device import SMU, SMUInfo
 from benchctrl.exceptions import (
-    SMUCommandError,
-    SMUConnectionError,
-    SMUError,
-    SMUNotImplementedError,
-    SMUProtocolError,
-    SMUTimeoutError,
-    SMUValueError,
+    BenchCommandError,
+    BenchConnectionError,
+    BenchError,
+    BenchNotImplementedError,
+    BenchProtocolError,
+    BenchTimeoutError,
+    BenchValueError,
 )
 from benchctrl.recording import ChannelInfoResult, Recording
 from benchctrl.samples import Sample, Statistics
@@ -41,11 +41,11 @@ __all__ = [
     "Statistics",
     "ChannelInfoResult",
     "Sample",
-    "SMUError",
-    "SMUConnectionError",
-    "SMUProtocolError",
-    "SMUCommandError",
-    "SMUValueError",
-    "SMUTimeoutError",
-    "SMUNotImplementedError",
+    "BenchError",
+    "BenchConnectionError",
+    "BenchProtocolError",
+    "BenchCommandError",
+    "BenchValueError",
+    "BenchTimeoutError",
+    "BenchNotImplementedError",
 ]

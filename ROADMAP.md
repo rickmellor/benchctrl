@@ -122,7 +122,7 @@ wire-level type-0x0003 records.
 
 ### Internal calibration
 
-**Status**: `SMU.calibrate()` raises `SMUNotImplementedError`. The
+**Status**: `SMU.calibrate()` raises `BenchNotImplementedError`. The
 Otii TCP API's `Arc.calibrate()` sends **zero wire commands** to the
 device — the actual calibration flow lives somewhere other than the
 documented API (likely the Desktop GUI's service-mode path or a USB
@@ -140,7 +140,7 @@ writes to NVM" warning.
 ### Firmware upgrade
 
 **Status**: `SMU.firmware_upgrade()` raises
-`SMUNotImplementedError` and points users at the vendor app.
+`BenchNotImplementedError` and points users at the vendor app.
 
 **Why deferred indefinitely**: bricking risk. The official
 `Arc.firmware_upgrade()` ships an image which puts the device in a
@@ -151,7 +151,7 @@ Not worth the risk to replicate.
 ### Channel sample-rate control as a wire command
 
 **Status**: `SMU.set_channel_samplerate()` raises
-`SMUNotImplementedError`. The Otii server's
+`BenchNotImplementedError`. The Otii server's
 `set_channel_samplerate` errors at the JavaScript layer before any
 bytes reach the device — the most plausible interpretation is that
 there is no wire command for this, and "sample rate" in the vendor

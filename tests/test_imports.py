@@ -23,13 +23,13 @@ def test_top_level_classes():
         ChannelInfoResult,
         Recording,
         Sample,
-        SMUCommandError,
-        SMUConnectionError,
-        SMUError,
-        SMUNotImplementedError,
-        SMUProtocolError,
-        SMUTimeoutError,
-        SMUValueError,
+        BenchCommandError,
+        BenchConnectionError,
+        BenchError,
+        BenchNotImplementedError,
+        BenchProtocolError,
+        BenchTimeoutError,
+        BenchValueError,
         Statistics,
     )
     assert SMU
@@ -37,7 +37,7 @@ def test_top_level_classes():
     assert ChannelInfoResult
     assert Recording
     assert Sample
-    assert SMUCommandError and SMUConnectionError and SMUError
-    assert SMUNotImplementedError and SMUProtocolError
-    assert SMUTimeoutError and SMUValueError
+    assert BenchCommandError and BenchConnectionError and BenchError
+    assert BenchNotImplementedError and BenchProtocolError
+    assert BenchTimeoutError and BenchValueError
     assert Statistics

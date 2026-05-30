@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from benchctrl.exceptions import SMUNotImplementedError
+from benchctrl.exceptions import BenchNotImplementedError
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def smu_skeleton():
 )
 def test_deferred_smu_methods_raise(smu_skeleton, method, args):
     fn = getattr(smu_skeleton, method)
-    with pytest.raises(SMUNotImplementedError) as exc:
+    with pytest.raises(BenchNotImplementedError) as exc:
         result = fn(*args)
         if hasattr(result, "__iter__") and method == "iter_uart_log":
             next(iter(result))  # force generator

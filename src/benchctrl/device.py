@@ -22,11 +22,11 @@ from typing import Optional, Union
 
 from benchctrl.channels import WIRE_ID_TO_CHANNEL, Channel
 from benchctrl.exceptions import (
-    SMUCommandError,
-    SMUConnectionError,
-    SMUNotImplementedError,
-    SMUTimeoutError,
-    SMUValueError,
+    BenchCommandError,
+    BenchConnectionError,
+    BenchNotImplementedError,
+    BenchTimeoutError,
+    BenchValueError,
 )
 from benchctrl.protocol import (
     CMD_ENABLE_5V,
@@ -158,7 +158,7 @@ class SMU:
         # client's model.
         self._reader_sample_counts: dict[Channel, int] = {}
         # Asynchronous errors detected during streaming, raised on next call.
-        self._pending_error: Optional[SMUCommandError] = None
+        self._pending_error: Optional[BenchCommandError] = None
         self._pending_error_lock = threading.Lock()
         # Raw bytes buffer for read_raw() — only populated when no recording
         # is active (otherwise the reader thread owns the bytes).
@@ -182,7 +182,7 @@ class SMU:
         if port is None:
             discovered = cls.discover()
             if not discovered:
-                raise SMUConnectionError(
+                raise BenchConnectionError(
                     "no Arc devices found (looking for VID=0x0FCE PID=0xD1E6)"
                 )
             info = discovered[0]
@@ -196,7 +196,7 @@ class SMU:
         elif isinstance(port, str):
             port_name = port
         else:
-            raise SMUValueError(f"unsupported port argument: {type(port).__name__}")
+            raise BenchValueError(f"unsupported port argument: {type(port).__name__}")
 
         transport = Transport(port_name, baudrate=baudrate)
         smu = cls(transport, info=info)
@@ -372,16 +372,16 @@ class SMU:
         :py:meth:`set_range("high")` first.
         """
         if volts < 0:
-            raise SMUValueError(f"voltage must be >= 0, got {volts}")
+            raise BenchValueError(f"voltage must be >= 0, got {volts}")
         if volts > 5.5:
-            raise SMUValueError(f"voltage must be <= 5.5, got {volts}")
+            raise BenchValueError(f"voltage must be <= 5.5, got {volts}")
         self._send_set(CMD_SET_MAIN_VOLTAGE, volts_to_microvolts(volts))
         self._state.voltage = volts
 
     def set_current_limit(self, amps: float) -> None:
         """Set the over-current protection / max current (A)."""
         if amps < 0.001 or amps > 5.0:
-            raise SMUValueError(
+            raise BenchValueError(
                 f"current_limit must be in [0.001, 5.0] A, got {amps}"
             )
         self._send_set(CMD_SET_OC_PROTECTION, amps_to_milliamps(amps))
@@ -392,7 +392,7 @@ class SMU:
     def set_main_current(self, amps: float) -> None:
         """Set the CC-mode source/sink current (A)."""
         if amps < -5.0 or amps > 5.0:
-            raise SMUValueError(
+            raise BenchValueError(
                 f"main_current must be in [-5.0, 5.0] A, got {amps}"
             )
         self._send_set(CMD_SET_MAIN_CURRENT, amps_to_microamps(amps))
@@ -410,7 +410,7 @@ class SMU:
         elif range_ == "high":
             self._send_set(CMD_SET_RANGE, RANGE_HIGH)
         else:
-            raise SMUValueError(f"range must be 'low' or 'high', got {range_!r}")
+            raise BenchValueError(f"range must be 'low' or 'high', got {range_!r}")
         self._state.range = range_
 
     def set_four_wire(self, enable: bool) -> None:
@@ -429,7 +429,7 @@ class SMU:
     def set_exp_voltage(self, volts: float) -> None:
         """Set the expansion-port digital voltage (V, 1.2-5.0)."""
         if volts < 1.2 or volts > 5.0:
-            raise SMUValueError(
+            raise BenchValueError(
                 f"exp_voltage must be in [1.2, 5.0] V, got {volts}"
             )
         self._send_set(CMD_SET_DIGITAL_VOLTAGE, volts_to_microvolts(volts))
@@ -454,7 +454,7 @@ class SMU:
     def set_adc_resistor(self, ohms: float) -> None:
         """Set the ADC shunt resistor value (Ohm, 0.001-22)."""
         if ohms < 0.001 or ohms > 22.0:
-            raise SMUValueError(
+            raise BenchValueError(
                 f"adc_resistor must be in [0.001, 22.0] Ohm, got {ohms}"
             )
         self._send_set(CMD_SET_ADC_RESISTOR, ohms_to_microohms(ohms))
@@ -474,7 +474,7 @@ class SMU:
     def set_uart_baudrate(self, baud: int) -> None:
         """Set the UART decoder baud rate (0 disables)."""
         if baud < 0:
-            raise SMUValueError(f"baudrate must be >= 0, got {baud}")
+            raise BenchValueError(f"baudrate must be >= 0, got {baud}")
         self._send_set(CMD_SET_UART_BAUDRATE, baud)
         self._state.uart_baudrate = baud
 
@@ -504,7 +504,7 @@ class SMU:
         Not yet decoded as a distinct wire command. The vendor API may
         report this from a GPI bitmap channel, but the bit-position has not
         been verified. Defers cleanly for now."""
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "get_rx() is a deferred feature — see ROADMAP.md"
         )
 
@@ -515,7 +515,7 @@ class SMU:
         wire encoding the vendor's ``Arc.set_tx`` produces (cap #43).
         """
         if pin not in (1, 2, 3):
-            raise SMUValueError(f"GPO pin must be 1, 2, or 3, got {pin}")
+            raise BenchValueError(f"GPO pin must be 1, 2, or 3, got {pin}")
         self._send_set(CMD_SET_GPO, encode_gpo(pin, state))
         self._state.gpo[pin] = bool(state)
 
@@ -527,7 +527,7 @@ class SMU:
         no GPI sample has been observed yet on this connection.
         """
         if pin not in (1, 2):
-            raise SMUValueError(f"GPI pin must be 1 or 2, got {pin}")
+            raise BenchValueError(f"GPI pin must be 1 or 2, got {pin}")
         last = self._state.last_value.get(Channel.GPI1) or self._state.last_value.get(
             Channel.GPI2
         )
@@ -550,7 +550,7 @@ class SMU:
         ``voltage=0, current=1, inline=10, off=100`` (decoded in cap #43).
         """
         if mode not in POWER_REGULATION_MAP:
-            raise SMUValueError(
+            raise BenchValueError(
                 f"mode must be one of {sorted(POWER_REGULATION_MAP)}, got {mode!r}"
             )
         self._send_set(CMD_SET_POWER_REGULATION, power_regulation_value(mode))
@@ -596,7 +596,7 @@ class SMU:
 
     def set_channel_samplerate(self, channel: ChannelLike, value: int) -> None:
         """Deferred — see ROADMAP.md (server-side bug blocked capture)."""
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "set_channel_samplerate() is a deferred feature — see ROADMAP.md"
         )
 
@@ -615,7 +615,7 @@ class SMU:
                     if channel_buf.values:
                         return channel_buf.values[-1]
                 time.sleep(0.02)
-            raise SMUTimeoutError(
+            raise BenchTimeoutError(
                 f"no sample for {ch.code} within {timeout:.2f} s"
             )
 
@@ -626,12 +626,12 @@ class SMU:
         for fr in iter_frames(raw):
             err = parse_error_frame(fr.payload)
             if err is not None:
-                raise SMUCommandError(err.error_code, err.last_good_value)
+                raise BenchCommandError(err.error_code, err.last_good_value)
             for rec in iter_samples(fr.payload):
                 if rec.channel_id == ch.wire_id:
                     self._state.last_value[ch] = rec.value
                     return rec.value
-        raise SMUTimeoutError(f"no sample for {ch.code} within {timeout:.2f} s")
+        raise BenchTimeoutError(f"no sample for {ch.code} within {timeout:.2f} s")
 
     def read_window(
         self,
@@ -654,12 +654,12 @@ class SMU:
             channel (empty list if no samples arrived on that channel).
 
         Raises:
-            SMUValueError: if a recording is active. Stop the recording
+            BenchValueError: if a recording is active. Stop the recording
                 first; the reader thread owns the byte stream during
                 recording.
         """
         if self._active_recording is not None:
-            raise SMUValueError(
+            raise BenchValueError(
                 "read_window() requires no active recording — stop_recording() first"
             )
         target = {Channel.coerce(c) for c in channels}
@@ -673,7 +673,7 @@ class SMU:
                 # read_value's behaviour).
                 with self._pending_error_lock:
                     if self._pending_error is None:
-                        self._pending_error = SMUCommandError(
+                        self._pending_error = BenchCommandError(
                             err.error_code, err.last_good_value
                         )
                 continue
@@ -694,14 +694,14 @@ class SMU:
     ) -> Recording:
         """Start a new recording. Returns the :class:`Recording` object."""
         if self._active_recording is not None:
-            raise SMUValueError("a recording is already active")
+            raise BenchValueError("a recording is already active")
 
         if channels is None:
             channel_set: set[Channel] = set(self._enabled_channels)
         else:
             channel_set = {Channel.coerce(c) for c in channels}
         if not channel_set:
-            raise SMUValueError(
+            raise BenchValueError(
                 "no channels selected — call enable_channels(...) first"
             )
 
@@ -745,7 +745,7 @@ class SMU:
         """Stop the active recording. Returns it for convenience."""
         rec = self._active_recording
         if rec is None:
-            raise SMUValueError("no recording is active")
+            raise BenchValueError("no recording is active")
 
         # Signal reader thread to stop and wait for it.
         self._reader_stop.set()
@@ -802,13 +802,13 @@ class SMU:
             ``.as_u32_array()`` for typed data extraction.
 
         Raises:
-            SMUValueError: if a recording is active. Stop the recording
+            BenchValueError: if a recording is active. Stop the recording
                 first; the reader thread owns the inbound byte stream
                 during a recording.
-            SMUTimeoutError: if no response arrives within ``timeout``.
+            BenchTimeoutError: if no response arrives within ``timeout``.
         """
         if self._active_recording is not None:
-            raise SMUValueError(
+            raise BenchValueError(
                 "get_param() requires no active recording — stop_recording() first"
             )
         self._raise_pending_error()
@@ -826,7 +826,7 @@ class SMU:
                 r = parse_response(fr.payload)
                 if r is not None and r.response_seq == seq:
                     return r
-        raise SMUTimeoutError(
+        raise BenchTimeoutError(
             f"no response to GET cmd=0x{cmd_code:04X} within {timeout:.2f}s"
         )
 
@@ -934,7 +934,7 @@ class SMU:
         Cannot be used while a recording is active.
         """
         if self._active_recording is not None:
-            raise SMUValueError("cannot stream while a recording is active")
+            raise BenchValueError("cannot stream while a recording is active")
 
         t0 = time.monotonic()
         pending = bytearray()
@@ -949,7 +949,7 @@ class SMU:
             for fr in iter_frames(bytes(pending)):
                 err = parse_error_frame(fr.payload)
                 if err is not None:
-                    raise SMUCommandError(err.error_code, err.last_good_value)
+                    raise BenchCommandError(err.error_code, err.last_good_value)
                 for rec in iter_samples(fr.payload):
                     ch = WIRE_ID_TO_CHANNEL.get(rec.channel_id)
                     if ch is None:
@@ -966,7 +966,7 @@ class SMU:
     def read_raw(self, seconds: float) -> bytes:
         """Drain raw bulk-IN bytes for `seconds` — escape hatch."""
         if self._active_recording is not None:
-            raise SMUValueError("cannot read raw while a recording is active")
+            raise BenchValueError("cannot read raw while a recording is active")
         buf = self._transport.read_for(seconds)
         self._raw_window_buffer.extend(buf)
         return buf
@@ -984,7 +984,7 @@ class SMU:
         while not self._reader_stop.is_set():
             try:
                 chunk = self._transport.read_chunk(8192)
-            except SMUConnectionError as exc:
+            except BenchConnectionError as exc:
                 log.warning("reader: connection error, stopping: %s", exc)
                 break
             if chunk:
@@ -995,7 +995,7 @@ class SMU:
                 err = parse_error_frame(fr.payload)
                 if err is not None:
                     with self._pending_error_lock:
-                        self._pending_error = SMUCommandError(
+                        self._pending_error = BenchCommandError(
                             err.error_code, err.last_good_value
                         )
                 for rec_smpl in iter_samples(fr.payload):
@@ -1031,7 +1031,7 @@ class SMU:
 
     def calibrate(self) -> None:
         """Internal calibration — deferred for safety. See ROADMAP.md."""
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "calibrate() is deferred — see ROADMAP.md (writes to NVM)"
         )
 
@@ -1040,17 +1040,17 @@ class SMU:
 
         Use the vendor's Otii application for firmware updates.
         """
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "firmware_upgrade() is intentionally deferred — see ROADMAP.md"
         )
 
     def enable_battery_profiling(self, enable: bool) -> None:
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "battery profiling is deferred — see ROADMAP.md"
         )
 
     def set_battery_profile(self, value: str) -> None:
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "battery profile selection is deferred — see ROADMAP.md"
         )
 
@@ -1064,17 +1064,17 @@ class SMU:
         soc: Optional[float] = None,
         soc_tracking: bool = True,
     ):
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "battery emulation is deferred — see ROADMAP.md"
         )
 
     def wait_for_battery_data(self, timeout: float) -> float:
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "battery data wait is deferred — see ROADMAP.md"
         )
 
     def iter_uart_log(self) -> Iterator[str]:
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "UART log channel iteration is deferred — see ROADMAP.md"
         )
 

@@ -60,7 +60,7 @@ strings in some response messages, not on demand).
 ### Setters
 
 Every setter that sends a wire command is a method that may raise
-`SMUValueError` (client-side range check) or `SMUCommandError`
+`BenchValueError` (client-side range check) or `BenchCommandError`
 (device-side rejection delivered asynchronously).
 
 | Method | Wire command |
@@ -99,7 +99,7 @@ auto-enables `ADC_POWER` — matching the device's behaviour.
 
 `smu.get_channel_samplerate(channel)` returns the channel's documented
 native rate. `smu.set_channel_samplerate(...)` raises
-`SMUNotImplementedError` (deferred).
+`BenchNotImplementedError` (deferred).
 
 ### Measurement / reads
 
@@ -131,7 +131,7 @@ for sample in smu.stream(seconds=10.0):
 ```
 
 Yields `Sample(timestamp, value, channel)`. Cannot run concurrently with
-a recording (raises `SMUValueError`).
+a recording (raises `BenchValueError`).
 
 ### Raw access
 
@@ -150,7 +150,7 @@ smu.get_gpi(pin) -> bool        # reads from latest GPI bitmap sample
 
 ### Deferred
 
-All raise `SMUNotImplementedError` with a pointer to `ROADMAP.md`:
+All raise `BenchNotImplementedError` with a pointer to `ROADMAP.md`:
 
 - `calibrate()`
 - `firmware_upgrade(filename=None)`
@@ -234,7 +234,7 @@ Recording.load(path) -> Recording
 ### Deferred
 
 `get_log_offset`, `set_log_offset`, `import_log`, `append_user_log` —
-all raise `SMUNotImplementedError`.
+all raise `BenchNotImplementedError`.
 
 ## `Sample`
 
@@ -280,13 +280,13 @@ Has `as_dict()` returning a dict in the official client's format.
 ## Exception hierarchy
 
 ```
-SMUError
-├── SMUConnectionError       (also OSError? no — distinct)
-├── SMUProtocolError
-├── SMUCommandError          (RuntimeError) — error_code, last_good_value, command_code
-├── SMUValueError            (ValueError)
-├── SMUTimeoutError          (TimeoutError)
-└── SMUNotImplementedError   (NotImplementedError)
+BenchError
+├── BenchConnectionError       (also OSError? no — distinct)
+├── BenchProtocolError
+├── BenchCommandError          (RuntimeError) — error_code, last_good_value, command_code
+├── BenchValueError            (ValueError)
+├── BenchTimeoutError          (TimeoutError)
+└── BenchNotImplementedError   (NotImplementedError)
 ```
 
 ## Logging

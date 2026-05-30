@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from benchctrl.channels import Channel
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 from benchctrl.recording import Recording
 
 
@@ -30,7 +30,7 @@ def test_info_uses_offset():
 
 def test_buffer_missing_channel_raises():
     rec = _make_recording_with_data()
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         rec.buffer(Channel.MAIN_CURRENT)
 
 
@@ -71,7 +71,7 @@ def test_downsample_halves_count_and_rate():
 
 def test_downsample_rejects_bad_factor():
     rec = _make_recording_with_data()
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         rec.downsample(Channel.MAIN_VOLTAGE, factor=0)
 
 
@@ -106,12 +106,12 @@ def test_contains_dunder():
 
 
 def test_deferred_methods_raise():
-    from benchctrl.exceptions import SMUNotImplementedError
+    from benchctrl.exceptions import BenchNotImplementedError
 
     rec = _make_recording_with_data()
-    with pytest.raises(SMUNotImplementedError):
+    with pytest.raises(BenchNotImplementedError):
         rec.get_log_offset(Channel.MAIN_VOLTAGE)
-    with pytest.raises(SMUNotImplementedError):
+    with pytest.raises(BenchNotImplementedError):
         rec.import_log("/tmp/x", "auto")
-    with pytest.raises(SMUNotImplementedError):
+    with pytest.raises(BenchNotImplementedError):
         rec.append_user_log("id", 0.0, "msg")

@@ -8,7 +8,7 @@ Used as the parity target for benchctrl. Each row says how benchctrl maps it:
 
 - **mirror** — implemented in benchctrl with equivalent semantics (name may differ for clarity)
 - **drop** — not relevant (TCP server / licensing / project file format)
-- **defer** — surface present but raises `SMUNotImplementedError`; tracked in `ROADMAP.md`
+- **defer** — surface present but raises `BenchNotImplementedError`; tracked in `ROADMAP.md`
 
 ---
 
@@ -181,7 +181,7 @@ All 9 methods (`get/set_parallel`, `get/set_series`, `get/set_soc`,
 
 **drop** — server-side concepts.
 
-benchctrl has its own exception hierarchy (`SMUError` and subclasses).
+benchctrl has its own exception hierarchy (`BenchError` and subclasses).
 
 ---
 

@@ -646,7 +646,7 @@ samples = smu.read_window([Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT], 0.5)
 # {Channel.MAIN_VOLTAGE: [3.2071, 3.2080, ...], Channel.MAIN_CURRENT: [-0.020, -0.020, ...]}
 ```
 
-Surfaces queued device errors as ``SMUCommandError`` on the next SET,
+Surfaces queued device errors as ``BenchCommandError`` on the next SET,
 matching ``read_value``'s semantics. Refuses when a recording is
 active (the reader thread owns the byte stream then).
 
@@ -1339,12 +1339,12 @@ over USB CDC-ACM with no vendor server, license, or GUI.
   `.save` (native `.opensmu` binary) with `Recording.load` for round-trip
 - Real-time streaming iterator (`SMU.stream`) yielding typed `Sample`s
 - `SMU.read_value` and `SMU.read_raw` escape hatches
-- Asynchronous device-error frame surfacing via `SMUCommandError` on
+- Asynchronous device-error frame surfacing via `BenchCommandError` on
   next API call
 - Full pyserial-based discovery (`SMU.discover()`)
-- Comprehensive exception hierarchy: `SMUError`, `SMUConnectionError`,
-  `SMUProtocolError`, `SMUCommandError`, `SMUValueError`,
-  `SMUTimeoutError`, `SMUNotImplementedError`
+- Comprehensive exception hierarchy: `BenchError`, `BenchConnectionError`,
+  `BenchProtocolError`, `BenchCommandError`, `BenchValueError`,
+  `BenchTimeoutError`, `BenchNotImplementedError`
 - CLI: `benchctrl discover / info / set-voltage / set-output /
   set-range / set-current-limit / set-exp-voltage / set-gpo /
   capture / stream`
@@ -1355,7 +1355,7 @@ over USB CDC-ACM with no vendor server, license, or GUI.
 - 4 example scripts: `basic`, `streaming`, `voltage_sweep`,
   `save_and_load`
 
-### Deferred (raises `SMUNotImplementedError`)
+### Deferred (raises `BenchNotImplementedError`)
 
 - Battery emulation: `set_supply_battery_emulator`,
   `set_battery_profile`, `enable_battery_profiling`,

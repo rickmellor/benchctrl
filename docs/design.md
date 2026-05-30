@@ -61,7 +61,7 @@ State that we know from the host-side cache (because we just wrote it) is
 a **property**. State changes are **methods** with side effects.
 
 ```python
-smu.set_voltage(3.3)        # method — may raise SMUCommandError
+smu.set_voltage(3.3)        # method — may raise BenchCommandError
 v = smu.voltage             # property — pure cache read, never raises
 ```
 
@@ -115,20 +115,20 @@ smu = SMU.open()                      # or auto-pick the first one
 ### Exceptions form a hierarchy
 
 ```
-SMUError                       — base
-├── SMUConnectionError         — port can't be opened / lost mid-stream
-├── SMUProtocolError           — bad magic / bad checksum / unexpected frame
-├── SMUCommandError            — device explicitly rejected a SET
+BenchError                       — base
+├── BenchConnectionError         — port can't be opened / lost mid-stream
+├── BenchProtocolError           — bad magic / bad checksum / unexpected frame
+├── BenchCommandError            — device explicitly rejected a SET
 │       .error_code            — signed int from device
 │       .last_good_value       — what the parameter reverted to
 │       .command_code          — which SET was rejected
-├── SMUValueError              — client-side range check failed before send
-├── SMUTimeoutError            — no samples within deadline
-└── SMUNotImplementedError     — deferred feature (battery, calibration, ...)
+├── BenchValueError              — client-side range check failed before send
+├── BenchTimeoutError            — no samples within deadline
+└── BenchNotImplementedError     — deferred feature (battery, calibration, ...)
 ```
 
-`SMUCommandError` extends `RuntimeError`; `SMUValueError` extends
-`ValueError`; `SMUNotImplementedError` extends `NotImplementedError` — so
+`BenchCommandError` extends `RuntimeError`; `BenchValueError` extends
+`ValueError`; `BenchNotImplementedError` extends `NotImplementedError` — so
 existing exception-handling idioms still work.
 
 ## Wire protocol notes

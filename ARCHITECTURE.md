@@ -58,7 +58,7 @@ transport              pyserial wrapper (open/close/read/write/probe)
 pyserial
 ```
 
-Public surface: `SMU`, `Recording`, `Channel`, the `SMUError`
+Public surface: `SMU`, `Recording`, `Channel`, the `BenchError`
 hierarchy. Wire-protocol details and channel IDs are internal.
 
 Key files:
@@ -225,12 +225,12 @@ emulator before opening the recording.
 Two-level exception hierarchy:
 
 ```
-SMUError                                 (in benchctrl.exceptions)
-├── SMUConnectionError                   transport / open failure
-├── SMUValueError                        client-side validation
-├── SMUTimeoutError                      no expected response
-├── SMUCommandError                      device rejected with -101 etc.
-└── SMUNotImplementedError               vendor-only methods we don't expose
+BenchError                                 (in benchctrl.exceptions)
+├── BenchConnectionError                   transport / open failure
+├── BenchValueError                        client-side validation
+├── BenchTimeoutError                      no expected response
+├── BenchCommandError                      device rejected with -101 etc.
+└── BenchNotImplementedError               vendor-only methods we don't expose
 
 QR10xError                               (in benchctrl.bench.qr10x)
 ├── QR10xConnectionError

@@ -64,7 +64,7 @@ from benchctrl.bench import QR10x
 # RigolDL3031A is imported lazily inside the tool functions so the MCP
 # server doesn't hard-require pyvisa to start.
 from benchctrl.channels import WIRE_ID_TO_CHANNEL
-from benchctrl.exceptions import SMUError
+from benchctrl.exceptions import BenchError
 from benchctrl.protocol import iter_frames, iter_samples
 from benchctrl.samples import compute_statistics
 
@@ -155,7 +155,7 @@ def info() -> dict:
         out["hw_version"] = smu.get_hw_version()
         out["fw_version"] = smu.get_fw_version()
         out["device_id"] = smu.get_device_id()
-    except SMUError as exc:
+    except BenchError as exc:
         out["read_error"] = str(exc)
     return out
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from benchctrl.exceptions import SMUCommandError
+from benchctrl.exceptions import BenchCommandError
 
 pytestmark = pytest.mark.hardware
 
@@ -31,7 +31,7 @@ def test_set_4v_in_low_range_eventually_raises(smu):
             _time.sleep(0.2)
             try:
                 smu.set_voltage(3.25)
-            except SMUCommandError as err:
+            except BenchCommandError as err:
                 raised = True
                 assert err.last_good_value > 0
                 break

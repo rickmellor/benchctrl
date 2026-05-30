@@ -6,7 +6,7 @@ import struct
 
 import pytest
 
-from benchctrl.exceptions import SMUProtocolError
+from benchctrl.exceptions import BenchProtocolError
 from benchctrl.protocol import (
     WIRE_MAGIC,
     checksum,
@@ -33,7 +33,7 @@ def test_encode_frame_structure():
 
 
 def test_encode_frame_rejects_oversized_payload():
-    with pytest.raises(SMUProtocolError):
+    with pytest.raises(BenchProtocolError):
         encode_frame(b"\x00" * 70_000)
 
 

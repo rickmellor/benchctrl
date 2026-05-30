@@ -25,7 +25,7 @@ from benchctrl.battery.profiler import (
     ProfilerConfig,
     ProfilerSample,
 )
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +166,7 @@ def test_profiler_rejects_too_short_step():
         ),
         battery=Battery(capacity=200.0),
     )
-    with pytest.raises(SMUValueError, match="below the profiler's minimum"):
+    with pytest.raises(BenchValueError, match="below the profiler's minimum"):
         Profiler(_MockSMU(), config)
 
 
@@ -179,7 +179,7 @@ def test_profiler_rejects_negative_current():
         ),
         battery=Battery(capacity=200.0),
     )
-    with pytest.raises(SMUValueError, match="must be >= 0"):
+    with pytest.raises(BenchValueError, match="must be >= 0"):
         Profiler(_MockSMU(), config)
 
 
@@ -192,13 +192,13 @@ def test_profiler_rejects_unsupported_mode():
         ),
         battery=Battery(capacity=200.0),
     )
-    with pytest.raises(SMUValueError, match="phase 3"):
+    with pytest.raises(BenchValueError, match="phase 3"):
         Profiler(_MockSMU(), config)
 
 
 def test_profiler_rejects_zero_capacity():
     config = _fast_config(capacity_mAh=0.0)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         Profiler(_MockSMU(), config)
 
 

@@ -21,13 +21,13 @@ def test_stream_yields_samples(smu):
 
 
 def test_stream_during_recording_raises(smu):
-    from benchctrl.exceptions import SMUValueError
+    from benchctrl.exceptions import BenchValueError
 
     smu.disable_all_channels()
     smu.enable_channel(Channel.MAIN_VOLTAGE)
     smu.start_recording()
     try:
-        with pytest.raises(SMUValueError):
+        with pytest.raises(BenchValueError):
             next(iter(smu.stream(seconds=0.5)))
     finally:
         smu.stop_recording()
@@ -54,13 +54,13 @@ def test_read_window_ignores_unrequested_channels(smu):
 
 
 def test_read_window_during_recording_raises(smu):
-    from benchctrl.exceptions import SMUValueError
+    from benchctrl.exceptions import BenchValueError
 
     smu.disable_all_channels()
     smu.enable_channel(Channel.MAIN_VOLTAGE)
     smu.start_recording()
     try:
-        with pytest.raises(SMUValueError):
+        with pytest.raises(BenchValueError):
             smu.read_window([Channel.MAIN_VOLTAGE], 0.5)
     finally:
         smu.stop_recording()

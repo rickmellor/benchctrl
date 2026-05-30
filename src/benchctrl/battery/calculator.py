@@ -44,7 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 
 from benchctrl.battery.profile import BatteryProfile
 
@@ -75,9 +75,9 @@ class DutyCycle:
 
     def __post_init__(self) -> None:
         if self.active_time_s < 0 or self.sleep_time_s < 0:
-            raise SMUValueError("durations must be >= 0")
+            raise BenchValueError("durations must be >= 0")
         if self.active_time_s == 0 and self.sleep_time_s == 0:
-            raise SMUValueError("at least one of active_time_s / sleep_time_s must be > 0")
+            raise BenchValueError("at least one of active_time_s / sleep_time_s must be > 0")
 
     @property
     def cycle_time_s(self) -> float:
@@ -208,13 +208,13 @@ def estimate_life_constant_current(
     a capacity and average current.
     """
     if capacity_mAh <= 0:
-        raise SMUValueError(f"capacity_mAh must be > 0, got {capacity_mAh}")
+        raise BenchValueError(f"capacity_mAh must be > 0, got {capacity_mAh}")
     if safety_margin_pct < 0 or safety_margin_pct >= 100:
-        raise SMUValueError(
+        raise BenchValueError(
             f"safety_margin_pct must be in [0, 100), got {safety_margin_pct}"
         )
     if self_discharge_per_month_pct < 0:
-        raise SMUValueError("self_discharge_per_month_pct must be >= 0")
+        raise BenchValueError("self_discharge_per_month_pct must be >= 0")
 
     safety_loss_mAh = capacity_mAh * (safety_margin_pct / 100.0)
     usable_mAh = capacity_mAh - safety_loss_mAh
@@ -307,17 +307,17 @@ def estimate_life_from_profile(
     end-of-life. Matches Otii's Battery Life Calculator semantics.
     """
     if duty_cycle.cycle_time_s <= 0:
-        raise SMUValueError("DutyCycle.cycle_time_s must be > 0")
+        raise BenchValueError("DutyCycle.cycle_time_s must be > 0")
     if safety_margin_pct < 0 or safety_margin_pct >= 100:
-        raise SMUValueError(
+        raise BenchValueError(
             f"safety_margin_pct must be in [0, 100), got {safety_margin_pct}"
         )
     if self_discharge_per_month_pct < 0:
-        raise SMUValueError("self_discharge_per_month_pct must be >= 0")
+        raise BenchValueError("self_discharge_per_month_pct must be >= 0")
 
     table = profile.select_table(temperature=temperature)
     if not table.table:
-        raise SMUValueError("selected discharge table is empty")
+        raise BenchValueError("selected discharge table is empty")
 
     if cutoff_voltage is None:
         cutoff_voltage = (
@@ -328,7 +328,7 @@ def estimate_life_from_profile(
 
     nominal_mAh = profile.nominal_capacity_mAh
     if nominal_mAh <= 0:
-        raise SMUValueError(f"profile nominal capacity must be > 0 mAh, got {nominal_mAh}")
+        raise BenchValueError(f"profile nominal capacity must be > 0 mAh, got {nominal_mAh}")
 
     safety_loss_mAh = nominal_mAh * (safety_margin_pct / 100.0)
     usable_mAh = nominal_mAh - safety_loss_mAh
@@ -418,17 +418,17 @@ def duty_cycle_from_recording(
 
     ch = Channel.coerce(channel)
     if ch not in rec:
-        raise SMUValueError(f"channel {ch.code!r} not present in recording")
+        raise BenchValueError(f"channel {ch.code!r} not present in recording")
 
     a_stats = rec.statistics(ch, start=active_window[0], end=active_window[1])
     s_stats = rec.statistics(ch, start=sleep_window[0], end=sleep_window[1])
 
     if a_stats.sample_count == 0:
-        raise SMUValueError(
+        raise BenchValueError(
             f"active_window {active_window} has no samples on {ch.code}"
         )
     if s_stats.sample_count == 0:
-        raise SMUValueError(
+        raise BenchValueError(
             f"sleep_window {sleep_window} has no samples on {ch.code}"
         )
 

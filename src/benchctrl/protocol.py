@@ -19,7 +19,7 @@ import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from benchctrl.exceptions import SMUProtocolError
+from benchctrl.exceptions import BenchProtocolError
 
 # --- USB identity --------------------------------------------------------
 
@@ -168,7 +168,7 @@ def encode_frame(payload: bytes) -> bytes:
         Framed bytes ready to write to the serial port.
     """
     if len(payload) > 0xFFFF:
-        raise SMUProtocolError(f"payload too long: {len(payload)} > 65535")
+        raise BenchProtocolError(f"payload too long: {len(payload)} > 65535")
     return WIRE_MAGIC + struct.pack("<HH", len(payload), checksum(payload)) + payload
 
 
@@ -228,7 +228,7 @@ def encode_poll(seq: int, timestamp_us: int) -> bytes:
 def power_regulation_value(mode: str) -> int:
     """Map a power-regulation mode string to its wire value."""
     if mode not in POWER_REGULATION_MAP:
-        raise SMUProtocolError(
+        raise BenchProtocolError(
             f"unknown power_regulation mode {mode!r}; "
             f"valid: {sorted(POWER_REGULATION_MAP)}"
         )
@@ -306,7 +306,7 @@ class RecordingChannel:
         if self.subtype == 4:
             blob = (self.initial_value + b"\x00" * 16)[:16]
             return struct.pack("<HHI", self.wire_id, self.subtype, self.sample_rate) + blob
-        raise SMUProtocolError(f"recording subtype {self.subtype} not supported")
+        raise BenchProtocolError(f"recording subtype {self.subtype} not supported")
 
 
 def encode_start_recording(channels: list[RecordingChannel]) -> bytes:
@@ -337,7 +337,7 @@ def encode_gpo(pin: int, state: bool) -> int:
         gpo(3, False) -> 64    (bit 6) — same wire encoding as Arc.set_tx(False)
     """
     if pin < 1:
-        raise SMUProtocolError(f"GPO pin must be >= 1, got {pin}")
+        raise BenchProtocolError(f"GPO pin must be >= 1, got {pin}")
     bit = (pin - 1) * 3 + (1 if state else 0)
     return 1 << bit
 

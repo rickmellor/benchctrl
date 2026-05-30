@@ -175,10 +175,10 @@ def test_plot_rejects_empty_recording():
     import matplotlib
 
     matplotlib.use("Agg")
-    from benchctrl.exceptions import SMUValueError
+    from benchctrl.exceptions import BenchValueError
 
     rec = Recording()
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         rec.plot(show=False)
 
 

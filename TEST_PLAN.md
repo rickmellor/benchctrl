@@ -43,7 +43,7 @@ pytest
 | | `test_open_close_cycle` | `SMU.open()` succeeds, context exit closes cleanly |
 | | `test_version` | `version()` returns dict with at least one of `device_id` / `fw_version` after some streaming |
 | `test_smu_setters.py` | `test_set_voltage` | set 3.0 V then 3.25 V, no error response in stream |
-| | `test_set_voltage_low_range_cap` | set 4.0 V in low range raises `SMUCommandError` |
+| | `test_set_voltage_low_range_cap` | set 4.0 V in low range raises `BenchCommandError` |
 | | `test_set_range_high_unlocks_4v` | switch to high range, then set 4.0 V succeeds |
 | | `test_set_current_limit` | set 1.0 A, 2.5 A, both succeed |
 | | `test_set_exp_voltage` | set 2.8 V, 3.3 V |
@@ -65,12 +65,12 @@ pytest
 | | `test_recording_statistics_charge_energy` | for current channel, charge populated; for power channel, energy populated |
 | `test_smu_stream.py` | `test_stream_finite_duration` | yields > 0 samples in 1 s |
 | | `test_stream_typed_sample` | each yielded item is `Sample`, has known channel |
-| `test_smu_errors.py` | `test_invalid_voltage_raises` | client-side range check (voltage > 5.5 V) raises `SMUValueError` |
-| | `test_device_rejection_low_range` | set 4.0 V in low range → `SMUCommandError` with err_code, last_good |
+| `test_smu_errors.py` | `test_invalid_voltage_raises` | client-side range check (voltage > 5.5 V) raises `BenchValueError` |
+| | `test_device_rejection_low_range` | set 4.0 V in low range → `BenchCommandError` with err_code, last_good |
 
 ## Deferred features — explicit no-op assertions
 
-For each `SMUNotImplementedError`-raising method, a test confirms that
+For each `BenchNotImplementedError`-raising method, a test confirms that
 exact exception is raised and the message points to ROADMAP.md:
 
 - `calibrate`, `firmware_upgrade`

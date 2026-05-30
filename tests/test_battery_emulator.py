@@ -23,7 +23,7 @@ from benchctrl.battery import (
     ExitConditions,
 )
 from benchctrl.battery.emulator import Emulator, EmulatorConfig
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ def _flat_profile(capacity_mAh: float = 1000.0, ocv: float = 3.7,
 
 def test_emulator_rejects_bad_soc():
     config = EmulatorConfig(profile=_flat_profile(), initial_soc=1.5)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         Emulator(_MockSMU(), config)
 
 
@@ -138,22 +138,22 @@ def test_emulator_rejects_zero_capacity_profile():
         )
     )
     config = EmulatorConfig(profile=p)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         Emulator(_MockSMU(), config)
 
 
 def test_emulator_rejects_zero_series_parallel():
     config = EmulatorConfig(profile=_flat_profile(), series=0)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         Emulator(_MockSMU(), config)
     config = EmulatorConfig(profile=_flat_profile(), parallel=0)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         Emulator(_MockSMU(), config)
 
 
 def test_emulator_rejects_zero_update_interval():
     config = EmulatorConfig(profile=_flat_profile(), update_interval_s=0)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         Emulator(_MockSMU(), config)
 
 
@@ -281,7 +281,7 @@ def test_emulator_double_start_raises():
     emu = Emulator(smu, EmulatorConfig(profile=_flat_profile(), update_interval_s=0.05))
     emu.start()
     try:
-        with pytest.raises(SMUValueError):
+        with pytest.raises(BenchValueError):
             emu.start()
     finally:
         emu.stop()

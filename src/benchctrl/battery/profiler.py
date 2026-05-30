@@ -55,7 +55,7 @@ from benchctrl.battery.profile import (
     DischargeSample,
     DischargeTable,
 )
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 
 if TYPE_CHECKING:
     from benchctrl.device import SMU
@@ -320,24 +320,24 @@ class Profiler:
         dp = self.config.discharge_profile
         for step_name, step in (("low", dp.low), ("high", dp.high)):
             if step.time < MIN_STEP_TIME_S:
-                raise SMUValueError(
+                raise BenchValueError(
                     f"discharge_profile.{step_name}.time ({step.time}s) is below the "
                     f"profiler's minimum reliable step duration ({MIN_STEP_TIME_S}s). "
                     "Use a slower-cycling profile or capture this characterisation "
                     "in firmware-level mode (not yet supported)."
                 )
             if step.value < 0:
-                raise SMUValueError(
+                raise BenchValueError(
                     f"discharge_profile.{step_name}.value ({step.value}) must be >= 0"
                 )
             if step.mode != "current":
-                raise SMUValueError(
+                raise BenchValueError(
                     f"discharge_profile.{step_name}.mode is {step.mode!r}; "
                     "phase 3 of benchctrl's profiler supports only 'current' mode. "
                     "Power and resistance modes are tracked for later."
                 )
         if self.config.battery.capacity <= 0:
-            raise SMUValueError("battery.capacity must be > 0")
+            raise BenchValueError("battery.capacity must be > 0")
 
     def _apply_step(self, step) -> None:
         """Set the SMU to draw the configured step's load.

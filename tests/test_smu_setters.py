@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 
 pytestmark = pytest.mark.hardware
 
@@ -15,50 +15,50 @@ pytestmark = pytest.mark.hardware
 
 
 def test_set_voltage_negative_raises(smu):
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_voltage(-0.1)
 
 
 def test_set_voltage_above_max_raises(smu):
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_voltage(10.0)
 
 
 def test_set_current_limit_out_of_range_raises(smu):
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_current_limit(0.0)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_current_limit(10.0)
 
 
 def test_set_exp_voltage_out_of_range_raises(smu):
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_exp_voltage(1.0)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_exp_voltage(6.0)
 
 
 def test_set_adc_resistor_out_of_range_raises(smu):
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_adc_resistor(0.0)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_adc_resistor(30.0)
 
 
 def test_set_gpo_invalid_pin_raises(smu):
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_gpo(0, True)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_gpo(4, True)  # pin 3 is now valid (TX pin); pin 4 is not
 
 
 def test_set_range_invalid_raises(smu):
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_range("medium")
 
 
 def test_set_power_regulation_invalid_raises(smu):
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         smu.set_power_regulation("ridiculous")
 
 

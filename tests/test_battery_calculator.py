@@ -19,7 +19,7 @@ from benchctrl.battery import (
     estimate_life_constant_current,
     estimate_life_from_profile,
 )
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 
 
 # ---------------------------------------------------------------------------
@@ -42,13 +42,13 @@ def test_dutycycle_average_current():
 
 
 def test_dutycycle_rejects_negative_durations():
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         DutyCycle(active_current_A=0.001, active_time_s=-1,
                   sleep_current_A=0, sleep_time_s=1)
 
 
 def test_dutycycle_rejects_zero_total_time():
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         DutyCycle(active_current_A=0.001, active_time_s=0,
                   sleep_current_A=0, sleep_time_s=0)
 
@@ -110,13 +110,13 @@ def test_cc_estimator_zero_drain_returns_infinite():
 def test_cc_estimator_rejects_bad_inputs():
     duty = DutyCycle(active_current_A=0.001, active_time_s=1.0,
                      sleep_current_A=0, sleep_time_s=0.0)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         estimate_life_constant_current(capacity_mAh=0, duty_cycle=duty)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         estimate_life_constant_current(
             capacity_mAh=100, duty_cycle=duty, safety_margin_pct=100
         )
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         estimate_life_constant_current(
             capacity_mAh=100, duty_cycle=duty, self_discharge_per_month_pct=-1
         )
@@ -200,7 +200,7 @@ def test_profile_estimator_rejects_zero_capacity():
     )
     duty = DutyCycle(active_current_A=0.001, active_time_s=1,
                      sleep_current_A=0, sleep_time_s=0)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         estimate_life_from_profile(profile=profile, duty_cycle=duty)
 
 
@@ -263,7 +263,7 @@ def test_duty_cycle_from_recording_rejects_missing_channel():
 
     rec = Recording(name="missing")
     rec._ensure_buffer(Channel.MAIN_VOLTAGE, 1000)
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         duty_cycle_from_recording(
             rec, active_window=(0, 1), sleep_window=(1, 2), channel="mc"
         )
@@ -275,7 +275,7 @@ def test_duty_cycle_from_recording_rejects_empty_window():
     rec = Recording(name="empty")
     mc = rec._ensure_buffer(Channel.MAIN_CURRENT, 1000)
     mc.extend([0.001] * 10)  # 10 ms of data
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         # Window outside the data range
         duty_cycle_from_recording(
             rec, active_window=(0, 0.005), sleep_window=(100, 101)

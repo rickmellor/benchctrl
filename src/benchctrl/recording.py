@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from benchctrl.channels import Channel
-from benchctrl.exceptions import SMUNotImplementedError, SMUValueError
+from benchctrl.exceptions import BenchNotImplementedError, BenchValueError
 from benchctrl.samples import (
     ChannelBuffer,
     Statistics,
@@ -135,7 +135,7 @@ class Recording:
         """Return the underlying :class:`ChannelBuffer` for `channel`."""
         ch = _coerce(channel)
         if ch not in self._buffers:
-            raise SMUValueError(f"channel {ch.code!r} not present in recording")
+            raise BenchValueError(f"channel {ch.code!r} not present in recording")
         return self._buffers[ch]
 
     # --- query API (mirrors official client surface) --------------------
@@ -199,7 +199,7 @@ class Recording:
     def crop(self, start: float, end: float) -> None:
         """In-place crop. Each channel buffer is trimmed to ``[start, end]``."""
         if end < start:
-            raise SMUValueError(f"end ({end}) < start ({start})")
+            raise BenchValueError(f"end ({end}) < start ({start})")
         for buf in self._buffers.values():
             s = start - self.offset
             e = end - self.offset
@@ -212,7 +212,7 @@ class Recording:
     def downsample(self, channel: ChannelLike, factor: int) -> None:
         """Downsample `channel` by integer `factor` (averaging window)."""
         if factor <= 0:
-            raise SMUValueError(f"factor must be >= 1, got {factor}")
+            raise BenchValueError(f"factor must be >= 1, got {factor}")
         if factor == 1:
             return
         buf = self.buffer(channel)
@@ -248,7 +248,7 @@ class Recording:
         elif format == "wide":
             write_csv_wide(p, self._buffers, decimals=decimals)
         else:
-            raise SMUValueError(f"format must be 'long' or 'wide', got {format!r}")
+            raise BenchValueError(f"format must be 'long' or 'wide', got {format!r}")
         return p
 
     def save_json(self, path: str | Path) -> Path:
@@ -462,7 +462,7 @@ class Recording:
         else:
             chs = [_coerce(c) for c in channels]
         if not chs:
-            raise SMUValueError("no channels to plot")
+            raise BenchValueError("no channels to plot")
 
         fig, axes = plt.subplots(
             len(chs), 1, sharex=True, figsize=(10, max(2.0, 2.0 * len(chs)))
@@ -542,7 +542,7 @@ class Recording:
         with p.open("rb") as f:
             magic = f.read(8)
             if magic != cls.BENCHCTRL_MAGIC:
-                raise SMUValueError(
+                raise BenchValueError(
                     f"{p}: not an .opensmu file (bad magic {magic!r})"
                 )
             (hlen,) = struct.unpack("<I", f.read(4))
@@ -578,22 +578,22 @@ class Recording:
     # --- placeholders for deferred features -----------------------------
 
     def get_log_offset(self, channel: ChannelLike) -> float:
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "log offsets are a deferred feature — see ROADMAP.md"
         )
 
     def set_log_offset(self, channel: ChannelLike, offset: float) -> None:
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "log offsets are a deferred feature — see ROADMAP.md"
         )
 
     def import_log(self, filename: str | Path, converter: str) -> str:
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "log import is a deferred feature — see ROADMAP.md"
         )
 
     def append_user_log(self, user_log_id: str, time: float, message: str) -> None:
-        raise SMUNotImplementedError(
+        raise BenchNotImplementedError(
             "user logs are a deferred feature — see ROADMAP.md"
         )
 

@@ -173,19 +173,19 @@ numpy/pandas/pyarrow/matplotlib at import time.
 ## Exception hierarchy
 
 ```
-SMUError
-├── SMUConnectionError       — port can't open / lost mid-stream
-├── SMUProtocolError         — bad frame / wrong magic / bad checksum
-├── SMUCommandError          — device rejected a SET
+BenchError
+├── BenchConnectionError       — port can't open / lost mid-stream
+├── BenchProtocolError         — bad frame / wrong magic / bad checksum
+├── BenchCommandError          — device rejected a SET
 │       .error_code          — signed int (e.g. -101 for out-of-range)
 │       .last_good_value     — the value it reverted to
-├── SMUValueError            — client-side range check failed (extends ValueError)
-├── SMUTimeoutError          — no samples within deadline (extends TimeoutError)
-└── SMUNotImplementedError   — deferred feature (extends NotImplementedError)
+├── BenchValueError            — client-side range check failed (extends ValueError)
+├── BenchTimeoutError          — no samples within deadline (extends TimeoutError)
+└── BenchNotImplementedError   — deferred feature (extends NotImplementedError)
 ```
 
 Async device errors (e.g. setting `4.0 V` in low range) surface as
-`SMUCommandError` on the next API call — the background reader thread
+`BenchCommandError` on the next API call — the background reader thread
 parses error frames and queues them.
 
 ## Battery features
@@ -432,7 +432,7 @@ dl.set_input(True)
 - **Don't call `smu.calibrate()`, `smu.firmware_upgrade()`, `smu.set_supply_battery_emulator()`,
   `smu.enable_battery_profiling()`, `smu.wait_for_battery_data()`,
   `smu.set_battery_profile()`** on the `SMU` class — they raise
-  `SMUNotImplementedError`. Battery emulation lives in
+  `BenchNotImplementedError`. Battery emulation lives in
   `benchctrl.battery.emulator` (phased rollout — see
   [`docs/battery.md`](../../docs/battery.md)); calibration is deferred
   (see [`ROADMAP.md`](../../ROADMAP.md)); firmware upgrade is deferred

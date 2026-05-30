@@ -1,31 +1,37 @@
 """Exception hierarchy for benchctrl.
 
-    SMUError                       — base
-    ├── SMUConnectionError         — port can't be opened / lost mid-stream
-    ├── SMUProtocolError           — bad magic / bad checksum / unexpected frame
-    ├── SMUCommandError            — device rejected a SET (carries error_code, last_good_value)
-    ├── SMUValueError              — client-side range check failed before send
-    ├── SMUTimeoutError            — no samples within deadline
-    └── SMUNotImplementedError     — deferred feature
+    BenchError                       — base
+    ├── BenchConnectionError         — port can't be opened / lost mid-stream
+    ├── BenchProtocolError           — bad magic / bad checksum / unexpected frame
+    ├── BenchCommandError            — device rejected a SET (carries error_code, last_good_value)
+    ├── BenchValueError              — client-side range check failed before send
+    ├── BenchTimeoutError            — no samples within deadline
+    └── BenchNotImplementedError     — deferred feature
+
+The same hierarchy applies to any bench instrument the framework drives
+(Otii Arc, future SMUs, etc.). Driver-specific instruments that own a
+distinct exception hierarchy (QR10x, RigolDL3031A) keep their own
+top-level classes — those predate the framework rename and are scoped
+to the vendor.
 """
 
 from __future__ import annotations
 
 
-class SMUError(Exception):
+class BenchError(Exception):
     """Base class for all benchctrl exceptions."""
 
 
-class SMUConnectionError(SMUError):
-    """Failed to open the serial port, or lost connection mid-stream."""
+class BenchConnectionError(BenchError):
+    """Failed to open the transport, or lost connection mid-stream."""
 
 
-class SMUProtocolError(SMUError):
+class BenchProtocolError(BenchError):
     """Received bytes that don't match the on-wire protocol (bad magic,
     bad checksum, truncated frame, unknown frame type when one was expected)."""
 
 
-class SMUCommandError(SMUError, RuntimeError):
+class BenchCommandError(BenchError, RuntimeError):
     """Device explicitly rejected a SET command.
 
     Attributes:
@@ -53,13 +59,13 @@ class SMUCommandError(SMUError, RuntimeError):
         super().__init__(message)
 
 
-class SMUValueError(SMUError, ValueError):
+class BenchValueError(BenchError, ValueError):
     """A parameter failed a client-side range check before being sent."""
 
 
-class SMUTimeoutError(SMUError, TimeoutError):
+class BenchTimeoutError(BenchError, TimeoutError):
     """No samples or expected response arrived within the deadline."""
 
 
-class SMUNotImplementedError(SMUError, NotImplementedError):
+class BenchNotImplementedError(BenchError, NotImplementedError):
     """A deferred feature was invoked. See ROADMAP.md."""

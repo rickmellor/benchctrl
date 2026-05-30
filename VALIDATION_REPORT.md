@@ -31,7 +31,7 @@ All green on the first hardware run after one test-expectation calibration
 | `benchctrl.samples` | parsing, ChannelBuffer slicing, statistics min/max/avg/rms, charge on current channels, energy on power channels, CSV (long/wide) + JSON exports |
 | `benchctrl.recording` | construction, info/statistics/data/timestamps/index_at/count, crop, downsample, rename, log, native binary save/load round-trip including empty recordings, deferred stubs |
 | `benchctrl.transport` | discovery returns typed list, PortInfo display |
-| `benchctrl.device` | every SET command end-to-end against hardware, every client-side range check raises before send, channel enable/disable + co-enables, recording context-manager + manual start/stop, stream iterator, error-frame surfacing, all deferred stubs raise `SMUNotImplementedError` |
+| `benchctrl.device` | every SET command end-to-end against hardware, every client-side range check raises before send, channel enable/disable + co-enables, recording context-manager + manual start/stop, stream iterator, error-frame surfacing, all deferred stubs raise `BenchNotImplementedError` |
 
 ## Pass list (selected highlights)
 

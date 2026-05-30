@@ -5,42 +5,42 @@ from __future__ import annotations
 import pytest
 
 from benchctrl.exceptions import (
-    SMUCommandError,
-    SMUConnectionError,
-    SMUError,
-    SMUNotImplementedError,
-    SMUProtocolError,
-    SMUTimeoutError,
-    SMUValueError,
+    BenchCommandError,
+    BenchConnectionError,
+    BenchError,
+    BenchNotImplementedError,
+    BenchProtocolError,
+    BenchTimeoutError,
+    BenchValueError,
 )
 
 
 def test_hierarchy_under_smu_error():
     for cls in (
-        SMUConnectionError,
-        SMUProtocolError,
-        SMUCommandError,
-        SMUValueError,
-        SMUTimeoutError,
-        SMUNotImplementedError,
+        BenchConnectionError,
+        BenchProtocolError,
+        BenchCommandError,
+        BenchValueError,
+        BenchTimeoutError,
+        BenchNotImplementedError,
     ):
-        assert issubclass(cls, SMUError)
+        assert issubclass(cls, BenchError)
 
 
 def test_value_error_is_value_error():
-    assert issubclass(SMUValueError, ValueError)
+    assert issubclass(BenchValueError, ValueError)
     with pytest.raises(ValueError):
-        raise SMUValueError("nope")
+        raise BenchValueError("nope")
 
 
 def test_timeout_error_is_timeout_error():
-    assert issubclass(SMUTimeoutError, TimeoutError)
+    assert issubclass(BenchTimeoutError, TimeoutError)
     with pytest.raises(TimeoutError):
-        raise SMUTimeoutError("nope")
+        raise BenchTimeoutError("nope")
 
 
 def test_command_error_carries_fields():
-    err = SMUCommandError(error_code=-101, last_good_value=3_000_000, command_code=0x0B)
+    err = BenchCommandError(error_code=-101, last_good_value=3_000_000, command_code=0x0B)
     assert err.error_code == -101
     assert err.last_good_value == 3_000_000
     assert err.command_code == 0x0B
@@ -52,10 +52,10 @@ def test_command_error_carries_fields():
 
 
 def test_command_error_custom_message():
-    err = SMUCommandError(error_code=-1, last_good_value=0, message="explicit")
+    err = BenchCommandError(error_code=-1, last_good_value=0, message="explicit")
     assert str(err) == "explicit"
 
 
 def test_not_implemented_subclass():
     with pytest.raises(NotImplementedError):
-        raise SMUNotImplementedError("deferred")
+        raise BenchNotImplementedError("deferred")

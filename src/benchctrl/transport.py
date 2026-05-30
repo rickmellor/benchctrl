@@ -13,7 +13,7 @@ from typing import Optional
 import serial
 import serial.tools.list_ports as list_ports
 
-from benchctrl.exceptions import SMUConnectionError
+from benchctrl.exceptions import BenchConnectionError
 from benchctrl.protocol import PID, VID
 
 
@@ -77,7 +77,7 @@ class Transport:
                 xonxoff=False,
             )
         except (OSError, serial.SerialException) as e:
-            raise SMUConnectionError(f"could not open {self.port!r}: {e}") from e
+            raise BenchConnectionError(f"could not open {self.port!r}: {e}") from e
         # Match the Otii vendor stack's posture
         self._ser.dtr = False
         self._ser.rts = False
@@ -105,23 +105,23 @@ class Transport:
     def write(self, data: bytes) -> int:
         """Write `data` and flush. Returns bytes written."""
         if self._ser is None or not self._ser.is_open:
-            raise SMUConnectionError("transport not open")
+            raise BenchConnectionError("transport not open")
         try:
             n = self._ser.write(data)
             self._ser.flush()
             return n
         except (OSError, serial.SerialException) as e:
-            raise SMUConnectionError(f"write failed: {e}") from e
+            raise BenchConnectionError(f"write failed: {e}") from e
 
     def read_chunk(self, max_size: int = 8192) -> bytes:
         """Read up to `max_size` bytes; returns immediately if none available
         within the underlying pyserial timeout (0.5 s)."""
         if self._ser is None or not self._ser.is_open:
-            raise SMUConnectionError("transport not open")
+            raise BenchConnectionError("transport not open")
         try:
             return bytes(self._ser.read(max_size))
         except (OSError, serial.SerialException) as e:
-            raise SMUConnectionError(f"read failed: {e}") from e
+            raise BenchConnectionError(f"read failed: {e}") from e
 
     def read_for(self, seconds: float, max_chunk: int = 8192) -> bytes:
         """Drain the inbound stream for the next `seconds`."""

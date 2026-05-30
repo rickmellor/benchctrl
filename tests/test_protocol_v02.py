@@ -44,9 +44,9 @@ def test_power_regulation_value_helper():
 
 
 def test_power_regulation_value_rejects_unknown_mode():
-    from benchctrl.exceptions import SMUProtocolError
+    from benchctrl.exceptions import BenchProtocolError
 
-    with pytest.raises(SMUProtocolError):
+    with pytest.raises(BenchProtocolError):
         power_regulation_value("eternal-glory")
 
 

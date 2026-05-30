@@ -55,7 +55,7 @@ benchctrl/
 │   └── AGENTS.md                        this file
 ├── src/benchctrl/
 │   ├── __init__.py                      public re-exports
-│   ├── exceptions.py                    SMUError + subclasses
+│   ├── exceptions.py                    BenchError + subclasses
 │   ├── channels.py                      Channel enum + ChannelInfo
 │   ├── protocol.py                      pure framing + command encoding
 │   ├── transport.py                     pyserial wrapper, discovery
@@ -131,7 +131,7 @@ Things that look wrong (would surprise a maintainer):
 - `smu.voltage = 3.3` — properties are read-only; use `smu.set_voltage(3.3)`
 - `try: smu.set_voltage(x); except Exception: pass` — silent fallbacks are bugs; see CONTRIBUTING.md § 4
 - Calls to deferred methods (calibration, firmware upgrade,
-  `set_supply_battery_emulator`) — these raise `SMUNotImplementedError`. The battery emulator lives in `benchctrl.battery`, not on `SMU`
+  `set_supply_battery_emulator`) — these raise `BenchNotImplementedError`. The battery emulator lives in `benchctrl.battery`, not on `SMU`
 - Manual wire-byte construction — go through `protocol.py` helpers
 - `subprocess` to drive an external Otii server — there is no server
 - TCP / port 1905 usage — there is no TCP layer
@@ -229,7 +229,7 @@ When you find an instrument behavior that contradicts the manufacturer's docs:
 
 1. Add a clear `# TODO(deferred):` comment in the affected file
 2. Add an entry in `ROADMAP.md` with the "why" and "scope when picked up"
-3. If the user-facing surface still needs to be present, raise `SMUNotImplementedError("...short reason... — see ROADMAP.md")`
+3. If the user-facing surface still needs to be present, raise `BenchNotImplementedError("...short reason... — see ROADMAP.md")`
 4. Add a test confirming the stub raises
 
 ## Operating mode for AI agents

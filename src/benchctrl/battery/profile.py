@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Optional, Union
 
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 
 # Discharge step "mode" — Otii supports current-mode (A) and power-mode (W) loads.
 DischargeMode = Literal["current", "power"]
@@ -314,7 +314,7 @@ class DischargeTable:
 
     def _interpolate(self, capacity: float, *, key: str) -> float:
         if not self.table:
-            raise SMUValueError("discharge table is empty")
+            raise BenchValueError("discharge table is empty")
         if len(self.table) == 1:
             return getattr(self.table[0], key)
 
@@ -441,11 +441,11 @@ class BatteryProfile:
         Raises if there are zero tables, or the request is ambiguous.
         """
         if not self.discharge_tables:
-            raise SMUValueError("profile has no discharge tables")
+            raise BenchValueError("profile has no discharge tables")
         if temperature is None:
             if len(self.discharge_tables) == 1:
                 return self.discharge_tables[0]
-            raise SMUValueError(
+            raise BenchValueError(
                 f"profile has {len(self.discharge_tables)} tables; pass temperature="
             )
         return min(

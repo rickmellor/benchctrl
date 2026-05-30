@@ -26,7 +26,7 @@ def smu():
     Skips the test if no device is found rather than failing.
     """
     from benchctrl import SMU
-    from benchctrl.exceptions import SMUConnectionError
+    from benchctrl.exceptions import BenchConnectionError
 
     try:
         devices = SMU.discover()
@@ -36,7 +36,7 @@ def smu():
         pytest.skip("no Arc Pro found")
     try:
         smu = SMU.open(devices[0])
-    except SMUConnectionError as exc:
+    except BenchConnectionError as exc:
         pytest.skip(f"could not open Arc Pro: {exc}")
     try:
         yield smu

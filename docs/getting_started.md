@@ -172,12 +172,12 @@ It cannot run concurrently with a recording.
 
 ```python
 from benchctrl import SMU
-from benchctrl.exceptions import SMUValueError, SMUCommandError
+from benchctrl.exceptions import BenchValueError, BenchCommandError
 
 with SMU.open() as smu:
     try:
         smu.set_voltage(10.0)      # out of client-side range
-    except SMUValueError as e:
+    except BenchValueError as e:
         print("Client refused:", e)
 
     smu.set_range("low")
@@ -185,7 +185,7 @@ with SMU.open() as smu:
         smu.set_voltage(4.0)        # device will reject in low range
         import time; time.sleep(2)
         smu.set_voltage(3.25)       # this triggers raise of the queued error
-    except SMUCommandError as e:
+    except BenchCommandError as e:
         print(f"Device rejected: err={e.error_code}, reverted to {e.last_good_value}")
 ```
 
@@ -194,7 +194,7 @@ with SMU.open() as smu:
 See [`ROADMAP.md`](../ROADMAP.md) for the full list. Key items:
 
 - **Battery emulation** (deferred to v0.2) — `set_supply_battery_emulator`,
-  battery profiles, SoC tracking. Stubs raise `SMUNotImplementedError`.
+  battery profiles, SoC tracking. Stubs raise `BenchNotImplementedError`.
 - **Calibration** — deferred for safety.
 - **Firmware upgrade** — intentionally never; use the vendor app.
 - **Full-rate streaming** — the device's baseline stream is ~6 Hz; the

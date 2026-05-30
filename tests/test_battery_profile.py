@@ -23,7 +23,7 @@ from benchctrl.battery import (
     DischargeTable,
     ExitConditions,
 )
-from benchctrl.exceptions import SMUValueError
+from benchctrl.exceptions import BenchValueError
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ def test_select_table_ambiguous_without_temperature():
             temperature=-10.0,
         )
     )
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         p.select_table()
 
 
@@ -191,7 +191,7 @@ def test_empty_table_interpolation_raises():
             )
         ]
     )
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         p.ocv_at(0.0)
 
 
@@ -203,7 +203,7 @@ def test_capacity_unit_normalization():
 
 def test_select_table_no_tables_raises():
     p = BatteryProfile()
-    with pytest.raises(SMUValueError):
+    with pytest.raises(BenchValueError):
         p.select_table()
 
 
