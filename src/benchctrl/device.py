@@ -20,15 +20,15 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
-from opensmu.channels import WIRE_ID_TO_CHANNEL, Channel
-from opensmu.exceptions import (
+from benchctrl.channels import WIRE_ID_TO_CHANNEL, Channel
+from benchctrl.exceptions import (
     SMUCommandError,
     SMUConnectionError,
     SMUNotImplementedError,
     SMUTimeoutError,
     SMUValueError,
 )
-from opensmu.protocol import (
+from benchctrl.protocol import (
     CMD_ENABLE_5V,
     CMD_ENABLE_LEGACY_SINK,
     CMD_GET_CHANNEL_INVENTORY,
@@ -75,11 +75,11 @@ from opensmu.protocol import (
     power_regulation_value,
     volts_to_microvolts,
 )
-from opensmu.recording import Recording
-from opensmu.samples import Sample
-from opensmu.transport import PortInfo, Transport, discover_arc_ports
+from benchctrl.recording import Recording
+from benchctrl.samples import Sample
+from benchctrl.transport import PortInfo, Transport, discover_arc_ports
 
-log = logging.getLogger("opensmu.device")
+log = logging.getLogger("benchctrl.device")
 
 ChannelLike = Union[Channel, str]
 PowerRegulation = str  # "voltage" | "current" | "inline" | "off"
@@ -736,7 +736,7 @@ class SMU:
         self._reader_sample_counts = {ch: 0 for ch in channel_set}
         self._reader_stop.clear()
         self._reader_thread = threading.Thread(
-            target=self._reader_loop, name="opensmu-reader", daemon=True
+            target=self._reader_loop, name="benchctrl-reader", daemon=True
         )
         self._reader_thread.start()
         return rec
@@ -785,7 +785,7 @@ class SMU:
 
         Wire form: ``[seq][0x64][cmd][0]`` outbound; device replies with a
         unified response frame ``[0e 03 99 ff][seq][status:i32][data]`` —
-        see :py:meth:`opensmu.protocol.parse_response`.
+        see :py:meth:`benchctrl.protocol.parse_response`.
 
         Args:
             cmd_code: parameter to query. The same code as the matching
@@ -1097,5 +1097,5 @@ class SMU:
             extras[name] = value
 
     def commit(self) -> None:
-        """No-op in OpenSMU — every SET is sent immediately."""
+        """No-op in benchctrl — every SET is sent immediately."""
         return None

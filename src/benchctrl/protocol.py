@@ -19,7 +19,7 @@ import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from opensmu.exceptions import SMUProtocolError
+from benchctrl.exceptions import SMUProtocolError
 
 # --- USB identity --------------------------------------------------------
 
@@ -211,7 +211,7 @@ def encode_prepare_stop(seq: int) -> bytes:
 
     Otii sends this immediately before a per-channel disable burst when
     stopping a recording. Without it, the device sometimes lags in switching
-    streaming modes. opensmu's stop_recording sends it for vendor parity."""
+    streaming modes. benchctrl's stop_recording sends it for vendor parity."""
     return struct.pack("<II", seq & 0xFFFFFFFF, TYPE_PREPARE_STOP)
 
 

@@ -1,8 +1,8 @@
-# Bench instruments — `opensmu.bench`
+# Bench instruments — `benchctrl.bench`
 
-OpenSMU's `bench` subpackage hosts drivers for other lab instruments
+benchctrl's `bench` subpackage hosts drivers for other lab instruments
 typically wired alongside an Otii Arc Pro: programmable loads,
-programmable resistors, DMMs, etc. They share opensmu's connection
+programmable resistors, DMMs, etc. They share benchctrl's connection
 patterns and ship MCP tools alongside the Python API.
 
 Each driver is independent and optional. Import only what you need.
@@ -11,8 +11,8 @@ Each driver is independent and optional. Import only what you need.
 
 | Driver | Class | Wire stack | Status |
 |---|---|---|---|
-| Eastwood Tech QR10x programmable resistance | `opensmu.bench.QR10x` | USB-Serial (CH340) | **shipped (v0.9.0)** |
-| Rigol DL3031A electronic load | `opensmu.bench.RigolDL3031A` | USB-TMC + SCPI via pyvisa | **shipped (v0.9.3)** |
+| Eastwood Tech QR10x programmable resistance | `benchctrl.bench.QR10x` | USB-Serial (CH340) | **shipped (v0.9.0)** |
+| Rigol DL3031A electronic load | `benchctrl.bench.RigolDL3031A` | USB-TMC + SCPI via pyvisa | **shipped (v0.9.3)** |
 
 ## QR10x — programmable resistance
 
@@ -23,7 +23,7 @@ model, ±0.02% to ±0.05% accuracy. Talks AT commands over USB-Serial.
 ### Quick start
 
 ```python
-from opensmu.bench import QR10x
+from benchctrl.bench import QR10x
 
 with QR10x.open("COM7") as qr:
     print(qr.info())                  # device identity
@@ -98,17 +98,17 @@ Per the QR10x spec:
 
 ### Installation
 
-The QR10x driver uses `pyserial` only — already a base opensmu
+The QR10x driver uses `pyserial` only — already a base benchctrl
 dependency. No extras required:
 
 ```bash
-pip install opensmu        # QR10x driver included
+pip install benchctrl        # QR10x driver included
 ```
 
 SCPI/VISA-based instruments live under the `bench-visa` extra:
 
 ```bash
-pip install opensmu[bench-visa]   # adds pyvisa
+pip install benchctrl[bench-visa]   # adds pyvisa
 ```
 
 PyVISA needs a backend. Options:
@@ -127,7 +127,7 @@ built-in transient, LIST sequence, and battery-discharge test modes.
 ### Quick start
 
 ```python
-from opensmu.bench import RigolDL3031A
+from benchctrl.bench import RigolDL3031A
 
 with RigolDL3031A.open() as load:        # auto-discover by USB VID/PID
     print(load.info())

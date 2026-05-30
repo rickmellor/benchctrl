@@ -1,4 +1,4 @@
-"""Bench-validation harness for the OpenSMU battery emulator.
+"""Bench-validation harness for the benchctrl battery emulator.
 
 Runs reproducible "scenarios" that drive the Otii Arc Pro emulator
 against a programmable load and saves the captured response to disk
@@ -48,15 +48,15 @@ import shutil
 import sys
 import time
 
-log = logging.getLogger("opensmu.validation")
+log = logging.getLogger("benchctrl.validation")
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from opensmu import SMU, Channel
-from opensmu._version import __version__ as OPENSMU_VERSION
-from opensmu.battery import BatteryProfile, Emulator, EmulatorConfig
-from opensmu.bench import QR10x
+from benchctrl import SMU, Channel
+from benchctrl._version import __version__ as BENCHCTRL_VERSION
+from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
+from benchctrl.bench import QR10x
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCENARIO_DIR = REPO_ROOT / "validation" / "scenarios"
@@ -65,13 +65,13 @@ SCENARIO_DIR = REPO_ROOT / "validation" / "scenarios"
 def _default_profile_dir() -> Path:
     """Resolve the battery-profile directory in priority order:
 
-    1. ``OPENSMU_BATTERY_PROFILE_DIR`` env var
+    1. ``BENCHCTRL_BATTERY_PROFILE_DIR`` env var
     2. CLI ``--profile-dir`` (handled in :func:`main`)
     3. Otii bundled profile dir under ``%LOCALAPPDATA%\\otii3``
     4. Repo-local ``validation/profiles/`` (if present — bring your own)
     """
     import os
-    env = os.environ.get("OPENSMU_BATTERY_PROFILE_DIR")
+    env = os.environ.get("BENCHCTRL_BATTERY_PROFILE_DIR")
     if env:
         return Path(env)
     local_app = os.environ.get("LOCALAPPDATA")
@@ -265,7 +265,7 @@ class _DL3031AAdapter(_LoadAdapter):
         self._input_on = False
 
     def open(self) -> None:
-        from opensmu.bench import RigolDL3031A
+        from benchctrl.bench import RigolDL3031A
         self.dl = RigolDL3031A.open(self.resource)
 
     def setup(self, *, safety_R: float, voltage_V: float) -> None:
@@ -557,7 +557,7 @@ def run_static_sweep(*, profile_path: Path, load: _LoadAdapter,
         "scenario": "static_load_sweep",
         "schema_version": 2,
         "captured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "opensmu_version": OPENSMU_VERSION,
+        "benchctrl_version": BENCHCTRL_VERSION,
         "profile": {
             "path": str(profile_path),
             "stem": stem,
@@ -731,7 +731,7 @@ def run_dynamic_pattern(*, profile_path: Path, load: _LoadAdapter,
         "scenario": "dynamic_load_pattern",
         "schema_version": 2,
         "captured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "opensmu_version": OPENSMU_VERSION,
+        "benchctrl_version": BENCHCTRL_VERSION,
         "profile": {
             "path": str(profile_path),
             "stem": stem,
@@ -965,7 +965,7 @@ def run_dynamic_hires(*, profile_path: Path, load: _LoadAdapter,
         "scenario": "dynamic_load_pattern_hires",
         "schema_version": 2,
         "captured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "opensmu_version": OPENSMU_VERSION,
+        "benchctrl_version": BENCHCTRL_VERSION,
         "profile": {
             "path": str(profile_path), "stem": stem,
             "battery": {
@@ -1233,7 +1233,7 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
         "scenario": "dynamic_list_firmware",
         "schema_version": 2,
         "captured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "opensmu_version": OPENSMU_VERSION,
+        "benchctrl_version": BENCHCTRL_VERSION,
         "profile": {
             "path": str(profile_path), "stem": stem,
             "battery": {
@@ -1320,7 +1320,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--settle-s", type=float, default=1.2)
     parser.add_argument("--output-dir", default=str(SCENARIO_DIR))
     parser.add_argument("--profile-dir", default=None,
-                        help="battery profile directory (default: $OPENSMU_BATTERY_PROFILE_DIR "
+                        help="battery profile directory (default: $BENCHCTRL_BATTERY_PROFILE_DIR "
                              "or Otii's bundled location under %%LOCALAPPDATA%%/otii3)")
     args = parser.parse_args(argv)
 
@@ -1333,7 +1333,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not PROFILE_DIR.is_dir():
         parser.error(
             f"profile directory not found: {PROFILE_DIR}\n"
-            f"  set OPENSMU_BATTERY_PROFILE_DIR or pass --profile-dir"
+            f"  set BENCHCTRL_BATTERY_PROFILE_DIR or pass --profile-dir"
         )
 
     targets: list[Path]

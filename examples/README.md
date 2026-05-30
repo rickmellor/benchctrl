@@ -1,6 +1,6 @@
 # Examples
 
-Runnable scripts that exercise each OpenSMU subsystem. Pick whichever
+Runnable scripts that exercise each benchctrl subsystem. Pick whichever
 matches what you're building.
 
 | Script | What it does | Requires |
@@ -11,8 +11,8 @@ matches what you're building.
 | [`save_and_load.py`](save_and_load.py) | Native `.opensmu` round-trip + CSV / JSON exports | Arc / Arc Pro |
 | [`battery_emulator.py`](battery_emulator.py) | Emulate a battery profile against a DUT (Battery Toolbox replacement) | Arc Pro + battery profile JSON |
 | [`bench_qr10x.py`](bench_qr10x.py) | Drive the Eastwood QR10x programmable resistor | QR10x on USB-Serial |
-| [`bench_dl3031a.py`](bench_dl3031a.py) | Drive the Rigol DL3031A electronic load — including LIST / transient / battery-discharge modes | DL3031A on USB-TMC, `opensmu[bench-visa]` |
-| [`mcp_server.py`](mcp_server.py) | Start the OpenSMU MCP server (93 tools for LLM clients) | `opensmu[mcp]` |
+| [`bench_dl3031a.py`](bench_dl3031a.py) | Drive the Rigol DL3031A electronic load — including LIST / transient / battery-discharge modes | DL3031A on USB-TMC, `benchctrl[bench-visa]` |
+| [`mcp_server.py`](mcp_server.py) | Start the benchctrl MCP server (93 tools for LLM clients) | `benchctrl[mcp]` |
 
 For reproducible regression-quality scenarios that combine the
 battery emulator with a programmable load, see

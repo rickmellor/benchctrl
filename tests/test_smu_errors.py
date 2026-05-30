@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from opensmu.exceptions import SMUCommandError
+from benchctrl.exceptions import SMUCommandError
 
 pytestmark = pytest.mark.hardware
 
@@ -16,7 +16,7 @@ def test_set_4v_in_low_range_eventually_raises(smu):
     background reader picks up the error frame quickly. The device's
     baseline streaming is ~6 Hz, so we wait generously for the rejection
     to land in our buffer."""
-    from opensmu import Channel
+    from benchctrl import Channel
 
     smu.set_range("low")
     smu.disable_all_channels()

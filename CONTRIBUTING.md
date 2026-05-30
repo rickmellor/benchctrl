@@ -1,18 +1,18 @@
-# Contributing to OpenSMU
+# Contributing to benchctrl
 
 Thanks for considering a contribution. This document covers everything
 you need to set up, test, and ship a change.
 
 If you're an AI agent picking up the codebase rather than a human,
 the more efficient briefing is [`docs/AGENTS.md`](docs/AGENTS.md) +
-[`skills/opensmu/SKILL.md`](skills/opensmu/SKILL.md). Come back here
+[`skills/benchctrl/SKILL.md`](skills/benchctrl/SKILL.md). Come back here
 for conventions and PR mechanics.
 
 ## Development setup
 
 ```bash
-git clone https://github.com/opensmu/opensmu
-cd opensmu
+git clone https://github.com/benchctrl/benchctrl
+cd benchctrl
 pip install -e ".[dev,mcp,bench-visa,science]"
 ```
 
@@ -62,7 +62,7 @@ If you're adding a new hardware test, follow the existing pattern:
 @pytest.mark.hardware
 def test_hardware_my_thing():
     pytest.importorskip("pyvisa")
-    resource = os.environ.get("OPENSMU_DL3031A_RESOURCE")
+    resource = os.environ.get("BENCHCTRL_DL3031A_RESOURCE")
     try:
         load = RigolDL3031A.open(resource=resource)
     except Exception as e:
@@ -86,7 +86,7 @@ strict — strict mode is a deferred item in `ROADMAP.md`.
 
 ## Conventions
 
-OpenSMU has a few load-bearing principles you'll find referenced
+benchctrl has a few load-bearing principles you'll find referenced
 throughout the codebase and CHANGELOG. New code is expected to follow
 them.
 
@@ -94,7 +94,7 @@ them.
 
 Every public SDK method has a matching MCP tool. When you add a
 public method to `SMU` / `Emulator` / `QR10x` / `RigolDL3031A`, add
-the matching `@mcp.tool()` in `src/opensmu/mcp.py` in the same PR.
+the matching `@mcp.tool()` in `src/benchctrl/mcp.py` in the same PR.
 
 The MCP tool wraps the SDK method, coerces arguments to JSON-friendly
 types where needed, and returns a dict (never a custom dataclass).
@@ -204,14 +204,14 @@ them on CI without dedicated bench hardware.
 ## Where things live
 
 ```
-opensmu/
+benchctrl/
 ├── README.md, ARCHITECTURE.md          repo entry points
 ├── CHANGELOG.md, KNOWN_LIMITATIONS.md   what changed / what's broken
 ├── CONTRIBUTING.md (this file)
 ├── ROADMAP.md                          deferred features
 ├── PROGRESS.md                         live build snapshot
 ├── pyproject.toml                      package config
-├── src/opensmu/
+├── src/benchctrl/
 │   ├── device.py, transport.py,        SMU core
 │   │   protocol.py, samples.py,
 │   │   recording.py, channels.py
@@ -225,20 +225,20 @@ opensmu/
 │   │   ├── qr10x.py                    Eastwood programmable resistor
 │   │   └── rigol_dl3031a.py            Rigol electronic load
 │   ├── mcp.py                          MCP server (93 tools)
-│   └── cli.py                          opensmu CLI entry
+│   └── cli.py                          benchctrl CLI entry
 ├── tests/                              hw-free + hardware-marked
 ├── docs/                               topical docs
 ├── validation/
 │   ├── run_validation.py               scenario harness
 │   ├── README.md                       harness docs + results
 │   └── scenarios/                      saved captures (JSON / CSV / PNG)
-├── skills/opensmu/SKILL.md             Claude Code skill briefing
+├── skills/benchctrl/SKILL.md             Claude Code skill briefing
 └── .github/                            PR + issue templates, CI workflow
 ```
 
 When you're hunting for something:
 
-- **"Where does X live?"** — search `src/opensmu/` first, then
+- **"Where does X live?"** — search `src/benchctrl/` first, then
   `validation/` if it's harness-related.
 - **"How does X work?"** — `docs/` is topical; `ARCHITECTURE.md` is
   the overview.

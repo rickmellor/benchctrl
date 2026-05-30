@@ -1,7 +1,7 @@
 # Wire protocol
 
 What's on the USB cable between the host and an Arc / Arc Pro. This
-documents the reverse-engineering result OpenSMU's implementation
+documents the reverse-engineering result benchctrl's implementation
 relies on. Reconstructed from passive observation of legitimate USB
 traffic; full decoding history lives in the parent repository.
 
@@ -88,7 +88,7 @@ explicitly-enabled channels (val=0) returns the device to baseline.
 ### Legacy `69 83 2a ff …` payload
 
 The 76-byte `69 83 2a ff 17 02 00 00 …` payload used by historical
-versions of `arc_direct` (and opensmu v0.1) is **not** what the vendor
+versions of `arc_direct` (and benchctrl v0.1) is **not** what the vendor
 stack sends. It was a misread of the device's *inbound* packed sample
 frame and produced no useful effect when sent host→device.
 
@@ -220,7 +220,7 @@ reverse engineered. Tracked in `ROADMAP.md` as v0.2.
 - **Firmware transfer** — payload type `0x18`. Captured shape: a multi-frame
   transfer of up to 4108 B per frame; first frame's body begins with the
   ASCII header `"Qoitech Arc firmware package"` followed by the filename
-  (`"arc-fw.bin"`) and binary firmware bytes. opensmu deliberately does
+  (`"arc-fw.bin"`) and binary firmware bytes. benchctrl deliberately does
   not implement firmware upgrade (bricking risk on interrupted /
   malformed transfers).
 - **Calibration internals** — calling `Arc.calibrate()` via the documented

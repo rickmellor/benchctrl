@@ -1,6 +1,6 @@
 # Bench validation scenarios
 
-End-to-end hardware tests for the OpenSMU battery emulator. Each
+End-to-end hardware tests for the benchctrl battery emulator. Each
 scenario drives an Otii Arc Pro (acting as a virtual cell) into an
 Eastwood QR10x programmable resistor (acting as the DUT) and saves
 the captured response to disk as a self-describing artifact pair.
@@ -29,7 +29,7 @@ Scenario JSON layout (`schema_version: 2` since v0.9.4)::
 {
   "scenario": "static_load_sweep" | "dynamic_load_pattern",
   "captured_utc": "...",
-  "opensmu_version": "0.9.2",
+  "benchctrl_version": "0.9.2",
   "profile":          { ...battery metadata + path... },
   "emulator_config":  { initial_soc, safety_max_voltage_V, ... },
   "bench":            { Eastwood QR10x device_type / serial / ... },

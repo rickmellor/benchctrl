@@ -13,8 +13,8 @@ from typing import Optional
 import serial
 import serial.tools.list_ports as list_ports
 
-from opensmu.exceptions import SMUConnectionError
-from opensmu.protocol import PID, VID
+from benchctrl.exceptions import SMUConnectionError
+from benchctrl.protocol import PID, VID
 
 
 @dataclass(frozen=True)

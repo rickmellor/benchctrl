@@ -1,4 +1,4 @@
-"""Command-line tool — ``python -m opensmu <command>``.
+"""Command-line tool — ``python -m benchctrl <command>``.
 
 Designed for quick one-shot operations from a shell. For anything
 non-trivial, prefer the Python API.
@@ -23,9 +23,9 @@ import sys
 import time
 from pathlib import Path
 
-from opensmu import SMU, Channel
-from opensmu._version import __version__
-from opensmu.exceptions import SMUError
+from benchctrl import SMU, Channel
+from benchctrl._version import __version__
+from benchctrl.exceptions import SMUError
 
 
 def _open_smu(args) -> SMU:
@@ -145,8 +145,8 @@ def cmd_stream(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="opensmu",
-        description="OpenSMU command-line tool",
+        prog="benchctrl",
+        description="benchctrl command-line tool",
     )
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("--port", help="serial port (e.g. COM6, /dev/ttyACM0)")
@@ -208,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except SMUError as exc:
-        print(f"opensmu error: {exc}", file=sys.stderr)
+        print(f"benchctrl error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)

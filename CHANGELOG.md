@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+All notable changes to benchctrl. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Known limitations across all versions are tracked in
 [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) (hardware caps,
@@ -124,11 +124,11 @@ remain SDK-only (the convenience wrappers `program_list` /
 `configure_transient_pulse` / `configure_battery_test` are the
 MCP-facing surface) — documented as SDK-only in the bench docs.
 
-### Added — `--profile-dir` + `OPENSMU_BATTERY_PROFILE_DIR`
+### Added — `--profile-dir` + `BENCHCTRL_BATTERY_PROFILE_DIR`
 
 `validation/run_validation.py` no longer hardcodes a
 user-specific Otii install path. Resolution order: CLI
-`--profile-dir`, then `$OPENSMU_BATTERY_PROFILE_DIR`, then
+`--profile-dir`, then `$BENCHCTRL_BATTERY_PROFILE_DIR`, then
 auto-detect under `%LOCALAPPDATA%/otii3/app-*/resources/batteryprofiles`,
 then repo-local `validation/profiles/`.
 
@@ -424,11 +424,11 @@ See `validation/README.md` for the full per-load takeaway table.
 No new test files (harness changes covered by existing scenario
 captures); existing test suite still passes (248 hardware-free).
 
-## [0.9.3] — Rigol DL3031A driver (`opensmu.bench.RigolDL3031A`)
+## [0.9.3] — Rigol DL3031A driver (`benchctrl.bench.RigolDL3031A`)
 
 ### Added — SCPI-over-USB-TMC driver for the Rigol DL3000 series
 
-`opensmu.bench.RigolDL3031A` — pyvisa-based driver for the Rigol
+`benchctrl.bench.RigolDL3031A` — pyvisa-based driver for the Rigol
 DL3021A / DL3031A programmable DC electronic load. Auto-discovers by
 USB VID/PID (`0x1AB1`/`0x0E11`) or accepts an explicit VISA resource
 string (USB-TMC or LXI).
@@ -456,7 +456,7 @@ Exception hierarchy:
   - `RigolDLTimeoutError` — VISA `VI_ERROR_TMO`
 
 Lives behind the `bench-visa` extra (already in `pyproject.toml`); the
-top-level `opensmu.bench` module lazy-imports `RigolDL3031A` via PEP 562
+top-level `benchctrl.bench` module lazy-imports `RigolDL3031A` via PEP 562
 so the QR10x path stays usable without pyvisa.
 
 ### Added — 17 MCP tools for DL3031A
@@ -485,7 +485,7 @@ measurement round-trip; hardware-marked test passes.
 - 36 hardware-free unit tests using a `FakeInstrument` that records
   every `write()` and replies to `query()` from a scripted dict.
 - 1 hardware-marked test that hits the real device (auto-discover or
-  override via `OPENSMU_DL3031A_RESOURCE`).
+  override via `BENCHCTRL_DL3031A_RESOURCE`).
 - Total tests: 248 hardware-free passing (was 212).
 
 ## [0.9.2] — bench validation harness + multi-profile matrix + LiPo support
@@ -632,7 +632,7 @@ Two themes:
    readings are accurate on real hardware (the previous implementation
    could return stale baseline samples).
 2. **Open the door to bench instruments** via a new
-   ``opensmu.bench`` subpackage, starting with the Eastwood Tech QR10x
+   ``benchctrl.bench`` subpackage, starting with the Eastwood Tech QR10x
    programmable resistance.
 
 ### Added — `SMU.read_window(channels, duration_s)`
@@ -676,7 +676,7 @@ End-to-end profiler run against two AA alkalines in series:
   (includes banana plug + cable + Arc internal sense path)
 - 10-cycle short profile completed in 15.2 s, used 10.6 µAh total
 
-### Added — `opensmu.bench` subpackage + `QR10x` driver
+### Added — `benchctrl.bench` subpackage + `QR10x` driver
 
 New subpackage for non-Arc lab instruments. First driver:
 **Eastwood Tech QR10x programmable resistance** — 1 Ω-8.4 MΩ depending
@@ -684,7 +684,7 @@ on model, ±0.02-0.05% accuracy, AT commands over USB-Serial (CH340
 chip, 115200 8N1).
 
 ```python
-from opensmu.bench import QR10x
+from benchctrl.bench import QR10x
 
 with QR10x.open("COM7") as qr:
     print(qr.info())
@@ -715,16 +715,16 @@ calls until `qr10x_close()`.
 
 ### Optional dependencies
 
-- `pip install opensmu[bench]` — declares intent (QR10x driver uses
+- `pip install benchctrl[bench]` — declares intent (QR10x driver uses
   pyserial which is already a base dep)
-- `pip install opensmu[bench-visa]` — for future SCPI/VISA-based
+- `pip install benchctrl[bench-visa]` — for future SCPI/VISA-based
   instruments (Rigol DL3031A etc.), pulls in pyvisa
 
 ### Tests
 
 - 3 new hardware tests for `SMU.read_window` in `test_smu_stream.py`.
 - 19 tests in `test_bench_qr10x.py` (13 hardware-free + 6 hardware on
-  COM7). Override port via `OPENSMU_QR10X_PORT`.
+  COM7). Override port via `BENCHCTRL_QR10X_PORT`.
 
 Total tests: 278 → **300** (assuming all hardware tests run).
 
@@ -741,10 +741,10 @@ First-try success against the connected QR101B-AM-1R on COM7:
 ## [0.8.0] — battery emulator (phase 4 of Battery Toolbox replacement) — FOUR PHASES DONE
 
 Host-side control loop that drives the SMU as a battery with OCV + ESR
-sag. Completes the Battery Toolbox replacement: opensmu now covers all
+sag. Completes the Battery Toolbox replacement: benchctrl now covers all
 four features Qoitech's licensed product offers.
 
-### Added — `opensmu.battery.emulator`
+### Added — `benchctrl.battery.emulator`
 
 - **`EmulatorConfig`** dataclass — profile + initial SoC + series + parallel
   + temperature + soc_tracking + update_interval_s + safety_max_voltage_V
@@ -815,24 +815,24 @@ up.
 ### What this completes
 
 The Battery Toolbox replacement is now feature-complete on top of
-opensmu's existing wire vocabulary:
+benchctrl's existing wire vocabulary:
 
-| Otii Battery Toolbox feature | opensmu module |
+| Otii Battery Toolbox feature | benchctrl module |
 |---|---|
-| Battery Profile Manager | `opensmu.battery.profile` (v0.5.0) |
-| Battery Life Calculator | `opensmu.battery.calculator` (v0.6.0) |
-| Battery Profiler | `opensmu.battery.profiler` (v0.7.0) |
-| Battery Emulator | `opensmu.battery.emulator` (v0.8.0) |
+| Battery Profile Manager | `benchctrl.battery.profile` (v0.5.0) |
+| Battery Life Calculator | `benchctrl.battery.calculator` (v0.6.0) |
+| Battery Profiler | `benchctrl.battery.profiler` (v0.7.0) |
+| Battery Emulator | `benchctrl.battery.emulator` (v0.8.0) |
 
 No vendor license required. No Otii server. Profile JSONs interchange
-bit-for-bit between opensmu and Otii in both directions.
+bit-for-bit between benchctrl and Otii in both directions.
 
 ## [0.7.0] — battery profiler (phase 3 of Battery Toolbox replacement)
 
 Hardware orchestration: drive a real battery through a configured
 discharge profile, measure V/I per cycle, build a profile JSON.
 
-### Added — `opensmu.battery.profiler`
+### Added — `benchctrl.battery.profiler`
 
 - **`ProfilerConfig`** dataclass — discharge profile + battery
   metadata + temperature + measurement-window / relaxation /
@@ -848,7 +848,7 @@ discharge profile, measure V/I per cycle, build a profile JSON.
   response. Stops on exit conditions (iteration limit, OCV cutoff,
   loaded-voltage cutoff), `Profiler.abort()` from another thread or
   the progress callback, or `sample_cap` reached.
-- Profile auto-tags `software_version="opensmu/<ver>"` and queries the
+- Profile auto-tags `software_version="benchctrl/<ver>"` and queries the
   connected SMU for `firmware_version` + `device_id` to populate
   the `device` metadata block (round-trip-compatible with Otii's
   format).
@@ -895,9 +895,9 @@ terminals) — tracked for a follow-up when bench hardware is wired up.
 ## [0.6.0] — battery life calculator (phase 2 of Battery Toolbox replacement)
 
 Pure-Python duty-cycle life estimator. Drop-in replacement for Qoitech's
-Battery Life Calculator using opensmu's open profile format from v0.5.0.
+Battery Life Calculator using benchctrl's open profile format from v0.5.0.
 
-### Added — `opensmu.battery.calculator`
+### Added — `benchctrl.battery.calculator`
 
 - **`DutyCycle`** dataclass — active/sleep load pattern with computed
   `cycle_time_s`, `cycle_charge_C`, `average_current_A` properties.
@@ -951,11 +951,11 @@ Total tests: 230 → **248 passing**.
 ## [0.5.0] — battery profile format (phase 1 of Battery Toolbox replacement)
 
 First of four phases replacing Qoitech's licensed Battery Toolbox on
-top of opensmu's existing wire vocabulary. This release nails the
+top of benchctrl's existing wire vocabulary. This release nails the
 **profile JSON format** — the data structure every subsequent battery
 feature reads/writes.
 
-### Added — `opensmu.battery.profile`
+### Added — `benchctrl.battery.profile`
 
 - **`BatteryProfile`** dataclass with nested `Battery`,
   `DischargeTable`, `DischargeProfile`, `DischargeStep`,
@@ -994,7 +994,7 @@ Both work on saved files; no SMU connection required.
 - **`docs/battery.md`** — feature plan, phased status, JSON schema,
   code recipes (loading bundled profiles, building synthetic ones,
   merging multi-temperature data).
-- Skill ([`skills/opensmu/SKILL.md`](skills/opensmu/SKILL.md)) gains a
+- Skill ([`skills/benchctrl/SKILL.md`](skills/benchctrl/SKILL.md)) gains a
   "Battery features" section pointing at the new subpackage.
 
 ### Tests
@@ -1019,10 +1019,10 @@ section). Three new tools, plus extensions to `record`.
 
 - **`record(..., save_path="run.parquet")`** — the existing `record`
   tool now handles `.parquet` save paths via the v0.4.0 Parquet output.
-  Requires `opensmu[parquet]`.
+  Requires `benchctrl[parquet]`.
 - **`record(..., plot_png="run.png")`** — new optional param; when
   given, also renders a matplotlib quick-look PNG in the same call.
-  Requires `opensmu[plot]`.
+  Requires `benchctrl[plot]`.
 - **`plot_recording(input_path, output_png, channels=None, title=None)`** —
   load a saved `.opensmu` file and render a PNG. No SMU connection
   required.
@@ -1030,7 +1030,7 @@ section). Three new tools, plus extensions to `record`.
   return its name, start/end times, offset, device metadata, and
   per-channel statistics. No SMU connection required.
 - **`export_recording(input_path, output_path)`** — convert a saved
-  `.opensmu` to another format (CSV / JSON / Parquet / opensmu)
+  `.opensmu` to another format (CSV / JSON / Parquet / benchctrl)
   based on the output extension. No SMU connection required.
 
 MCP tool count: 23 → **26**.
@@ -1062,23 +1062,23 @@ use.
 ### Added
 
 - **`Recording.to_numpy(channel)`** → 1D float32 `numpy.ndarray` of values.
-  Install with `pip install 'opensmu[numpy]'`.
+  Install with `pip install 'benchctrl[numpy]'`.
 - **`Recording.timestamps_numpy(channel)`** → 1D float64 `numpy.ndarray`
   of synthesised timestamps (offset-adjusted).
 - **`Recording.to_pandas(channel=None)`** — returns a `pandas.Series`
   if a channel is given, or a wide `pandas.DataFrame` (one column per
   channel, NaN-padded where rates differ) if not.
-  Install with `pip install 'opensmu[pandas]'`.
+  Install with `pip install 'benchctrl[pandas]'`.
 - **`Recording.save_parquet(path, compression="snappy")`** → Apache
   Parquet file. Wide form, columnar, ~10-20× smaller than the equivalent
   CSV. Opens cleanly in pandas, polars, duckdb, Excel via Power Query,
   and Apache Arrow tooling. Embeds channel units/labels/wire-ids and
   the recording name as column-level metadata.
-  Install with `pip install 'opensmu[parquet]'`.
+  Install with `pip install 'benchctrl[parquet]'`.
 - **`Recording.plot(channels=None, show=True, title=None)`** →
   matplotlib `Figure` with one subplot per channel and shared x-axis.
-  Install with `pip install 'opensmu[plot]'`.
-- **`opensmu[science]`** umbrella extras key installs parquet + plot
+  Install with `pip install 'benchctrl[plot]'`.
+- **`benchctrl[science]`** umbrella extras key installs parquet + plot
   (which pull in pandas, numpy, pyarrow, matplotlib).
 - **`docs/output_formats.md`** — full chooser table covering every
   format (native / parquet / CSV long / CSV wide / JSON / numpy /
@@ -1087,9 +1087,9 @@ use.
 
 ### Notes on the optional model
 
-opensmu imports cleanly without any of `numpy`, `pandas`, `pyarrow`, or
+benchctrl imports cleanly without any of `numpy`, `pandas`, `pyarrow`, or
 `matplotlib` installed — verified by an in-suite test that blocks these
-modules in a child interpreter and confirms `import opensmu` succeeds
+modules in a child interpreter and confirms `import benchctrl` succeeds
 with none of them loaded.
 
 Each method's import is lazy: the dependency is only imported the
@@ -1098,7 +1098,7 @@ a clear `ImportError`:
 
 ```
 ImportError: save_parquet() requires pyarrow.
-Install with: pip install 'opensmu[parquet]'
+Install with: pip install 'benchctrl[parquet]'
 ```
 
 ### Sizing example
@@ -1123,7 +1123,7 @@ gap widens — parquet stays around ~10 MB while CSV crosses 250 MB.
 - pandas: 3 tests (Series, wide DataFrame, empty)
 - parquet: 3 tests (round-trip, embedded metadata, compaction)
 - plot: 3 tests (subplots-per-channel, channel subset, empty-rejection)
-- lazy import: 2 tests (clean opensmu import without deps, friendly
+- lazy import: 2 tests (clean benchctrl import without deps, friendly
   ImportError when calling a method without its dep)
 
 Total tests: 187 → **203 passing**.
@@ -1132,9 +1132,9 @@ Total tests: 187 → **203 passing**.
 
 ### Added
 
-- **`skills/opensmu/SKILL.md`** — a Claude Code skill that complements
+- **`skills/benchctrl/SKILL.md`** — a Claude Code skill that complements
   the MCP server. The MCP server lets Claude *drive* the device; the
-  skill guides Claude when *writing opensmu Python code* (custom
+  skill guides Claude when *writing benchctrl Python code* (custom
   analysis, batch processing, plotting, transient detection, anything
   beyond the 23 tool surface).
 - The skill covers: the two integration paths (MCP vs Python),
@@ -1145,13 +1145,13 @@ Total tests: 187 → **203 passing**.
   transient detection, live monitoring, and batch processing.
 - Install instructions added to [`docs/mcp.md`](docs/mcp.md) — symlink
   (recommended, stays in sync with repo) or static copy. Lands at
-  `~/.claude/skills/opensmu/SKILL.md`.
+  `~/.claude/skills/benchctrl/SKILL.md`.
 
 ### When does the skill activate?
 
-Whenever the user is doing anything with opensmu beyond what MCP tools
+Whenever the user is doing anything with benchctrl beyond what MCP tools
 cover. Frontmatter description: "Use when controlling a Qoitech Otii
-Arc Pro source-measurement unit, writing code with the opensmu Python
+Arc Pro source-measurement unit, writing code with the benchctrl Python
 library, analysing captured .opensmu recordings, or building
 measurement automation."
 
@@ -1162,12 +1162,12 @@ Cursor, custom agents) as a set of structured tools.
 
 ### Added
 
-- **`opensmu.mcp`** — a FastMCP server exposing 23 tools covering every
+- **`benchctrl.mcp`** — a FastMCP server exposing 23 tools covering every
   user-facing capability of the library: device info, every setpoint,
   output enable (with safety guards), live reads, snapshot, synchronous
   recording with statistics, GPIO/UART, connection management.
-- **`opensmu-mcp` console script** — `pip install opensmu[mcp]` and run
-  `opensmu-mcp` to start the stdio server.
+- **`benchctrl-mcp` console script** — `pip install benchctrl[mcp]` and run
+  `benchctrl-mcp` to start the stdio server.
 - **`docs/mcp.md`** — install, configuration (Claude Code + Claude Desktop
   JSON snippets), full tool reference, safety model, troubleshooting.
 - **Safety model** for `enable_output`: refuses unless all three guards
@@ -1179,7 +1179,7 @@ Cursor, custom agents) as a set of structured tools.
 
 ### Verified end-to-end
 
-- `opensmu-mcp` initializes MCP protocol v2024-11-05 over stdio.
+- `benchctrl-mcp` initializes MCP protocol v2024-11-05 over stdio.
 - `tools/list` enumerates all 23 tools with descriptions sourced from
   Python docstrings.
 - `tools/call info` returns live device metadata: name=Arc, fw=3.1.3,
@@ -1187,12 +1187,12 @@ Cursor, custom agents) as a set of structured tools.
 
 ### Optional dependency
 
-- `mcp >= 1.0` — installed automatically with `pip install opensmu[mcp]`.
+- `mcp >= 1.0` — installed automatically with `pip install benchctrl[mcp]`.
 
 ## [0.2.0] — 100% decoding sweep
 
 A systematic decode pass across every captured trace exposed the rest of the
-wire vocabulary. Result: opensmu now understands every distinct frame
+wire vocabulary. Result: benchctrl now understands every distinct frame
 type the device emits or accepts in the captured corpus.
 
 ### Added — newly decoded wire commands
@@ -1345,7 +1345,7 @@ over USB CDC-ACM with no vendor server, license, or GUI.
 - Comprehensive exception hierarchy: `SMUError`, `SMUConnectionError`,
   `SMUProtocolError`, `SMUCommandError`, `SMUValueError`,
   `SMUTimeoutError`, `SMUNotImplementedError`
-- CLI: `opensmu discover / info / set-voltage / set-output /
+- CLI: `benchctrl discover / info / set-voltage / set-output /
   set-range / set-current-limit / set-exp-voltage / set-gpo /
   capture / stream`
 - 132 tests (89 hardware-free + 43 hardware-required)

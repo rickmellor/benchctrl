@@ -1,4 +1,4 @@
-# OpenSMU MCP server
+# benchctrl MCP server
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that
 exposes your Arc Pro as a set of tools any MCP-aware client (Claude Code,
@@ -8,7 +8,7 @@ Claude Desktop, Cursor, custom agents) can call. Built on the official
 ## Install
 
 ```bash
-pip install "opensmu[mcp]"
+pip install "benchctrl[mcp]"
 ```
 
 For development:
@@ -23,13 +23,13 @@ The server speaks MCP over stdio (the standard transport for editor /
 desktop integrations):
 
 ```bash
-opensmu-mcp
+benchctrl-mcp
 ```
 
 Or equivalently:
 
 ```bash
-python -m opensmu.mcp
+python -m benchctrl.mcp
 ```
 
 The server holds the SMU connection for its lifetime — only one process
@@ -43,15 +43,15 @@ Add to your Claude Code MCP configuration:
 ```json
 {
   "mcpServers": {
-    "opensmu": {
-      "command": "opensmu-mcp"
+    "benchctrl": {
+      "command": "benchctrl-mcp"
     }
   }
 }
 ```
 
 Claude will pick it up the next time it starts. Verify with `/mcp` in
-the Claude Code interface — `opensmu` should appear under connected
+the Claude Code interface — `benchctrl` should appear under connected
 servers.
 
 ## Wire into Claude Desktop
@@ -62,8 +62,8 @@ Desktop docs](https://modelcontextprotocol.io/quickstart/user)) and add:
 ```json
 {
   "mcpServers": {
-    "opensmu": {
-      "command": "opensmu-mcp"
+    "benchctrl": {
+      "command": "benchctrl-mcp"
     }
   }
 }
@@ -128,8 +128,8 @@ the output terminals.
 | `record(seconds, channels=None, save_path=None, name="recording", plot_png=None)` | float, list[str], path, str, path | per-channel stats + optional file + optional PNG |
 
 `record`'s `save_path` extension is auto-detected: `.csv`, `.json`,
-`.opensmu`, or `.parquet` (the last requires `opensmu[parquet]`).
-`plot_png` requires `opensmu[plot]`.
+`.opensmu`, or `.parquet` (the last requires `benchctrl[parquet]`).
+`plot_png` requires `benchctrl[plot]`.
 
 ### Recording I/O (no SMU connection required)
 
@@ -183,10 +183,10 @@ Claude calls `take_snapshot(0.5)` → returns latest value per channel.
 ## Install the Claude Code skill
 
 Complementary to the MCP server: a skill that guides Claude when **writing
-opensmu Python code** for tasks the MCP tools don't cover (custom analysis,
+benchctrl Python code** for tasks the MCP tools don't cover (custom analysis,
 batch processing, plotting, transient detection, etc.).
 
-The skill lives in this repo at [`skills/opensmu/SKILL.md`](../skills/opensmu/SKILL.md).
+The skill lives in this repo at [`skills/benchctrl/SKILL.md`](../skills/benchctrl/SKILL.md).
 Install it into your Claude config one of two ways.
 
 **Symlink** (recommended — skill stays in sync with repo updates):
@@ -195,30 +195,30 @@ Install it into your Claude config one of two ways.
 # PowerShell:
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills" | Out-Null
 New-Item -ItemType SymbolicLink `
-    -Path "$env:USERPROFILE\.claude\skills\opensmu" `
-    -Target "$(Resolve-Path .\skills\opensmu)"
+    -Path "$env:USERPROFILE\.claude\skills\benchctrl" `
+    -Target "$(Resolve-Path .\skills\benchctrl)"
 ```
 
 ```bash
 # bash / zsh:
 mkdir -p ~/.claude/skills
-ln -s "$(pwd)/skills/opensmu" ~/.claude/skills/opensmu
+ln -s "$(pwd)/skills/benchctrl" ~/.claude/skills/benchctrl
 ```
 
 **Copy** (static install):
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills\opensmu" | Out-Null
-Copy-Item -Recurse -Force .\skills\opensmu\* "$env:USERPROFILE\.claude\skills\opensmu\"
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills\benchctrl" | Out-Null
+Copy-Item -Recurse -Force .\skills\benchctrl\* "$env:USERPROFILE\.claude\skills\benchctrl\"
 ```
 
 ```bash
-mkdir -p ~/.claude/skills/opensmu
-cp -r skills/opensmu/* ~/.claude/skills/opensmu/
+mkdir -p ~/.claude/skills/benchctrl
+cp -r skills/benchctrl/* ~/.claude/skills/benchctrl/
 ```
 
 Verify it loaded: in a fresh Claude Code session, ask "what's the canonical
-recording pattern in opensmu?" — Claude should invoke the `opensmu` skill
+recording pattern in benchctrl?" — Claude should invoke the `benchctrl` skill
 and respond with the `with SMU.open() as smu: ...` context-manager
 pattern. If the skill didn't activate, ask Claude to `/list-skills` or
 similar (commands vary by Claude Code build).
@@ -228,16 +228,16 @@ similar (commands vary by Claude Code build).
 | User says... | Claude does... |
 |---|---|
 | "Set 3.3V and record 5 seconds" | Calls MCP `set_voltage` → `set_current_limit` → `enable_output` → `record` |
-| "Write a voltage-sweep script and save the I-V curve" | Loads opensmu skill, writes Python with `SMU` + `Recording` |
+| "Write a voltage-sweep script and save the I-V curve" | Loads benchctrl skill, writes Python with `SMU` + `Recording` |
 | "What's the peak current right now?" | Calls MCP `live("mc")` or `take_snapshot` |
-| "Process every .opensmu file in /captures/" | Loads opensmu skill, writes Python with `Recording.load()` |
-| "What channels does the Arc have?" | Either: MCP `list_channels` (returns JSON) or opensmu skill (channel table in markdown) |
+| "Process every .opensmu file in /captures/" | Loads benchctrl skill, writes Python with `Recording.load()` |
+| "What channels does the Arc have?" | Either: MCP `list_channels` (returns JSON) or benchctrl skill (channel table in markdown) |
 
 The MCP server is for **driving the device**; the skill is for **writing code about the device**. They complement each other.
 
 ## SDK ↔ MCP parity principle
 
-The MCP server is intentionally kept in sync with the opensmu Python
+The MCP server is intentionally kept in sync with the benchctrl Python
 SDK. When a new SDK feature lands that's meaningful in an interactive /
 tool-calling context, a matching MCP tool ships with it:
 
@@ -250,7 +250,7 @@ tool-calling context, a matching MCP tool ships with it:
 | `Recording.plot()` (v0.4.0) | `record(plot_png=…)`, `plot_recording(in, out)` |
 | `Recording.to_numpy()` / `to_pandas()` (v0.4.0) | *N/A* — in-process objects don't cross the MCP boundary; use file-based tools instead |
 
-When opensmu gains a new wire command, surface, or output format, the
+When benchctrl gains a new wire command, surface, or output format, the
 expectation is: **if it fits the chat / tool-calling model, it ships
 with an MCP tool in the same release.** The exceptions are in-memory
 Python objects (`numpy.ndarray`, `pandas.DataFrame`, matplotlib
@@ -271,7 +271,7 @@ plot-to-PNG) instead.
 
 **"no Arc devices found"** when the device is plugged in: another
 process holds the COM port. Kill `otii_server`/`otii_core`/any other
-opensmu instance and retry.
+benchctrl instance and retry.
 
 **Tool calls hang**: the device may have dropped streaming after USB
 disturbance. Call `reconnect()` to force a re-init handshake.

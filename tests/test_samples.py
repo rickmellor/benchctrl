@@ -7,12 +7,12 @@ import struct
 
 import pytest
 
-from opensmu.channels import Channel
-from opensmu.protocol import (
+from benchctrl.channels import Channel
+from benchctrl.protocol import (
     SAMPLE_RECORD_HEADER,
     encode_frame,
 )
-from opensmu.samples import (
+from benchctrl.samples import (
     ChannelBuffer,
     compute_statistics,
     parse_samples_by_channel,

@@ -6,8 +6,8 @@ import struct
 
 import pytest
 
-from opensmu.exceptions import SMUProtocolError
-from opensmu.protocol import (
+from benchctrl.exceptions import SMUProtocolError
+from benchctrl.protocol import (
     WIRE_MAGIC,
     checksum,
     encode_frame,

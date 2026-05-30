@@ -1,4 +1,4 @@
-"""Hardware-free tests for opensmu.battery.profiler.
+"""Hardware-free tests for benchctrl.battery.profiler.
 
 These verify the orchestration logic against a mock SMU. Real-hardware
 validation is a separate task (needs a battery connected to the output
@@ -13,19 +13,19 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from opensmu import Channel
-from opensmu.battery import (
+from benchctrl import Channel
+from benchctrl.battery import (
     Battery,
     DischargeProfile,
     DischargeStep,
     ExitConditions,
 )
-from opensmu.battery.profiler import (
+from benchctrl.battery.profiler import (
     Profiler,
     ProfilerConfig,
     ProfilerSample,
 )
-from opensmu.exceptions import SMUValueError
+from benchctrl.exceptions import SMUValueError
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@ from opensmu.exceptions import SMUValueError
 
 @dataclass
 class _MockSMU:
-    """Pretends to be an opensmu SMU for the profiler's purposes.
+    """Pretends to be an benchctrl SMU for the profiler's purposes.
 
     Models a simple battery: starts at ``ocv_initial`` V, OCV drops
     linearly to ``ocv_final`` V over ``capacity_mAh`` of consumed charge.
@@ -318,7 +318,7 @@ def test_profiler_built_profile_roundtrips_through_json(tmp_path):
     out = tmp_path / "mock.json"
     result.profile.save(out)
     # Load + assert it matches structurally
-    from opensmu.battery import BatteryProfile
+    from benchctrl.battery import BatteryProfile
 
     loaded = BatteryProfile.load(out)
     assert loaded.battery.manufacturer == "MockCo"

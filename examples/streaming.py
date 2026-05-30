@@ -6,7 +6,7 @@ Run:
 
 from __future__ import annotations
 
-from opensmu import SMU
+from benchctrl import SMU
 
 
 def main() -> None:

@@ -1,7 +1,7 @@
 """MCP server exposing the Arc Pro SMU as tools any MCP client can call.
 
 Designed for use with Claude Code, Claude Desktop, or any other MCP-aware
-client. Run as ``opensmu-mcp`` or ``python -m opensmu.mcp``.
+client. Run as ``benchctrl-mcp`` or ``python -m benchctrl.mcp``.
 
 Connection model
 ----------------
@@ -40,12 +40,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
-log = logging.getLogger("opensmu.mcp")
+log = logging.getLogger("benchctrl.mcp")
 
 from mcp.server.fastmcp import FastMCP
 
-from opensmu import SMU, Channel, Recording
-from opensmu.battery import (
+from benchctrl import SMU, Channel, Recording
+from benchctrl.battery import (
     Battery,
     BatteryProfile,
     DischargeProfile,
@@ -60,15 +60,15 @@ from opensmu.battery import (
     estimate_life_constant_current,
     estimate_life_from_profile,
 )
-from opensmu.bench import QR10x
+from benchctrl.bench import QR10x
 # RigolDL3031A is imported lazily inside the tool functions so the MCP
 # server doesn't hard-require pyvisa to start.
-from opensmu.channels import WIRE_ID_TO_CHANNEL
-from opensmu.exceptions import SMUError
-from opensmu.protocol import iter_frames, iter_samples
-from opensmu.samples import compute_statistics
+from benchctrl.channels import WIRE_ID_TO_CHANNEL
+from benchctrl.exceptions import SMUError
+from benchctrl.protocol import iter_frames, iter_samples
+from benchctrl.samples import compute_statistics
 
-mcp = FastMCP("opensmu")
+mcp = FastMCP("benchctrl")
 
 _smu: Optional[SMU] = None
 _lock = threading.RLock()
@@ -428,7 +428,7 @@ def _save_recording_by_extension(rec: Recording, path: Path) -> Path:
     """Dispatch save() based on file extension.
 
     Accepts ``.csv``, ``.json``, ``.opensmu``, ``.parquet``. Anything else
-    is normalised to ``.opensmu``. Parquet requires ``opensmu[parquet]``
+    is normalised to ``.opensmu``. Parquet requires ``benchctrl[parquet]``
     installed; a clear ``ImportError`` propagates otherwise.
     """
     suffix = path.suffix.lower()
@@ -502,12 +502,12 @@ def record(
             Enabling ``mc`` auto-includes ``mp``; enabling ``ac`` auto-includes ``ap``.
         save_path: optional file path. Extension auto-detected:
             ``.csv`` / ``.json`` / ``.opensmu`` (native binary) /
-            ``.parquet`` (requires ``opensmu[parquet]``). Other extensions
+            ``.parquet`` (requires ``benchctrl[parquet]``). Other extensions
             are saved as ``.opensmu``.
         name: recording name (stored in metadata).
         plot_png: optional path; if given, also renders a matplotlib
             quick-look PNG (one subplot per channel). Requires
-            ``opensmu[plot]`` installed.
+            ``benchctrl[plot]`` installed.
 
     Returns per-channel statistics (sample_count, min, max, average, rms,
     charge for current channels, energy for power channels), the file
@@ -553,7 +553,7 @@ def plot_recording(
         channels: optional list of channel codes to plot (defaults to all).
         title: optional plot title (defaults to the recording's name).
 
-    Requires ``opensmu[plot]`` installed. Useful for "open this saved
+    Requires ``benchctrl[plot]`` installed. Useful for "open this saved
     capture and show me what it looks like" without ever touching the
     SMU.
     """
@@ -803,7 +803,7 @@ def battery_profiler_estimate_duration(
     overhead_seconds = cycles * 0.6
     total_seconds = raw_seconds + overhead_seconds
 
-    from opensmu.battery.calculator import _humanize_seconds
+    from benchctrl.battery.calculator import _humanize_seconds
 
     return {
         "estimated_cycles": cycles,
@@ -841,7 +841,7 @@ def battery_profiler_run(
     :py:meth:`battery_profiler_estimate_duration` first to know what
     you're committing to. Most MCP clients will time out before a real
     profiling run completes — prefer the Python API
-    (``opensmu.battery.Profiler``) for anything beyond a short demo.
+    (``benchctrl.battery.Profiler``) for anything beyond a short demo.
 
     The discharge profile uses **current mode only** in phase 3 — power
     and resistance modes are tracked for later.
@@ -992,7 +992,7 @@ def battery_emulator_stop() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# QR10x programmable resistance (opensmu.bench)
+# QR10x programmable resistance (benchctrl.bench)
 # ---------------------------------------------------------------------------
 
 _qr10x: Optional[QR10x] = None
@@ -1000,7 +1000,7 @@ _qr10x_lock = threading.RLock()
 
 
 def _get_qr10x() -> QR10x:
-    from opensmu.bench.qr10x import QR10xConnectionError
+    from benchctrl.bench.qr10x import QR10xConnectionError
     if _qr10x is None or not _qr10x.is_open:
         raise QR10xConnectionError(
             "QR10x not open — call qr10x_open(port=...) first."
@@ -1118,7 +1118,7 @@ def qr10x_decr(delta_ohm: float) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Rigol DL3031A programmable DC electronic load (opensmu.bench)
+# Rigol DL3031A programmable DC electronic load (benchctrl.bench)
 # ---------------------------------------------------------------------------
 
 _dl3031a = None  # actually Optional[RigolDL3031A] but kept Any to avoid eager import
@@ -1126,7 +1126,7 @@ _dl3031a_lock = threading.RLock()
 
 
 def _get_dl3031a():
-    from opensmu.bench.rigol_dl3031a import RigolDLConnectionError
+    from benchctrl.bench.rigol_dl3031a import RigolDLConnectionError
     if _dl3031a is None:
         raise RigolDLConnectionError(
             "DL3031A not open — call dl3031a_open() first."
@@ -1145,7 +1145,7 @@ def dl3031a_open(resource: Optional[str] = None) -> dict:
     Returns the device's *IDN? identity on success.
     """
     global _dl3031a
-    from opensmu.bench import RigolDL3031A
+    from benchctrl.bench import RigolDL3031A
     with _dl3031a_lock:
         if _dl3031a is not None:
             info = _dl3031a.info()
@@ -1608,7 +1608,7 @@ def export_recording(
 
     Output format is selected by the ``output_path`` extension:
     ``.csv`` / ``.json`` / ``.parquet`` / ``.opensmu``. Parquet output
-    requires ``opensmu[parquet]`` installed.
+    requires ``benchctrl[parquet]`` installed.
 
     Useful for "share this recording in parquet" or "give me CSV for
     the spreadsheet" without re-running the capture.
@@ -1671,7 +1671,7 @@ def disconnect() -> dict:
 
 
 def main() -> None:
-    """``opensmu-mcp`` entry point. Runs the FastMCP server on stdio."""
+    """``benchctrl-mcp`` entry point. Runs the FastMCP server on stdio."""
     try:
         mcp.run()
     finally:

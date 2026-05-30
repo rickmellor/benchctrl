@@ -36,7 +36,7 @@ used and what the device did.
 - Device: <!-- e.g. Rigol DL3031A -->
 - Firmware: <!-- e.g. 00.01.05.00.01 -->
 - pyvisa backend (if applicable):
-- OpenSMU version:
+- benchctrl version:
 
 <!--
 If you want to send a PR documenting this:

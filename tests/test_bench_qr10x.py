@@ -1,8 +1,8 @@
-"""Tests for opensmu.bench.qr10x.
+"""Tests for benchctrl.bench.qr10x.
 
 Hardware-free tests exercise the parser helpers and validation.
 Hardware-required tests (marked) drive a real QR10x on a known port —
-default ``COM7``; override via ``OPENSMU_QR10X_PORT``.
+default ``COM7``; override via ``BENCHCTRL_QR10X_PORT``.
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import os
 
 import pytest
 
-from opensmu.bench import QR10x, QR10xInfo
-from opensmu.bench.qr10x import QR10xValueError
+from benchctrl.bench import QR10x, QR10xInfo
+from benchctrl.bench.qr10x import QR10xValueError
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +115,7 @@ def test_decr_rejects_negative_delta():
 
 
 def test_unopened_cmd_raises_connection_error():
-    from opensmu.bench.qr10x import QR10xConnectionError
+    from benchctrl.bench.qr10x import QR10xConnectionError
 
     qr = QR10x("__dummy__")  # not opened
     with pytest.raises(QR10xConnectionError):
@@ -127,7 +127,7 @@ def test_unopened_cmd_raises_connection_error():
 # ---------------------------------------------------------------------------
 
 
-HW_PORT = os.environ.get("OPENSMU_QR10X_PORT", "COM7")
+HW_PORT = os.environ.get("BENCHCTRL_QR10X_PORT", "COM7")
 
 
 @pytest.fixture

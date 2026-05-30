@@ -13,14 +13,14 @@ pytestmark = pytest.mark.hardware
 def _disconnect_after_each_test():
     """Each MCP test owns the singleton SMU; clean up at the end."""
     yield
-    from opensmu import mcp as m
+    from benchctrl import mcp as m
 
     m._close_smu()
 
 
 def _ensure_hardware_available():
     """Skip if no Arc is connected."""
-    from opensmu import SMU
+    from benchctrl import SMU
 
     if not SMU.discover():
         pytest.skip("no Arc Pro found")
@@ -31,7 +31,7 @@ def _ensure_hardware_available():
 
 def test_info_returns_device_metadata():
     _ensure_hardware_available()
-    from opensmu.mcp import info
+    from benchctrl.mcp import info
 
     r = info()
     assert r["is_connected"] is True
@@ -41,7 +41,7 @@ def test_info_returns_device_metadata():
 
 def test_state_returns_full_snapshot():
     _ensure_hardware_available()
-    from opensmu.mcp import state
+    from benchctrl.mcp import state
 
     r = state()
     for k in ("voltage_V", "current_limit_A", "output_enabled",
@@ -51,7 +51,7 @@ def test_state_returns_full_snapshot():
 
 def test_versions_returns_strings():
     _ensure_hardware_available()
-    from opensmu.mcp import versions
+    from benchctrl.mcp import versions
 
     r = versions()
     assert r["name"] == "Arc"
@@ -65,7 +65,7 @@ def test_versions_returns_strings():
 
 def test_set_voltage_updates_state():
     _ensure_hardware_available()
-    from opensmu.mcp import set_voltage, state
+    from benchctrl.mcp import set_voltage, state
 
     r = set_voltage(3.0)
     assert r["set_voltage_V"] == 3.0
@@ -75,7 +75,7 @@ def test_set_voltage_updates_state():
 
 def test_set_current_limit_updates_state():
     _ensure_hardware_available()
-    from opensmu.mcp import set_current_limit, state
+    from benchctrl.mcp import set_current_limit, state
 
     set_current_limit(1.0)
     assert state()["current_limit_A"] == 1.0
@@ -84,7 +84,7 @@ def test_set_current_limit_updates_state():
 
 def test_set_range_round_trip():
     _ensure_hardware_available()
-    from opensmu.mcp import set_range, state
+    from benchctrl.mcp import set_range, state
 
     set_range("low")
     assert state()["range"] == "low"
@@ -95,7 +95,7 @@ def test_set_range_round_trip():
 
 def test_set_4wire_toggle():
     _ensure_hardware_available()
-    from opensmu.mcp import set_4wire, state
+    from benchctrl.mcp import set_4wire, state
 
     set_4wire(True)
     assert state()["four_wire_enabled"] is True
@@ -108,7 +108,7 @@ def test_set_4wire_toggle():
 
 def test_enable_output_refuses_without_current_limit():
     _ensure_hardware_available()
-    from opensmu.mcp import disconnect, enable_output
+    from benchctrl.mcp import disconnect, enable_output
 
     # Fresh connection: no current_limit cached
     disconnect()
@@ -119,7 +119,7 @@ def test_enable_output_refuses_without_current_limit():
 
 def test_enable_output_refuses_without_confirmation():
     _ensure_hardware_available()
-    from opensmu.mcp import enable_output, set_current_limit, set_voltage
+    from benchctrl.mcp import enable_output, set_current_limit, set_voltage
 
     set_voltage(3.0)
     set_current_limit(1.0)
@@ -132,7 +132,7 @@ def test_enable_output_refuses_without_confirmation():
 
 def test_enable_output_accepts_when_all_guards_pass():
     _ensure_hardware_available()
-    from opensmu.mcp import (
+    from benchctrl.mcp import (
         disable_output,
         enable_output,
         set_current_limit,
@@ -151,7 +151,7 @@ def test_enable_output_accepts_when_all_guards_pass():
 
 def test_take_snapshot_returns_channel_values():
     _ensure_hardware_available()
-    from opensmu.mcp import take_snapshot
+    from benchctrl.mcp import take_snapshot
 
     r = take_snapshot(duration_s=0.5)
     # baseline streaming returns ~12 channels in a 0.5 s window
@@ -163,7 +163,7 @@ def test_take_snapshot_returns_channel_values():
 
 def test_live_returns_single_value():
     _ensure_hardware_available()
-    from opensmu.mcp import live
+    from benchctrl.mcp import live
 
     r = live("mv", timeout_s=2.0)
     assert r["channel"] == "mv"
@@ -173,7 +173,7 @@ def test_live_returns_single_value():
 
 def test_record_returns_statistics():
     _ensure_hardware_available()
-    from opensmu.mcp import record
+    from benchctrl.mcp import record
 
     r = record(seconds=1.0, channels=["mc", "mv"])
     assert "mc" in r["channels"]
@@ -186,7 +186,7 @@ def test_record_returns_statistics():
 
 def test_record_saves_csv_when_requested(tmp_path):
     _ensure_hardware_available()
-    from opensmu.mcp import record
+    from benchctrl.mcp import record
 
     out = tmp_path / "run.csv"
     r = record(seconds=0.6, channels=["mv"], save_path=str(out))
@@ -197,7 +197,7 @@ def test_record_saves_csv_when_requested(tmp_path):
 
 def test_record_saves_native_when_extension_unknown(tmp_path):
     _ensure_hardware_available()
-    from opensmu.mcp import record
+    from benchctrl.mcp import record
 
     out = tmp_path / "run.bin"
     r = record(seconds=0.6, channels=["mv"], save_path=str(out))
@@ -208,7 +208,7 @@ def test_record_saves_parquet_extension(tmp_path):
     """v0.4.0 sync — `record` now handles `.parquet` save_path natively."""
     _ensure_hardware_available()
     pytest.importorskip("pyarrow")
-    from opensmu.mcp import record
+    from benchctrl.mcp import record
 
     out = tmp_path / "run.parquet"
     r = record(seconds=0.6, channels=["mv"], save_path=str(out))
@@ -220,7 +220,7 @@ def test_record_plot_png_produces_image(tmp_path):
     """v0.4.0 sync — `record` can also render a matplotlib PNG in one call."""
     _ensure_hardware_available()
     pytest.importorskip("matplotlib")
-    from opensmu.mcp import record
+    from benchctrl.mcp import record
 
     out = tmp_path / "run.png"
     r = record(seconds=0.6, channels=["mc", "mv"], plot_png=str(out))
@@ -234,7 +234,7 @@ def test_record_combined_save_and_plot(tmp_path):
     _ensure_hardware_available()
     pytest.importorskip("pyarrow")
     pytest.importorskip("matplotlib")
-    from opensmu.mcp import record
+    from benchctrl.mcp import record
 
     parquet_out = tmp_path / "run.parquet"
     png_out = tmp_path / "run.png"
@@ -255,7 +255,7 @@ def test_record_combined_save_and_plot(tmp_path):
 
 def test_set_gpo_pin_3_works_via_mcp():
     _ensure_hardware_available()
-    from opensmu.mcp import set_gpo, state
+    from benchctrl.mcp import set_gpo, state
 
     set_gpo(3, True)
     set_gpo(3, False)
@@ -268,7 +268,7 @@ def test_set_gpo_pin_3_works_via_mcp():
 
 def test_disconnect_then_reconnect():
     _ensure_hardware_available()
-    from opensmu.mcp import disconnect, reconnect, state
+    from benchctrl.mcp import disconnect, reconnect, state
 
     state()  # ensure connection
     disconnect()

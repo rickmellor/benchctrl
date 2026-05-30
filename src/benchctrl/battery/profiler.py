@@ -1,9 +1,9 @@
 """Battery profiler — orchestrates a real-cell discharge to build a profile.
 
-Replaces Qoitech's Battery Profiler on top of opensmu's existing wire
+Replaces Qoitech's Battery Profiler on top of benchctrl's existing wire
 vocabulary (CC mode, recording, voltage measurement). The result is a
-:class:`opensmu.battery.BatteryProfile` that round-trips through Otii
-and opensmu's other battery tools.
+:class:`benchctrl.battery.BatteryProfile` that round-trips through Otii
+and benchctrl's other battery tools.
 
 How it works
 ------------
@@ -35,7 +35,7 @@ equivalent at slower rates for now.
 
 Hardware
 --------
-The profiler issues only commands opensmu already speaks (``set_main_current``,
+The profiler issues only commands benchctrl already speaks (``set_main_current``,
 ``set_output``, recording, statistics). It does NOT require the licensed
 Battery Toolbox features and is interoperable with both Arc and Ace Pro.
 """
@@ -47,7 +47,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Optional
 
-from opensmu.battery.profile import (
+from benchctrl.battery.profile import (
     Battery,
     BatteryProfile,
     DeviceInfo,
@@ -55,12 +55,12 @@ from opensmu.battery.profile import (
     DischargeSample,
     DischargeTable,
 )
-from opensmu.exceptions import SMUValueError
+from benchctrl.exceptions import SMUValueError
 
 if TYPE_CHECKING:
-    from opensmu.device import SMU
+    from benchctrl.device import SMU
 
-log = logging.getLogger("opensmu.battery.profiler")
+log = logging.getLogger("benchctrl.battery.profiler")
 
 # Minimum supported step duration; below this, USB-driven step changes
 # are not reliably bounded.
@@ -80,7 +80,7 @@ class ProfilerConfig:
 
     Attributes:
         discharge_profile: high/low load definition + exit conditions
-            (an :class:`opensmu.battery.DischargeProfile`).
+            (an :class:`benchctrl.battery.DischargeProfile`).
         battery: physical metadata for the cell being profiled (capacity,
             nominal voltage, manufacturer, model, size).
         temperature: ambient temperature during measurement (°C).
@@ -151,11 +151,11 @@ class Profiler:
 
     Usage:
 
-        from opensmu import SMU
-        from opensmu.battery import (
+        from benchctrl import SMU
+        from benchctrl.battery import (
             Battery, DischargeProfile, DischargeStep, ExitConditions,
         )
-        from opensmu.battery.profiler import Profiler, ProfilerConfig
+        from benchctrl.battery.profiler import Profiler, ProfilerConfig
 
         config = ProfilerConfig(
             discharge_profile=DischargeProfile(
@@ -199,7 +199,7 @@ class Profiler:
         progress: Optional[Callable[[ProfilerSample], None]] = None,
     ) -> ProfilerResult:
         """Execute the discharge cycle and return the resulting profile."""
-        from opensmu import Channel
+        from benchctrl import Channel
 
         dp = self.config.discharge_profile
         high = dp.high
@@ -333,7 +333,7 @@ class Profiler:
             if step.mode != "current":
                 raise SMUValueError(
                     f"discharge_profile.{step_name}.mode is {step.mode!r}; "
-                    "phase 3 of opensmu's profiler supports only 'current' mode. "
+                    "phase 3 of benchctrl's profiler supports only 'current' mode. "
                     "Power and resistance modes are tracked for later."
                 )
         if self.config.battery.capacity <= 0:
@@ -396,7 +396,7 @@ class Profiler:
 
     def _build_profile(self, samples: list[ProfilerSample]) -> BatteryProfile:
         """Assemble a BatteryProfile from the captured samples."""
-        from opensmu._version import __version__ as opensmu_version
+        from benchctrl._version import __version__ as benchctrl_version
 
         device_info = DeviceInfo(
             type="Arc",
@@ -424,7 +424,7 @@ class Profiler:
             temperature=self.config.temperature,
             temperature_unit=self.config.temperature_unit,
             device=device_info,
-            software_version=f"opensmu/{opensmu_version}",
+            software_version=f"benchctrl/{benchctrl_version}",
         )
         return BatteryProfile(
             battery=self.config.battery,

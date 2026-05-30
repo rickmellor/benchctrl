@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 
-from opensmu import SMU, Channel, Recording
+from benchctrl import SMU, Channel, Recording
 
 
 def main() -> None:

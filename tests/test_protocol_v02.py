@@ -6,7 +6,7 @@ import struct
 
 import pytest
 
-from opensmu.protocol import (
+from benchctrl.protocol import (
     CMD_GET_DEVICE_NAME,
     CMD_SET_POWER_REGULATION,
     CMD_WRITE_TX,
@@ -44,7 +44,7 @@ def test_power_regulation_value_helper():
 
 
 def test_power_regulation_value_rejects_unknown_mode():
-    from opensmu.exceptions import SMUProtocolError
+    from benchctrl.exceptions import SMUProtocolError
 
     with pytest.raises(SMUProtocolError):
         power_regulation_value("eternal-glory")
@@ -190,7 +190,7 @@ def test_legacy_parse_error_frame_uses_status_word():
     The legacy v0.1 implementation hard-coded the ``04 10 00 00`` prefix
     which was actually ``seq=0x1004``. v0.2 keys off the status field,
     which is semantically correct."""
-    from opensmu.protocol import parse_error_frame
+    from benchctrl.protocol import parse_error_frame
 
     # status = -101 with last_good = 3_000_000
     payload = (
@@ -206,7 +206,7 @@ def test_legacy_parse_error_frame_uses_status_word():
 
 
 def test_legacy_parse_set_ack_returns_set_value():
-    from opensmu.protocol import parse_set_ack_frame
+    from benchctrl.protocol import parse_set_ack_frame
 
     payload = (
         b"\x0e\x03\x99\xff"

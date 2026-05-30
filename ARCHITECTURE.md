@@ -1,6 +1,6 @@
 # Architecture
 
-One-page tour of the OpenSMU codebase. Read this before
+One-page tour of the benchctrl codebase. Read this before
 [`docs/design.md`](docs/design.md) — design.md covers the SMU layer in
 depth; this file is the wide view.
 
@@ -8,14 +8,14 @@ depth; this file is the wide view.
 
 ```
                           ┌──────────────────────────────────────┐
-                          │   MCP server  (opensmu.mcp)          │
+                          │   MCP server  (benchctrl.mcp)          │
                           │   93 tools — thin wrappers around    │
                           │   the SDK methods below              │
                           └──────────────────────────────────────┘
                               │           │            │
                               ▼           ▼            ▼
               ┌───────────────────┐ ┌──────────┐ ┌──────────────┐
-              │   opensmu.SMU     │ │ battery  │ │   bench      │
+              │   benchctrl.SMU     │ │ battery  │ │   bench      │
               │   (Arc / Arc Pro) │ │ profile/ │ │ QR10x        │
               │                   │ │ profiler/│ │ RigolDL3031A │
               │ source • measure  │ │ emulator/│ │              │
@@ -43,7 +43,7 @@ doesn't expose it to lower layers.
 
 ## Layer 1 — instrument I/O
 
-### `opensmu.SMU` and friends
+### `benchctrl.SMU` and friends
 
 The original library. Drives the Otii Arc / Arc Pro over USB CDC-ACM.
 Internal layering (covered in detail in [`docs/design.md`](docs/design.md)):
@@ -62,18 +62,18 @@ Public surface: `SMU`, `Recording`, `Channel`, the `SMUError`
 hierarchy. Wire-protocol details and channel IDs are internal.
 
 Key files:
-- `src/opensmu/device.py` — `SMU` class
-- `src/opensmu/recording.py` — `Recording` class
-- `src/opensmu/protocol.py` — frame framing, command codes
-- `src/opensmu/samples.py` — sample parsing, statistics, exports
-- `src/opensmu/transport.py` — pyserial wrapper
-- `src/opensmu/channels.py` — `Channel` enum
+- `src/benchctrl/device.py` — `SMU` class
+- `src/benchctrl/recording.py` — `Recording` class
+- `src/benchctrl/protocol.py` — frame framing, command codes
+- `src/benchctrl/samples.py` — sample parsing, statistics, exports
+- `src/benchctrl/transport.py` — pyserial wrapper
+- `src/benchctrl/channels.py` — `Channel` enum
 
 Hardware constants (USB VID/PID, channel wire-IDs, command opcodes)
 live in `protocol.py` and `channels.py`. The session-init handshake
 the device requires is implemented in `SMU.open()`.
 
-### `opensmu.bench` — companion instrument drivers
+### `benchctrl.bench` — companion instrument drivers
 
 Parallel to `SMU`, not built on top of it — both subsystems are
 peers at the I/O boundary. Bench drivers exist so a battery emulator
@@ -82,15 +82,15 @@ having to write their own RS232 / VISA glue.
 
 Each driver is independent:
 
-- `opensmu.bench.QR10x` — Eastwood Tech programmable resistor.
+- `benchctrl.bench.QR10x` — Eastwood Tech programmable resistor.
   USB-Serial via pyserial. Private AT command set. ~280 lines.
-- `opensmu.bench.RigolDL3031A` — Rigol DL3000-series electronic
+- `benchctrl.bench.RigolDL3031A` — Rigol DL3000-series electronic
   load. USB-TMC + SCPI via pyvisa (or LAN/RS232). LIST sequence
   mode + transient + battery-discharge + trigger system. ~900
   lines.
 
-`opensmu.bench.__init__` uses PEP 562 lazy attribute lookup so
-`from opensmu.bench import QR10x` doesn't pull in pyvisa for users
+`benchctrl.bench.__init__` uses PEP 562 lazy attribute lookup so
+`from benchctrl.bench import QR10x` doesn't pull in pyvisa for users
 who only have the QR10x.
 
 Drivers expose their own exception hierarchies
@@ -108,7 +108,7 @@ The driver rejects known-bad inputs at the SDK boundary.
 
 ## Layer 2 — battery toolbox
 
-`opensmu.battery` replaces Qoitech's licensed Battery Toolbox in four
+`benchctrl.battery` replaces Qoitech's licensed Battery Toolbox in four
 phased modules:
 
 ```
@@ -135,7 +135,7 @@ records V/I to characterize a real cell into the Otii JSON format.
 
 ## Layer 3 — composition
 
-### `opensmu.mcp` — Model Context Protocol server
+### `benchctrl.mcp` — Model Context Protocol server
 
 Wraps the entire SDK as MCP tools so LLM agents can drive a real
 bench. 93 tools at v0.9.7:
@@ -160,7 +160,7 @@ parity entries on the DL3031A driver, all fixed in the same release.
 
 ### `validation/` — reproducible scenario harness
 
-Top-level directory, not under `src/opensmu/`. Contains a CLI that
+Top-level directory, not under `src/benchctrl/`. Contains a CLI that
 drives the emulator against a programmable load and saves the
 captured response as a self-describing artifact bundle.
 
@@ -192,7 +192,7 @@ external Otii profile bundle.
 
 ### Output formats
 
-`opensmu.samples` knows how to export `Recording` data in:
+`benchctrl.samples` knows how to export `Recording` data in:
 
 - Native `.opensmu` binary (lossless, the canonical format)
 - CSV / JSON
@@ -201,7 +201,7 @@ external Otii profile bundle.
 - Parquet (via pyarrow)
 - matplotlib PNG
 
-Each non-native format is a lazy import — `pip install opensmu`
+Each non-native format is a lazy import — `pip install benchctrl`
 gives you `.opensmu` + CSV + JSON; the rest gate behind `[science]`
 extras. Format selection happens at the call site
 (`rec.save_csv(...)` / `rec.save_parquet(...)`).
@@ -225,20 +225,20 @@ emulator before opening the recording.
 Two-level exception hierarchy:
 
 ```
-SMUError                                 (in opensmu.exceptions)
+SMUError                                 (in benchctrl.exceptions)
 ├── SMUConnectionError                   transport / open failure
 ├── SMUValueError                        client-side validation
 ├── SMUTimeoutError                      no expected response
 ├── SMUCommandError                      device rejected with -101 etc.
 └── SMUNotImplementedError               vendor-only methods we don't expose
 
-QR10xError                               (in opensmu.bench.qr10x)
+QR10xError                               (in benchctrl.bench.qr10x)
 ├── QR10xConnectionError
 ├── QR10xProtocolError
 ├── QR10xTimeoutError
 └── QR10xValueError
 
-RigolDLError                             (in opensmu.bench.rigol_dl3031a)
+RigolDLError                             (in benchctrl.bench.rigol_dl3031a)
 ├── RigolDLConnectionError
 ├── RigolDLCommandError                  device -101 from :SYSTem:ERRor?
 ├── RigolDLTimeoutError                  VI_ERROR_TMO

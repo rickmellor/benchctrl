@@ -1,6 +1,6 @@
 """Battery life calculator — duty-cycle discharge simulator.
 
-Replaces Qoitech's Battery Life Calculator on top of opensmu's open
+Replaces Qoitech's Battery Life Calculator on top of benchctrl's open
 profile format. Pure-Python; no SMU connection required.
 
 Two estimators:
@@ -11,7 +11,7 @@ Two estimators:
   numbers.
 
 - :func:`estimate_life_from_profile` — iterative against a
-  :class:`opensmu.battery.BatteryProfile`. Tracks used capacity per
+  :class:`benchctrl.battery.BatteryProfile`. Tracks used capacity per
   duty cycle, looks up open-circuit voltage from the profile's
   discharge curve, stops when OCV drops below cutoff. Accounts for the
   declining voltage over discharge, which a simple ``capacity ÷ current``
@@ -19,14 +19,14 @@ Two estimators:
 
 Both estimators accept a :class:`DutyCycle` describing an active/sleep
 load pattern. :func:`duty_cycle_from_recording` extracts a DutyCycle
-from an opensmu :class:`Recording` by averaging main current over two
+from an benchctrl :class:`Recording` by averaging main current over two
 user-selected time windows — the same workflow as Otii's "Get from
 selection" button.
 
 Example:
 
-    >>> from opensmu.battery import BatteryProfile
-    >>> from opensmu.battery.calculator import DutyCycle, estimate_life_from_profile
+    >>> from benchctrl.battery import BatteryProfile
+    >>> from benchctrl.battery.calculator import DutyCycle, estimate_life_from_profile
     >>> profile = BatteryProfile.load("CR2032-Energizer-(25).json")
     >>> duty = DutyCycle(
     ...     active_current_A=0.020,     # 20 mA when transmitting
@@ -44,12 +44,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from opensmu.exceptions import SMUValueError
+from benchctrl.exceptions import SMUValueError
 
-from opensmu.battery.profile import BatteryProfile
+from benchctrl.battery.profile import BatteryProfile
 
 if TYPE_CHECKING:
-    from opensmu.recording import Recording
+    from benchctrl.recording import Recording
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +405,7 @@ def duty_cycle_from_recording(
     in each.
 
     Args:
-        rec: an opensmu :class:`Recording`.
+        rec: an benchctrl :class:`Recording`.
         active_window: ``(start_s, end_s)`` for the active phase.
         sleep_window: ``(start_s, end_s)`` for the sleep phase.
         channel: which channel to read (defaults to ``"mc"``).
@@ -414,7 +414,7 @@ def duty_cycle_from_recording(
     — i.e. the cycle structure you observed in the recording, not an
     abstract duty cycle from a datasheet.
     """
-    from opensmu import Channel
+    from benchctrl import Channel
 
     ch = Channel.coerce(channel)
     if ch not in rec:

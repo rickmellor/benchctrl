@@ -3,14 +3,14 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "opensmu"
+name = "benchctrl"
 version = "0.9.7"
 description = "Open-source Python control library for USB source-measurement units (Qoitech Otii Arc/Pro). No vendor server required."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
-    { name = "OpenSMU contributors" }
+    { name = "benchctrl contributors" }
 ]
 keywords = ["smu", "source-measurement-unit", "instrumentation", "usb", "current-measurement", "otii", "arc"]
 classifiers = [
@@ -44,20 +44,20 @@ numpy = [
     "numpy>=1.20",
 ]
 pandas = [
-    "opensmu[numpy]",
+    "benchctrl[numpy]",
     "pandas>=2.0",
 ]
 parquet = [
-    "opensmu[pandas]",
+    "benchctrl[pandas]",
     "pyarrow>=10",
 ]
 plot = [
-    "opensmu[numpy]",
+    "benchctrl[numpy]",
     "matplotlib>=3.5",
 ]
 science = [
-    "opensmu[parquet]",
-    "opensmu[plot]",
+    "benchctrl[parquet]",
+    "benchctrl[plot]",
 ]
 mcp = [
     "mcp>=1.0",
@@ -66,17 +66,17 @@ mcp = [
 bench = []
 # Future SCPI / VISA bench instruments (Rigol DL3031A etc.)
 bench-visa = [
-    "opensmu[bench]",
+    "benchctrl[bench]",
     "pyvisa>=1.13",
 ]
 
 [project.scripts]
-opensmu = "opensmu.cli:main"
-opensmu-mcp = "opensmu.mcp:main"
+benchctrl = "benchctrl.cli:main"
+benchctrl-mcp = "benchctrl.mcp:main"
 
 [project.urls]
-Documentation = "https://github.com/opensmu/opensmu#readme"
-Repository = "https://github.com/opensmu/opensmu"
+Documentation = "https://github.com/benchctrl/benchctrl#readme"
+Repository = "https://github.com/benchctrl/benchctrl"
 
 [tool.setuptools.packages.find]
 where = ["src"]

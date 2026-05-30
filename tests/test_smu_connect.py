@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from opensmu import SMU
+from benchctrl import SMU
 
 pytestmark = pytest.mark.hardware
 

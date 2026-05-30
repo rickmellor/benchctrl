@@ -20,9 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
 
-from opensmu.channels import Channel
-from opensmu.exceptions import SMUNotImplementedError, SMUValueError
-from opensmu.samples import (
+from benchctrl.channels import Channel
+from benchctrl.exceptions import SMUNotImplementedError, SMUValueError
+from benchctrl.samples import (
     ChannelBuffer,
     Statistics,
     compute_statistics,
@@ -282,7 +282,7 @@ class Recording:
     # --- data-science conveniences (optional dependencies) --------------
     #
     # Each method below is gated by a lazy import — the optional dep is
-    # only loaded when the method is actually called. opensmu itself
+    # only loaded when the method is actually called. benchctrl itself
     # imports clean without any of numpy / pandas / pyarrow / matplotlib
     # installed; you only need them if you call the corresponding
     # method. Each lazy import is wrapped to produce a clear, actionable
@@ -292,7 +292,7 @@ class Recording:
         """Return this channel's samples as a 1-D ``numpy.ndarray`` (float32).
 
         **Optional dependency**: ``numpy``. Install with
-        ``pip install opensmu[numpy]``. opensmu itself imports clean
+        ``pip install benchctrl[numpy]``. benchctrl itself imports clean
         without numpy — you only need it if you call this method.
 
         See :py:meth:`timestamps_numpy` for the matching time axis.
@@ -302,7 +302,7 @@ class Recording:
         except ImportError as e:  # pragma: no cover - environment-dependent
             raise ImportError(
                 "to_numpy() requires numpy. "
-                "Install with: pip install 'opensmu[numpy]'"
+                "Install with: pip install 'benchctrl[numpy]'"
             ) from e
 
         buf = self.buffer(channel)
@@ -312,7 +312,7 @@ class Recording:
         """Return this channel's synthetic time axis as a 1-D ``numpy.ndarray``.
 
         **Optional dependency**: ``numpy``. Install with
-        ``pip install opensmu[numpy]``.
+        ``pip install benchctrl[numpy]``.
 
         Offset-adjusted to match :py:meth:`timestamps`.
         """
@@ -321,7 +321,7 @@ class Recording:
         except ImportError as e:  # pragma: no cover
             raise ImportError(
                 "timestamps_numpy() requires numpy. "
-                "Install with: pip install 'opensmu[numpy]'"
+                "Install with: pip install 'benchctrl[numpy]'"
             ) from e
 
         buf = self.buffer(channel)
@@ -343,14 +343,14 @@ class Recording:
           want forward-filled values.
 
         **Optional dependency**: ``pandas`` (which pulls in ``numpy``).
-        Install with ``pip install opensmu[pandas]``.
+        Install with ``pip install benchctrl[pandas]``.
         """
         try:
             import pandas as pd
         except ImportError as e:  # pragma: no cover
             raise ImportError(
                 "to_pandas() requires pandas. "
-                "Install with: pip install 'opensmu[pandas]'"
+                "Install with: pip install 'benchctrl[pandas]'"
             ) from e
 
         if channel is not None:
@@ -397,7 +397,7 @@ class Recording:
 
         **Optional dependency**: ``pyarrow`` (and ``pandas`` for the
         DataFrame construction). Install with
-        ``pip install opensmu[parquet]``.
+        ``pip install benchctrl[parquet]``.
         """
         try:
             import pyarrow as pa
@@ -405,7 +405,7 @@ class Recording:
         except ImportError as e:  # pragma: no cover
             raise ImportError(
                 "save_parquet() requires pyarrow. "
-                "Install with: pip install 'opensmu[parquet]'"
+                "Install with: pip install 'benchctrl[parquet]'"
             ) from e
 
         df = self.to_pandas().reset_index()
@@ -423,9 +423,9 @@ class Recording:
         table = table.replace_schema_metadata(
             {
                 **(table.schema.metadata or {}),
-                b"opensmu.recording_name": self.name.encode("utf-8"),
-                b"opensmu.offset_s": str(self.offset).encode("utf-8"),
-                b"opensmu.columns": json.dumps(col_meta).encode("utf-8"),
+                b"benchctrl.recording_name": self.name.encode("utf-8"),
+                b"benchctrl.offset_s": str(self.offset).encode("utf-8"),
+                b"benchctrl.columns": json.dumps(col_meta).encode("utf-8"),
             }
         )
         p = Path(path)
@@ -447,14 +447,14 @@ class Recording:
         ``plt.show()``; pass ``show=False`` in headless / batch contexts.
 
         **Optional dependency**: ``matplotlib``. Install with
-        ``pip install opensmu[plot]``.
+        ``pip install benchctrl[plot]``.
         """
         try:
             import matplotlib.pyplot as plt
         except ImportError as e:  # pragma: no cover
             raise ImportError(
                 "plot() requires matplotlib. "
-                "Install with: pip install 'opensmu[plot]'"
+                "Install with: pip install 'benchctrl[plot]'"
             ) from e
 
         if channels is None:
@@ -484,7 +484,7 @@ class Recording:
 
     # --- native binary format ('.opensmu') ------------------------------
 
-    OPENSMU_MAGIC = b"OSMU\x00\x00\x00\x01"  # 8 B — schema version 1
+    BENCHCTRL_MAGIC = b"OSMU\x00\x00\x00\x01"  # 8 B — schema version 1
 
     def save(self, path: str | Path) -> Path:
         """Save to a self-contained `.opensmu` binary file.
@@ -514,7 +514,7 @@ class Recording:
         }
         header_bytes = json.dumps(header).encode("utf-8")
         with p.open("wb") as f:
-            f.write(self.OPENSMU_MAGIC)
+            f.write(self.BENCHCTRL_MAGIC)
             f.write(struct.pack("<I", len(header_bytes)))
             f.write(header_bytes)
             for ch, buf in self._buffers.items():
@@ -541,7 +541,7 @@ class Recording:
         p = Path(path)
         with p.open("rb") as f:
             magic = f.read(8)
-            if magic != cls.OPENSMU_MAGIC:
+            if magic != cls.BENCHCTRL_MAGIC:
                 raise SMUValueError(
                     f"{p}: not an .opensmu file (bad magic {magic!r})"
                 )

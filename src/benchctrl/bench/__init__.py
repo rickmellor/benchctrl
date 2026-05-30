@@ -1,6 +1,6 @@
 """Bench instruments — companions to the SMU for measurement / DUT loads.
 
-OpenSMU's "bench" subpackage hosts drivers for other lab instruments
+benchctrl's "bench" subpackage hosts drivers for other lab instruments
 typically wired alongside an Otii Arc Pro:
 
 - **Programmable resistors** for emulator validation, current-draw
@@ -12,16 +12,16 @@ Each driver is independent and optional. Import only what you need.
 
 Currently available:
 
-- :py:class:`opensmu.bench.QR10x` — Eastwood Tech QR10x programmable
+- :py:class:`benchctrl.bench.QR10x` — Eastwood Tech QR10x programmable
   resistance substitution box (CH340 USB-Serial, AT command set)
-- :py:class:`opensmu.bench.RigolDL3031A` — Rigol DL3031A programmable
-  DC electronic load (USB-TMC via pyvisa; install `opensmu[bench-visa]`)
+- :py:class:`benchctrl.bench.RigolDL3031A` — Rigol DL3031A programmable
+  DC electronic load (USB-TMC via pyvisa; install `benchctrl[bench-visa]`)
 
-The DL3031A driver is lazily exported: importing ``opensmu.bench``
+The DL3031A driver is lazily exported: importing ``benchctrl.bench``
 will not pull in pyvisa unless you reach for the symbol.
 """
 
-from opensmu.bench.qr10x import QR10x, QR10xError, QR10xInfo
+from benchctrl.bench.qr10x import QR10x, QR10xError, QR10xInfo
 
 __all__ = [
     "QR10x", "QR10xInfo", "QR10xError",
@@ -33,7 +33,7 @@ def __getattr__(name):
     # PEP 562: lazy attribute lookup. Keeps pyvisa out of the import
     # graph for callers that only use QR10x.
     if name in ("RigolDL3031A", "RigolDLInfo", "RigolDLError"):
-        from opensmu.bench.rigol_dl3031a import (
+        from benchctrl.bench.rigol_dl3031a import (
             RigolDL3031A, RigolDLInfo, RigolDLError,
         )
         return {
@@ -41,4 +41,4 @@ def __getattr__(name):
             "RigolDLInfo": RigolDLInfo,
             "RigolDLError": RigolDLError,
         }[name]
-    raise AttributeError(f"module 'opensmu.bench' has no attribute {name!r}")
+    raise AttributeError(f"module 'benchctrl.bench' has no attribute {name!r}")

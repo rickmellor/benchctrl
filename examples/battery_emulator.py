@@ -9,7 +9,7 @@ chemistry.
 Setup:
     Arc Pro on USB. A DUT (or programmable load) wired across the
     Arc's main output. For the bench-validation case, the QR10x or
-    DL3031A drivers in opensmu.bench let you script the load too.
+    DL3031A drivers in benchctrl.bench let you script the load too.
 
 Run:
     python examples/battery_emulator.py path/to/CR2032-Energizer-(25).json
@@ -25,8 +25,8 @@ import argparse
 import time
 from pathlib import Path
 
-from opensmu import SMU
-from opensmu.battery import BatteryProfile, Emulator, EmulatorConfig
+from benchctrl import SMU
+from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
 
 
 def main() -> None:

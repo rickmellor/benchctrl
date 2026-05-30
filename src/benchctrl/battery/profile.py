@@ -7,14 +7,14 @@ A battery profile describes a real battery's discharge characteristics:
 
 The on-disk JSON schema matches the format Qoitech's Otii application
 ships with (`C:\\Users\\<user>\\AppData\\Local\\otii3\\app-*\\resources\\batteryprofiles`).
-Profiles produced by opensmu round-trip bit-identically through Otii, so
+Profiles produced by benchctrl round-trip bit-identically through Otii, so
 existing measurement data is interchangeable in both directions.
 
 This module is pure data + I/O — no SMU connection or hardware required.
 
 Example:
 
-    >>> from opensmu.battery import BatteryProfile
+    >>> from benchctrl.battery import BatteryProfile
     >>> p = BatteryProfile.load("CR2032-Energizer-(25).json")
     >>> p.nominal_voltage, p.nominal_capacity_mAh
     (3.0, 230.24)
@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Optional, Union
 
-from opensmu.exceptions import SMUValueError
+from benchctrl.exceptions import SMUValueError
 
 # Discharge step "mode" — Otii supports current-mode (A) and power-mode (W) loads.
 DischargeMode = Literal["current", "power"]
@@ -245,7 +245,7 @@ class DischargeTable:
     A profile can hold multiple tables, one per temperature, but Otii's
     shipped profiles each carry exactly one table; multi-temperature
     measurements (e.g. the LiPo at -10/5/20 °C) ship as three separate
-    profile files. opensmu preserves both possibilities.
+    profile files. benchctrl preserves both possibilities.
 
     Attributes:
         table: list of (voltage, resistance, capacity) samples ordered by
@@ -255,7 +255,7 @@ class DischargeTable:
         discharge_profile: the pulse load used during profiling.
         device: which Arc/Ace device captured the data (preserved for
             round-trip).
-        software_version: Otii (or opensmu) version that produced the
+        software_version: Otii (or benchctrl) version that produced the
             table.
         id: stable UUID for this discharge table.
     """
@@ -346,7 +346,7 @@ class BatteryProfile:
     """A complete battery profile: metadata + one or more discharge tables.
 
     Load with :py:meth:`load`, save with :py:meth:`save`. Profiles
-    produced by opensmu round-trip bit-identically through Otii.
+    produced by benchctrl round-trip bit-identically through Otii.
     """
 
     battery: Battery = field(default_factory=Battery)
@@ -355,7 +355,7 @@ class BatteryProfile:
 
     # Optional schema-version marker we emit on save. Otii's bundled
     # profiles don't carry one, so by default we preserve their shape.
-    OPENSMU_SCHEMA_VERSION: ClassVar[int] = 1
+    BENCHCTRL_SCHEMA_VERSION: ClassVar[int] = 1
 
     # --- I/O ---------------------------------------------------------
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from opensmu import Channel, Sample
+from benchctrl import Channel, Sample
 
 pytestmark = pytest.mark.hardware
 
@@ -21,7 +21,7 @@ def test_stream_yields_samples(smu):
 
 
 def test_stream_during_recording_raises(smu):
-    from opensmu.exceptions import SMUValueError
+    from benchctrl.exceptions import SMUValueError
 
     smu.disable_all_channels()
     smu.enable_channel(Channel.MAIN_VOLTAGE)
@@ -54,7 +54,7 @@ def test_read_window_ignores_unrequested_channels(smu):
 
 
 def test_read_window_during_recording_raises(smu):
-    from opensmu.exceptions import SMUValueError
+    from benchctrl.exceptions import SMUValueError
 
     smu.disable_all_channels()
     smu.enable_channel(Channel.MAIN_VOLTAGE)

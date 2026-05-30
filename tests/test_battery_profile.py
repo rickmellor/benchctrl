@@ -1,4 +1,4 @@
-"""Hardware-free tests for opensmu.battery.profile.
+"""Hardware-free tests for benchctrl.battery.profile.
 
 Tests against the JSON profiles bundled with the Otii desktop app at
 ``C:\\Users\\<user>\\AppData\\Local\\otii3\\app-*\\resources\\batteryprofiles``.
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from opensmu.battery import (
+from benchctrl.battery import (
     Battery,
     BatteryProfile,
     DischargeProfile,
@@ -23,7 +23,7 @@ from opensmu.battery import (
     DischargeTable,
     ExitConditions,
 )
-from opensmu.exceptions import SMUValueError
+from benchctrl.exceptions import SMUValueError
 
 
 # ---------------------------------------------------------------------------

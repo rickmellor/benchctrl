@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from opensmu.exceptions import SMUNotImplementedError
+from benchctrl.exceptions import SMUNotImplementedError
 
 
 @pytest.fixture
 def smu_skeleton():
     """Construct an SMU without opening a port — for testing pure-Python stubs."""
-    from opensmu.device import SMU
-    from opensmu.transport import Transport
+    from benchctrl.device import SMU
+    from benchctrl.transport import Transport
 
     transport = Transport("__dummy__")  # never opened
     return SMU(transport)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from opensmu.transport import PortInfo, discover_arc_ports
+from benchctrl.transport import PortInfo, discover_arc_ports
 
 
 def test_discover_returns_list():

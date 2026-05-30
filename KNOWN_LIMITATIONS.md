@@ -22,7 +22,7 @@ Workaround: `Emulator.start()` clamps the seed voltage to
 `safety_max_voltage_V` before sending (v0.9.2). The validation
 harness sets per-profile overrides.
 
-Code reference: `src/opensmu/battery/emulator.py` — see the
+Code reference: `src/benchctrl/battery/emulator.py` — see the
 "Seed the output" block in `start()`.
 
 ### H-2. DL3031A CR mode regulation breaks down below ~1 mA target
@@ -55,7 +55,7 @@ latency is the dominant concern; understand that the four values in
 ~200 ms integration window. For genuinely synchronous high-rate
 V/I capture, use `SMU.record()` on the Arc Pro.
 
-Code reference: `src/opensmu/bench/rigol_dl3031a.py` — `measure_*`
+Code reference: `src/benchctrl/bench/rigol_dl3031a.py` — `measure_*`
 and `fetch_*` docstrings.
 
 ### H-4. DL3031A input toggle takes ~700 ms to settle
@@ -99,7 +99,7 @@ same total play time. The driver rejects 4-step programs at
 ``list_set_step_count(4)`` / ``program_list(steps=[...4...])`` with
 a clear error pointing to the workaround.
 
-Code reference: `src/opensmu/bench/rigol_dl3031a.py`
+Code reference: `src/benchctrl/bench/rigol_dl3031a.py`
 `list_set_step_count` and `program_list`.
 
 ### F-2. DL3031A LIST in Arc Pro high range fires partially / unpredictably
@@ -172,7 +172,7 @@ semantics, established v0.9.7):
 - `:SOUR:CURR:TRAN:FREQuency` takes **Hz**, not kHz as the manual
   documents (bench-verified by period queries returning 1/freq).
 
-Code reference: `src/opensmu/bench/rigol_dl3031a.py` —
+Code reference: `src/benchctrl/bench/rigol_dl3031a.py` —
 `list_set_step_count`, `list_set_slew`, `_LIST_END_VALUES`,
 `_fetch_discharging_time_s`, `transient_set_frequency`.
 

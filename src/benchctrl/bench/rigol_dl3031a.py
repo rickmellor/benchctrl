@@ -13,7 +13,7 @@ VISA backend that works out of the box.
 
 Typical use::
 
-    from opensmu.bench import RigolDL3031A
+    from benchctrl.bench import RigolDL3031A
 
     with RigolDL3031A.open() as load:        # auto-discover by VID/PID
         print(load.info())
@@ -40,7 +40,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional, Union
 
-log = logging.getLogger("opensmu.bench.rigol_dl3031a")
+log = logging.getLogger("benchctrl.bench.rigol_dl3031a")
 
 # Rigol's USB-TMC VID/PID for the DL3000 family.
 RIGOL_USB_VID = 0x1AB1
@@ -198,7 +198,7 @@ class RigolDL3031A:
         except ImportError as e:
             raise RigolDLConnectionError(
                 "pyvisa is required for the DL3031A driver — "
-                "install with `pip install opensmu[bench-visa]`"
+                "install with `pip install benchctrl[bench-visa]`"
             ) from e
 
         try:

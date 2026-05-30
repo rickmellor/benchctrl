@@ -1,6 +1,6 @@
 # Battery features
 
-OpenSMU's `opensmu.battery` subpackage replaces Qoitech's licensed
+benchctrl's `benchctrl.battery` subpackage replaces Qoitech's licensed
 **Battery Toolbox** entirely on top of the wire vocabulary we already
 have. No extra licensing required — no separate server, no
 "Cannot read properties of undefined (reading 'something')" errors,
@@ -18,31 +18,31 @@ Otii ships a "Battery Toolbox" as a paid add-on covering four features:
 | Battery Emulator | Make the device act as a battery (OCV + ESR sag) for DUT testing |
 
 All four sit on top of capabilities the device exposes through wire
-commands opensmu already speaks. The Battery Toolbox license gates
+commands benchctrl already speaks. The Battery Toolbox license gates
 **access via the Otii server's API**, not the device itself — so we
-can ship the same features as opensmu Python (and MCP tools) entirely
+can ship the same features as benchctrl Python (and MCP tools) entirely
 without it.
 
 ## Status — phased rollout
 
 | Phase | Module | Status |
 |---|---|---|
-| 1 | `opensmu.battery.profile` — Otii-compatible JSON I/O + interpolation | **shipped (v0.5.0)** |
-| 2 | `opensmu.battery.calculator` — duty-cycle life estimator | **shipped (v0.6.0)** |
-| 3 | `opensmu.battery.profiler` — orchestrated hardware discharge | **shipped (v0.7.0)** |
-| 4 | `opensmu.battery.emulator` — host-side OCV + ESR control loop | **shipped (v0.8.0)** |
+| 1 | `benchctrl.battery.profile` — Otii-compatible JSON I/O + interpolation | **shipped (v0.5.0)** |
+| 2 | `benchctrl.battery.calculator` — duty-cycle life estimator | **shipped (v0.6.0)** |
+| 3 | `benchctrl.battery.profiler` — orchestrated hardware discharge | **shipped (v0.7.0)** |
+| 4 | `benchctrl.battery.emulator` — host-side OCV + ESR control loop | **shipped (v0.8.0)** |
 
-## Phase 1 — `opensmu.battery.profile`
+## Phase 1 — `benchctrl.battery.profile`
 
 ### Reads Otii's profile format directly
 
 Tested against every profile that ships with Otii 3.7.2 (8 cells:
 AA, AAA, CR123A, CR2, CR2032, plus a LiPo at three temperatures).
-All eight load, round-trip through opensmu, and re-save as
+All eight load, round-trip through benchctrl, and re-save as
 bit-identical JSON. They re-import into Otii without complaint.
 
 ```python
-from opensmu.battery import BatteryProfile
+from benchctrl.battery import BatteryProfile
 
 # Otii ships these at:
 # C:\Users\<user>\AppData\Local\otii3\app-*\resources\batteryprofiles
@@ -61,7 +61,7 @@ print(profile.esr_at(used_capacity_mAh=50.0))      # ~14.1 Ω
 ### Programmatically build profiles
 
 ```python
-from opensmu.battery import (
+from benchctrl.battery import (
     Battery, BatteryProfile, DischargeProfile, DischargeStep,
     DischargeSample, DischargeTable, ExitConditions,
 )
@@ -127,7 +127,7 @@ Two file-based tools (no SMU connection needed):
 
 ### File format
 
-`opensmu.battery.profile` writes JSON in the exact shape Otii produces,
+`benchctrl.battery.profile` writes JSON in the exact shape Otii produces,
 key for key:
 
 ```json
@@ -159,10 +159,10 @@ key for key:
 }
 ```
 
-Profiles produced by opensmu round-trip bit-identically through Otii,
+Profiles produced by benchctrl round-trip bit-identically through Otii,
 so existing measurement data is interchangeable in both directions.
 
-## Phase 2 — `opensmu.battery.calculator`
+## Phase 2 — `benchctrl.battery.calculator`
 
 Pure-Python duty-cycle life estimator. Two methods:
 
@@ -172,7 +172,7 @@ Treats the cell as a flat-voltage charge reservoir. Fastest, no profile
 needed.
 
 ```python
-from opensmu.battery import DutyCycle, estimate_life_constant_current
+from benchctrl.battery import DutyCycle, estimate_life_constant_current
 
 duty = DutyCycle(
     active_current_A=0.020,    # 20 mA when transmitting
@@ -199,7 +199,7 @@ curve. Stops when OCV drops to cutoff. More accurate when the cell's
 voltage sags significantly over discharge.
 
 ```python
-from opensmu.battery import BatteryProfile, DutyCycle, estimate_life_from_profile
+from benchctrl.battery import BatteryProfile, DutyCycle, estimate_life_from_profile
 
 profile = BatteryProfile.load("CR2032-Energizer-(25).json")
 duty = DutyCycle(0.020, 0.1, 5e-6, 60.0)
@@ -223,8 +223,8 @@ and a sleep region in a captured run, the tool averages main current
 over each window.
 
 ```python
-from opensmu import Recording
-from opensmu.battery import duty_cycle_from_recording, estimate_life_from_profile
+from benchctrl import Recording
+from benchctrl.battery import duty_cycle_from_recording, estimate_life_from_profile
 
 rec = Recording.load("device-under-test.opensmu")
 duty = duty_cycle_from_recording(
@@ -243,7 +243,7 @@ est = estimate_life_from_profile(profile=profile, duty_cycle=duty)
 - `battery_life_from_recording(recording_path, active_window, sleep_window, profile_path=None, capacity_mAh=None, ...)` —
   end-to-end: load a saved capture, extract active/sleep currents, estimate
 
-## Phase 3 — `opensmu.battery.profiler`
+## Phase 3 — `benchctrl.battery.profiler`
 
 Orchestrates a real-cell discharge to produce a `BatteryProfile`.
 Replaces Otii's Battery Profiler using only the existing wire vocabulary.
@@ -251,11 +251,11 @@ Replaces Otii's Battery Profiler using only the existing wire vocabulary.
 ### Workflow
 
 ```python
-from opensmu import SMU
-from opensmu.battery import (
+from benchctrl import SMU
+from benchctrl.battery import (
     Battery, DischargeProfile, DischargeStep, ExitConditions,
 )
-from opensmu.battery.profiler import Profiler, ProfilerConfig
+from benchctrl.battery.profiler import Profiler, ProfilerConfig
 
 config = ProfilerConfig(
     discharge_profile=DischargeProfile(
@@ -339,18 +339,18 @@ connection before calling. The profile run sets `set_output(True)` and
 draws the configured high/low currents until exit conditions fire or
 the run is aborted.
 
-## Phase 4 — `opensmu.battery.emulator`
+## Phase 4 — `benchctrl.battery.emulator`
 
 Host-side control loop that drives the SMU as a battery with OCV + ESR
-sag. Replaces Otii's licensed Battery Emulator using only opensmu's
+sag. Replaces Otii's licensed Battery Emulator using only benchctrl's
 existing wire vocabulary.
 
 ### Workflow
 
 ```python
-from opensmu import SMU
-from opensmu.battery import BatteryProfile
-from opensmu.battery.emulator import Emulator, EmulatorConfig
+from benchctrl import SMU
+from benchctrl.battery import BatteryProfile
+from benchctrl.battery.emulator import Emulator, EmulatorConfig
 
 profile = BatteryProfile.load("CR2032-Energizer-(25).json")
 config = EmulatorConfig(

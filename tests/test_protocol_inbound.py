@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 
-from opensmu.protocol import (
+from benchctrl.protocol import (
     ERROR_PAYLOAD_HEADER,
     SAMPLE_RECORD_HEADER,
     encode_frame,

@@ -1,7 +1,7 @@
-# OpenSMU — for AI assistants
+# benchctrl — for AI assistants
 
 If you're an AI agent reading this, here's the briefing you need to
-be useful to a user working on OpenSMU.
+be useful to a user working on benchctrl.
 
 Companion docs to read alongside this:
 
@@ -9,34 +9,34 @@ Companion docs to read alongside this:
 - [`ARCHITECTURE.md`](../ARCHITECTURE.md) — one-page tour of the five subsystems
 - [`KNOWN_LIMITATIONS.md`](../KNOWN_LIMITATIONS.md) — hardware caps, firmware quirks, harness workarounds. **Read this before debugging a new failure.**
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md) — conventions you're expected to follow
-- [`skills/opensmu/SKILL.md`](../skills/opensmu/SKILL.md) — Claude Code skill briefing (more usage-focused than this)
+- [`skills/benchctrl/SKILL.md`](../skills/benchctrl/SKILL.md) — Claude Code skill briefing (more usage-focused than this)
 
 ## What this library is
 
-**One sentence**: OpenSMU drives a Qoitech Otii Arc / Arc Pro
+**One sentence**: benchctrl drives a Qoitech Otii Arc / Arc Pro
 source-measurement unit directly over its USB CDC-ACM port from
 Python, with built-in battery emulation, companion-instrument
 drivers, an MCP server, and a reproducible validation harness.
 
 **Why it exists**: Qoitech's automation Python client requires a
-paid-licensed local server. OpenSMU re-implements the same
+paid-licensed local server. benchctrl re-implements the same
 capability by talking to the hardware directly. The wire protocol is
 fully reverse-engineered (see [`protocol.md`](protocol.md)) and the
 device imposes no license check at the wire level.
 
 The project has grown beyond just the SMU driver:
 
-- **`opensmu.battery`** — Battery Toolbox replacement: profile I/O,
+- **`benchctrl.battery`** — Battery Toolbox replacement: profile I/O,
   life calculator, profiler, 100 Hz host-side emulator
-- **`opensmu.bench`** — companion instrument drivers (QR10x
+- **`benchctrl.bench`** — companion instrument drivers (QR10x
   programmable resistor, Rigol DL3031A electronic load)
-- **`opensmu.mcp`** — MCP server, 93 tools, exposes every SDK method
+- **`benchctrl.mcp`** — MCP server, 93 tools, exposes every SDK method
 - **`validation/`** — top-level harness for reproducible scenarios
 
 ## Where things live
 
 ```
-opensmu/
+benchctrl/
 ├── README.md, ARCHITECTURE.md          entry points
 ├── CHANGELOG.md, KNOWN_LIMITATIONS.md  changelog + caps/quirks
 ├── CONTRIBUTING.md, PROGRESS.md        dev guide + live status
@@ -53,7 +53,7 @@ opensmu/
 │   ├── output_formats.md                .opensmu / Parquet / CSV / pandas / numpy
 │   ├── official_api_inventory.md        what we replicate from otii_tcp_client
 │   └── AGENTS.md                        this file
-├── src/opensmu/
+├── src/benchctrl/
 │   ├── __init__.py                      public re-exports
 │   ├── exceptions.py                    SMUError + subclasses
 │   ├── channels.py                      Channel enum + ChannelInfo
@@ -62,7 +62,7 @@ opensmu/
 │   ├── samples.py                       parsing, ChannelBuffer, exports
 │   ├── recording.py                     Recording class + .opensmu format
 │   ├── device.py                        SMU class (public)
-│   ├── cli.py                           opensmu CLI entry
+│   ├── cli.py                           benchctrl CLI entry
 │   ├── battery/
 │   │   ├── profile.py                   profile JSON I/O
 │   │   ├── calculator.py                life calculator
@@ -78,7 +78,7 @@ opensmu/
 │   ├── run_validation.py                scenario harness
 │   ├── README.md                        harness docs + results
 │   └── scenarios/                       saved captures (JSON / CSV / PNG)
-├── skills/opensmu/SKILL.md              Claude Code skill briefing
+├── skills/benchctrl/SKILL.md              Claude Code skill briefing
 └── .github/                             PR + issue templates, CI
 ```
 
@@ -89,9 +89,9 @@ opensmu/
 | Add a new SMU SET command | `protocol.py` for the encoding, `device.py` for the public method |
 | Decode a new wire feature | `docs/protocol.md`, then `protocol.py` |
 | Understand a behavior | `ARCHITECTURE.md` for the wide view, `docs/design.md` for SMU-layer decisions |
-| Add bench instrument support | `src/opensmu/bench/__init__.py` (lazy export pattern), then a new module modeled on `qr10x.py` or `rigol_dl3031a.py` |
-| Touch the battery emulator | `src/opensmu/battery/emulator.py`. Pay attention to the explicit "no try/except" comments in `start()` — those are load-bearing |
-| Add an MCP tool | `src/opensmu/mcp.py`. Every SDK public method should have a matching tool (SDK ↔ MCP parity — see CONTRIBUTING.md § 1) |
+| Add bench instrument support | `src/benchctrl/bench/__init__.py` (lazy export pattern), then a new module modeled on `qr10x.py` or `rigol_dl3031a.py` |
+| Touch the battery emulator | `src/benchctrl/battery/emulator.py`. Pay attention to the explicit "no try/except" comments in `start()` — those are load-bearing |
+| Add an MCP tool | `src/benchctrl/mcp.py`. Every SDK public method should have a matching tool (SDK ↔ MCP parity — see CONTRIBUTING.md § 1) |
 | Add a validation scenario | `validation/run_validation.py`. Three existing kinds: static, dynamic, dynamic-list — model new ones on whichever is closest |
 | Find out what's deferred | `ROADMAP.md` |
 | Resume mid-task | `PROGRESS.md` |
@@ -99,12 +99,12 @@ opensmu/
 
 ## API shape you should produce
 
-When generating code for OpenSMU users:
+When generating code for benchctrl users:
 
 ```python
-from opensmu import SMU, Channel
-from opensmu.battery import BatteryProfile, Emulator, EmulatorConfig
-from opensmu.bench import QR10x, RigolDL3031A
+from benchctrl import SMU, Channel
+from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
+from benchctrl.bench import QR10x, RigolDL3031A
 
 with SMU.open() as smu:
     smu.set_voltage(3.3)
@@ -131,7 +131,7 @@ Things that look wrong (would surprise a maintainer):
 - `smu.voltage = 3.3` — properties are read-only; use `smu.set_voltage(3.3)`
 - `try: smu.set_voltage(x); except Exception: pass` — silent fallbacks are bugs; see CONTRIBUTING.md § 4
 - Calls to deferred methods (calibration, firmware upgrade,
-  `set_supply_battery_emulator`) — these raise `SMUNotImplementedError`. The battery emulator lives in `opensmu.battery`, not on `SMU`
+  `set_supply_battery_emulator`) — these raise `SMUNotImplementedError`. The battery emulator lives in `benchctrl.battery`, not on `SMU`
 - Manual wire-byte construction — go through `protocol.py` helpers
 - `subprocess` to drive an external Otii server — there is no server
 - TCP / port 1905 usage — there is no TCP layer
@@ -188,24 +188,24 @@ pytest -q                                  # all (~5 min with hardware)
    - updates `self._state.<field>` with the new value
 4. Add a hardware-free test to `tests/test_protocol_commands.py`
 5. Add a hardware-required test to `tests/test_smu_setters.py`
-6. **Add a matching `@mcp.tool()` in `src/opensmu/mcp.py`** — parity is checked in review
+6. **Add a matching `@mcp.tool()` in `src/benchctrl/mcp.py`** — parity is checked in review
 
 ### Add an MCP tool
 
 1. Find the corresponding SDK method (if it doesn't exist, you need to add it first)
-2. In `src/opensmu/mcp.py`, add a `@mcp.tool()` function that calls the SDK method
+2. In `src/benchctrl/mcp.py`, add a `@mcp.tool()` function that calls the SDK method
 3. Coerce JSON-friendly types; return a dict (never a custom dataclass)
 4. For setters that change state, read back via the corresponding `get_*` and include in the return dict for observability
 
 ### Add a bench instrument driver
 
-1. Create `src/opensmu/bench/<vendor_model>.py`
+1. Create `src/benchctrl/bench/<vendor_model>.py`
 2. Define an exception hierarchy: `<Vendor>Error` → `<Vendor>ConnectionError` / `<Vendor>CommandError` / `<Vendor>TimeoutError` / `<Vendor>ValueError`
 3. Implement an `open(...)` class method that returns the instance with the transport open
 4. Implement `close()` and `__enter__` / `__exit__` for context-manager use; `__exit__` should also disable any output for safety
 5. Use the same property-read-method-write convention as the SMU class
-6. Add MCP tools in `src/opensmu/mcp.py`
-7. Lazy-export in `src/opensmu/bench/__init__.py` if the driver pulls in heavy dependencies (PEP 562 pattern used for `RigolDL3031A`)
+6. Add MCP tools in `src/benchctrl/mcp.py`
+7. Lazy-export in `src/benchctrl/bench/__init__.py` if the driver pulls in heavy dependencies (PEP 562 pattern used for `RigolDL3031A`)
 8. Document in `docs/bench.md`
 
 ### Document a firmware bug

@@ -3,7 +3,7 @@
 Makes the SMU behave like a battery for DUT testing: dynamically adjusts
 output voltage based on instantaneous current draw and a profile's OCV
 + ESR curves. Replaces Qoitech's licensed Battery Emulator entirely on
-top of opensmu's existing wire vocabulary.
+top of benchctrl's existing wire vocabulary.
 
 How it works
 ------------
@@ -50,9 +50,9 @@ Series / parallel
 
 Example::
 
-    from opensmu import SMU
-    from opensmu.battery import BatteryProfile
-    from opensmu.battery.emulator import Emulator, EmulatorConfig
+    from benchctrl import SMU
+    from benchctrl.battery import BatteryProfile
+    from benchctrl.battery.emulator import Emulator, EmulatorConfig
 
     profile = BatteryProfile.load("CR2032-Energizer-(25).json")
     config = EmulatorConfig(
@@ -80,13 +80,13 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from opensmu.battery.profile import BatteryProfile
-from opensmu.exceptions import SMUValueError
+from benchctrl.battery.profile import BatteryProfile
+from benchctrl.exceptions import SMUValueError
 
 if TYPE_CHECKING:
-    from opensmu.device import SMU
+    from benchctrl.device import SMU
 
-log = logging.getLogger("opensmu.battery.emulator")
+log = logging.getLogger("benchctrl.battery.emulator")
 
 
 @dataclass
@@ -229,7 +229,7 @@ class Emulator:
         self._stop_event.clear()
         self._stop_reason = None
         self._thread = threading.Thread(
-            target=self._loop, name="opensmu-emulator", daemon=True
+            target=self._loop, name="benchctrl-emulator", daemon=True
         )
         self._thread.start()
 
@@ -442,7 +442,7 @@ class Emulator:
         sleeps and continues, so retries on transient failures still
         work — but real errors now surface in the warning log instead
         of being silently swallowed."""
-        from opensmu import Channel
+        from benchctrl import Channel
 
         return self.smu.read_value(
             Channel.MAIN_CURRENT,

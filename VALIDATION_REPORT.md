@@ -1,4 +1,4 @@
-# OpenSMU v0.1 — validation report
+# benchctrl v0.1 — validation report
 
 Generated during the v0.1 build pass. Re-run with `pytest` to refresh.
 
@@ -25,13 +25,13 @@ All green on the first hardware run after one test-expectation calibration
 
 | Module | Coverage |
 |---|---|
-| `opensmu.exceptions` | every class exercised, hierarchy + carried fields verified |
-| `opensmu.channels` | every enum constant + every property + reverse lookup |
-| `opensmu.protocol` | encode/decode round-trips, every SET command code, GPO bit pattern verified against earlier capture observations, error/ack frame discrimination, garbage skipping, truncation handling |
-| `opensmu.samples` | parsing, ChannelBuffer slicing, statistics min/max/avg/rms, charge on current channels, energy on power channels, CSV (long/wide) + JSON exports |
-| `opensmu.recording` | construction, info/statistics/data/timestamps/index_at/count, crop, downsample, rename, log, native binary save/load round-trip including empty recordings, deferred stubs |
-| `opensmu.transport` | discovery returns typed list, PortInfo display |
-| `opensmu.device` | every SET command end-to-end against hardware, every client-side range check raises before send, channel enable/disable + co-enables, recording context-manager + manual start/stop, stream iterator, error-frame surfacing, all deferred stubs raise `SMUNotImplementedError` |
+| `benchctrl.exceptions` | every class exercised, hierarchy + carried fields verified |
+| `benchctrl.channels` | every enum constant + every property + reverse lookup |
+| `benchctrl.protocol` | encode/decode round-trips, every SET command code, GPO bit pattern verified against earlier capture observations, error/ack frame discrimination, garbage skipping, truncation handling |
+| `benchctrl.samples` | parsing, ChannelBuffer slicing, statistics min/max/avg/rms, charge on current channels, energy on power channels, CSV (long/wide) + JSON exports |
+| `benchctrl.recording` | construction, info/statistics/data/timestamps/index_at/count, crop, downsample, rename, log, native binary save/load round-trip including empty recordings, deferred stubs |
+| `benchctrl.transport` | discovery returns typed list, PortInfo display |
+| `benchctrl.device` | every SET command end-to-end against hardware, every client-side range check raises before send, channel enable/disable + co-enables, recording context-manager + manual start/stop, stream iterator, error-frame surfacing, all deferred stubs raise `SMUNotImplementedError` |
 
 ## Pass list (selected highlights)
 
@@ -80,10 +80,10 @@ all channels** — verified by:
 - Reading raw bytes for 2 s without `start_recording()` → 12 samples per
   channel
 - Reading inside a `record()` block for 2 s → 11 samples per channel
-- Reading via the legacy `arc_direct.read_raw()` (which is what opensmu
+- Reading via the legacy `arc_direct.read_raw()` (which is what benchctrl
   is reverse-engineered from) → same 12 samples per channel
 
-Conclusion: this is the device's true post-init rate, not an opensmu
+Conclusion: this is the device's true post-init rate, not an benchctrl
 bug. The Otii desktop client achieves higher rates, so there is a
 wire-level "set high-rate streaming" command we have not yet decoded.
 Logged in `ROADMAP.md` as a v0.2 deferral ("Full-rate sample
@@ -108,7 +108,7 @@ from `Recording._begin/_end`. Replaced with timezone-aware
 ## How to reproduce
 
 ```powershell
-cd C:\Users\rickm\Desktop\opensmu
+cd C:\Users\rickm\Desktop\benchctrl
 python -m pytest tests/ -m "not hardware" -q     # 89 tests, <1 s
 python -m pytest tests/ -m hardware -q            # 43 tests, ~35 s
 python -m pytest tests/ -q                        # both, 132 tests

@@ -6,7 +6,7 @@ modes that execute with sub-100 µs timing — perfect for actual TX
 burst loads that USB-TMC round-trips can't keep up with.
 
 Setup:
-    DL3031A connected via USB-TMC. Requires opensmu[bench-visa] for
+    DL3031A connected via USB-TMC. Requires benchctrl[bench-visa] for
     pyvisa, and a VISA backend (Rigol Ultra Sigma bundles one; NI-VISA
     or Keysight IO Libraries also work; pyvisa-py + libusb is the
     pure-Python option).
@@ -31,7 +31,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from opensmu.bench import RigolDL3031A
+from benchctrl.bench import RigolDL3031A
 
 
 def demo_static_cc(dl: RigolDL3031A) -> None:

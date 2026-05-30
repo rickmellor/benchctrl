@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 
 def main() -> None:

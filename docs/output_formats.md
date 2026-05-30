@@ -1,26 +1,26 @@
 # Output formats
 
-OpenSMU recordings can be exported to several formats. Pick the one that
+benchctrl recordings can be exported to several formats. Pick the one that
 matches what you're going to do with the data.
 
 ## Quick chooser
 
 | Format | Best for | Lossless? | Compact? | Universal? | Extra install? |
 |---|---|---|---|---|---|
-| `.opensmu` (native binary) | Long-term archive, round-trip in opensmu | yes | yes | opensmu only | none |
-| Parquet (`.parquet`) | Share with colleagues, load in pandas/polars/duckdb/Excel | yes | **yes** (~10-20× CSV) | pandas/polars/Arrow tooling | `opensmu[parquet]` |
+| `.opensmu` (native binary) | Long-term archive, round-trip in benchctrl | yes | yes | benchctrl only | none |
+| Parquet (`.parquet`) | Share with colleagues, load in pandas/polars/duckdb/Excel | yes | **yes** (~10-20× CSV) | pandas/polars/Arrow tooling | `benchctrl[parquet]` |
 | CSV long (`timestamp,channel,value,unit`) | Spreadsheets, shell pipelines, ad-hoc inspection | yes | no (huge for long captures) | universal | none |
 | CSV wide (one column per channel) | Quick plots, drag into Excel | lossy at lower-rate channels | medium | universal | none |
 | JSON (samples + statistics + metadata) | Human-readable inspection, shareable summaries | yes | no | universal | none |
-| numpy `.ndarray` | In-process analysis, plotting, math | yes (float32) | n/a (in-memory) | scientific Python | `opensmu[numpy]` |
-| pandas `Series`/`DataFrame` | Notebooks, statistical analysis, resampling | yes | n/a (in-memory) | scientific Python | `opensmu[pandas]` |
-| matplotlib `Figure` | Quick-look plotting | n/a | n/a | scientific Python | `opensmu[plot]` |
-| Raw bytes (`.raw`) | Protocol debugging | yes | yes | opensmu only | none |
+| numpy `.ndarray` | In-process analysis, plotting, math | yes (float32) | n/a (in-memory) | scientific Python | `benchctrl[numpy]` |
+| pandas `Series`/`DataFrame` | Notebooks, statistical analysis, resampling | yes | n/a (in-memory) | scientific Python | `benchctrl[pandas]` |
+| matplotlib `Figure` | Quick-look plotting | n/a | n/a | scientific Python | `benchctrl[plot]` |
+| Raw bytes (`.raw`) | Protocol debugging | yes | yes | benchctrl only | none |
 
 **Rules of thumb:**
 
-- **Archive a measurement for later opensmu use** → `.opensmu`
-- **Send it to a teammate who doesn't have opensmu** → `.parquet`
+- **Archive a measurement for later benchctrl use** → `.opensmu`
+- **Send it to a teammate who doesn't have benchctrl** → `.parquet`
 - **Open in Excel right now** → `.csv` (wide format)
 - **Analyze in a Jupyter notebook** → `.to_pandas()` (in-memory) or `.parquet` (from disk)
 - **Plot once and see what happened** → `.plot()` (matplotlib quick-look)
@@ -46,30 +46,30 @@ CSV crosses ~250 MB, JSON breaks 1 GB. Use parquet (or native
 
 ## Optional dependencies
 
-The data-science methods are **strictly optional**. opensmu itself
+The data-science methods are **strictly optional**. benchctrl itself
 imports cleanly without any of `numpy`, `pandas`, `pyarrow`, or
 `matplotlib` installed — they're only loaded the moment you call the
 matching method.
 
 | Method | Install with |
 |---|---|
-| `Recording.to_numpy(channel)` / `Recording.timestamps_numpy(channel)` | `pip install opensmu[numpy]` |
-| `Recording.to_pandas(channel)` / `Recording.to_pandas()` | `pip install opensmu[pandas]` |
-| `Recording.save_parquet(path)` | `pip install opensmu[parquet]` |
-| `Recording.plot(channels=None)` | `pip install opensmu[plot]` |
-| Everything science-related at once | `pip install opensmu[science]` |
+| `Recording.to_numpy(channel)` / `Recording.timestamps_numpy(channel)` | `pip install benchctrl[numpy]` |
+| `Recording.to_pandas(channel)` / `Recording.to_pandas()` | `pip install benchctrl[pandas]` |
+| `Recording.save_parquet(path)` | `pip install benchctrl[parquet]` |
+| `Recording.plot(channels=None)` | `pip install benchctrl[plot]` |
+| Everything science-related at once | `pip install benchctrl[science]` |
 
 If you call a method without the dependency installed you get a clear
 error pointing at the right extras key — e.g.:
 
 ```
 ImportError: save_parquet() requires pyarrow.
-Install with: pip install 'opensmu[parquet]'
+Install with: pip install 'benchctrl[parquet]'
 ```
 
-The MCP server install (`opensmu[mcp]`) and these extras are
+The MCP server install (`benchctrl[mcp]`) and these extras are
 independent — combine them as needed: `pip install
-'opensmu[mcp,science]'` gets you everything.
+'benchctrl[mcp,science]'` gets you everything.
 
 ## Usage
 
@@ -87,7 +87,7 @@ rec.save_raw("run.raw", bytes_)   # raw inbound USB bytes (escape hatch)
 ### Load from disk
 
 ```python
-from opensmu import Recording
+from benchctrl import Recording
 rec = Recording.load("run.opensmu")   # reconstructs an equivalent Recording
 
 # For Parquet, load directly with your tool of choice:
@@ -135,9 +135,9 @@ factor)` to downsample a single channel in place.
 
 ```
 Need to:
-  Send to a colleague who doesn't have opensmu?
+  Send to a colleague who doesn't have benchctrl?
     → Parquet (compact, portable, opens in pandas/polars/duckdb/Excel)
-  Archive for future opensmu round-trip?
+  Archive for future benchctrl round-trip?
     → .opensmu (native binary)
   Open in Excel right now?
     → CSV (wide format)

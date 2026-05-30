@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from opensmu import Channel, Recording
+from benchctrl import Channel, Recording
 
 pytestmark = pytest.mark.hardware
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from opensmu.channels import WIRE_ID_TO_CHANNEL, Channel, ChannelInfo
+from benchctrl.channels import WIRE_ID_TO_CHANNEL, Channel, ChannelInfo
 
 
 def test_main_channels_have_correct_metadata():

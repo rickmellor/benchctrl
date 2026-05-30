@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: OpenSMU isn't doing what you expect
+about: benchctrl isn't doing what you expect
 labels: bug
 ---
 
@@ -34,12 +34,12 @@ What the docs / docstrings led you to believe should happen.
 
 ## Environment
 
-- OpenSMU version: <!-- python -c "import opensmu; print(opensmu.__version__)" -->
+- benchctrl version: <!-- python -c "import benchctrl; print(benchctrl.__version__)" -->
 - Python version: <!-- python --version -->
 - OS:
 - Hardware involved: <!-- Arc / Arc Pro / DL3031A / QR10x / etc -->
 - Firmware (if known):
-- Extras installed: <!-- e.g. opensmu[bench-visa,mcp] -->
+- Extras installed: <!-- e.g. benchctrl[bench-visa,mcp] -->
 
 ## Anything else
 

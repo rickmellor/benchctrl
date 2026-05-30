@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 VOLTAGES = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.25]
 DWELL_SECONDS = 1.0

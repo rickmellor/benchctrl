@@ -11,13 +11,13 @@ import pytest
 
 
 def test_mcp_module_importable():
-    from opensmu import mcp as m
+    from benchctrl import mcp as m
 
-    assert m.mcp.name == "opensmu"
+    assert m.mcp.name == "benchctrl"
 
 
 def test_list_channels_returns_all_channels():
-    from opensmu.mcp import list_channels
+    from benchctrl.mcp import list_channels
 
     result = list_channels()
     codes = [c["code"] for c in result["channels"]]
@@ -26,7 +26,7 @@ def test_list_channels_returns_all_channels():
 
 
 def test_list_channels_includes_metadata():
-    from opensmu.mcp import list_channels
+    from benchctrl.mcp import list_channels
 
     result = list_channels()
     mc = next(c for c in result["channels"] if c["code"] == "mc")
@@ -38,7 +38,7 @@ def test_list_channels_includes_metadata():
 
 
 def test_list_channels_temperature_is_not_toggleable():
-    from opensmu.mcp import list_channels
+    from benchctrl.mcp import list_channels
 
     result = list_channels()
     tp = next(c for c in result["channels"] if c["code"] == "tp")
@@ -48,7 +48,7 @@ def test_list_channels_temperature_is_not_toggleable():
 def test_tools_have_docstrings():
     """Every public tool function must have a docstring — that's what the
     LLM sees as the tool description."""
-    from opensmu import mcp as m
+    from benchctrl import mcp as m
 
     expected_tools = [
         "info", "state", "versions", "list_channels",
@@ -77,7 +77,7 @@ def test_tools_have_docstrings():
 
 def _make_saved_recording(tmp_path):
     """Build + save a small synthetic recording. Returns the .opensmu path."""
-    from opensmu import Channel, Recording
+    from benchctrl import Channel, Recording
 
     rec = Recording(name="hw-free-sync-test")
     mc = rec._ensure_buffer(Channel.MAIN_CURRENT, 4000)
@@ -90,7 +90,7 @@ def _make_saved_recording(tmp_path):
 
 
 def test_recording_summary_returns_stats(tmp_path):
-    from opensmu.mcp import recording_summary
+    from benchctrl.mcp import recording_summary
 
     p = _make_saved_recording(tmp_path)
     r = recording_summary(str(p))
@@ -105,7 +105,7 @@ def test_recording_summary_returns_stats(tmp_path):
 
 
 def test_export_recording_to_csv(tmp_path):
-    from opensmu.mcp import export_recording
+    from benchctrl.mcp import export_recording
 
     p = _make_saved_recording(tmp_path)
     out = tmp_path / "rec.csv"
@@ -117,7 +117,7 @@ def test_export_recording_to_csv(tmp_path):
 
 def test_export_recording_to_parquet(tmp_path):
     pytest.importorskip("pyarrow")
-    from opensmu.mcp import export_recording
+    from benchctrl.mcp import export_recording
 
     p = _make_saved_recording(tmp_path)
     out = tmp_path / "rec.parquet"
@@ -126,8 +126,8 @@ def test_export_recording_to_parquet(tmp_path):
     assert out.exists()
 
 
-def test_export_recording_unknown_extension_normalises_to_opensmu(tmp_path):
-    from opensmu.mcp import export_recording
+def test_export_recording_unknown_extension_normalises_to_benchctrl(tmp_path):
+    from benchctrl.mcp import export_recording
 
     p = _make_saved_recording(tmp_path)
     out = tmp_path / "rec.bin"
@@ -137,7 +137,7 @@ def test_export_recording_unknown_extension_normalises_to_opensmu(tmp_path):
 
 def test_plot_recording_writes_png(tmp_path):
     pytest.importorskip("matplotlib")
-    from opensmu.mcp import plot_recording
+    from benchctrl.mcp import plot_recording
 
     p = _make_saved_recording(tmp_path)
     out = tmp_path / "rec.png"
@@ -149,7 +149,7 @@ def test_plot_recording_writes_png(tmp_path):
 
 def test_plot_recording_subset_of_channels(tmp_path):
     pytest.importorskip("matplotlib")
-    from opensmu.mcp import plot_recording
+    from benchctrl.mcp import plot_recording
 
     p = _make_saved_recording(tmp_path)
     out = tmp_path / "rec.png"
@@ -160,9 +160,9 @@ def test_plot_recording_subset_of_channels(tmp_path):
 def test_smu_state_snapshot_shape():
     """The internal state-snapshot helper produces a well-formed dict for any
     SMU. Use a transport-less SMU stub to avoid hardware."""
-    from opensmu.device import SMU
-    from opensmu.mcp import _smu_state
-    from opensmu.transport import Transport
+    from benchctrl.device import SMU
+    from benchctrl.mcp import _smu_state
+    from benchctrl.transport import Transport
 
     smu = SMU(Transport("__dummy__"))  # never opened
     snap = _smu_state(smu)
@@ -207,7 +207,7 @@ class _FakeDL:
 
 
 def test_dl3031a_program_list_coerces_int_and_float_step_pairs():
-    from opensmu import mcp as m
+    from benchctrl import mcp as m
     fake = _FakeDL()
     m._dl3031a = fake
     try:
@@ -235,7 +235,7 @@ def test_dl3031a_program_list_coerces_int_and_float_step_pairs():
 
 
 def test_dl3031a_program_list_rejects_malformed_steps():
-    from opensmu import mcp as m
+    from benchctrl import mcp as m
     fake = _FakeDL()
     m._dl3031a = fake
     try:
@@ -252,8 +252,8 @@ def test_dl3031a_program_list_rejects_malformed_steps():
 def test_dl3031a_tools_raise_driver_connection_error_when_not_open():
     """L2 fix: _get_dl3031a now raises RigolDLConnectionError, not
     bare RuntimeError, when the singleton is None."""
-    from opensmu import mcp as m
-    from opensmu.bench.rigol_dl3031a import RigolDLConnectionError
+    from benchctrl import mcp as m
+    from benchctrl.bench.rigol_dl3031a import RigolDLConnectionError
     m._dl3031a = None
     with pytest.raises(RigolDLConnectionError):
         m.dl3031a_info()
@@ -261,8 +261,8 @@ def test_dl3031a_tools_raise_driver_connection_error_when_not_open():
 
 def test_qr10x_tools_raise_driver_connection_error_when_not_open():
     """Same as above for QR10x."""
-    from opensmu import mcp as m
-    from opensmu.bench.qr10x import QR10xConnectionError
+    from benchctrl import mcp as m
+    from benchctrl.bench.qr10x import QR10xConnectionError
     m._qr10x = None
     with pytest.raises(QR10xConnectionError):
         m.qr10x_info()
@@ -272,7 +272,7 @@ def test_dl3031a_close_surfaces_input_off_failure():
     """H5 fix: dl3031a_close returns input_off_failed when set_input(False)
     raises. Previously, errors were silently swallowed and the operator
     got {"closed": True} even though the load could still be sinking."""
-    from opensmu import mcp as m
+    from benchctrl import mcp as m
     fake = _FakeDL()
 
     def boom(_on):

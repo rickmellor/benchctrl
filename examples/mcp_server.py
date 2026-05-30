@@ -1,22 +1,22 @@
-"""Start the OpenSMU MCP server.
+"""Start the benchctrl MCP server.
 
-Equivalent to the `opensmu-mcp` console script that ships with the
+Equivalent to the `benchctrl-mcp` console script that ships with the
 package; this file exists as a self-documenting launcher and as a
 template for users who want to embed the server in a larger Python
 program.
 
-The MCP (Model Context Protocol) server exposes the entire OpenSMU
+The MCP (Model Context Protocol) server exposes the entire benchctrl
 SDK as 93 tools that any MCP-aware client can call: Claude Code,
 Claude Desktop, etc. Every public SDK method has a matching tool.
 
 Setup:
-    pip install opensmu[mcp]
+    pip install benchctrl[mcp]
 
 Run:
     python examples/mcp_server.py
     # or equivalently:
-    opensmu-mcp
-    python -m opensmu.mcp
+    benchctrl-mcp
+    python -m benchctrl.mcp
 
 In your MCP client's settings, add a server pointing at one of those
 entries. Concrete examples in docs/mcp.md.
@@ -33,7 +33,7 @@ Safety notes:
 
 from __future__ import annotations
 
-from opensmu.mcp import main
+from benchctrl.mcp import main
 
 
 if __name__ == "__main__":

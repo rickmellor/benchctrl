@@ -1,15 +1,15 @@
-# OpenSMU API reference
+# benchctrl API reference
 
-Every public name exported from `opensmu` and its sub-packages.
-Internal modules (`opensmu.transport`, `opensmu.protocol`, etc.) are
+Every public name exported from `benchctrl` and its sub-packages.
+Internal modules (`benchctrl.transport`, `benchctrl.protocol`, etc.) are
 documented for contributors but not part of the stability surface.
 
 This document is structured by sub-package:
 
-- [`opensmu` — SMU device control](#smu--the-device) (this layer)
-- [`opensmu.battery` — Battery Toolbox replacement](#opensmubattery--battery-toolbox-replacement)
-- [`opensmu.bench` — companion instrument drivers](#opensmubench--companion-instrument-drivers)
-- [`opensmu.mcp` — Model Context Protocol server](docs/mcp.md) (separate doc — 93 tools)
+- [`benchctrl` — SMU device control](#smu--the-device) (this layer)
+- [`benchctrl.battery` — Battery Toolbox replacement](#benchctrlbattery--battery-toolbox-replacement)
+- [`benchctrl.bench` — companion instrument drivers](#benchctrlbench--companion-instrument-drivers)
+- [`benchctrl.mcp` — Model Context Protocol server](docs/mcp.md) (separate doc — 93 tools)
 
 ## `SMU` — the device
 
@@ -291,35 +291,35 @@ SMUError
 
 ## Logging
 
-The library uses the standard `logging` module under the `opensmu`
+The library uses the standard `logging` module under the `benchctrl`
 logger. Sub-loggers:
 
-- `opensmu.device` — SET commands, recording lifecycle, reader stats
-- `opensmu.protocol` — frame hex dumps (DEBUG only)
-- `opensmu.battery.emulator` — emulator loop tick + warnings
-- `opensmu.battery.profiler` — profiler step transitions
-- `opensmu.bench.qr10x` — QR10x AT command traffic
-- `opensmu.bench.rigol_dl3031a` — DL3031A SCPI traffic
-- `opensmu.mcp` — MCP server lifecycle + tool warnings
+- `benchctrl.device` — SET commands, recording lifecycle, reader stats
+- `benchctrl.protocol` — frame hex dumps (DEBUG only)
+- `benchctrl.battery.emulator` — emulator loop tick + warnings
+- `benchctrl.battery.profiler` — profiler step transitions
+- `benchctrl.bench.qr10x` — QR10x AT command traffic
+- `benchctrl.bench.rigol_dl3031a` — DL3031A SCPI traffic
+- `benchctrl.mcp` — MCP server lifecycle + tool warnings
 
 Enable hex dumps:
 
 ```python
 import logging
 logging.basicConfig(level=logging.DEBUG)
-logging.getLogger("opensmu.protocol").setLevel(logging.DEBUG)
+logging.getLogger("benchctrl.protocol").setLevel(logging.DEBUG)
 ```
 
 ---
 
-## `opensmu.battery` — Battery Toolbox replacement
+## `benchctrl.battery` — Battery Toolbox replacement
 
 Four phased modules that together replace Qoitech's licensed Battery
 Toolbox. Detailed walkthrough in [`battery.md`](battery.md); this
 section is the API surface.
 
 ```python
-from opensmu.battery import (
+from benchctrl.battery import (
     BatteryProfile, Battery, DischargeTable, DischargeSample,
     DischargeProfile, DischargeStep, ExitConditions, DeviceInfo,
     LifeEstimate, DutyCycle,
@@ -435,15 +435,15 @@ sequence propagate (no silent swallow — see CONTRIBUTING.md § 4).
 
 ---
 
-## `opensmu.bench` — companion instrument drivers
+## `benchctrl.bench` — companion instrument drivers
 
 ```python
-from opensmu.bench import QR10x, QR10xInfo, QR10xError
-from opensmu.bench import RigolDL3031A, RigolDLInfo, RigolDLError
+from benchctrl.bench import QR10x, QR10xInfo, QR10xError
+from benchctrl.bench import RigolDL3031A, RigolDLInfo, RigolDLError
 ```
 
 `RigolDL3031A` is lazily imported (PEP 562) so users without
-`opensmu[bench-visa]` don't get a pyvisa import error just for using
+`benchctrl[bench-visa]` don't get a pyvisa import error just for using
 the QR10x.
 
 ### `QR10x` — Eastwood Tech programmable resistor

@@ -15,7 +15,7 @@ Wire protocol (per the manufacturer's spec):
 
 Typical use::
 
-    from opensmu.bench import QR10x
+    from benchctrl.bench import QR10x
 
     with QR10x.open("COM7") as qr:
         print(qr.info())
@@ -42,12 +42,12 @@ from typing import Optional
 
 import serial
 
-log = logging.getLogger("opensmu.bench.qr10x")
+log = logging.getLogger("benchctrl.bench.qr10x")
 
 
 # ---------------------------------------------------------------------------
-# Exception hierarchy (kept independent of opensmu.exceptions to keep
-# `opensmu.bench` import-independent of the rest of opensmu's surface)
+# Exception hierarchy (kept independent of benchctrl.exceptions to keep
+# `benchctrl.bench` import-independent of the rest of benchctrl's surface)
 # ---------------------------------------------------------------------------
 
 

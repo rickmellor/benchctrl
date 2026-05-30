@@ -1,14 +1,14 @@
 """Hardware-free tests for the optional-dependency export methods on Recording.
 
 These skip if the optional dep isn't installed. Run with the full
-science stack via ``pip install opensmu[science]``.
+science stack via ``pip install benchctrl[science]``.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from opensmu import Channel, Recording
+from benchctrl import Channel, Recording
 
 
 def _build_recording():
@@ -129,9 +129,9 @@ def test_save_parquet_embeds_column_metadata(tmp_path):
     p = rec.save_parquet(tmp_path / "rec.parquet")
     table = pq.read_table(p)
     md = table.schema.metadata or {}
-    assert b"opensmu.recording_name" in md
-    assert md[b"opensmu.recording_name"] == b"export-test"
-    assert b"opensmu.columns" in md
+    assert b"benchctrl.recording_name" in md
+    assert md[b"benchctrl.recording_name"] == b"export-test"
+    assert b"benchctrl.columns" in md
 
 
 def test_save_parquet_smaller_than_csv(tmp_path):
@@ -175,7 +175,7 @@ def test_plot_rejects_empty_recording():
     import matplotlib
 
     matplotlib.use("Agg")
-    from opensmu.exceptions import SMUValueError
+    from benchctrl.exceptions import SMUValueError
 
     rec = Recording()
     with pytest.raises(SMUValueError):
@@ -184,7 +184,7 @@ def test_plot_rejects_empty_recording():
 
 # ----- lazy import behaviour ------------------------------------------------
 # These tests verify the OPTIONAL nature of the data-science extras —
-# opensmu must import clean without any of numpy / pandas / pyarrow /
+# benchctrl must import clean without any of numpy / pandas / pyarrow /
 # matplotlib loaded, and each method must raise a clear, actionable
 # ImportError when its dep is missing.
 
@@ -219,10 +219,10 @@ def _import_with_blocked(blocked: set[str], module: str):
     return out
 
 
-def test_opensmu_imports_clean_without_optional_deps():
-    """Importing opensmu must not load numpy/pandas/pyarrow/matplotlib."""
+def test_benchctrl_imports_clean_without_optional_deps():
+    """Importing benchctrl must not load numpy/pandas/pyarrow/matplotlib."""
     out = _import_with_blocked(
-        {"numpy", "pandas", "pyarrow", "matplotlib"}, "opensmu"
+        {"numpy", "pandas", "pyarrow", "matplotlib"}, "benchctrl"
     )
     assert out.returncode == 0, out.stderr
     assert "OK" in out.stdout
@@ -248,7 +248,7 @@ def test_to_numpy_raises_friendly_error_without_numpy(tmp_path, monkeypatch):
             rec = _build_recording()
             with pytest.raises(ImportError) as exc:
                 rec.to_numpy(Channel.MAIN_CURRENT)
-            assert "opensmu[numpy]" in str(exc.value)
+            assert "benchctrl[numpy]" in str(exc.value)
         finally:
             sys.meta_path.remove(blocker)
     finally:

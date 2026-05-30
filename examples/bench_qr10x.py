@@ -27,7 +27,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from opensmu.bench import QR10x
+from benchctrl.bench import QR10x
 
 
 def main() -> None:

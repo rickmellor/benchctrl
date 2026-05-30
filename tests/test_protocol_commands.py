@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 
-from opensmu.protocol import (
+from benchctrl.protocol import (
     CMD_ENABLE_5V,
     CMD_SET_MAIN_VOLTAGE,
     CMD_SET_OC_PROTECTION,

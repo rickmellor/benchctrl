@@ -108,7 +108,7 @@ def test_set_gpo_pin_3_allowed(smu):
 def test_write_tx_sends_bytes(smu):
     """Just verify the call doesn't raise — there's no readback we can verify
     against without an external receiver wired to the TX pin."""
-    smu.write_tx("hello opensmu")
+    smu.write_tx("hello benchctrl")
     smu.write_tx(b"\x01\x02\x03")
 
 
@@ -118,7 +118,7 @@ def test_write_tx_sends_bytes(smu):
 def test_recording_stop_includes_prepare_stop(smu):
     """The recording should still cleanly start + stop with the new
     0x7E prepare-stop frame inserted before the disable burst."""
-    from opensmu import Channel
+    from benchctrl import Channel
     import time
 
     smu.disable_all_channels()

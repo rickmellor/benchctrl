@@ -11,7 +11,7 @@ from collections import deque
 
 import pytest
 
-from opensmu.bench.rigol_dl3031a import (
+from benchctrl.bench.rigol_dl3031a import (
     RigolDL3031A,
     RigolDLCommandError,
     RigolDLError,
@@ -653,7 +653,7 @@ pytestmark_hw = pytest.mark.hardware
 def test_hardware_idn_and_basic_setpoints():
     """Talk to the real DL3031A. Skips if no Rigol VISA resource found."""
     pytest.importorskip("pyvisa")
-    resource = os.environ.get("OPENSMU_DL3031A_RESOURCE")  # None → auto
+    resource = os.environ.get("BENCHCTRL_DL3031A_RESOURCE")  # None → auto
     try:
         load = RigolDL3031A.open(resource=resource)
     except Exception as e:
@@ -693,7 +693,7 @@ def test_hardware_battery_discharge_test_smoke():
     engage and the test just verifies the SCPI surface is intact.
     """
     pytest.importorskip("pyvisa")
-    resource = os.environ.get("OPENSMU_DL3031A_RESOURCE")
+    resource = os.environ.get("BENCHCTRL_DL3031A_RESOURCE")
     try:
         load = RigolDL3031A.open(resource=resource)
     except Exception as e:
@@ -725,7 +725,7 @@ def test_hardware_transient_frequency_is_hz_not_khz():
     """Bench-verified v0.9.7: contra the manual, transient frequency
     is in Hz. period = 1/freq must hold."""
     pytest.importorskip("pyvisa")
-    resource = os.environ.get("OPENSMU_DL3031A_RESOURCE")
+    resource = os.environ.get("BENCHCTRL_DL3031A_RESOURCE")
     try:
         load = RigolDL3031A.open(resource=resource)
     except Exception as e:
@@ -751,7 +751,7 @@ def test_hardware_transient_frequency_is_hz_not_khz():
 def test_hardware_list_program_accepted():
     """Push a small LIST and verify the firmware accepts the program."""
     pytest.importorskip("pyvisa")
-    resource = os.environ.get("OPENSMU_DL3031A_RESOURCE")
+    resource = os.environ.get("BENCHCTRL_DL3031A_RESOURCE")
     try:
         load = RigolDL3031A.open(resource=resource)
     except Exception as e:

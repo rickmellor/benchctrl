@@ -1,4 +1,4 @@
-"""Exception hierarchy for OpenSMU.
+"""Exception hierarchy for benchctrl.
 
     SMUError                       — base
     ├── SMUConnectionError         — port can't be opened / lost mid-stream
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 
 class SMUError(Exception):
-    """Base class for all OpenSMU exceptions."""
+    """Base class for all benchctrl exceptions."""
 
 
 class SMUConnectionError(SMUError):

@@ -1,4 +1,4 @@
-# OpenSMU roadmap
+# benchctrl roadmap
 
 What's planned, what's deferred, and why. Entries follow a consistent
 format: **status** (current state) + **scope when picked up** (what
@@ -54,7 +54,7 @@ Arc can't drive, charge profile drives, etc.). SCPI surface is in the
 same family as DL3031A.
 
 **Scope when picked up** (~2 days with hardware):
-1. New `opensmu.bench.RigolDP2031` driver modeled on RigolDL3031A
+1. New `benchctrl.bench.RigolDP2031` driver modeled on RigolDL3031A
 2. CV/CC/CR modes, OVP/OCP, LIST sequence, timer/wave modes
 3. MCP parity (~25 tools)
 4. Validation harness: extend `_LoadAdapter` to also be a `_SourceAdapter`
@@ -168,6 +168,6 @@ enabled.
 got picked up. Full release notes in [`CHANGELOG.md`](CHANGELOG.md).)
 
 - **v0.1.1**: Full-rate sample streaming — the "start recording" unlock is a per-channel `[seq:u32][0x78][wire_id][1]` command. Native ~4 kHz on MAIN_CURRENT verified.
-- **v0.6.0** through **v0.8.0**: Battery profile I/O, life calculator, profiler, and emulator landed in `opensmu.battery`. The Otii "Battery Toolbox license required" blocker that scoped this for v0.3 was bypassed by re-implementing the four phases natively instead of replaying their server's flow.
+- **v0.6.0** through **v0.8.0**: Battery profile I/O, life calculator, profiler, and emulator landed in `benchctrl.battery`. The Otii "Battery Toolbox license required" blocker that scoped this for v0.3 was bypassed by re-implementing the four phases natively instead of replaying their server's flow.
 - **v0.9.0** through **v0.9.6**: Bench instrument drivers (QR10x, RigolDL3031A) including firmware-side LIST / transient / battery-discharge modes; MCP server expanded to 93 tools; validation harness with three scenario kinds.
 - **v0.9.7**: Adversarial-review fix-batch — propagating-error model in the emulator, parity catch-up, KNOWN_LIMITATIONS.md, several firmware bugs discovered and worked around.

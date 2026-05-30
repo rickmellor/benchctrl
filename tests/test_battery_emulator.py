@@ -1,4 +1,4 @@
-"""Hardware-free tests for opensmu.battery.emulator against a mock SMU.
+"""Hardware-free tests for benchctrl.battery.emulator against a mock SMU.
 
 Real-hardware validation (DUT with known current draw connected to the
 SMU's output terminals) is a separate task.
@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from opensmu import Channel
-from opensmu.battery import (
+from benchctrl import Channel
+from benchctrl.battery import (
     Battery,
     BatteryProfile,
     DischargeProfile,
@@ -22,8 +22,8 @@ from opensmu.battery import (
     DischargeTable,
     ExitConditions,
 )
-from opensmu.battery.emulator import Emulator, EmulatorConfig
-from opensmu.exceptions import SMUValueError
+from benchctrl.battery.emulator import Emulator, EmulatorConfig
+from benchctrl.exceptions import SMUValueError
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +256,7 @@ def test_emulator_loop_logs_and_retries_on_read_failure(caplog):
     import logging
     config = EmulatorConfig(profile=_flat_profile(), update_interval_s=0.05)
     emu = Emulator(smu, config)
-    with caplog.at_level(logging.WARNING, logger="opensmu.battery.emulator"):
+    with caplog.at_level(logging.WARNING, logger="benchctrl.battery.emulator"):
         emu.start()
         time.sleep(0.3)
         emu.stop()

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from opensmu.channels import Channel
-from opensmu.exceptions import SMUValueError
-from opensmu.recording import Recording
+from benchctrl.channels import Channel
+from benchctrl.exceptions import SMUValueError
+from benchctrl.recording import Recording
 
 
 def _make_recording_with_data():
@@ -106,7 +106,7 @@ def test_contains_dunder():
 
 
 def test_deferred_methods_raise():
-    from opensmu.exceptions import SMUNotImplementedError
+    from benchctrl.exceptions import SMUNotImplementedError
 
     rec = _make_recording_with_data()
     with pytest.raises(SMUNotImplementedError):

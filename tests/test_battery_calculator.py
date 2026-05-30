@@ -1,4 +1,4 @@
-"""Hardware-free tests for opensmu.battery.calculator."""
+"""Hardware-free tests for benchctrl.battery.calculator."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from opensmu.battery import (
+from benchctrl.battery import (
     Battery,
     BatteryProfile,
     DischargeProfile,
@@ -19,7 +19,7 @@ from opensmu.battery import (
     estimate_life_constant_current,
     estimate_life_from_profile,
 )
-from opensmu.exceptions import SMUValueError
+from benchctrl.exceptions import SMUValueError
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@ def test_profile_estimator_runs_against_bundled_cr2032():
 
 def test_duty_cycle_from_recording():
     """Given a synthetic recording with a step in mc, extract the duty cycle."""
-    from opensmu import Channel, Recording
+    from benchctrl import Channel, Recording
 
     rec = Recording(name="dc-test")
     mc = rec._ensure_buffer(Channel.MAIN_CURRENT, 1000)
@@ -259,7 +259,7 @@ def test_duty_cycle_from_recording():
 
 
 def test_duty_cycle_from_recording_rejects_missing_channel():
-    from opensmu import Channel, Recording
+    from benchctrl import Channel, Recording
 
     rec = Recording(name="missing")
     rec._ensure_buffer(Channel.MAIN_VOLTAGE, 1000)
@@ -270,7 +270,7 @@ def test_duty_cycle_from_recording_rejects_missing_channel():
 
 
 def test_duty_cycle_from_recording_rejects_empty_window():
-    from opensmu import Channel, Recording
+    from benchctrl import Channel, Recording
 
     rec = Recording(name="empty")
     mc = rec._ensure_buffer(Channel.MAIN_CURRENT, 1000)
@@ -288,7 +288,7 @@ def test_duty_cycle_from_recording_rejects_empty_window():
 
 
 def test_humanize_renders_long_durations():
-    from opensmu.battery.calculator import _humanize_seconds
+    from benchctrl.battery.calculator import _humanize_seconds
 
     assert _humanize_seconds(0) == "0 seconds"
     assert _humanize_seconds(1) == "1 second"

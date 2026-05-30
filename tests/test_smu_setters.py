@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from opensmu.exceptions import SMUValueError
+from benchctrl.exceptions import SMUValueError
 
 pytestmark = pytest.mark.hardware
 

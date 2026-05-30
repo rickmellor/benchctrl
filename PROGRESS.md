@@ -1,4 +1,4 @@
-# OpenSMU build progress
+# benchctrl build progress
 
 Live status log so anyone (human or AI) picking this up mid-flight knows
 exactly where it is. Updated after every milestone; latest entry on top.
@@ -23,8 +23,8 @@ exactly where it is. Updated after every milestone; latest entry on top.
     Surfaced Arc Pro high-range limit (~4.2 V under load) — documented and worked around.
 - **MCP tool count**: 48
 - **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
-- **MCP server**: 26 tools (was 23 in v0.3.0); `opensmu-mcp` ready
-- **Claude Code skill** at `skills/opensmu/SKILL.md`
+- **MCP server**: 26 tools (was 23 in v0.3.0); `benchctrl-mcp` ready
+- **Claude Code skill** at `skills/benchctrl/SKILL.md`
 - **Output formats**: `.opensmu` / Parquet / CSV / JSON / numpy / pandas
   / matplotlib — all strictly optional, lazy-imported
 - **SDK ↔ MCP parity principle** documented in `docs/mcp.md` —
@@ -65,7 +65,7 @@ parent project). Three findings:
    misread of the device's *inbound* packed sample frame (which carries
    1 sample per sub-1 channel + 4 packed samples per sub-4 channel,
    arriving every 1 ms). Sending it had no effect.
-3. **opensmu's "init step 3"** is the same `type=0x78` command applied
+3. **benchctrl's "init step 3"** is the same `type=0x78` command applied
    to channel `0x17` (rx) — that's what triggers baseline streaming on
    open.
 
@@ -78,14 +78,14 @@ the device actually delivers ≥6000 mc samples in 2 s now (was ≥5).
 
 Everything in the v0.1 scope is built, tested, and documented. The
 package is installable (`pip install -e .` works), the CLI is wired up
-(`python -m opensmu` and `opensmu` both work), and every documented
+(`python -m benchctrl` and `benchctrl` both work), and every documented
 public method is exercised end-to-end.
 
 | # | Phase | Status |
 |---|---|---|
 | 1 | Survey official `otii_tcp_client` API | DONE — see `docs/official_api_inventory.md` |
 | 2 | Write design doc | DONE — see `docs/design.md` |
-| 3 | Scaffold package | DONE — `pyproject.toml`, `src/opensmu/`, MIT license |
+| 3 | Scaffold package | DONE — `pyproject.toml`, `src/benchctrl/`, MIT license |
 | 4 | Transport + protocol + framing | DONE — `transport.py`, `protocol.py` |
 | 5 | Device (SMU) class | DONE — `device.py` |
 | 6 | Recording + samples | DONE — `recording.py`, `samples.py`, native `.opensmu` format |
@@ -96,13 +96,13 @@ public method is exercised end-to-end.
 
 ## Resuming in the morning
 
-1. `cd C:\Users\rickm\Desktop\opensmu`
+1. `cd C:\Users\rickm\Desktop\benchctrl`
 2. `cat PROGRESS.md` (this file)
 3. `git log --oneline` to see the trail
 4. `python -m pytest tests/ -q` to confirm all 132 tests still green
 5. `cat ROADMAP.md` to see what's deferred for v0.2
 
-Use `opensmu info` from the shell as a smoke test against the live
+Use `benchctrl info` from the shell as a smoke test against the live
 device.
 
 ## Where to find what
@@ -124,7 +124,7 @@ device.
 
 ### 1. Device baseline streams at ~6 Hz, not 1 kHz / 4 kHz
 
-The biggest surprise. Both opensmu and the legacy `arc_direct` library
+The biggest surprise. Both benchctrl and the legacy `arc_direct` library
 get only ~6 Hz across all channels after standard session init. The
 documented native rates (1 kHz subtype-1, 4 kHz subtype-4) are
 capabilities, not the default. A wire-level command unlocks higher
@@ -173,11 +173,11 @@ v0.3 candidates.
 ## Quick resume commands
 
 ```powershell
-cd C:\Users\rickm\Desktop\opensmu
+cd C:\Users\rickm\Desktop\benchctrl
 git log --oneline -20
 python -m pytest tests/ -m "not hardware" -q     # hardware-free, <1 s
 python -m pytest tests/ -m hardware -q            # requires Arc Pro on COM6, ~35 s
 python -m pytest tests/ -q                        # both, 132 tests
-opensmu discover
-opensmu info
+benchctrl discover
+benchctrl info
 ```

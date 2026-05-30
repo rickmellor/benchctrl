@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from opensmu.channels import Channel
-from opensmu.exceptions import SMUValueError
-from opensmu.recording import Recording
+from benchctrl.channels import Channel
+from benchctrl.exceptions import SMUValueError
+from benchctrl.recording import Recording
 
 
 def _filled_recording():

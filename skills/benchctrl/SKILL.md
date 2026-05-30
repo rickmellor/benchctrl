@@ -1,22 +1,22 @@
 ---
-name: opensmu
-description: Use when controlling a Qoitech Otii Arc Pro source-measurement unit, writing code with the opensmu Python library, analysing captured .opensmu recordings, or building measurement automation. Covers connection patterns, safety guards for output enable, the choice between MCP tools and the Python API, and common anti-patterns.
+name: benchctrl
+description: Use when controlling a Qoitech Otii Arc Pro source-measurement unit, writing code with the benchctrl Python library, analysing captured .opensmu recordings, or building measurement automation. Covers connection patterns, safety guards for output enable, the choice between MCP tools and the Python API, and common anti-patterns.
 ---
 
-# OpenSMU library guidance
+# benchctrl library guidance
 
-OpenSMU is a Python library that drives a Qoitech Otii Arc Pro SMU directly
+benchctrl is a Python library that drives a Qoitech Otii Arc Pro SMU directly
 over its USB CDC-ACM port. **No vendor server, no Automation Toolbox license,
 no GUI.** The wire protocol is fully reverse-engineered — see
 [`docs/protocol.md`](../../docs/protocol.md).
 
-Repo: `C:\Users\rickm\Desktop\opensmu`.
+Repo: `C:\Users\rickm\Desktop\benchctrl`.
 
 ## Two integration paths — pick the right one
 
 | Task style | Use |
 |---|---|
-| Interactive: "set 3.3 V, record for 5 s, what's the peak current?" | **MCP server** (`opensmu-mcp`) |
+| Interactive: "set 3.3 V, record for 5 s, what's the peak current?" | **MCP server** (`benchctrl-mcp`) |
 | One-off live read: "what's mv right now?" | **MCP server** (`live`, `take_snapshot`) |
 | Custom analysis: FFT, plotting, anomaly detection | **Python API** |
 | Batch: process every `.opensmu` file in a folder | **Python API** |
@@ -34,7 +34,7 @@ Python API is documented in [`docs/api_reference.md`](../../docs/api_reference.m
 
 ```python
 import time
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 with SMU.open() as smu:
     smu.set_voltage(3.3)
@@ -101,7 +101,7 @@ enum is canonical (`Channel.MAIN_CURRENT`).
 ## Recording analysis
 
 ```python
-from opensmu import Channel, Recording
+from benchctrl import Channel, Recording
 
 rec = Recording.load("run-1.opensmu")
 
@@ -130,11 +130,11 @@ Quick rules:
 
 | Need | Reach for |
 |---|---|
-| Archive for future opensmu round-trip | `.save("run.opensmu")` |
-| Share with colleagues (compact, portable) | `.save_parquet("run.parquet")` — needs `opensmu[parquet]` |
+| Archive for future benchctrl round-trip | `.save("run.opensmu")` |
+| Share with colleagues (compact, portable) | `.save_parquet("run.parquet")` — needs `benchctrl[parquet]` |
 | Open in Excel right now | `.save_csv("run.csv", format="wide")` |
-| Notebook / custom analysis | `.to_pandas()` / `.to_numpy(ch)` — need `opensmu[pandas]` / `opensmu[numpy]` |
-| Quick-look plot | `.plot()` — needs `opensmu[plot]` |
+| Notebook / custom analysis | `.to_pandas()` / `.to_numpy(ch)` — need `benchctrl[pandas]` / `benchctrl[numpy]` |
+| Quick-look plot | `.plot()` — needs `benchctrl[plot]` |
 | Inspect wire bytes | `.save_raw("run.raw", buf)` |
 
 ```python
@@ -145,29 +145,29 @@ rec.save_csv("run.csv", format="wide")            # one column per channel
 rec.save_json("run.json")                         # samples + stats + metadata
 Recording.load("run.opensmu")                     # round-trip
 
-# With opensmu[numpy]:
+# With benchctrl[numpy]:
 arr = rec.to_numpy("mc")                          # float32 ndarray
 ts = rec.timestamps_numpy("mc")                   # float64 ndarray
 
-# With opensmu[pandas]:
+# With benchctrl[pandas]:
 series = rec.to_pandas("mc")                      # Series indexed by timestamp
 df = rec.to_pandas()                              # wide DataFrame (NaN where rates differ)
 
-# With opensmu[parquet]:
+# With benchctrl[parquet]:
 rec.save_parquet("run.parquet")                   # ~10-20× smaller than CSV
 
-# With opensmu[plot]:
+# With benchctrl[plot]:
 fig = rec.plot()                                  # one subplot per channel
 fig.savefig("run.png")                            # standard matplotlib
 
 # Or install everything at once:
-#   pip install opensmu[science]
+#   pip install benchctrl[science]
 ```
 
-**Optional-dependency rule** — opensmu's base install pulls only pyserial.
+**Optional-dependency rule** — benchctrl's base install pulls only pyserial.
 The data-science methods import their deps lazily; calling one without
 the dep raises a clear `ImportError` pointing at the right extras key
-(e.g. `pip install 'opensmu[parquet]'`). The base library never loads
+(e.g. `pip install 'benchctrl[parquet]'`). The base library never loads
 numpy/pandas/pyarrow/matplotlib at import time.
 
 ## Exception hierarchy
@@ -190,14 +190,14 @@ parses error frames and queues them.
 
 ## Battery features
 
-`opensmu.battery` ships a clean-room replacement for Qoitech's licensed
+`benchctrl.battery` ships a clean-room replacement for Qoitech's licensed
 Battery Toolbox. See [`docs/battery.md`](../../docs/battery.md) for the
 full feature plan.
 
 ### Profile I/O (v0.5.0)
 
 ```python
-from opensmu.battery import BatteryProfile
+from benchctrl.battery import BatteryProfile
 
 # Load Otii's bundled profile (or any compatible JSON)
 profile = BatteryProfile.load("CR2032-Energizer-(25).json")
@@ -216,7 +216,7 @@ interchangeable. **Don't write your own profile JSON shape**; use the
 Duty-cycle simulator. Two estimators:
 
 ```python
-from opensmu.battery import (
+from benchctrl.battery import (
     BatteryProfile, DutyCycle,
     estimate_life_constant_current,
     estimate_life_from_profile,
@@ -243,7 +243,7 @@ est = estimate_life_from_profile(
 print(est.runtime_human, est.stop_reason, est.final_voltage_V)
 
 # Pull a duty cycle straight out of a recording (Otii's "Get from selection"):
-from opensmu import Recording
+from benchctrl import Recording
 rec = Recording.load("device-under-test.opensmu")
 duty = duty_cycle_from_recording(
     rec,
@@ -262,9 +262,9 @@ duty = duty_cycle_from_recording(
 Host-side control loop drives the SMU as a battery (OCV + ESR sag).
 
 ```python
-from opensmu import SMU
-from opensmu.battery import BatteryProfile
-from opensmu.battery.emulator import Emulator, EmulatorConfig
+from benchctrl import SMU
+from benchctrl.battery import BatteryProfile
+from benchctrl.battery.emulator import Emulator, EmulatorConfig
 
 profile = BatteryProfile.load("CR2032-Energizer-(25).json")
 config = EmulatorConfig(
@@ -289,7 +289,7 @@ with SMU.open() as smu:
 Bandwidth: ~100 Hz host-side, suitable for IoT loads with > 10 ms
 response. Sub-ms ESR tracking would need firmware-level access. Otii's
 licensed device-side emulator handles that regime; for everything
-else, the opensmu emulator works.
+else, the benchctrl emulator works.
 
 Safety: `safety_max_voltage_V` is a hard cap on output. Always set
 this to your DUT's max tolerable voltage. The loop also stops on
@@ -300,11 +300,11 @@ this to your DUT's max tolerable voltage. The loop also stops on
 Orchestrates a real-cell discharge → builds a `BatteryProfile`.
 
 ```python
-from opensmu import SMU
-from opensmu.battery import (
+from benchctrl import SMU
+from benchctrl.battery import (
     Battery, DischargeProfile, DischargeStep, ExitConditions,
 )
-from opensmu.battery.profiler import Profiler, ProfilerConfig
+from benchctrl.battery.profiler import Profiler, ProfilerConfig
 
 config = ProfilerConfig(
     discharge_profile=DischargeProfile(
@@ -351,20 +351,20 @@ needs an SMU and a real battery):
 
 ## Bench instruments
 
-`opensmu.bench` hosts drivers for other lab instruments wired alongside
+`benchctrl.bench` hosts drivers for other lab instruments wired alongside
 the Arc. Currently:
 
-- `opensmu.bench.QR10x` — Eastwood Tech QR10x programmable resistance
+- `benchctrl.bench.QR10x` — Eastwood Tech QR10x programmable resistance
   substitution box (1 Ω-8.4 MΩ, USB-Serial, AT command set). Useful
   for sleep / quiescent / low-current scenarios where a passive load
   is the right model.
-- `opensmu.bench.RigolDL3031A` — Rigol DL3031A programmable electronic
+- `benchctrl.bench.RigolDL3031A` — Rigol DL3031A programmable electronic
   load (150 V / 60 A / 350 W, USB-TMC via pyvisa). CC / CV / CR / CP
   modes plus firmware-side LIST / transient / battery-discharge
   sequences. Right for active / TX-burst / high-current loads.
 
 ```python
-from opensmu.bench import QR10x, RigolDL3031A
+from benchctrl.bench import QR10x, RigolDL3031A
 
 # Passive resistor — ideal for sleep / quiescent current
 with QR10x.open("COM7") as qr:
@@ -427,20 +427,20 @@ dl.set_input(True)
 ## Anti-patterns — don't do these
 
 - **Don't reach for the Otii server / Automation Toolbox / TCP port 1905.**
-  opensmu talks to the device directly via pyserial. There is no server.
+  benchctrl talks to the device directly via pyserial. There is no server.
   Code that imports `otii_tcp_client` is the wrong path.
 - **Don't call `smu.calibrate()`, `smu.firmware_upgrade()`, `smu.set_supply_battery_emulator()`,
   `smu.enable_battery_profiling()`, `smu.wait_for_battery_data()`,
   `smu.set_battery_profile()`** on the `SMU` class — they raise
   `SMUNotImplementedError`. Battery emulation lives in
-  `opensmu.battery.emulator` (phased rollout — see
+  `benchctrl.battery.emulator` (phased rollout — see
   [`docs/battery.md`](../../docs/battery.md)); calibration is deferred
   (see [`ROADMAP.md`](../../ROADMAP.md)); firmware upgrade is deferred
   indefinitely (bricking risk).
 - **Don't call `smu.set_channel_samplerate()`.** No wire command exists —
   sample rates are hardware-fixed. Use `Recording.downsample(channel, factor)`
   for client-side downsampling after capture.
-- **Don't write your own wire framing.** Use `opensmu.protocol.encode_*` and
+- **Don't write your own wire framing.** Use `benchctrl.protocol.encode_*` and
   `iter_frames` / `iter_samples`. Wire details (checksum, packed vs baseline
   envelopes, the `0x7E` flush before disable, the `0x7C` cleanup) have subtle
   ordering requirements.
@@ -460,7 +460,7 @@ dl.set_input(True)
 
 ```python
 import time
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 VOLTAGES = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.25]
 DWELL = 1.0
@@ -489,7 +489,7 @@ with SMU.open() as smu:
 
 ```python
 import time
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 with SMU.open() as smu:
     smu.set_current_limit(0.5)
@@ -514,7 +514,7 @@ with SMU.open() as smu:
 ### Live monitor (no recording)
 
 ```python
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 with SMU.open() as smu:
     for sample in smu.stream(seconds=10.0):
@@ -527,7 +527,7 @@ with SMU.open() as smu:
 
 ```python
 from pathlib import Path
-from opensmu import Channel, Recording
+from benchctrl import Channel, Recording
 
 for p in Path("captures").glob("*.opensmu"):
     rec = Recording.load(p)

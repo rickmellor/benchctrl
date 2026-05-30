@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-# Make `src/opensmu` importable when running pytest from the project root
+# Make `src/benchctrl` importable when running pytest from the project root
 # even before `pip install -e .` is run.
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -25,8 +25,8 @@ def smu():
 
     Skips the test if no device is found rather than failing.
     """
-    from opensmu import SMU
-    from opensmu.exceptions import SMUConnectionError
+    from benchctrl import SMU
+    from benchctrl.exceptions import SMUConnectionError
 
     try:
         devices = SMU.discover()

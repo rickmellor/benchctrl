@@ -1,4 +1,4 @@
-# OpenSMU
+# benchctrl
 
 Open-source Python control stack for USB source-measurement units. Drives
 the [Qoitech Otii Arc / Arc Pro][otii] directly over its USB CDC-ACM
@@ -38,7 +38,7 @@ You have an Otii Arc or Arc Pro on the bench. You want to:
   Protocol][mcp] without writing your own tool surface.
 - Save reproducible test scenarios you can re-run as regression checks.
 
-OpenSMU is all of that, in one package.
+benchctrl is all of that, in one package.
 
 [mcp]: https://modelcontextprotocol.io
 
@@ -47,7 +47,7 @@ OpenSMU is all of that, in one package.
 ```
             +-------------------------+
             |  MCP server             |   93 tools — drive any subsystem
-            |  (opensmu.mcp)          |   from Claude Code / Desktop / etc
+            |  (benchctrl.mcp)          |   from Claude Code / Desktop / etc
             +-------------------------+
               |          |        |
               v          v        v
@@ -66,7 +66,7 @@ OpenSMU is all of that, in one package.
               +-------------------------+
 ```
 
-### 1. `opensmu.SMU` — direct hardware control
+### 1. `benchctrl.SMU` — direct hardware control
 
 Connect, configure, source / measure, record at native streaming rates
 (~4 kHz on the current channel). Frame-aware error detection. Channel
@@ -74,7 +74,7 @@ enable, expansion port, GPIO, UART. Everything the Qoitech Automation
 Toolbox does at the SMU layer, for $0.
 
 ```python
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 with SMU.open() as smu:
     smu.set_voltage(3.3)
@@ -90,7 +90,7 @@ with SMU.open() as smu:
 → [`docs/getting_started.md`](docs/getting_started.md),
 [`docs/api_reference.md`](docs/api_reference.md)
 
-### 2. `opensmu.battery` — Battery Toolbox replacement
+### 2. `benchctrl.battery` — Battery Toolbox replacement
 
 Otii's Battery Toolbox is a paid license. The workflow it sells —
 profile a real cell, then emulate it against a DUT with SoC tracking —
@@ -106,8 +106,8 @@ is in this package, in four phases:
   `V = OCV(SoC) − I·ESR(SoC)` and the DUT can't tell the difference
 
 ```python
-from opensmu import SMU
-from opensmu.battery import BatteryProfile, Emulator, EmulatorConfig
+from benchctrl import SMU
+from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
 
 profile = BatteryProfile.load("CR2032-Energizer-(25).json")
 with SMU.open() as smu:
@@ -122,18 +122,18 @@ with SMU.open() as smu:
 
 → [`docs/battery.md`](docs/battery.md)
 
-### 3. `opensmu.bench` — companion instrument drivers
+### 3. `benchctrl.bench` — companion instrument drivers
 
 Drivers for the other instruments that share the bench with the Arc.
 Each is independent; import only what you have.
 
 | Driver | Class | Wire stack | Use case |
 |---|---|---|---|
-| Eastwood Tech QR10x | `opensmu.bench.QR10x` | USB-Serial (CH340), AT commands | Passive load — sleep current / quiescent / low-mA |
-| Rigol DL3031A | `opensmu.bench.RigolDL3031A` | USB-TMC + SCPI via pyvisa | Active load — high-current / fast transients / built-in LIST / battery-discharge mode |
+| Eastwood Tech QR10x | `benchctrl.bench.QR10x` | USB-Serial (CH340), AT commands | Passive load — sleep current / quiescent / low-mA |
+| Rigol DL3031A | `benchctrl.bench.RigolDL3031A` | USB-TMC + SCPI via pyvisa | Active load — high-current / fast transients / built-in LIST / battery-discharge mode |
 
 ```python
-from opensmu.bench import QR10x, RigolDL3031A
+from benchctrl.bench import QR10x, RigolDL3031A
 
 with QR10x.open("COM7") as qr:
     qr.set_safety_limit(12.0)
@@ -150,7 +150,7 @@ with RigolDL3031A.open() as dl:        # auto-discover by Rigol VID/PID
 
 → [`docs/bench.md`](docs/bench.md)
 
-### 4. `opensmu.mcp` — Model Context Protocol server
+### 4. `benchctrl.mcp` — Model Context Protocol server
 
 93 tools exposing the whole SDK to MCP-aware clients (Claude Code,
 Claude Desktop, etc). Lets an LLM agent run real measurements:
@@ -158,8 +158,8 @@ Claude Desktop, etc). Lets an LLM agent run real measurements:
 report mean current."
 
 ```bash
-pip install opensmu[mcp]
-opensmu-mcp                              # or `python -m opensmu.mcp`
+pip install benchctrl[mcp]
+benchctrl-mcp                              # or `python -m benchctrl.mcp`
 ```
 
 Every public SDK method has a matching MCP tool — including the
@@ -203,11 +203,11 @@ emulated cell.
 ## Install
 
 ```bash
-pip install opensmu                      # SMU + battery + QR10x bench driver
-pip install opensmu[mcp]                 # + MCP server
-pip install opensmu[bench-visa]          # + Rigol DL3031A (pyvisa)
-pip install opensmu[science]             # + numpy / pandas / parquet / matplotlib
-pip install opensmu[dev]                 # + pytest / ruff / mypy
+pip install benchctrl                      # SMU + battery + QR10x bench driver
+pip install benchctrl[mcp]                 # + MCP server
+pip install benchctrl[bench-visa]          # + Rigol DL3031A (pyvisa)
+pip install benchctrl[science]             # + numpy / pandas / parquet / matplotlib
+pip install benchctrl[dev]                 # + pytest / ruff / mypy
 ```
 
 All output formats (Parquet, pandas, numpy, matplotlib) are
@@ -218,7 +218,7 @@ everyday work. See [extras matrix](docs/output_formats.md#install).
 
 ```python
 import time
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 # 1. Discover & connect (auto-detects the first connected Arc / Pro)
 with SMU.open() as smu:
@@ -268,7 +268,7 @@ More: [`docs/getting_started.md`](docs/getting_started.md).
 
 ## Status & known limits
 
-OpenSMU is in **beta** (`Development Status :: 4 - Beta`). The SDK
+benchctrl is in **beta** (`Development Status :: 4 - Beta`). The SDK
 surface is stable; we're not planning breaking changes before 1.0.
 The validation harness is the most active area — new scenario types
 land in `validation/` as they're characterized.
@@ -297,8 +297,8 @@ public method has a test, firmware bugs get documented in
 `KNOWN_LIMITATIONS.md`).
 
 ```bash
-git clone https://github.com/opensmu/opensmu
-cd opensmu
+git clone https://github.com/benchctrl/benchctrl
+cd benchctrl
 pip install -e ".[dev,mcp,bench-visa,science]"
 pytest -m "not hardware"                 # ~3 minutes, no device needed
 pytest                                    # full suite (Arc Pro on USB)
@@ -308,7 +308,7 @@ pytest                                    # full suite (Arc Pro on USB)
 
 MIT. See [`LICENSE`](LICENSE).
 
-OpenSMU is an independent open-source project. **Not affiliated with,
+benchctrl is an independent open-source project. **Not affiliated with,
 endorsed by, or supported by Qoitech AB.** "Otii", "Arc", and related
 marks are trademarks of Qoitech AB. The DL3031A driver is not
 affiliated with Rigol Technologies.
@@ -316,5 +316,5 @@ affiliated with Rigol Technologies.
 The wire protocol was reverse-engineered from passive observation of
 legitimate USB traffic between a user's own hardware and software they
 had licensed. The hardware enforces no license check on the wire;
-OpenSMU simply opens the device's standard CDC-ACM endpoint, exactly
+benchctrl simply opens the device's standard CDC-ACM endpoint, exactly
 as the operating system invites any application to do.

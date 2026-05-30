@@ -1,4 +1,4 @@
-# OpenSMU test plan
+# benchctrl test plan
 
 Comprehensive validation strategy. Tests are organised in two tiers:
 
@@ -24,7 +24,7 @@ pytest
 
 | File | Target module | Coverage |
 |---|---|---|
-| `test_imports.py` | `opensmu` | every public symbol importable from package root |
+| `test_imports.py` | `benchctrl` | every public symbol importable from package root |
 | `test_exceptions.py` | `exceptions` | hierarchy, attribute carrying, isinstance against std types |
 | `test_channels.py` | `channels` | enum constants, `code`/`wire_id`/`subtype`/`sample_rate`/`unit`, `from_code`, `coerce`, reverse-lookup table |
 | `test_protocol_framing.py` | `protocol` | encode_frame round-trips, checksum correctness, iter_frames yields validated payloads, resync after garbage, truncated tail handling |

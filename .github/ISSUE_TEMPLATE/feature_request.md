@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Add a capability OpenSMU doesn't have today
+about: Add a capability benchctrl doesn't have today
 labels: enhancement
 ---
 

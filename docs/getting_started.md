@@ -1,16 +1,16 @@
-# Getting started with OpenSMU
+# Getting started with benchctrl
 
 ## Install
 
 ```bash
-pip install opensmu        # once published
+pip install benchctrl        # once published
 ```
 
 For development:
 
 ```bash
 git clone <repo>
-cd opensmu
+cd benchctrl
 pip install -e ".[dev]"
 ```
 
@@ -30,7 +30,7 @@ sufficient. Linux and macOS need no additional setup.
 ## First connection
 
 ```python
-from opensmu import SMU
+from benchctrl import SMU
 
 print(SMU.discover())
 # [SMUInfo(port='COM6', name='Arc', serial='1234...', description='USB Serial Device')]
@@ -49,7 +49,7 @@ The `SMU.open()` call automatically:
 
 ```python
 import time
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 with SMU.open() as smu:
     smu.set_voltage(3.3)
@@ -68,7 +68,7 @@ tolerate the configured voltage before enabling output.
 
 ```python
 import time
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 with SMU.open() as smu:
     smu.enable_channels(Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT)
@@ -102,7 +102,7 @@ rec = smu.stop_recording()
 Channels are an enum:
 
 ```python
-from opensmu import Channel
+from benchctrl import Channel
 
 Channel.MAIN_CURRENT     # the headline 'mc' channel
 Channel.MAIN_VOLTAGE     # 'mv'
@@ -139,7 +139,7 @@ smu.enable_channels("mc", "mv")
 ## Save and reload
 
 ```python
-from opensmu import Recording
+from benchctrl import Recording
 
 # Save
 rec.save("capture.opensmu")     # native binary, lossless
@@ -157,7 +157,7 @@ stats = loaded.statistics("mc")
 For interactive monitoring without buffering:
 
 ```python
-from opensmu import SMU, Channel
+from benchctrl import SMU, Channel
 
 with SMU.open() as smu:
     for sample in smu.stream(seconds=10.0):
@@ -171,8 +171,8 @@ It cannot run concurrently with a recording.
 ## Error handling
 
 ```python
-from opensmu import SMU
-from opensmu.exceptions import SMUValueError, SMUCommandError
+from benchctrl import SMU
+from benchctrl.exceptions import SMUValueError, SMUCommandError
 
 with SMU.open() as smu:
     try:
@@ -206,12 +206,12 @@ See [`ROADMAP.md`](../ROADMAP.md) for the full list. Key items:
 ## CLI
 
 ```bash
-opensmu discover                              # list devices
-opensmu info                                  # show state
-opensmu set-voltage 3.3                       # set V
-opensmu set-output on                         # enable output
-opensmu capture 5.0 run.csv -c mc mv          # record for 5 s
-opensmu stream 10                             # live print
+benchctrl discover                              # list devices
+benchctrl info                                  # show state
+benchctrl set-voltage 3.3                       # set V
+benchctrl set-output on                         # enable output
+benchctrl capture 5.0 run.csv -c mc mv          # record for 5 s
+benchctrl stream 10                             # live print
 ```
 
 ## Next steps

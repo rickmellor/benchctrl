@@ -4,9 +4,9 @@ Source-of-truth catalog of every class, method, parameter, and return
 type exposed by Qoitech's official Python TCP client (v3.x as installed
 in `C:\Users\rickm\AppData\Local\Programs\Python\Python312\Lib\site-packages\otii_tcp_client`).
 
-Used as the parity target for OpenSMU. Each row says how OpenSMU maps it:
+Used as the parity target for benchctrl. Each row says how benchctrl maps it:
 
-- **mirror** — implemented in OpenSMU with equivalent semantics (name may differ for clarity)
+- **mirror** — implemented in benchctrl with equivalent semantics (name may differ for clarity)
 - **drop** — not relevant (TCP server / licensing / project file format)
 - **defer** — surface present but raises `SMUNotImplementedError`; tracked in `ROADMAP.md`
 
@@ -14,7 +14,7 @@ Used as the parity target for OpenSMU. Each row says how OpenSMU maps it:
 
 ## `OtiiClient` (otii_client.py)
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `connect(...)` | `host, port, try_for_seconds, licensing, credentials, licenses` | **drop** — no TCP server, use `SMU.open(port=...)` instead |
 | `disconnect()` | | **drop** — use `SMU.close()` or context manager exit |
@@ -25,7 +25,7 @@ Connection + license-reservation context manager. **drop** entirely.
 
 ## `Otii` (otii.py)
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `create_project()` | -> `Project` | **drop** — no server-side project concept |
 | `get_active_project()` | -> `Project` | **drop** |
@@ -48,7 +48,7 @@ Connection + license-reservation context manager. **drop** entirely.
 
 ### Identification / lifecycle
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `add_to_project()` | | **drop** |
 | `is_connected()` | -> bool | **mirror** — `smu.is_connected` property |
@@ -56,7 +56,7 @@ Connection + license-reservation context manager. **drop** entirely.
 
 ### Power & output
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `set_main(enable)` | bool | **mirror** — `smu.set_output(enable)` |
 | `get_main()` | -> bool | **mirror** — `smu.output_enabled` property |
@@ -75,7 +75,7 @@ Connection + license-reservation context manager. **drop** entirely.
 
 ### 4-wire / sense / shunt
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `set_4wire(enable)` | | **mirror** — `smu.set_four_wire(enable)` |
 | `get_4wire()` | -> state str | **mirror** — `smu.four_wire_state` (host-cached enable/disable) |
@@ -84,7 +84,7 @@ Connection + license-reservation context manager. **drop** entirely.
 
 ### Expansion port (5V / digital / GPIO)
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `enable_5v(enable)` | | **mirror** — `smu.set_exp_5v(enable)` |
 | `enable_exp_port(enable)` | | **mirror** — `smu.set_exp_port(enable)` (umbrella enable) |
@@ -97,7 +97,7 @@ Connection + license-reservation context manager. **drop** entirely.
 
 ### UART
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `enable_uart(enable)` | | **mirror** — `smu.set_uart(enable, baudrate=...)` |
 | `set_uart_baudrate(value)` | int | **mirror** — same call as above; also exposed separately |
@@ -106,7 +106,7 @@ Connection + license-reservation context manager. **drop** entirely.
 
 ### Channels
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `enable_channel(name, enable)` | | **mirror** — `smu.enable_channel(channel)` / `smu.disable_channel(channel)` / `smu.enable_channels(*channels)` |
 | `set_channel_samplerate(name, value)` | | **defer** |
@@ -115,7 +115,7 @@ Connection + license-reservation context manager. **drop** entirely.
 
 ### Legacy / oddities
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `enable_legacy_sink(enable)` | | **mirror** — `smu.set_legacy_sink(enable)` |
 | `set_property(name, value)` | | **mirror** — `smu.set_property(name, value)` (passthrough, no validation) |
@@ -124,7 +124,7 @@ Connection + license-reservation context manager. **drop** entirely.
 
 ### Battery / calibration / firmware
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `enable_battery_profiling(enable)` | | **defer** |
 | `set_battery_profile(id)` | | **defer** |
@@ -141,7 +141,7 @@ All 9 methods (`get/set_parallel`, `get/set_series`, `get/set_soc`,
 
 ## `Project` (project.py)
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `close(force)` | | **drop** |
 | `crop_data(start, end)` | | **mirror** — `Recording.crop(start, end)` operates on recording in memory |
@@ -155,7 +155,7 @@ All 9 methods (`get/set_parallel`, `get/set_series`, `get/set_soc`,
 
 ## `Recording` (recording.py)
 
-| method | signature | OpenSMU mapping |
+| method | signature | benchctrl mapping |
 |---|---|---|
 | `delete()` | | **drop** — just drop the reference |
 | `downsample_channel(device_id, channel, factor)` | | **mirror** — `Recording.downsample(channel, factor)` (in-memory) |
@@ -181,7 +181,7 @@ All 9 methods (`get/set_parallel`, `get/set_series`, `get/set_soc`,
 
 **drop** — server-side concepts.
 
-OpenSMU has its own exception hierarchy (`SMUError` and subclasses).
+benchctrl has its own exception hierarchy (`SMUError` and subclasses).
 
 ---
 
@@ -192,4 +192,4 @@ OpenSMU has its own exception hierarchy (`SMUError` and subclasses).
 - **drop**: ~24 methods (TCP server, licensing, project file format)
 
 Net result: every meaningful user-facing capability of the official client
-is reachable in OpenSMU without a license fee or a running server.
+is reachable in benchctrl without a license fee or a running server.

@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from opensmu.channels import WIRE_ID_TO_CHANNEL, Channel
-from opensmu.protocol import (
+from benchctrl.channels import WIRE_ID_TO_CHANNEL, Channel
+from benchctrl.protocol import (
     SAMPLE_RECORD_HEADER,
     SAMPLE_RECORD_LEN,
     SampleRecord,

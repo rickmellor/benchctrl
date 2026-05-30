@@ -2,22 +2,22 @@
 
 from __future__ import annotations
 
-import opensmu
+import benchctrl
 
 
 def test_version_string():
-    assert isinstance(opensmu.__version__, str)
-    assert opensmu.__version__.count(".") == 2  # semver MAJOR.MINOR.PATCH
+    assert isinstance(benchctrl.__version__, str)
+    assert benchctrl.__version__.count(".") == 2  # semver MAJOR.MINOR.PATCH
 
 
 def test_all_public_names_resolve():
-    for name in opensmu.__all__:
-        assert hasattr(opensmu, name), f"{name} declared in __all__ but not exported"
+    for name in benchctrl.__all__:
+        assert hasattr(benchctrl, name), f"{name} declared in __all__ but not exported"
 
 
 def test_top_level_classes():
     # Spot-check the headliners
-    from opensmu import (
+    from benchctrl import (
         SMU,
         Channel,
         ChannelInfoResult,

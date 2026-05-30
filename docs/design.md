@@ -1,4 +1,4 @@
-# OpenSMU design
+# benchctrl design
 
 ## Goals
 
@@ -17,7 +17,7 @@
 
 - Network protocol parity with the official server. We do **not** speak the
   Qoitech TCP protocol. Anyone running the official server gets no benefit
-  from OpenSMU; the value proposition is *removing* that dependency.
+  from benchctrl; the value proposition is *removing* that dependency.
 - Project file compatibility. Recordings serialise to our own self-contained
   format plus standard CSV/JSON.
 - Async API. The hardware is inherently sequential; the simple sync API is
@@ -30,19 +30,19 @@
 +----------------------------------------------------+
 |  Application / examples / CLI                      |
 +----------------------------------------------------+
-|  opensmu.device.SMU      (public API)              |  <-- user-facing
-|  opensmu.recording.Recording                       |
-|  opensmu.channels.Channel                          |
-|  opensmu.exceptions                                |
+|  benchctrl.device.SMU      (public API)              |  <-- user-facing
+|  benchctrl.recording.Recording                       |
+|  benchctrl.channels.Channel                          |
+|  benchctrl.exceptions                                |
 +----------------------------------------------------+
-|  opensmu.samples         (sample parsing,          |  <-- pure functions
+|  benchctrl.samples         (sample parsing,          |  <-- pure functions
 |                           statistics, exports)     |
 +----------------------------------------------------+
-|  opensmu.protocol        (frame encode/decode,     |  <-- pure functions
+|  benchctrl.protocol        (frame encode/decode,     |  <-- pure functions
 |                           command codes,           |
 |                           channel-config payload)  |
 +----------------------------------------------------+
-|  opensmu.transport.Transport  (pyserial wrapper:   |  <-- I/O boundary
+|  benchctrl.transport.Transport  (pyserial wrapper:   |  <-- I/O boundary
 |                                open/close/         |
 |                                read/write/probe)   |
 +----------------------------------------------------+
@@ -72,7 +72,7 @@ assignment, which by convention is total. Methods make the failure mode honest.
 ### Channels are an enum
 
 ```python
-from opensmu import Channel
+from benchctrl import Channel
 
 smu.enable_channels(Channel.MAIN_CURRENT, Channel.MAIN_VOLTAGE)
 smu.read_value(Channel.MAIN_VOLTAGE)
@@ -133,7 +133,7 @@ existing exception-handling idioms still work.
 
 ## Wire protocol notes
 
-OpenSMU implements the exact wire protocol reverse-engineered in the
+benchctrl implements the exact wire protocol reverse-engineered in the
 parent project (see `docs/protocol.md`). Key points the code relies on:
 
 - Frame: `A3 2C B5 7F` magic + `u16` length + `u16` checksum + payload.
@@ -213,9 +213,9 @@ reader thread to drain the bulk-IN stream without blocking command writes.
 
 ## Logging
 
-Standard `logging` under the `opensmu` logger. The library never configures
+Standard `logging` under the `benchctrl` logger. The library never configures
 handlers — that's the application's job. Hex dumps of frames are logged at
-DEBUG when `logging.getLogger("opensmu.protocol").setLevel(logging.DEBUG)`.
+DEBUG when `logging.getLogger("benchctrl.protocol").setLevel(logging.DEBUG)`.
 
 ## Versioning
 
