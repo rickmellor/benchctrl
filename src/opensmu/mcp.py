@@ -45,6 +45,8 @@ from opensmu.battery import (
     estimate_life_from_profile,
 )
 from opensmu.bench import QR10x
+# RigolDL3031A is imported lazily inside the tool functions so the MCP
+# server doesn't hard-require pyvisa to start.
 from opensmu.channels import WIRE_ID_TO_CHANNEL
 from opensmu.exceptions import SMUError
 from opensmu.protocol import iter_frames, iter_samples
@@ -1096,6 +1098,189 @@ def qr10x_decr(delta_ohm: float) -> dict:
     out = qr.decr(delta_ohm)
     out["actual_resistance_ohm"] = qr.actual_resistance()
     return out
+
+
+# ---------------------------------------------------------------------------
+# Rigol DL3031A programmable DC electronic load (opensmu.bench)
+# ---------------------------------------------------------------------------
+
+_dl3031a = None  # actually Optional[RigolDL3031A] but kept Any to avoid eager import
+_dl3031a_lock = threading.RLock()
+
+
+def _get_dl3031a():
+    if _dl3031a is None:
+        raise RuntimeError(
+            "DL3031A not open — call dl3031a_open() first."
+        )
+    return _dl3031a
+
+
+@mcp.tool()
+def dl3031a_open(resource: Optional[str] = None) -> dict:
+    """Open a VISA session to a Rigol DL3031A programmable electronic load.
+
+    If ``resource`` is None, auto-discovers by scanning for the Rigol
+    DL3000 USB VID/PID (0x1AB1 / 0x0E11). Pass an explicit VISA
+    resource string (USB or LXI) to target a specific device.
+
+    Returns the device's *IDN? identity on success.
+    """
+    global _dl3031a
+    from opensmu.bench import RigolDL3031A
+    with _dl3031a_lock:
+        if _dl3031a is not None:
+            info = _dl3031a.info()
+            return {
+                "error": "DL3031A already open",
+                "guidance": "Call dl3031a_close() before reopening.",
+                "current_resource": info.resource,
+            }
+        _dl3031a = RigolDL3031A.open(resource)
+    info = _dl3031a.info()
+    return {
+        "resource": info.resource,
+        "info": {
+            "manufacturer": info.manufacturer, "model": info.model,
+            "serial": info.serial, "firmware": info.firmware,
+        },
+    }
+
+
+@mcp.tool()
+def dl3031a_close() -> dict:
+    """Close the DL3031A connection. Also disables the load input."""
+    global _dl3031a
+    with _dl3031a_lock:
+        if _dl3031a is None:
+            return {"closed": False, "note": "no DL3031A was open"}
+        try:
+            _dl3031a.set_input(False)
+        except Exception:
+            pass
+        _dl3031a.close()
+        _dl3031a = None
+    return {"closed": True}
+
+
+@mcp.tool()
+def dl3031a_info() -> dict:
+    """Identity and resource string from ``*IDN?``."""
+    info = _get_dl3031a().info()
+    return {
+        "manufacturer": info.manufacturer, "model": info.model,
+        "serial": info.serial, "firmware": info.firmware,
+        "resource": info.resource,
+    }
+
+
+@mcp.tool()
+def dl3031a_reset() -> dict:
+    """``*RST`` — restore factory defaults (mode CC, input OFF, all zero)."""
+    _get_dl3031a().reset()
+    return {"reset": True}
+
+
+@mcp.tool()
+def dl3031a_set_mode(mode: str) -> dict:
+    """Set the load's operation mode: ``"CC"`` / ``"CV"`` / ``"CR"`` / ``"CP"``."""
+    dl = _get_dl3031a()
+    dl.set_mode(mode)
+    return {"mode": dl.get_mode()}
+
+
+@mcp.tool()
+def dl3031a_get_mode() -> dict:
+    return {"mode": _get_dl3031a().get_mode()}
+
+
+@mcp.tool()
+def dl3031a_set_input(on: bool) -> dict:
+    """Enable or disable the load input.
+
+    SAFETY-CRITICAL: enabling the input lets the load start sinking
+    current from the connected DUT. Confirm the setpoint, mode, and
+    DUT compatibility before passing ``on=True``.
+    """
+    dl = _get_dl3031a()
+    dl.set_input(on)
+    return {"input_on": dl.get_input()}
+
+
+@mcp.tool()
+def dl3031a_get_input() -> dict:
+    return {"input_on": _get_dl3031a().get_input()}
+
+
+@mcp.tool()
+def dl3031a_set_current(amps: float) -> dict:
+    """CC-mode setpoint (A). Honored when ``:FUNC == CC``."""
+    dl = _get_dl3031a()
+    dl.set_current(amps)
+    return {"current_setpoint_A": dl.get_current()}
+
+
+@mcp.tool()
+def dl3031a_set_voltage(volts: float) -> dict:
+    """CV-mode setpoint (V). Honored when ``:FUNC == CV``."""
+    dl = _get_dl3031a()
+    dl.set_voltage(volts)
+    return {"voltage_setpoint_V": dl.get_voltage()}
+
+
+@mcp.tool()
+def dl3031a_set_resistance(ohms: float) -> dict:
+    """CR-mode setpoint (Ω). Honored when ``:FUNC == CR``."""
+    dl = _get_dl3031a()
+    dl.set_resistance(ohms)
+    return {"resistance_setpoint_ohm": dl.get_resistance()}
+
+
+@mcp.tool()
+def dl3031a_set_power(watts: float) -> dict:
+    """CP-mode setpoint (W). Honored when ``:FUNC == CP``."""
+    dl = _get_dl3031a()
+    dl.set_power(watts)
+    return {"power_setpoint_W": dl.get_power()}
+
+
+@mcp.tool()
+def dl3031a_set_current_range(amps: float) -> dict:
+    """Set the CC / transient current range (DL3031A: ~6 A low / 60 A high)."""
+    dl = _get_dl3031a()
+    dl.set_current_range(amps)
+    return {"current_range_A": dl.get_current_range()}
+
+
+@mcp.tool()
+def dl3031a_set_voltage_range(volts: float) -> dict:
+    """Set the CV / measurement voltage range (DL3031A: ~36 V low / 150 V high)."""
+    dl = _get_dl3031a()
+    dl.set_voltage_range(volts)
+    return {"voltage_range_V": dl.get_voltage_range()}
+
+
+@mcp.tool()
+def dl3031a_set_slew(amps_per_us: float) -> dict:
+    """Symmetric current slew rate (A/µs) for CC and transient mode."""
+    dl = _get_dl3031a()
+    dl.set_slew(amps_per_us)
+    return {"slew_A_per_us": dl.get_slew()}
+
+
+@mcp.tool()
+def dl3031a_measure() -> dict:
+    """Measure V / I / P / R at the load terminals (one shot each)."""
+    return _get_dl3031a().measure_all()
+
+
+@mcp.tool()
+def dl3031a_last_error() -> dict:
+    """Read one entry from the SCPI error queue. Returns ``{"code": 0}`` if clean."""
+    err = _get_dl3031a().last_error()
+    if err is None:
+        return {"code": 0, "message": "No error"}
+    return {"code": err[0], "message": err[1]}
 
 
 @mcp.tool()

@@ -2,6 +2,70 @@
 
 All notable changes to OpenSMU. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.3] — Rigol DL3031A driver (`opensmu.bench.RigolDL3031A`)
+
+### Added — SCPI-over-USB-TMC driver for the Rigol DL3000 series
+
+`opensmu.bench.RigolDL3031A` — pyvisa-based driver for the Rigol
+DL3021A / DL3031A programmable DC electronic load. Auto-discovers by
+USB VID/PID (`0x1AB1`/`0x0E11`) or accepts an explicit VISA resource
+string (USB-TMC or LXI).
+
+Public API (mirrors the QR10x pattern):
+
+- `open(resource=None)` / `close()` (context-manager safe; `__exit__`
+  disables the load input)
+- `info()` returns `RigolDLInfo` from `*IDN?`
+- `reset()` / `clear_status()` / `last_error()` / `raise_if_error()`
+- `set_mode(...)` / `get_mode()` — CC / CV / CR / CP
+- `set_input(bool)` / `get_input()`
+- Per-mode setpoints: `set_current` / `set_voltage` / `set_resistance` / `set_power`
+- Ranges: `set_current_range` / `set_voltage_range`
+- `set_slew(A/µs)` — symmetric CC/transient slew rate
+- `measure_voltage` / `measure_current` / `measure_power` /
+  `measure_resistance` / `measure_all()`
+
+Exception hierarchy:
+
+- `RigolDLError` (base)
+  - `RigolDLConnectionError` — VISA open / transport failure
+  - `RigolDLCommandError` — device returned non-zero from `:SYSTem:ERRor?`
+  - `RigolDLValueError` — client-side range / type check failed
+  - `RigolDLTimeoutError` — VISA `VI_ERROR_TMO`
+
+Lives behind the `bench-visa` extra (already in `pyproject.toml`); the
+top-level `opensmu.bench` module lazy-imports `RigolDL3031A` via PEP 562
+so the QR10x path stays usable without pyvisa.
+
+### Added — 17 MCP tools for DL3031A
+
+Per the SDK ↔ MCP parity principle, every public method has a matching
+tool. The MCP server holds one DL3031A connection across calls until
+`dl3031a_close()`. Tool count: 48 → **65**.
+
+Tools: `dl3031a_open` / `dl3031a_close` / `dl3031a_info` /
+`dl3031a_reset` / `dl3031a_last_error` / `dl3031a_set_mode` /
+`dl3031a_get_mode` / `dl3031a_set_input` / `dl3031a_get_input` /
+`dl3031a_set_current` / `dl3031a_set_voltage` /
+`dl3031a_set_resistance` / `dl3031a_set_power` /
+`dl3031a_set_current_range` / `dl3031a_set_voltage_range` /
+`dl3031a_set_slew` / `dl3031a_measure`.
+
+### Verified — talks to real hardware
+
+Bench setup: DL3031A on USB-TMC via USB hub (the VISA resource string
+is `USB0::0x1AB1::0x0E11::DL3D232300106::INSTR`), Rigol Ultra Sigma's
+VISA backend loaded. `*IDN?` parses cleanly; mode / setpoint /
+measurement round-trip; hardware-marked test passes.
+
+### Tests
+
+- 36 hardware-free unit tests using a `FakeInstrument` that records
+  every `write()` and replies to `query()` from a scripted dict.
+- 1 hardware-marked test that hits the real device (auto-discover or
+  override via `OPENSMU_DL3031A_RESOURCE`).
+- Total tests: 248 hardware-free passing (was 212).
+
 ## [0.9.2] — bench validation harness + multi-profile matrix + LiPo support
 
 ### Added — `validation/` harness with reusable scenarios
