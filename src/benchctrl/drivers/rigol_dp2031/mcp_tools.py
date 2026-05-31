@@ -705,6 +705,322 @@ def dp2031_current_bounds(channel: int) -> dict:
             "min_A": lo, "max_A": hi, "default_A": dflt}
 
 
+# ---------------------------------------------------------------------------
+# Phase D — Timer (Arb sequencer)
+# ---------------------------------------------------------------------------
+
+
+def dp2031_set_timer_enabled(on: bool) -> dict:
+    """Arm or disarm the Timer generator."""
+    _get_dp2031().set_timer_enabled(on)
+    return {"timer_enabled": on}
+
+
+def dp2031_get_timer_enabled() -> dict:
+    return {"timer_enabled": _get_dp2031().get_timer_enabled()}
+
+
+def dp2031_set_timer_channel(channel: int) -> dict:
+    _get_dp2031().set_timer_channel(channel)
+    return {"timer_channel": channel}
+
+
+def dp2031_get_timer_channel() -> dict:
+    return {"timer_channel": int(_get_dp2031().get_timer_channel())}
+
+
+def dp2031_set_timer_cycles(count: Optional[int] = None) -> dict:
+    """Set Timer cycle count. ``count`` 1–99999, or None/0 for infinite."""
+    _get_dp2031().set_timer_cycles(count)
+    return {"timer_cycles": count or "infinite"}
+
+
+def dp2031_get_timer_cycles() -> dict:
+    c = _get_dp2031().get_timer_cycles()
+    return {"timer_cycles": c if c is not None else "infinite"}
+
+
+def dp2031_set_timer_end_state(mode: str) -> dict:
+    """``OFF`` (disable output at end) or ``LAST`` (hold last step's value)."""
+    _get_dp2031().set_timer_end_state(mode)
+    return {"timer_end_state": mode}
+
+
+def dp2031_get_timer_end_state() -> dict:
+    return {"timer_end_state": _get_dp2031().get_timer_end_state()}
+
+
+def dp2031_set_timer_run_mode(mode: str) -> dict:
+    """``CONTinue`` (loop) or ``SINGle`` (one pass)."""
+    _get_dp2031().set_timer_run_mode(mode)
+    return {"timer_run_mode": mode}
+
+
+def dp2031_get_timer_run_mode() -> dict:
+    return {"timer_run_mode": _get_dp2031().get_timer_run_mode()}
+
+
+def dp2031_set_timer_trigger(source: str) -> dict:
+    """``MANual`` or ``BUS``."""
+    _get_dp2031().set_timer_trigger(source)
+    return {"timer_trigger": source}
+
+
+def dp2031_get_timer_trigger() -> dict:
+    return {"timer_trigger": _get_dp2031().get_timer_trigger()}
+
+
+def dp2031_get_timer_group_params(count: int = 1) -> dict:
+    """Read back ``count`` Timer groups starting at the current group index.
+
+    Returns a list of ``{"index", "voltage_V", "current_A", "dwell_s"}``
+    dicts.
+    """
+    rows = _get_dp2031().get_timer_group_params(count)
+    return {
+        "groups": [
+            {"index": idx, "voltage_V": v, "current_A": i, "dwell_s": t}
+            for idx, v, i, t in rows
+        ]
+    }
+
+
+def dp2031_delete_timer_groups(count: int = 1) -> dict:
+    """Delete ``count`` Timer groups starting at the current group index."""
+    _get_dp2031().delete_timer_groups(count)
+    return {"deleted_count": count}
+
+
+def dp2031_program_timer(
+    channel: int,
+    steps: list,
+    cycles: Optional[int] = 1,
+    end_state: str = "OFF",
+    run_mode: str = "CONTinue",
+    trigger: str = "MANual",
+) -> dict:
+    """Program a complete Timer sequence on CHn in one call.
+
+    Each step in ``steps`` is ``[voltage_V, current_A, dwell_s]``.
+    Steps are validated against the channel envelope before any
+    wire writes happen. The Timer is left disarmed — call
+    ``dp2031_set_timer_enabled(True)`` and arm the trigger separately.
+
+    SAFETY: subsequent Timer execution can drive significant
+    voltages and currents on CHn. Confirm DUT-side ratings.
+    """
+    step_tuples = [
+        (float(s[0]), float(s[1]), float(s[2])) for s in steps
+    ]
+    _get_dp2031().program_timer(
+        channel,
+        step_tuples,
+        cycles=cycles,
+        end_state=end_state,
+        run_mode=run_mode,
+        trigger=trigger,
+    )
+    return {
+        "channel": channel,
+        "steps_written": len(step_tuples),
+        "cycles": cycles or "infinite",
+        "end_state": end_state,
+        "trigger": trigger,
+    }
+
+
+# Timer template subsystem (less commonly used; surface only the most
+# useful parts — full template surface is on the SDK if needed)
+
+
+def dp2031_set_timer_template(template: str) -> dict:
+    """Pick template: SINE / PULSE / RAMP / UP / DN / UPDN / RISE / FALL."""
+    _get_dp2031().set_timer_template(template)
+    return {"template": template}
+
+
+def dp2031_construct_timer_from_template() -> dict:
+    """Render the configured template into the Timer group editor."""
+    _get_dp2031().construct_timer_from_template()
+    return {"constructed": True}
+
+
+# ---------------------------------------------------------------------------
+# Phase D — Analyzer
+# ---------------------------------------------------------------------------
+
+
+def dp2031_set_analyzer_enabled(on: bool) -> dict:
+    _get_dp2031().set_analyzer_enabled(on)
+    return {"analyzer_enabled": on}
+
+
+def dp2031_get_analyzer_enabled() -> dict:
+    return {"analyzer_enabled": _get_dp2031().get_analyzer_enabled()}
+
+
+def dp2031_set_analyzer_type(type_: str) -> dict:
+    """``COM`` (V/I/P selection) or ``CURR`` (pulse-current analysis)."""
+    _get_dp2031().set_analyzer_type(type_)
+    return {"analyzer_type": type_}
+
+
+def dp2031_get_analyzer_type() -> dict:
+    return {"analyzer_type": _get_dp2031().get_analyzer_type()}
+
+
+def dp2031_set_analyzer_common_objects(objects: list) -> dict:
+    """Select 1–3 analyzer COM-mode objects (``CHx_V`` / ``CHx_C`` / ``CHx_P``).
+
+    KNOWN BUG: this command triggers VI_ERROR_SYSTEM_ERROR on
+    DP2031 firmware 01.00.01.00.16 over USB-TMC. The wire-form is
+    per-spec; the device-side handler is defective.
+    """
+    _get_dp2031().set_analyzer_common_objects(*objects)
+    return {"objects": list(objects)}
+
+
+def dp2031_set_analyzer_save(on: bool) -> dict:
+    """Enable the analyzer's log-to-file feature."""
+    _get_dp2031().set_analyzer_save(on)
+    return {"analyzer_save": on}
+
+
+def dp2031_set_analyzer_save_path(path: str) -> dict:
+    """Set the analyzer log file path (e.g. ``C:/RA.ROF``)."""
+    _get_dp2031().set_analyzer_save_path(path)
+    return {"analyzer_save_path": path}
+
+
+# ---------------------------------------------------------------------------
+# Phase D — Trigger I/O (D1-D4 rear digital lines)
+# ---------------------------------------------------------------------------
+
+
+def dp2031_set_trigger_in_enabled(line: str, on: bool) -> dict:
+    _get_dp2031().set_trigger_in_enabled(line, on)
+    return {"line": line, "trigger_in_enabled": on}
+
+
+def dp2031_get_trigger_in_enabled(line: str) -> dict:
+    return {"line": line,
+            "trigger_in_enabled": _get_dp2031().get_trigger_in_enabled(line)}
+
+
+def dp2031_set_trigger_in_type(line: str, type_: str) -> dict:
+    """RISE / FALL / HIGH / LOW."""
+    _get_dp2031().set_trigger_in_type(line, type_)
+    return {"line": line, "trigger_in_type": type_}
+
+
+def dp2031_get_trigger_in_type(line: str) -> dict:
+    return {"line": line,
+            "trigger_in_type": _get_dp2031().get_trigger_in_type(line)}
+
+
+def dp2031_set_trigger_in_source(line: str, channels: list) -> dict:
+    """List of channels (e.g. ``[1, 2]``) that respond to the trigger."""
+    _get_dp2031().set_trigger_in_source(line, channels)
+    return {"line": line, "channels": list(channels)}
+
+
+def dp2031_get_trigger_in_source(line: str) -> dict:
+    return {"line": line,
+            "channels": _get_dp2031().get_trigger_in_source(line)}
+
+
+def dp2031_set_trigger_in_response(line: str, response: str) -> dict:
+    """ON / OFF / ALTER (toggle)."""
+    _get_dp2031().set_trigger_in_response(line, response)
+    return {"line": line, "trigger_in_response": response}
+
+
+def dp2031_trigger_in_immediate() -> dict:
+    """Fire one immediate trigger event regardless of line state."""
+    _get_dp2031().trigger_in_immediate()
+    return {"triggered": True}
+
+
+def dp2031_set_trigger_out_enabled(line: str, on: bool) -> dict:
+    _get_dp2031().set_trigger_out_enabled(line, on)
+    return {"line": line, "trigger_out_enabled": on}
+
+
+def dp2031_set_trigger_out_source(line: str, channel: int) -> dict:
+    """Single channel — the trigger output fires when that channel changes state."""
+    _get_dp2031().set_trigger_out_source(line, channel)
+    return {"line": line, "channel": channel}
+
+
+def dp2031_set_trigger_out_polarity(line: str, polarity: str) -> dict:
+    """POSitive or NEGative."""
+    _get_dp2031().set_trigger_out_polarity(line, polarity)
+    return {"line": line, "polarity": polarity}
+
+
+# ---------------------------------------------------------------------------
+# Phase D — Memory / file system
+# ---------------------------------------------------------------------------
+
+
+def dp2031_list_files() -> dict:
+    """List filenames in the current directory."""
+    return {"files": _get_dp2031().list_files()}
+
+
+def dp2031_change_directory(path: str) -> dict:
+    """Change to ``path`` (e.g. ``C:/`` or ``D:/folder``)."""
+    _get_dp2031().change_directory(path)
+    return {"directory": path}
+
+
+def dp2031_current_directory() -> dict:
+    return {"directory": _get_dp2031().current_directory()}
+
+
+def dp2031_delete_file(filename: str) -> dict:
+    _get_dp2031().delete_file(filename)
+    return {"deleted": filename}
+
+
+def dp2031_store_file(filename: str) -> dict:
+    """Save device state to ``filename`` (.RSF for state, .RTF for Arb)."""
+    _get_dp2031().store_file(filename)
+    return {"stored": filename}
+
+
+def dp2031_load_file(filename: str) -> dict:
+    """Load device state or Arb sequence from ``filename``."""
+    _get_dp2031().load_file(filename)
+    return {"loaded": filename}
+
+
+def dp2031_external_disks() -> dict:
+    """List mounted external USB disk roots."""
+    return {"disks": _get_dp2031().external_disks()}
+
+
+def dp2031_file_exists(filename: str) -> dict:
+    return {"exists": _get_dp2031().file_exists(filename)}
+
+
+# ---------------------------------------------------------------------------
+# Phase D — License + screenshot
+# ---------------------------------------------------------------------------
+
+
+def dp2031_install_license(license_key: str) -> dict:
+    """Install an option license key. Check ``dp2031_last_error`` after."""
+    _get_dp2031().install_license(license_key)
+    return {"license_install_attempted": True}
+
+
+def dp2031_save_screenshot(path: str) -> dict:
+    """Capture the display as a BMP and save to ``path``."""
+    bytes_written = _get_dp2031().save_screenshot(path)
+    return {"path": path, "bytes": bytes_written}
+
+
 _TOOLS = (
     # Connection + identity
     dp2031_open, dp2031_close, dp2031_info,
@@ -765,6 +1081,34 @@ _TOOLS = (
     dp2031_step_current_up, dp2031_step_current_down,
     dp2031_apply, dp2031_query_applied,
     dp2031_voltage_bounds, dp2031_current_bounds,
+    # Phase D — Timer
+    dp2031_set_timer_enabled, dp2031_get_timer_enabled,
+    dp2031_set_timer_channel, dp2031_get_timer_channel,
+    dp2031_set_timer_cycles, dp2031_get_timer_cycles,
+    dp2031_set_timer_end_state, dp2031_get_timer_end_state,
+    dp2031_set_timer_run_mode, dp2031_get_timer_run_mode,
+    dp2031_set_timer_trigger, dp2031_get_timer_trigger,
+    dp2031_get_timer_group_params, dp2031_delete_timer_groups,
+    dp2031_program_timer,
+    dp2031_set_timer_template, dp2031_construct_timer_from_template,
+    # Phase D — Analyzer
+    dp2031_set_analyzer_enabled, dp2031_get_analyzer_enabled,
+    dp2031_set_analyzer_type, dp2031_get_analyzer_type,
+    dp2031_set_analyzer_common_objects,
+    dp2031_set_analyzer_save, dp2031_set_analyzer_save_path,
+    # Phase D — Trigger I/O
+    dp2031_set_trigger_in_enabled, dp2031_get_trigger_in_enabled,
+    dp2031_set_trigger_in_type, dp2031_get_trigger_in_type,
+    dp2031_set_trigger_in_source, dp2031_get_trigger_in_source,
+    dp2031_set_trigger_in_response, dp2031_trigger_in_immediate,
+    dp2031_set_trigger_out_enabled,
+    dp2031_set_trigger_out_source, dp2031_set_trigger_out_polarity,
+    # Phase D — Memory
+    dp2031_list_files, dp2031_change_directory, dp2031_current_directory,
+    dp2031_delete_file, dp2031_store_file, dp2031_load_file,
+    dp2031_external_disks, dp2031_file_exists,
+    # Phase D — License + screenshot
+    dp2031_install_license, dp2031_save_screenshot,
 )
 
 

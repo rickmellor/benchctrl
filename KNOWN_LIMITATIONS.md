@@ -173,17 +173,26 @@ Code reference: `scenarios/run.py` — see the
 
 ### F-3.5. DP2031 bench-discovered quirks (firmware 01.00.01.00.16)
 
-Found while bringing up the DP2031 driver in Phase A–C against a
+Found while bringing up the DP2031 driver in Phase A–D against a
 DP2A243500269 unit. Documented here so future drivers / phases
-don't waste time rediscovering them.
+don't waste time rediscovering them. Reports prepared for the
+vendor for the most severe items live in the `bugs/` directory.
 
-- **`:OUTPut:PAIR PARallel` silently no-ops.** `SERies` engages
-  fine (verified bench: CH1+CH2 internally tied for up to 64 V
-  composite), but writing `PARallel` leaves `:OUTPut:PAIR?` at
-  `OFF`. May be gated by an installed option (`DP2000-10A`?) we
-  don't have. The driver passes the command through; callers must
-  read back to confirm. No exception raised — the device queues
-  no SCPI error.
+- **`:OUTPut:PAIR PARallel` write-then-query returns stale `OFF`
+  for ≥ 1 s** before the mode transition completes. Originally
+  read this as "silent no-op" — Phase C bench data was wrong.
+  PARallel does engage (verified Phase D: querying ≥ 2 s after
+  the write returns `PARALLEL` correctly). SERies transitions
+  faster (~300 ms). Driver: pass-through, but callers should
+  wait ≥ 2 s before verifying via `get_channel_pair()`.
+
+- **`:OUTPut:PAIR` state survives `*RST`** — `*RST` does not
+  restore PAIR to OFF. Sessions that ran prior SERies / PARallel
+  tests will start with the device still in that topology.
+  Significant safety implication: a fresh session that assumes
+  independent channels can inadvertently drive CH1+CH2 paired.
+  Driver workaround: the hw-test fixture explicitly
+  `set_channel_pair("OFF")` after `reset()` and waits 2 s.
 
 - **OVP latch settles in ~150–250 ms after the trip condition.**
   Querying `:OUTPut:OVP:ALAR?` immediately after `:OUTPut:STATe ON`
@@ -229,6 +238,36 @@ don't waste time rediscovering them.
 - **Boolean queries return with a trailing space** on some
   paths (e.g. `:OUTPut:TRACk?` returns `"1 "`). `query_int` /
   `query_float` strip whitespace before parsing.
+
+- **`:ANALyzer:COMMon:MEASure:TYPE` writes trigger
+  `VI_ERROR_SYSTEM_ERROR` over USB-TMC** (Phase D discovery).
+  The wire-form is per-spec but the device-side handler hangs;
+  this leaves the VISA session in a half-broken state that may
+  cause subsequent writes to fail. The SDK method
+  `set_analyzer_common_objects` is kept for completeness but is
+  effectively unusable on this firmware. Front-panel UI for the
+  same feature works correctly. Reproduction: `bugs/` directory.
+
+- **`:SYSTem:PRINt?` screenshot reply is wrapped in IEEE 488.2
+  arbitrary-block format** (`#NX...X<bmp>`), even though the
+  documented payload type is "binary bitmap". The `screenshot_bytes()`
+  driver method strips the header via `_strip_block_header_bytes`
+  before returning raw BMP. Read takes 5+ seconds; driver temporarily
+  bumps the VISA timeout to 10 s.
+
+- **`:TIMEr:CYCLEs?` returns `"N, 5"` with a space after the comma**
+  (or `"I"` for infinite). Driver `_parse` tolerates both
+  `"N,5"` and `"N, 5"` variants.
+
+- **`:TIMEr:GROUP:PARAmeter?` returns IEEE 488.2 block format with
+  trailing NUL byte** inside the declared payload window. Driver's
+  `_query_block_payload` tolerates the NUL.
+
+- **`:TRIGger:IN:SOURce <line>,NONE` writes are rejected with
+  `-141,"Invalid character data"`** even though the query of the
+  same field returns `NONE` when nothing is set. `NONE` is a
+  read-only sentinel. To "clear" a trigger source, disable the line
+  via `:TRIGger:IN:ENABle <line>,OFF`.
 
 ### F-4. Manual misreads compensated by the driver
 

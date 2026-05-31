@@ -1319,6 +1319,607 @@ class RigolDP2031:
             self.query_float(f":SOURce{ch}:CURRent? DEF"),
         )
 
+    # ------------------------------------------------------------------
+    # Phase D — Timer (Arb sequencer)
+    # ------------------------------------------------------------------
+
+    def set_timer_enabled(self, on: bool) -> None:
+        """Arm or disarm the Timer generator (``:TIMEr:STATe``)."""
+        self.write(f":TIMEr:STATe {'ON' if on else 'OFF'}")
+
+    def get_timer_enabled(self) -> bool:
+        return self.query_int(":TIMEr:STATe?") == 1
+
+    def set_timer_channel(self, channel: ChannelLike) -> None:
+        """Select which channel the Timer editor (groups + templates) targets."""
+        ch = _coerce_channel(channel)
+        self.write(f":TIMEr:CHANnel CH{ch}")
+
+    def get_timer_channel(self) -> DP2031Channel:
+        s = self.query(":TIMEr:CHANnel?").strip().upper()
+        for ch in DP2031Channel:
+            if s == f"CH{int(ch)}":
+                return ch
+        raise RigolDP2031Error(f"unexpected :TIMEr:CHANnel? response: {s!r}")
+
+    def set_timer_cycles(self, count: Optional[int]) -> None:
+        """Set how many times the Timer sequence repeats.
+
+        ``count = None`` or ``0`` → infinite (``I``).
+        Otherwise an int 1–99999 → ``N, <count>``.
+        """
+        if count is None or count == 0:
+            self.write(":TIMEr:CYCLEs I")
+            return
+        if not isinstance(count, int) or isinstance(count, bool):
+            raise RigolDP2031ValueError(
+                f"timer cycles must be int 1–99999 or None/0 for infinite, got {count!r}"
+            )
+        if count < 1 or count > 99999:
+            raise RigolDP2031ValueError(
+                f"timer cycles must be 1–99999, got {count}"
+            )
+        self.write(f":TIMEr:CYCLEs N,{count}")
+
+    def get_timer_cycles(self) -> Optional[int]:
+        """Return the cycles setting. ``None`` means infinite."""
+        raw = self.query(":TIMEr:CYCLEs?").strip()
+        norm = raw.replace(" ", "").upper()
+        if norm == "I":
+            return None
+        # Format: "N,5" (we may also see "N, 5" with whitespace)
+        if norm.startswith("N,"):
+            try:
+                return int(norm[2:])
+            except ValueError:
+                pass
+        raise RigolDP2031Error(f"could not parse :TIMEr:CYCLEs? reply {raw!r}")
+
+    _TIMER_END_STATES = ("OFF", "LAST")
+
+    def set_timer_end_state(self, mode: str) -> None:
+        """Set behaviour after the Timer sequence ends: ``"OFF"`` or ``"LAST"``."""
+        norm = mode.strip().upper()
+        if norm not in self._TIMER_END_STATES:
+            raise RigolDP2031ValueError(
+                f"timer end state must be OFF or LAST, got {mode!r}"
+            )
+        self.write(f":TIMEr:ENDState {norm}")
+
+    def get_timer_end_state(self) -> str:
+        return self.query(":TIMEr:ENDState?").strip().upper()
+
+    _TIMER_RUN_MODES = {
+        "CONT": "CONTinue", "CONTINUE": "CONTinue",
+        "SING": "SINGle", "SINGLE": "SINGle",
+    }
+
+    def set_timer_run_mode(self, mode: str) -> None:
+        """Set Timer execution mode: ``"CONTinue"`` or ``"SINGle"``."""
+        scpi = self._TIMER_RUN_MODES.get(mode.strip().upper())
+        if scpi is None:
+            raise RigolDP2031ValueError(
+                f"timer run mode must be CONTinue or SINGle, got {mode!r}"
+            )
+        self.write(f":TIMEr:RUN {scpi}")
+
+    def get_timer_run_mode(self) -> str:
+        return self.query(":TIMEr:RUN?").strip().upper()
+
+    _TIMER_TRIGGER_SOURCES = {
+        "MAN": "MANual", "MANUAL": "MANual",
+        "BUS": "BUS",
+    }
+
+    def set_timer_trigger(self, source: str) -> None:
+        """Set Timer trigger source: ``"MANual"`` (front-panel / *TRG) or ``"BUS"``."""
+        scpi = self._TIMER_TRIGGER_SOURCES.get(source.strip().upper())
+        if scpi is None:
+            raise RigolDP2031ValueError(
+                f"timer trigger must be MANual or BUS, got {source!r}"
+            )
+        self.write(f":TIMEr:TRIG {scpi}")
+
+    def get_timer_trigger(self) -> str:
+        return self.query(":TIMEr:TRIG?").strip().upper()
+
+    def set_timer_group_index(self, index: int) -> None:
+        """Position the Timer editor on group ``index`` (1-based, ≤ 512)."""
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise RigolDP2031ValueError(f"group index must be int, got {index!r}")
+        if index < 1 or index > 512:
+            raise RigolDP2031ValueError(f"group index must be 1–512, got {index}")
+        self.write(f":TIMEr:GROUP:INDEx {index}")
+
+    def get_timer_group_index(self) -> int:
+        return self.query_int(":TIMEr:GROUP:INDEx?")
+
+    def set_timer_group_params(
+        self, voltage: float, current: float, dwell_s: float,
+    ) -> None:
+        """Write V / I / dwell into the currently-selected group.
+
+        Validates against the channel envelope of whichever channel the
+        Timer is currently targeting (call :py:meth:`set_timer_channel`
+        first). Dwell range is 0.001 – 3600 s.
+        """
+        ch = int(self.get_timer_channel())
+        _validate(voltage, _CHANNEL_LIMITS[ch]["v"], f"timer V (CH{ch})")
+        _validate(current, _CHANNEL_LIMITS[ch]["i"], f"timer I (CH{ch})")
+        if not isinstance(dwell_s, (int, float)) or isinstance(dwell_s, bool):
+            raise RigolDP2031ValueError(
+                f"timer dwell must be numeric, got {dwell_s!r}"
+            )
+        if dwell_s < 0.001 or dwell_s > 3600:
+            raise RigolDP2031ValueError(
+                f"timer dwell must be 0.001–3600 s, got {dwell_s}"
+            )
+        self.write(
+            f":TIMEr:GROUP:PARAmeter {voltage:.6f},{current:.6f},{dwell_s:.6f}"
+        )
+
+    def get_timer_group_params(
+        self, count: int = 1,
+    ) -> list[tuple[int, float, float, float]]:
+        """Read back up to ``count`` Timer groups starting at the current index.
+
+        Returns a list of ``(index, voltage, current, dwell_s)`` tuples.
+        The device replies in IEEE 488.2 arbitrary-block format
+        (``#NX...X<payload>``); :py:func:`_query_block_payload` strips
+        the header.
+        """
+        if count < 1:
+            raise RigolDP2031ValueError(f"count must be ≥ 1, got {count}")
+        raw = self.query(f":TIMEr:GROUP:PARAmeter? {count}")
+        payload = _query_block_payload(raw)
+        return _parse_timer_group_payload(payload)
+
+    def delete_timer_groups(self, count: int = 1) -> None:
+        """Delete ``count`` Timer groups starting at the current index."""
+        if count < 1:
+            raise RigolDP2031ValueError(f"count must be ≥ 1, got {count}")
+        self.write(f":TIMEr:GROUP:DELete {count}")
+
+    # ---------------- Timer templates (auto-construct groups) ----------------
+
+    _TIMER_TEMPLATES = (
+        "SINE", "PULSE", "RAMP",
+        "UP", "DN", "UPDN",
+        "RISE", "FALL",
+    )
+
+    def set_timer_template(self, template: str) -> None:
+        """Pick the Timer template shape.
+
+        Accepts: ``SINE``, ``PULSE``, ``RAMP``, ``UP``, ``DN``, ``UPDN``,
+        ``RISE``, ``FALL``.
+        """
+        norm = template.strip().upper()
+        if norm not in self._TIMER_TEMPLATES:
+            raise RigolDP2031ValueError(
+                f"template must be one of {self._TIMER_TEMPLATES}, got {template!r}"
+            )
+        self.write(f":TIMEr:TEMPlet:SELect {norm}")
+
+    def get_timer_template(self) -> str:
+        return self.query(":TIMEr:TEMPlet:SELect?").strip().upper()
+
+    def construct_timer_from_template(self) -> None:
+        """Render the configured template into the Timer group editor."""
+        self.write(":TIMEr:TEMPlet:CONSTruct")
+
+    _TEMPLATE_OBJECTS = {"V": "V", "C": "C", "VOLT": "V", "CURR": "C"}
+
+    def set_timer_template_object(
+        self, obj: str, paired_value: Optional[float] = None,
+    ) -> None:
+        """Pick which dimension the template varies (V or C) and the
+        constant value of the paired dimension."""
+        norm = self._TEMPLATE_OBJECTS.get(obj.strip().upper())
+        if norm is None:
+            raise RigolDP2031ValueError(
+                f"template object must be V or C, got {obj!r}"
+            )
+        if paired_value is None:
+            self.write(f":TIMEr:TEMPlet:OBJect {norm}")
+        else:
+            self.write(f":TIMEr:TEMPlet:OBJect {norm},{paired_value:.6f}")
+
+    def get_timer_template_object(self) -> str:
+        return self.query(":TIMEr:TEMPlet:OBJect?").strip().upper()
+
+    def set_timer_template_max(self, value: float) -> None:
+        self.write(f":TIMEr:TEMPlet:MAXValue {value:.6f}")
+
+    def get_timer_template_max(self) -> float:
+        return self.query_float(":TIMEr:TEMPlet:MAXValue?")
+
+    def set_timer_template_min(self, value: float) -> None:
+        self.write(f":TIMEr:TEMPlet:MINValue {value:.6f}")
+
+    def get_timer_template_min(self) -> float:
+        return self.query_float(":TIMEr:TEMPlet:MINValue?")
+
+    def set_timer_template_period(self, seconds: float) -> None:
+        if seconds < 0.001 or seconds > 3600:
+            raise RigolDP2031ValueError(
+                f"template period must be 0.001–3600 s, got {seconds}"
+            )
+        self.write(f":TIMEr:TEMPlet:PERIod {seconds:.6f}")
+
+    def get_timer_template_period(self) -> float:
+        return self.query_float(":TIMEr:TEMPlet:PERIod?")
+
+    def set_timer_template_points(self, points: int) -> None:
+        if not isinstance(points, int) or isinstance(points, bool):
+            raise RigolDP2031ValueError(f"points must be int, got {points!r}")
+        if points < 1 or points > 512:
+            raise RigolDP2031ValueError(f"points must be 1–512, got {points}")
+        self.write(f":TIMEr:TEMPlet:POINTs {points}")
+
+    def get_timer_template_points(self) -> int:
+        return self.query_int(":TIMEr:TEMPlet:POINTs?")
+
+    # ---------------- Timer convenience: program in one call --------------
+
+    def program_timer(
+        self,
+        channel: ChannelLike,
+        steps: list[tuple[float, float, float]],
+        *,
+        cycles: Optional[int] = 1,
+        end_state: str = "OFF",
+        run_mode: str = "CONTinue",
+        trigger: str = "MANual",
+    ) -> None:
+        """Program a complete Timer sequence on ``channel`` in one call.
+
+        Each step is ``(voltage_V, current_A, dwell_s)``. Steps are
+        validated against the channel envelope and dwell limits before
+        any wire writes happen. After programming, the Timer is left
+        disarmed — caller must :py:meth:`set_timer_enabled` and (for
+        BUS trigger source) :py:meth:`mark_op_complete` / ``*TRG`` /
+        :py:meth:`set_output` separately.
+
+        Mirrors the DL3031A driver's ``program_list()`` shape.
+        """
+        ch = _coerce_channel(channel)
+        if not steps:
+            raise RigolDP2031ValueError("steps must contain at least one entry")
+        if len(steps) > 512:
+            raise RigolDP2031ValueError(
+                f"timer supports 1–512 steps, got {len(steps)}"
+            )
+        # Pre-validate every step before we touch the wire
+        for i, step in enumerate(steps, 1):
+            if len(step) != 3:
+                raise RigolDP2031ValueError(
+                    f"step {i} must be (V, I, dwell_s), got {step!r}"
+                )
+            v, current, t = step
+            _validate(v, _CHANNEL_LIMITS[ch]["v"], f"step {i} V (CH{ch})")
+            _validate(current, _CHANNEL_LIMITS[ch]["i"],
+                      f"step {i} I (CH{ch})")
+            if not isinstance(t, (int, float)) or isinstance(t, bool):
+                raise RigolDP2031ValueError(
+                    f"step {i} dwell must be numeric, got {t!r}"
+                )
+            if t < 0.001 or t > 3600:
+                raise RigolDP2031ValueError(
+                    f"step {i} dwell must be 0.001–3600 s, got {t}"
+                )
+        # Disarm before editing
+        self.set_timer_enabled(False)
+        self.set_timer_channel(ch)
+        # Write each group
+        for idx, (v, current, t) in enumerate(steps, 1):
+            self.set_timer_group_index(idx)
+            # Bypass set_timer_group_params' channel-query (we already
+            # know the channel; saves a round-trip per step)
+            self.write(
+                f":TIMEr:GROUP:PARAmeter {v:.6f},{current:.6f},{t:.6f}"
+            )
+        self.set_timer_cycles(cycles)
+        self.set_timer_end_state(end_state)
+        self.set_timer_run_mode(run_mode)
+        self.set_timer_trigger(trigger)
+
+    # ------------------------------------------------------------------
+    # Phase D — Analyzer (power / IoT energy capture)
+    # ------------------------------------------------------------------
+
+    def set_analyzer_enabled(self, on: bool) -> None:
+        self.write(f":ANALyzer:STATe {'ON' if on else 'OFF'}")
+
+    def get_analyzer_enabled(self) -> bool:
+        return self.query_int(":ANALyzer:STATe?") == 1
+
+    _ANALYZER_TYPES = {"COM": "COM", "COMMON": "COM",
+                       "CURR": "CURR", "CURRENT": "CURR"}
+
+    def set_analyzer_type(self, type_: str) -> None:
+        """Analyzer mode: ``"COM"`` (common — selects V/I/P per channel) or
+        ``"CURR"`` (pulse-current analysis)."""
+        scpi = self._ANALYZER_TYPES.get(type_.strip().upper())
+        if scpi is None:
+            raise RigolDP2031ValueError(
+                f"analyzer type must be COM or CURR, got {type_!r}"
+            )
+        self.write(f":ANALyzer:TYPE {scpi}")
+
+    def get_analyzer_type(self) -> str:
+        return self.query(":ANALyzer:TYPE?").strip().upper()
+
+    _ANALYZER_COMMON_OBJECTS = {
+        "CH1_V", "CH1_C", "CH1_P",
+        "CH2_V", "CH2_C", "CH2_P",
+        "CH3_V", "CH3_C", "CH3_P",
+    }
+
+    def set_analyzer_common_objects(self, *objects: str) -> None:
+        """In COM mode, select 1–3 channel/quantity objects to capture.
+
+        Each object is one of ``CH1_V``, ``CH1_C``, ``CH1_P``, ``CH2_V``,
+        ``CH2_C``, ``CH2_P``, ``CH3_V``, ``CH3_C``, ``CH3_P``.
+
+        BENCH-OBSERVED FIRMWARE BUG (DP2031 FW 01.00.01.00.16):
+        writing to this command over USB-TMC causes the device's
+        VISA interface to return ``VI_ERROR_SYSTEM_ERROR``. The
+        wire-form is per-spec; the device-side handler is broken.
+        Tracked separately; the front-panel UI for this feature
+        works correctly.
+        """
+        if not 1 <= len(objects) <= 3:
+            raise RigolDP2031ValueError(
+                f"analyzer COM mode takes 1–3 objects, got {len(objects)}"
+            )
+        normed = []
+        for obj in objects:
+            norm = obj.strip().upper()
+            if norm not in self._ANALYZER_COMMON_OBJECTS:
+                raise RigolDP2031ValueError(
+                    f"analyzer object must be CHx_{{V,C,P}}, got {obj!r}"
+                )
+            normed.append(norm)
+        self.write(":ANALyzer:COMMon:MEASure:TYPE " + ",".join(normed))
+
+    def get_analyzer_common_objects(self) -> list[str]:
+        raw = self.query(":ANALyzer:COMMon:MEASure:TYPE?").strip()
+        if not raw:
+            return []
+        return [p.strip().upper() for p in raw.split(",") if p.strip()]
+
+    def set_analyzer_save(self, on: bool) -> None:
+        """Enable / disable the analyzer's data-log-to-file feature."""
+        self.write(f":ANALyzer:SAVE:STATe {'ON' if on else 'OFF'}")
+
+    def get_analyzer_save(self) -> bool:
+        return self.query_int(":ANALyzer:SAVE:STATe?") == 1
+
+    def set_analyzer_save_path(self, path: str) -> None:
+        """Set the analyzer log-file path (e.g. ``"C:/RA.ROF"``)."""
+        self.write(f":ANALyzer:SAVE:ROUTe {path}")
+
+    def get_analyzer_save_path(self) -> str:
+        return self.query(":ANALyzer:SAVE:ROUTe?").strip()
+
+    # ------------------------------------------------------------------
+    # Phase D — Trigger I/O (D1-D4 rear digital lines)
+    # ------------------------------------------------------------------
+
+    _TRIGGER_LINES = ("D1", "D2", "D3", "D4")
+    _TRIGGER_IN_TYPES = ("RISE", "FALL", "HIGH", "LOW")
+    _TRIGGER_IN_RESPONSES = ("ON", "OFF", "ALTER")
+    _TRIGGER_OUT_POLARITIES = {"POS": "POSitive", "POSITIVE": "POSitive",
+                               "NEG": "NEGative", "NEGATIVE": "NEGative"}
+
+    def _coerce_trigger_line(self, line: str) -> str:
+        norm = line.strip().upper()
+        if norm not in self._TRIGGER_LINES:
+            raise RigolDP2031ValueError(
+                f"trigger line must be D1/D2/D3/D4, got {line!r}"
+            )
+        return norm
+
+    def set_trigger_in_enabled(self, line: str, on: bool) -> None:
+        d = self._coerce_trigger_line(line)
+        self.write(f":TRIGger:IN:ENABle {d},{'ON' if on else 'OFF'}")
+
+    def get_trigger_in_enabled(self, line: str) -> bool:
+        d = self._coerce_trigger_line(line)
+        return self.query_int(f":TRIGger:IN:ENABle? {d}") == 1
+
+    def set_trigger_in_type(self, line: str, type_: str) -> None:
+        """RISE / FALL / HIGH / LOW."""
+        d = self._coerce_trigger_line(line)
+        norm = type_.strip().upper()
+        if norm not in self._TRIGGER_IN_TYPES:
+            raise RigolDP2031ValueError(
+                f"trigger type must be RISE/FALL/HIGH/LOW, got {type_!r}"
+            )
+        self.write(f":TRIGger:IN:TYPE {d},{norm}")
+
+    def get_trigger_in_type(self, line: str) -> str:
+        d = self._coerce_trigger_line(line)
+        return self.query(f":TRIGger:IN:TYPE? {d}").strip().upper()
+
+    def set_trigger_in_source(self, line: str, channels) -> None:
+        """Set which channels respond to the trigger input on ``line``.
+
+        ``channels`` is a list of :py:class:`DP2031Channel` / int 1-3
+        with ≥ 1 entry. To "clear" the source (make the trigger
+        ineffective), use :py:meth:`set_trigger_in_enabled` with
+        ``on=False``; the device's firmware rejects writes of
+        ``NONE`` to this field with SCPI error -141.
+        """
+        d = self._coerce_trigger_line(line)
+        if isinstance(channels, str):
+            raise RigolDP2031ValueError(
+                f"trigger source must be a list of channels, not a string; "
+                f"to disable use set_trigger_in_enabled({line!r}, False)"
+            )
+        coerced = [f"CH{_coerce_channel(c)}" for c in channels]
+        if not coerced:
+            raise RigolDP2031ValueError(
+                "trigger source must include ≥ 1 channel; "
+                "to disable use set_trigger_in_enabled(line, False)"
+            )
+        self.write(f":TRIGger:IN:SOURce {d}," + ",".join(coerced))
+
+    def get_trigger_in_source(self, line: str) -> list[str]:
+        """Return the source channels as a list of ``"CH1"`` / ``"CH2"`` /
+        ``"CH3"`` strings, or an empty list when source is ``NONE``."""
+        d = self._coerce_trigger_line(line)
+        raw = self.query(f":TRIGger:IN:SOURce? {d}").strip().upper()
+        if not raw or raw == "NONE":
+            return []
+        return [p.strip() for p in raw.split(",") if p.strip()]
+
+    def set_trigger_in_response(self, line: str, response: str) -> None:
+        """ON / OFF / ALTER (toggle)."""
+        d = self._coerce_trigger_line(line)
+        norm = response.strip().upper()
+        if norm not in self._TRIGGER_IN_RESPONSES:
+            raise RigolDP2031ValueError(
+                f"trigger response must be ON/OFF/ALTER, got {response!r}"
+            )
+        self.write(f":TRIGger:IN:RESPonse {d},{norm}")
+
+    def get_trigger_in_response(self, line: str) -> str:
+        d = self._coerce_trigger_line(line)
+        return self.query(f":TRIGger:IN:RESPonse? {d}").strip().upper()
+
+    def trigger_in_immediate(self) -> None:
+        """Fire an immediate trigger event regardless of input line state."""
+        self.write(":TRIGger:IN:IMMEdiate")
+
+    def set_trigger_out_enabled(self, line: str, on: bool) -> None:
+        d = self._coerce_trigger_line(line)
+        self.write(f":TRIGger:OUT:ENABle {d},{'ON' if on else 'OFF'}")
+
+    def get_trigger_out_enabled(self, line: str) -> bool:
+        d = self._coerce_trigger_line(line)
+        return self.query_int(f":TRIGger:OUT:ENABle? {d}") == 1
+
+    def set_trigger_out_source(self, line: str, channel: ChannelLike) -> None:
+        """Single channel — the trigger output fires when that channel
+        changes state."""
+        d = self._coerce_trigger_line(line)
+        ch = _coerce_channel(channel)
+        self.write(f":TRIGger:OUT:SOURce {d},CH{ch}")
+
+    def get_trigger_out_source(self, line: str) -> str:
+        d = self._coerce_trigger_line(line)
+        return self.query(f":TRIGger:OUT:SOURce? {d}").strip().upper()
+
+    def set_trigger_out_polarity(self, line: str, polarity: str) -> None:
+        """POSitive or NEGative."""
+        d = self._coerce_trigger_line(line)
+        scpi = self._TRIGGER_OUT_POLARITIES.get(polarity.strip().upper())
+        if scpi is None:
+            raise RigolDP2031ValueError(
+                f"polarity must be POSitive or NEGative, got {polarity!r}"
+            )
+        self.write(f":TRIGger:OUT:POLArity {d},{scpi}")
+
+    def get_trigger_out_polarity(self, line: str) -> str:
+        d = self._coerce_trigger_line(line)
+        return self.query(f":TRIGger:OUT:POLArity? {d}").strip().upper()
+
+    # ------------------------------------------------------------------
+    # Phase D — Memory / file system (internal C disk + USB)
+    # ------------------------------------------------------------------
+
+    def list_files(self) -> list[str]:
+        """Return the current directory's filenames as a list."""
+        raw = self.query(":MEMory:CATalog?").strip()
+        if not raw:
+            return []
+        return [p.strip() for p in raw.split(",") if p.strip()]
+
+    def change_directory(self, path: str) -> None:
+        self.write(f":MEMory:CDIRectory {path}")
+
+    def current_directory(self) -> str:
+        return self.query(":MEMory:CDIRectory?").strip()
+
+    def make_directory(self, name: str) -> None:
+        """Create a subdirectory. Note: C disk doesn't support folders —
+        use the external USB disks (D:/, E:/)."""
+        self.write(f":MEMory:MDIRectory {name}")
+
+    def delete_file(self, filename: str) -> None:
+        self.write(f":MEMory:DELete {filename}")
+
+    def store_file(self, filename: str) -> None:
+        """Save the current state to a file (``.RSF`` for state files,
+        ``.RTF`` for Arb)."""
+        self.write(f":MEMory:STORe {filename}")
+
+    def load_file(self, filename: str) -> None:
+        """Load device state or Arb sequence from a file."""
+        self.write(f":MEMory:LOAD {filename}")
+
+    def external_disks(self) -> list[str]:
+        """Return mounted external USB disk roots (e.g. ``["D:/"]``)."""
+        raw = self.query(":MEMory:DISK?").strip()
+        if not raw or raw.upper() == "NONE":
+            return []
+        return [p.strip() for p in raw.split(",") if p.strip()]
+
+    def set_file_locked(self, filename: str, locked: bool) -> None:
+        """Lock or unlock a file on the C disk (USB disks don't support lock)."""
+        self.write(f":MEMory:LOCK {filename},{'ON' if locked else 'OFF'}")
+
+    def get_file_locked(self, filename: str) -> bool:
+        return self.query_int(f":MEMory:LOCK? {filename}") == 1
+
+    def file_exists(self, filename: str) -> bool:
+        return self.query_int(f":MEMory:VALid? {filename}") == 1
+
+    # ------------------------------------------------------------------
+    # Phase D — License install + screenshot
+    # ------------------------------------------------------------------
+
+    def install_license(self, license_key: str) -> None:
+        """Install an option license key.
+
+        SAFETY: incorrect or rejected keys produce a SCPI error. Drain
+        the error queue after install to detect rejection.
+        """
+        self.write(f":LIC:SET {license_key}")
+
+    def screenshot_bytes(self) -> bytes:
+        """Capture the device's display as a bitmap. Returns raw BMP bytes.
+
+        The reply is wrapped in an IEEE 488.2 arbitrary-block envelope
+        (``#NX...X<bmp>``) which we strip before returning, so the
+        caller gets a clean BMP byte stream starting with ``b"BM"``.
+        We temporarily bump the VISA timeout to 10 s because the
+        capture takes several seconds.
+        """
+        if self._closed:
+            raise RigolDP2031ConnectionError("instrument is closed")
+        original_timeout = self._inst.timeout
+        try:
+            self._inst.timeout = max(original_timeout, 10000)
+            self._inst.write(":SYSTem:PRINt?")
+            data = self._inst.read_raw()
+        except Exception as e:
+            raise RigolDP2031ConnectionError(
+                f"screenshot read failed: {e}"
+            ) from e
+        finally:
+            self._inst.timeout = original_timeout
+        return _strip_block_header_bytes(bytes(data))
+
+    def save_screenshot(self, path: str) -> int:
+        """Capture and save a BMP screenshot to ``path``. Returns bytes written."""
+        data = self.screenshot_bytes()
+        from pathlib import Path
+        Path(path).write_bytes(data)
+        return len(data)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1371,6 +1972,116 @@ def _validate_mask(value: int, label: str, *, maximum: int = 255) -> None:
         raise RigolDP2031ValueError(
             f"{label} mask must be 0–{maximum}, got {value}"
         )
+
+
+def _strip_block_header_bytes(data: bytes) -> bytes:
+    """Strip an IEEE 488.2 arbitrary-block header from binary data.
+
+    Format: ``#NX...X<payload>`` where the leading ``#`` is byte 0x23
+    (``b'#'``), ``N`` is a single ASCII digit (1-9), and ``X...X`` is
+    ``N`` ASCII digits giving the payload length in bytes.
+
+    If the data doesn't start with ``b'#'`` it's returned as-is (some
+    transports may already strip the header). Trailing terminator
+    bytes (newline / null) are also stripped from the tail.
+    """
+    if not data.startswith(b"#"):
+        return data.rstrip(b"\x00\r\n")
+    if len(data) < 2:
+        return data
+    try:
+        n_digits = int(chr(data[1]))
+    except ValueError:
+        return data
+    header_end = 2 + n_digits
+    if len(data) < header_end:
+        return data
+    try:
+        payload_len = int(data[2:header_end].decode("ascii"))
+    except (ValueError, UnicodeDecodeError):
+        return data
+    payload = data[header_end:header_end + payload_len]
+    return payload
+
+
+def _query_block_payload(raw: str) -> str:
+    """Strip an IEEE 488.2 arbitrary-block header from a query reply.
+
+    Block format: ``#NX...X<payload>`` where ``N`` is a single digit
+    (1-9) indicating how many digits the length field has, ``X...X`` is
+    the length in characters, and ``<payload>`` is the payload itself.
+    Some firmware appends a trailing NUL byte or newline which is
+    stripped.
+
+    Returns just the payload string. Raises :py:class:`RigolDP2031Error`
+    if the input doesn't start with ``#`` or the length header is
+    malformed.
+    """
+    s = raw
+    # Strip trailing whitespace + nulls
+    s = s.rstrip("\x00\r\n\t ")
+    if not s.startswith("#"):
+        raise RigolDP2031Error(
+            f"expected IEEE 488.2 block reply starting with '#', got {raw!r}"
+        )
+    if len(s) < 2:
+        raise RigolDP2031Error(f"block reply too short: {raw!r}")
+    try:
+        n_digits = int(s[1])
+    except ValueError as e:
+        raise RigolDP2031Error(
+            f"block reply length-digit must be 0-9, got {s[1]!r}"
+        ) from e
+    header_end = 2 + n_digits
+    if len(s) < header_end:
+        raise RigolDP2031Error(
+            f"block reply too short for declared header: {raw!r}"
+        )
+    try:
+        payload_len = int(s[2:header_end])
+    except ValueError as e:
+        raise RigolDP2031Error(
+            f"block reply length field must be numeric, got {s[2:header_end]!r}"
+        ) from e
+    payload = s[header_end:header_end + payload_len]
+    if len(payload) < payload_len:
+        # Some firmware (DP2031 included) appends a NUL inside the
+        # payload window; tolerate by returning what we got.
+        pass
+    return payload
+
+
+def _parse_timer_group_payload(
+    payload: str,
+) -> list[tuple[int, float, float, float]]:
+    """Parse the inner payload of `:TIMEr:GROUP:PARAmeter?`.
+
+    Format: ``index,V,I,t;index,V,I,t;...`` with optional trailing
+    semicolon. Returns a list of ``(index, voltage, current, dwell_s)``
+    tuples.
+    """
+    out: list[tuple[int, float, float, float]] = []
+    for chunk in payload.split(";"):
+        chunk = chunk.strip().strip("\x00")
+        if not chunk:
+            continue
+        parts = chunk.split(",")
+        if len(parts) != 4:
+            raise RigolDP2031Error(
+                f"timer group chunk must be 'idx,V,I,t', got {chunk!r}"
+            )
+        try:
+            out.append((
+                int(parts[0]),
+                float(parts[1]),
+                float(parts[2]),
+                float(parts[3]),
+            ))
+        except ValueError as e:
+            raise RigolDP2031Error(
+                f"non-numeric value in timer group chunk {chunk!r}"
+            ) from e
+    return out
 
 
 def _parse_delay_ms(raw: str) -> int:

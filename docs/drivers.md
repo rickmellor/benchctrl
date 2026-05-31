@@ -15,6 +15,7 @@ Each driver is independent and optional. Import only what you need.
 |---|---|---|---|
 | Eastwood Tech QR10x programmable resistance | `benchctrl.drivers.eastwood_qr10x.QR10x` | USB-Serial (CH340) | **shipped (v0.9.0)** |
 | Rigol DL3031A electronic load | `benchctrl.drivers.rigol_dl3031a.RigolDL3031A` | USB-TMC + SCPI via pyvisa | **shipped (v0.9.3)** |
+| Rigol DP2031 triple-output programmable PSU | `benchctrl.drivers.rigol_dp2031.RigolDP2031` | USB-TMC + SCPI via pyvisa | **shipped (v1.1.0)** |
 
 ## QR10x — programmable resistance
 
@@ -309,3 +310,123 @@ Pick whichever fits the test:
 | Voltage rating | 200 V | 150 V |
 | Built-in safety limit | RLIMIT (min R) | none on the wire; use `set_*_range` |
 | Cost | $$ | $$$$ |
+
+## Rigol DP2031 — triple-output programmable PSU
+
+[Rigol DP2031](https://www.rigolna.com) — triple-output linear DC
+power supply (CH1/CH2 0–32 V × 0–3 A, CH3 0–6 V × 0–5 A, 222 W total),
+with built-in OVP/OCP per channel, channel-pair SERies/PARallel
+modes, tracking, a 1–512 step arbitrary-waveform Timer sequencer,
+power-energy Analyzer, four programmable digital trigger lines, and
+internal/USB filesystem for state save/recall.
+
+This driver speaks USB-TMC via pyvisa. LAN / RS232 / GPIB are
+deliberately out of scope.
+
+### Quick start
+
+```python
+from benchctrl.drivers.rigol_dp2031 import RigolDP2031, DP2031Channel
+
+with RigolDP2031.open() as psu:        # auto-discover by Rigol VID + DP2000 PID
+    print(psu.info())
+    psu.reset()
+
+    # Configure CH1 with safe envelope + OVP
+    psu.set_voltage(DP2031Channel.CH1, 3.3)
+    psu.set_current(DP2031Channel.CH1, 0.5)
+    psu.set_ovp_level(DP2031Channel.CH1, 4.0)
+    psu.set_ovp_enabled(DP2031Channel.CH1, True)
+
+    psu.set_output(DP2031Channel.CH1, True)
+    m = psu.measure_all(DP2031Channel.CH1)
+    print(f"V={m['voltage_V']:.3f} I={m['current_A']*1000:.2f} mA")
+    psu.set_output(DP2031Channel.CH1, False)
+```
+
+The `with` context manager disables all three outputs on exit. To
+leave an output enabled across a script's lifetime, open without the
+context manager (`psu = RigolDP2031.open()` / `psu.close()`).
+
+### Safety
+
+- Each channel's output drives voltage onto its terminals immediately
+  when `set_output(ch, True)` is called. Confirm DUT-side ratings and
+  arm OVP/OCP before enabling.
+- **Channel pair SERies** ties CH1+ to CH2- internally for up to 64 V
+  composite. **PARallel** ties CH1 and CH2 in parallel for up to 6 A
+  composite. Disconnect any external load between CH1 and CH2 before
+  switching pair modes. PAIR state survives `*RST` — see
+  `KNOWN_LIMITATIONS.md § F-3.5`.
+- The Timer (Arb sequencer) can drive arbitrary V/I patterns at
+  millisecond timing. `program_timer()` pre-validates every step
+  against the channel envelope, but doesn't know about your DUT's
+  ratings.
+- **Remote sense** (`set_remote_sense(ch, on=True)`) with floating
+  sense leads will drive the output toward OVP — wire the sense leads
+  to the DUT before enabling.
+
+### API
+
+Surface organised by subsystem:
+
+| Subsystem | Methods (representative) |
+|---|---|
+| Identity / housekeeping | `info`, `reset`, `clear_status`, `last_error`, `raise_if_error`, `self_test`, `installed_options`, `scpi_version` |
+| Channel selection | `select_channel`, `current_channel` |
+| Source setpoints | `set_voltage`, `get_voltage`, `set_current`, `get_current`, `set_voltage_step`, `step_voltage_up/down`, `set_current_step`, `step_current_up/down` |
+| Apply / bounds | `apply`, `query_applied`, `voltage_bounds`, `current_bounds` |
+| Output enable | `set_output`, `get_output`, `set_output_all`, `output_regulation` |
+| Protection — OVP | `set_ovp_level/enabled`, `get_ovp_level/enabled`, `ovp_tripped/questionable`, `clear_ovp` |
+| Protection — OCP | `set_ocp_level/enabled/delay_ms`, `get_ocp_level/enabled/delay_ms`, `ocp_tripped/questionable`, `clear_ocp` |
+| Measurement | `measure_voltage`, `measure_current`, `measure_power`, `measure_all`, `measure_all_channels` |
+| Channel topology | `set_channel_pair`, `get_channel_pair`, `set_tracking`, `set_track_mode`, `set_output_sync`, `set_remote_sense`, `set_sampling_mode` |
+| Status registers | `event_status_register`, `status_byte`, `*ESE`/`*SRE` set/get, `operation_event`, `questionable_event`, `channel_status_event`, `health_check` |
+| OPC + state save | `wait_op_complete`, `mark_op_complete`, `wait`, `save_state`, `recall_state` |
+| Timer (Arb sequencer) | `program_timer`, `set_timer_enabled/channel/cycles/end_state/run_mode/trigger`, `set_timer_group_index/params`, `get_timer_group_params` (block-format parse), `delete_timer_groups`, template subsystem (`set_timer_template`/`construct_timer_from_template`/etc.) |
+| Analyzer | `set_analyzer_enabled/type/common_objects/save/save_path` |
+| Trigger I/O (D1–D4) | `set_trigger_in_enabled/type/source/response`, `trigger_in_immediate`, `set_trigger_out_enabled/source/polarity` |
+| Memory / filesystem | `list_files`, `change_directory`, `current_directory`, `store_file`, `load_file`, `delete_file`, `external_disks`, `file_exists`, `set_file_locked` |
+| System | beeper, brightness, locks (keyboard/touchscreen/RW), language, power-on mode, screen-saver, `set_remote`/`set_local` |
+| License + screenshot | `install_license`, `screenshot_bytes`, `save_screenshot` |
+
+### Timer example — IoT-pattern Arb sequence
+
+```python
+from benchctrl.drivers.rigol_dp2031 import RigolDP2031
+
+with RigolDP2031.open() as psu:
+    # Define a 3-step sleep / wake / TX pattern on CH3
+    steps = [
+        (3.0, 0.001, 0.500),   # sleep — 3.0 V, 1 mA limit, 500 ms
+        (3.0, 0.500, 0.100),   # active — same V, 500 mA budget, 100 ms
+        (3.0, 0.030, 0.050),   # TX — 30 mA peak, 50 ms
+    ]
+    psu.program_timer(3, steps, cycles=5, end_state="OFF",
+                      run_mode="CONTinue", trigger="MANual")
+    psu.set_output(3, True)
+    psu.set_timer_enabled(True)  # runs entirely in device firmware
+    # ... wait for the pattern to complete ...
+    psu.set_timer_enabled(False)
+    psu.set_output(3, False)
+```
+
+### Bench-discovered firmware quirks
+
+Tested against firmware 01.00.01.00.16. See
+`KNOWN_LIMITATIONS.md § F-3.5` for the full list and `bugs/` for
+reproductions ready to file with Rigol. Highlights:
+
+- `:OUTPut:PAIR` state survives `*RST` — the driver's fixture-level
+  reset path handles this; user code should call
+  `set_channel_pair("OFF")` explicitly after `reset()`.
+- `:OUTPut:PAIR PARallel` write-then-query returns stale `OFF` for
+  ~1 s before the mode transition completes — wait ≥ 2 s if you
+  verify via `get_channel_pair()`.
+- OVP latch settles ~150–250 ms after the over-voltage condition.
+- `:OUTPut:OVP:CLEar` clears the latch but does NOT re-enable the
+  output (deliberate driver choice — the `:SOURce:VOLT:PROT:CLEar`
+  form does re-enable).
+- `:ANALyzer:COMMon:MEASure:TYPE` write triggers
+  `VI_ERROR_SYSTEM_ERROR` over USB-TMC — firmware defect. The SDK
+  method is per-spec but unusable on this firmware.

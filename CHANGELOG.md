@@ -7,6 +7,118 @@ Known limitations across all versions are tracked in
 firmware quirks, harness workarounds). Read it before debugging a
 new failure — it's likely a documented limit.
 
+## [1.1.0] — Rigol DP2031 driver (4-phase rollout)
+
+New driver: **`benchctrl.drivers.rigol_dp2031.RigolDP2031`** — full
+USB-TMC coverage of the Rigol DP2031 triple-output programmable PSU.
+LAN / RS232 / GPIB transports are out of scope (deferred — USB-only
+for this release).
+
+### Phase A — skeleton + source / measure / output / protection levels
+
+- `RigolDP2031` class, `DP2031Channel` IntEnum (1/2/3),
+  `RigolDP2031Info`, `RigolDP2031Error` hierarchy
+- Per-channel `set_voltage` / `get_voltage` / `set_current` /
+  `get_current` with envelope validation (CH1/CH2 0–32 V/3 A;
+  CH3 0–6 V/5 A)
+- `set_output(ch, on)` / `set_output_all(on)` / `get_output(ch)` /
+  `output_regulation(ch)` (CV/CC/UR)
+- OVP and OCP level + enable per channel
+- `measure_voltage` / `measure_current` / `measure_power` /
+  `measure_all` (single-channel CSV parse) / `measure_all_channels`
+  (3-channel snapshot)
+- Auto-discover via Rigol VID + DP2000 PID (0x1AB1 / 0xA4A8)
+- Context manager disables all 3 channels on exit (safety)
+
+### Phase B — protection trip/clear + IEEE 488.2 status + system basics
+
+- Protection trip/clear: `clear_ovp` / `clear_ocp` / `ovp_tripped` /
+  `ocp_tripped` / `ovp_questionable` / `ocp_questionable`
+- OCP delay (0–1000 ms) with `"200ms"` unit-suffix parser
+- Full IEEE 488.2 status surface (`*ESR`/`*ESE`/`*SRE`/`*STB`/`*OPC`/
+  `*OPC?`/`*WAI`/`*TST?`/`*OPT?`/`*PSC`/`*SAV`/`*RCL`)
+- `:STATus:*` subsystem incl. per-channel ISUMmary registers
+- `health_check()` convenience — decodes questionable bits + per-channel
+  vunreg/iunreg/ovp/ocp/otp flags
+- System basics: beeper / brightness / locks / language / power-on /
+  remote / local
+
+### Phase C — pair / tracking / sense / sampling / step / apply / bounds
+
+- Channel pair (OFF/SERies/PARallel), tracking (`:OUTPut:TRACk` and
+  `:SYSTem:TMODe` aliases), output sync, 4-wire remote sense
+  (per-channel + `"ALL"`), sampling mode (AUTO/HIGH/LOW)
+- V/I step + `step_voltage_up`/`down`, `step_current_up`/`down`
+- `apply()` one-shot V/I shorthand + `query_applied()` (full triplet
+  or VOLT/CURR option)
+- `voltage_bounds()` / `current_bounds()` — device-reported MIN/MAX/DEF
+  (MAX is ~5% over nominal envelope)
+
+### Phase D — Timer + Analyzer + Trigger I/O + Memory + license + screenshot
+
+- **Timer (Arb sequencer)** — 17 methods covering state, channel,
+  cycles (int or `None` for infinite), end state, run mode, trigger
+  source, group editor (index/params/delete), template subsystem
+  (SINE/PULSE/RAMP/UP/DN/UPDN/RISE/FALL with min/max/period/points/
+  object), and a `program_timer()` convenience that pre-validates and
+  batch-writes a full sequence in one call.
+- **Analyzer** — 7 methods for the IoT power / pulse-current analyzer
+  including common-object selection and the log-to-file feature.
+- **Trigger I/O** — 11 methods for the D1–D4 rear digital lines
+  (per-line in/out enable, type, source, response, polarity, and an
+  immediate-trigger fire).
+- **Memory** — 8 methods for the device's internal C-disk + external
+  USB filesystem (list/cd/store/load/delete/exists/lock + disk list).
+  Pairs with the IEEE 488.2 `*SAV`/`*RCL` from Phase B for fast slot
+  save/recall.
+- **License install** (`:LIC:SET`) and **screenshot capture**
+  (`:SYSTem:PRINt?` with IEEE 488.2 block-header stripping for the
+  binary BMP reply).
+- IEEE 488.2 block-format parsers: `_query_block_payload` (strings)
+  and `_strip_block_header_bytes` (binary).
+
+### MCP tools
+
+134 new `dp2031_*` MCP tools across all four phases. Orchestrator
+grows 92 → **226 total** tools (Otii Arc 24 + QR10x 11 + DL3031A 45 +
+DP2031 134 + cross-driver 12).
+
+### Tests
+
+**526 tests** (462 hardware-free + 64 hardware-marked), all passing
+on a real DP2031 (FW 01.00.01.00.16, S/N DP2A243500269) +
+DL3031A + Otii Arc + QR10x bench. Hardware tests include OVP trip +
+clear on CH3, multi-channel setpoint round-trip, tracking / pair
+state, Timer programming with `program_timer` + readback via
+IEEE 488.2 block parser, screenshot BMP capture.
+
+### Bench-discovered firmware quirks
+
+`KNOWN_LIMITATIONS.md § F-3.5` documents the DP2031-specific quirks
+found during bring-up:
+
+- `:OUTPut:PAIR` SERies/PARallel state survives `*RST`
+- `:OUTPut:PAIR PARallel` write-then-query returns stale `OFF` for
+  ~1+ seconds before the mode transition completes
+- `:OUTPut:PAIR PARallel` mode transition takes ≥ 1 s
+- OVP latch settles ~150–250 ms after the over-voltage condition
+- `:OUTPut:OVP:CLEar` clears the latch but does NOT re-enable the
+  output (the `:SOURce<n>:VOLT:PROT:CLEar` form does — distinct
+  behaviour despite docs treating them as aliases)
+- `:OUTPut:TRACk ON` sets the state register but the analog
+  CH1→CH2 setpoint mirroring requires further conditions
+- `:ANALyzer:COMMon:MEASure:TYPE` write triggers
+  `VI_ERROR_SYSTEM_ERROR` over USB-TMC (firmware defect — see
+  `bugs/` directory)
+- `:OCP:DELay?` returns string with `"ms"` suffix
+- `:LANG:TYPE?` returns long form (`"ENGLISH"`); input takes short
+- `:SOURce<n>:VOLT? MAX` includes ~5% headroom over nominal
+- `*OPT?` returns `"NONE"` literal when no options installed
+- Many boolean queries return with trailing space
+
+Bug reports for the firmware defects worth filing with Rigol are
+prepared in the `bugs/` directory.
+
 ## [1.0.0] — driver-symmetric architecture + package rename
 
 The first public release. The v0.x tree was called `opensmu` and

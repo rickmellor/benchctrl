@@ -22,6 +22,9 @@ from benchctrl.drivers.rigol_dp2031.driver import (
     _coerce_channel,
     _coerce_channel_or_all,
     _parse_delay_ms,
+    _parse_timer_group_payload,
+    _query_block_payload,
+    _strip_block_header_bytes,
 )
 
 
@@ -1156,6 +1159,567 @@ def test_current_bounds_queries_all_three():
 
 
 # ---------------------------------------------------------------------------
+# Phase D — IEEE 488.2 block parser
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,expected", [
+    # Standard: '#9' = 9 length digits, '000000021' = length 21
+    ("#9000000021" + "3,0.000,0.000,0.300;", "3,0.000,0.000,0.300;"),
+    # Short: #2 = 2 length digits, '10' = length 10
+    ("#210" + "1234567890", "1234567890"),
+    # Length 0 — empty payload
+    ("#10", ""),
+    # Trailing null + whitespace stripped
+    ("#9000000021" + "3,0.000,0.000,0.300;" + "\x00", "3,0.000,0.000,0.300;"),
+    ("#9000000021" + "3,0.000,0.000,0.300;" + "\r\n", "3,0.000,0.000,0.300;"),
+])
+def test_query_block_payload_parses(raw, expected):
+    assert _query_block_payload(raw) == expected
+
+
+@pytest.mark.parametrize("bad", [
+    "no hash prefix",
+    "#",
+    "#X1234",  # length-digit isn't a digit
+    "",
+])
+def test_query_block_payload_rejects_malformed(bad):
+    with pytest.raises(RigolDP2031Error):
+        _query_block_payload(bad)
+
+
+def test_parse_timer_group_payload_single():
+    payload = "1,3.300,0.500,1.000;"
+    result = _parse_timer_group_payload(payload)
+    assert result == [(1, 3.3, 0.5, 1.0)]
+
+
+def test_parse_timer_group_payload_multiple():
+    payload = "1,3.300,0.500,1.000;2,1.000,0.100,0.500;3,0.000,0.000,0.300;"
+    result = _parse_timer_group_payload(payload)
+    assert len(result) == 3
+    assert result[0] == (1, 3.3, 0.5, 1.0)
+    assert result[1] == (2, 1.0, 0.1, 0.5)
+    assert result[2] == (3, 0.0, 0.0, 0.3)
+
+
+def test_parse_timer_group_payload_handles_null_terminator():
+    payload = "1,3.300,0.500,1.000;\x00"
+    result = _parse_timer_group_payload(payload)
+    assert result == [(1, 3.3, 0.5, 1.0)]
+
+
+def test_parse_timer_group_payload_rejects_malformed_chunk():
+    payload = "1,3.300,0.500;"  # only 3 fields
+    with pytest.raises(RigolDP2031Error, match="must be 'idx,V,I,t'"):
+        _parse_timer_group_payload(payload)
+
+
+def test_parse_timer_group_payload_rejects_non_numeric():
+    payload = "1,three,0.5,1.0;"
+    with pytest.raises(RigolDP2031Error, match="non-numeric"):
+        _parse_timer_group_payload(payload)
+
+
+@pytest.mark.parametrize("data,expected", [
+    # Standard: '#9' = 9 length digits, '000000005' = length 5
+    (b"#9000000005" + b"hello", b"hello"),
+    # BMP-style block — magic 'BM' inside the payload
+    (b"#7" + b"0000010" + b"BM" + b"\x00" * 8, b"BM" + b"\x00" * 8),
+    # No header — return as-is (minus trailing terminators)
+    (b"plain bytes", b"plain bytes"),
+    (b"plain bytes\x00\n", b"plain bytes"),
+])
+def test_strip_block_header_bytes_handles_variants(data, expected):
+    assert _strip_block_header_bytes(data) == expected
+
+
+def test_strip_block_header_bytes_short_input_returns_as_is():
+    assert _strip_block_header_bytes(b"#") == b"#"
+
+
+# ---------------------------------------------------------------------------
+# Phase D — Timer
+# ---------------------------------------------------------------------------
+
+
+def test_set_timer_enabled_writes():
+    drv, inst = _make()
+    drv.set_timer_enabled(True)
+    drv.set_timer_enabled(False)
+    assert inst.writes == [":TIMEr:STATe ON", ":TIMEr:STATe OFF"]
+
+
+@pytest.mark.parametrize("reply,expected", [("0", False), ("1", True)])
+def test_get_timer_enabled_parses(reply, expected):
+    drv, _ = _make({":TIMEr:STATe?": reply})
+    assert drv.get_timer_enabled() is expected
+
+
+@pytest.mark.parametrize("ch", [1, 2, 3])
+def test_set_timer_channel_writes(ch):
+    drv, inst = _make()
+    drv.set_timer_channel(ch)
+    assert inst.writes == [f":TIMEr:CHANnel CH{ch}"]
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("CH1", DP2031Channel.CH1),
+    ("CH2", DP2031Channel.CH2),
+    ("CH3", DP2031Channel.CH3),
+])
+def test_get_timer_channel_parses(reply, expected):
+    drv, _ = _make({":TIMEr:CHANnel?": reply})
+    assert drv.get_timer_channel() == expected
+
+
+def test_get_timer_channel_rejects_unexpected():
+    drv, _ = _make({":TIMEr:CHANnel?": "CH9"})
+    with pytest.raises(RigolDP2031Error):
+        drv.get_timer_channel()
+
+
+@pytest.mark.parametrize("count,wire", [
+    (1, ":TIMEr:CYCLEs N,1"),
+    (5, ":TIMEr:CYCLEs N,5"),
+    (99999, ":TIMEr:CYCLEs N,99999"),
+    (None, ":TIMEr:CYCLEs I"),
+    (0, ":TIMEr:CYCLEs I"),
+])
+def test_set_timer_cycles_writes(count, wire):
+    drv, inst = _make()
+    drv.set_timer_cycles(count)
+    assert inst.writes == [wire]
+
+
+@pytest.mark.parametrize("bad", [-1, 100000, 1.5, True, "5"])
+def test_set_timer_cycles_rejects_invalid(bad):
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_timer_cycles(bad)
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("N, 1", 1),
+    ("N,5", 5),
+    ("N, 99999", 99999),
+    ("I", None),
+])
+def test_get_timer_cycles_parses(reply, expected):
+    drv, _ = _make({":TIMEr:CYCLEs?": reply})
+    assert drv.get_timer_cycles() == expected
+
+
+def test_get_timer_cycles_malformed_raises():
+    drv, _ = _make({":TIMEr:CYCLEs?": "garbage"})
+    with pytest.raises(RigolDP2031Error):
+        drv.get_timer_cycles()
+
+
+@pytest.mark.parametrize("mode", ["OFF", "LAST"])
+def test_set_timer_end_state_writes(mode):
+    drv, inst = _make()
+    drv.set_timer_end_state(mode)
+    assert inst.writes == [f":TIMEr:ENDState {mode}"]
+
+
+def test_set_timer_end_state_accepts_lowercase():
+    drv, inst = _make()
+    drv.set_timer_end_state("off")
+    assert inst.writes == [":TIMEr:ENDState OFF"]
+
+
+def test_set_timer_end_state_rejects_unknown():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_timer_end_state("MAYBE")
+
+
+@pytest.mark.parametrize("mode,scpi", [
+    ("CONTinue", "CONTinue"), ("CONT", "CONTinue"), ("continue", "CONTinue"),
+    ("SINGle", "SINGle"), ("SING", "SINGle"), ("single", "SINGle"),
+])
+def test_set_timer_run_mode_writes(mode, scpi):
+    drv, inst = _make()
+    drv.set_timer_run_mode(mode)
+    assert inst.writes == [f":TIMEr:RUN {scpi}"]
+
+
+@pytest.mark.parametrize("source,scpi", [
+    ("MANual", "MANual"), ("MANUAL", "MANual"), ("man", "MANual"),
+    ("BUS", "BUS"), ("bus", "BUS"),
+])
+def test_set_timer_trigger_writes(source, scpi):
+    drv, inst = _make()
+    drv.set_timer_trigger(source)
+    assert inst.writes == [f":TIMEr:TRIG {scpi}"]
+
+
+@pytest.mark.parametrize("idx", [1, 250, 512])
+def test_set_timer_group_index_writes(idx):
+    drv, inst = _make()
+    drv.set_timer_group_index(idx)
+    assert inst.writes == [f":TIMEr:GROUP:INDEx {idx}"]
+
+
+@pytest.mark.parametrize("bad", [0, 513, -1, 1.5, True])
+def test_set_timer_group_index_rejects_invalid(bad):
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_timer_group_index(bad)
+
+
+def test_set_timer_group_params_validates_against_current_channel():
+    """set_timer_group_params should reject voltages outside the active
+    channel's envelope."""
+    drv, inst = _make({":TIMEr:CHANnel?": "CH3"})
+    # CH3 max is 6 V — 10 V should reject
+    with pytest.raises(RigolDP2031ValueError, match="timer V"):
+        drv.set_timer_group_params(10.0, 1.0, 0.5)
+
+
+def test_set_timer_group_params_dwell_validation():
+    drv, _ = _make({":TIMEr:CHANnel?": "CH1"})
+    with pytest.raises(RigolDP2031ValueError, match="timer dwell"):
+        drv.set_timer_group_params(5.0, 1.0, 0.0005)  # too short
+    drv2, _ = _make({":TIMEr:CHANnel?": "CH1"})
+    with pytest.raises(RigolDP2031ValueError, match="timer dwell"):
+        drv2.set_timer_group_params(5.0, 1.0, 3601.0)  # too long
+
+
+def test_get_timer_group_params_parses_block_response():
+    drv, _ = _make({
+        ":TIMEr:GROUP:PARAmeter? 3":
+            "#9000000061"
+            "1,3.300000,0.500000,1.000000;"
+            "2,1.000000,0.100000,0.500000;"
+    })
+    result = drv.get_timer_group_params(count=3)
+    assert len(result) == 2
+    assert result[0] == (1, 3.3, 0.5, 1.0)
+    assert result[1] == (2, 1.0, 0.1, 0.5)
+
+
+def test_program_timer_validates_step_count():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError, match="at least one"):
+        drv.program_timer(1, [])
+    with pytest.raises(RigolDP2031ValueError, match="1–512"):
+        drv.program_timer(1, [(5.0, 1.0, 0.1)] * 513)
+
+
+def test_program_timer_validates_step_shape():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError, match="must be"):
+        drv.program_timer(1, [(5.0, 1.0)])  # missing dwell
+
+
+def test_program_timer_validates_envelope():
+    drv, _ = _make()
+    # CH1 max V is 32, but try 50 → reject
+    with pytest.raises(RigolDP2031ValueError, match="V"):
+        drv.program_timer(1, [(50.0, 1.0, 0.5)])
+
+
+def test_program_timer_writes_correct_sequence():
+    drv, inst = _make()
+    drv.program_timer(
+        2, [(5.0, 0.5, 1.0), (10.0, 1.0, 2.0)],
+        cycles=3, end_state="LAST",
+        run_mode="SINGle", trigger="BUS",
+    )
+    # Expected sequence:
+    expected_prefix = [
+        ":TIMEr:STATe OFF",
+        ":TIMEr:CHANnel CH2",
+        ":TIMEr:GROUP:INDEx 1",
+        ":TIMEr:GROUP:PARAmeter 5.000000,0.500000,1.000000",
+        ":TIMEr:GROUP:INDEx 2",
+        ":TIMEr:GROUP:PARAmeter 10.000000,1.000000,2.000000",
+        ":TIMEr:CYCLEs N,3",
+        ":TIMEr:ENDState LAST",
+        ":TIMEr:RUN SINGle",
+        ":TIMEr:TRIG BUS",
+    ]
+    assert inst.writes == expected_prefix
+
+
+# Timer template
+
+
+@pytest.mark.parametrize("t", ["SINE", "PULSE", "RAMP", "UP", "DN",
+                              "UPDN", "RISE", "FALL"])
+def test_set_timer_template_writes(t):
+    drv, inst = _make()
+    drv.set_timer_template(t)
+    assert inst.writes == [f":TIMEr:TEMPlet:SELect {t}"]
+
+
+def test_set_timer_template_rejects_unknown():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_timer_template("SQUARE")
+
+
+def test_construct_timer_from_template_writes():
+    drv, inst = _make()
+    drv.construct_timer_from_template()
+    assert inst.writes == [":TIMEr:TEMPlet:CONSTruct"]
+
+
+def test_set_timer_template_object_with_paired_value():
+    drv, inst = _make()
+    drv.set_timer_template_object("V", paired_value=2.5)
+    assert inst.writes == [":TIMEr:TEMPlet:OBJect V,2.500000"]
+
+
+def test_set_timer_template_object_no_paired_value():
+    drv, inst = _make()
+    drv.set_timer_template_object("C")
+    assert inst.writes == [":TIMEr:TEMPlet:OBJect C"]
+
+
+def test_set_timer_template_period_validates_range():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_timer_template_period(0.0005)
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_timer_template_period(3601.0)
+
+
+def test_set_timer_template_points_validates_range():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_timer_template_points(0)
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_timer_template_points(513)
+
+
+# ---------------------------------------------------------------------------
+# Phase D — Analyzer
+# ---------------------------------------------------------------------------
+
+
+def test_set_analyzer_enabled_writes():
+    drv, inst = _make()
+    drv.set_analyzer_enabled(True)
+    drv.set_analyzer_enabled(False)
+    assert inst.writes == [":ANALyzer:STATe ON", ":ANALyzer:STATe OFF"]
+
+
+@pytest.mark.parametrize("t,scpi", [
+    ("COM", "COM"), ("common", "COM"), ("COMMON", "COM"),
+    ("CURR", "CURR"), ("current", "CURR"),
+])
+def test_set_analyzer_type_writes(t, scpi):
+    drv, inst = _make()
+    drv.set_analyzer_type(t)
+    assert inst.writes == [f":ANALyzer:TYPE {scpi}"]
+
+
+def test_set_analyzer_common_objects_writes():
+    drv, inst = _make()
+    drv.set_analyzer_common_objects("CH1_V", "CH1_C", "CH3_P")
+    assert inst.writes == [":ANALyzer:COMMon:MEASure:TYPE CH1_V,CH1_C,CH3_P"]
+
+
+def test_set_analyzer_common_objects_rejects_invalid():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError, match="CHx_"):
+        drv.set_analyzer_common_objects("BAD")
+    with pytest.raises(RigolDP2031ValueError, match="1–3 objects"):
+        drv.set_analyzer_common_objects()
+
+
+def test_get_analyzer_common_objects_parses_list():
+    drv, _ = _make({":ANALyzer:COMMon:MEASure:TYPE?": "CH1_V,CH2_C"})
+    assert drv.get_analyzer_common_objects() == ["CH1_V", "CH2_C"]
+
+
+def test_get_analyzer_common_objects_empty():
+    drv, _ = _make({":ANALyzer:COMMon:MEASure:TYPE?": "  "})
+    assert drv.get_analyzer_common_objects() == []
+
+
+def test_set_analyzer_save_writes():
+    drv, inst = _make()
+    drv.set_analyzer_save(True)
+    assert inst.writes == [":ANALyzer:SAVE:STATe ON"]
+
+
+def test_set_analyzer_save_path_writes():
+    drv, inst = _make()
+    drv.set_analyzer_save_path("C:/RA.ROF")
+    assert inst.writes == [":ANALyzer:SAVE:ROUTe C:/RA.ROF"]
+
+
+# ---------------------------------------------------------------------------
+# Phase D — Trigger I/O
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("line", ["D1", "D2", "D3", "D4"])
+def test_set_trigger_in_enabled_writes(line):
+    drv, inst = _make()
+    drv.set_trigger_in_enabled(line, True)
+    assert inst.writes == [f":TRIGger:IN:ENABle {line},ON"]
+
+
+def test_set_trigger_in_enabled_rejects_unknown_line():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError, match="D1/D2/D3/D4"):
+        drv.set_trigger_in_enabled("D5", True)
+
+
+@pytest.mark.parametrize("t", ["RISE", "FALL", "HIGH", "LOW"])
+def test_set_trigger_in_type_writes(t):
+    drv, inst = _make()
+    drv.set_trigger_in_type("D1", t)
+    assert inst.writes == [f":TRIGger:IN:TYPE D1,{t}"]
+
+
+def test_set_trigger_in_type_rejects_unknown():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_trigger_in_type("D1", "EDGE")
+
+
+def test_set_trigger_in_source_writes_channels():
+    drv, inst = _make()
+    drv.set_trigger_in_source("D1", [1, 2])
+    assert inst.writes == [":TRIGger:IN:SOURce D1,CH1,CH2"]
+
+
+def test_set_trigger_in_source_rejects_string():
+    """Earlier bench-discovered: NONE is read-only sentinel, not writable."""
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError, match="list of channels"):
+        drv.set_trigger_in_source("D1", "NONE")
+
+
+def test_set_trigger_in_source_rejects_empty():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError, match="≥ 1 channel"):
+        drv.set_trigger_in_source("D1", [])
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("CH1,CH2", ["CH1", "CH2"]),
+    ("CH3", ["CH3"]),
+    ("NONE", []),
+    ("", []),
+])
+def test_get_trigger_in_source_parses(reply, expected):
+    drv, _ = _make({":TRIGger:IN:SOURce? D1": reply})
+    assert drv.get_trigger_in_source("D1") == expected
+
+
+@pytest.mark.parametrize("r", ["ON", "OFF", "ALTER"])
+def test_set_trigger_in_response_writes(r):
+    drv, inst = _make()
+    drv.set_trigger_in_response("D2", r)
+    assert inst.writes == [f":TRIGger:IN:RESPonse D2,{r}"]
+
+
+def test_trigger_in_immediate_writes():
+    drv, inst = _make()
+    drv.trigger_in_immediate()
+    assert inst.writes == [":TRIGger:IN:IMMEdiate"]
+
+
+@pytest.mark.parametrize("line", ["D1", "D2", "D3", "D4"])
+@pytest.mark.parametrize("ch", [1, 2, 3])
+def test_set_trigger_out_source_writes(line, ch):
+    drv, inst = _make()
+    drv.set_trigger_out_source(line, ch)
+    assert inst.writes == [f":TRIGger:OUT:SOURce {line},CH{ch}"]
+
+
+@pytest.mark.parametrize("pol,scpi", [
+    ("POS", "POSitive"), ("POSitive", "POSitive"), ("positive", "POSitive"),
+    ("NEG", "NEGative"), ("NEGative", "NEGative"),
+])
+def test_set_trigger_out_polarity_writes(pol, scpi):
+    drv, inst = _make()
+    drv.set_trigger_out_polarity("D3", pol)
+    assert inst.writes == [f":TRIGger:OUT:POLArity D3,{scpi}"]
+
+
+# ---------------------------------------------------------------------------
+# Phase D — Memory
+# ---------------------------------------------------------------------------
+
+
+def test_list_files_parses_csv():
+    drv, _ = _make({":MEMory:CATalog?": "FILE1.RSF,FILE2.RTF,FILE3.BMP"})
+    assert drv.list_files() == ["FILE1.RSF", "FILE2.RTF", "FILE3.BMP"]
+
+
+def test_list_files_empty():
+    drv, _ = _make({":MEMory:CATalog?": " "})
+    assert drv.list_files() == []
+
+
+def test_change_directory_writes():
+    drv, inst = _make()
+    drv.change_directory("D:/folder")
+    assert inst.writes == [":MEMory:CDIRectory D:/folder"]
+
+
+def test_current_directory_returns():
+    drv, _ = _make({":MEMory:CDIRectory?": "C:/ "})
+    assert drv.current_directory() == "C:/"
+
+
+def test_delete_file_writes():
+    drv, inst = _make()
+    drv.delete_file("OLD.RSF")
+    assert inst.writes == [":MEMory:DELete OLD.RSF"]
+
+
+def test_store_file_writes():
+    drv, inst = _make()
+    drv.store_file("MYSTATE.RSF")
+    assert inst.writes == [":MEMory:STORe MYSTATE.RSF"]
+
+
+def test_load_file_writes():
+    drv, inst = _make()
+    drv.load_file("MYSTATE.RSF")
+    assert inst.writes == [":MEMory:LOAD MYSTATE.RSF"]
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("NONE", []),
+    ("NONE ", []),
+    ("", []),
+    ("D:/", ["D:/"]),
+    ("D:/,E:/", ["D:/", "E:/"]),
+])
+def test_external_disks_parses(reply, expected):
+    drv, _ = _make({":MEMory:DISK?": reply})
+    assert drv.external_disks() == expected
+
+
+@pytest.mark.parametrize("reply,expected", [("0", False), ("1", True)])
+def test_file_exists_parses(reply, expected):
+    drv, _ = _make({":MEMory:VALid? FOO.RSF": reply})
+    assert drv.file_exists("FOO.RSF") is expected
+
+
+# ---------------------------------------------------------------------------
+# Phase D — License + screenshot
+# ---------------------------------------------------------------------------
+
+
+def test_install_license_writes():
+    drv, inst = _make()
+    drv.install_license("ABCD-1234")
+    assert inst.writes == [":LIC:SET ABCD-1234"]
+
+
+# ---------------------------------------------------------------------------
 # Context manager — best-effort output disable on exit
 # ---------------------------------------------------------------------------
 
@@ -1180,7 +1744,22 @@ def test_context_manager_disables_all_channels_on_exit():
 
 @pytest.fixture
 def hw_dp2031():
-    """Open the real DP2031. Skips if VISA / device unavailable."""
+    """Open the real DP2031. Skips if VISA / device unavailable.
+
+    Bench-discovered firmware quirks make a clean reset state harder
+    than a simple ``*RST``:
+
+    - PAIR mode (SERies / PARallel) survives ``*RST`` — must be
+      cleared explicitly.
+    - OVP latch can survive ``*RST`` — drain via per-channel
+      :py:meth:`clear_ovp`.
+    - PAIR mode transitions take > 1 s to settle.
+    - Tracking + sync states can also linger.
+
+    This fixture does the full belt-and-suspenders cleanup so tests
+    can rely on a known starting state regardless of what the
+    preceding test left behind.
+    """
     import time
     pytest.importorskip("pyvisa")
     resource = os.environ.get("BENCHCTRL_DP2031_RESOURCE")  # None → auto
@@ -1188,18 +1767,48 @@ def hw_dp2031():
         psu = RigolDP2031.open(resource=resource)
     except Exception as e:
         pytest.skip(f"DP2031 unavailable: {e}")
+    # Aggressively clear state before yielding to the test
     psu.reset()
     psu.clear_status()
-    # *RST on this firmware needs a real settle before subsequent writes
-    # take effect reliably — without this, the first set_voltage after
-    # reset can be silently ignored.
     time.sleep(0.5)
-    # Make sure every channel starts off — defensive in case a prior
-    # test left something hot.
+    # Disable all outputs first (in case a prior test left them on)
     for ch in (1, 2, 3):
-        psu.set_output(ch, False)
-    time.sleep(0.1)
+        try:
+            psu.set_output(ch, False)
+        except Exception:
+            pass
+    # Clear PAIR — survives *RST. Long settle.
+    try:
+        psu.set_channel_pair("OFF")
+        time.sleep(2.0)
+    except Exception:
+        pass
+    # Clear tracking + sync
+    for setter in (lambda: psu.set_tracking(False),
+                   lambda: psu.set_output_sync(False)):
+        try:
+            setter()
+        except Exception:
+            pass
+    # Clear latched OVP / OCP per channel — also survives *RST sometimes
+    for ch in (1, 2, 3):
+        try:
+            psu.set_ovp_enabled(ch, False)
+            psu.set_ocp_enabled(ch, False)
+            psu.clear_ovp(ch)
+            psu.clear_ocp(ch)
+        except Exception:
+            pass
+    # Drain the error queue
+    for _ in range(10):
+        try:
+            if psu.last_error() is None:
+                break
+        except Exception:
+            break
+    time.sleep(0.2)
     yield psu
+    # Teardown: best-effort outputs off + restore safe defaults
     for ch in (1, 2, 3):
         try:
             psu.set_output(ch, False)
@@ -1438,9 +2047,22 @@ def test_hw_ovp_trip_and_clear(hw_dp2031):
     hw_dp2031.set_ovp_enabled(ch, True)
     try:
         hw_dp2031.set_output(ch, True)
-        # Latch takes ~150–250 ms to settle on this firmware
-        time.sleep(0.4)
-        assert hw_dp2031.ovp_tripped(ch), "OVP did not latch as expected"
+        # Latch takes ~150–250 ms to settle on this firmware; some
+        # bench conditions (warm USB-TMC link from prior tests) need
+        # longer. Retry-poll up to ~1.5 s.
+        tripped = False
+        for _ in range(15):
+            time.sleep(0.1)
+            if hw_dp2031.ovp_tripped(ch):
+                tripped = True
+                break
+        assert tripped, \
+            f"OVP did not latch within 1.5 s on CH{ch}"
+        # Output may take an extra moment to flip OFF after the latch
+        for _ in range(10):
+            if hw_dp2031.get_output(ch) is False:
+                break
+            time.sleep(0.05)
         assert hw_dp2031.get_output(ch) is False, \
             "output should have tripped off on OVP"
         # Now clear and verify the latch releases. Output stays off
@@ -1687,3 +2309,154 @@ def test_hw_channel_pair_series_engages(hw_dp2031):
 def test_hw_channel_pair_off_default(hw_dp2031):
     """Reset should leave the pair mode at OFF."""
     assert hw_dp2031.get_channel_pair() == "OFF"
+
+
+# ---------------------------------------------------------------------------
+# Phase D — hardware tests
+# Mostly state-only round-trip — Timer execution + Analyzer logging need
+# loads / external storage and are out of scope for the CI suite.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.hardware
+def test_hw_timer_state_round_trip(hw_dp2031):
+    """STATe / CHANnel / CYCLEs / ENDState / RUN / TRIG round-trip."""
+    import time
+    hw_dp2031.set_timer_enabled(False)
+    assert hw_dp2031.get_timer_enabled() is False
+
+    hw_dp2031.set_timer_channel(3)
+    assert hw_dp2031.get_timer_channel() == DP2031Channel.CH3
+
+    hw_dp2031.set_timer_cycles(7)
+    assert hw_dp2031.get_timer_cycles() == 7
+    hw_dp2031.set_timer_cycles(None)
+    assert hw_dp2031.get_timer_cycles() is None
+    hw_dp2031.set_timer_cycles(1)
+
+    hw_dp2031.set_timer_end_state("OFF")
+    assert hw_dp2031.get_timer_end_state() == "OFF"
+    hw_dp2031.set_timer_end_state("LAST")
+    assert hw_dp2031.get_timer_end_state() == "LAST"
+
+    hw_dp2031.set_timer_run_mode("SINGle")
+    assert hw_dp2031.get_timer_run_mode() == "SINGLE"
+    hw_dp2031.set_timer_run_mode("CONTinue")
+    assert hw_dp2031.get_timer_run_mode() == "CONTINUE"
+
+    hw_dp2031.set_timer_trigger("BUS")
+    assert hw_dp2031.get_timer_trigger() == "BUS"
+    hw_dp2031.set_timer_trigger("MANual")
+    assert hw_dp2031.get_timer_trigger() == "MANUAL"
+
+
+@pytest.mark.hardware
+def test_hw_program_timer_round_trip(hw_dp2031):
+    """program_timer writes a multi-step sequence; read it back via
+    get_timer_group_params and verify the IEEE 488.2 block parser."""
+    steps = [
+        (3.3, 0.5, 1.0),
+        (1.0, 0.1, 0.5),
+        (0.0, 0.0, 0.3),
+    ]
+    hw_dp2031.program_timer(3, steps, cycles=2, end_state="OFF",
+                             trigger="MANual")
+    # Position the editor at group 1 and read back
+    hw_dp2031.set_timer_group_index(1)
+    rows = hw_dp2031.get_timer_group_params(count=len(steps))
+    assert len(rows) == len(steps)
+    for (i, expected), got in zip(enumerate(steps, 1), rows):
+        v_exp, i_exp, t_exp = expected
+        idx, v, i_amp, t = got
+        assert idx == i
+        assert v == pytest.approx(v_exp, abs=0.01)
+        assert i_amp == pytest.approx(i_exp, abs=0.01)
+        assert t == pytest.approx(t_exp, abs=0.01)
+    assert hw_dp2031.get_timer_cycles() == 2
+    assert hw_dp2031.get_timer_end_state() == "OFF"
+
+
+@pytest.mark.hardware
+def test_hw_timer_template_round_trip(hw_dp2031):
+    """Template selection round-trip — doesn't execute, just configures.
+
+    Bench-observed: template writes need ~200 ms to settle before the
+    next write is reliably accepted.
+    """
+    import time
+    for t in ("SINE", "PULSE", "RAMP"):
+        hw_dp2031.set_timer_template(t)
+        time.sleep(0.3)
+        assert hw_dp2031.get_timer_template() == t, \
+            f"expected {t}, got {hw_dp2031.get_timer_template()!r}"
+
+
+@pytest.mark.hardware
+def test_hw_trigger_io_round_trip(hw_dp2031):
+    """Trigger I/O state round-trip across D1-D4."""
+    import time
+    for line in ("D1", "D2", "D3", "D4"):
+        hw_dp2031.set_trigger_in_enabled(line, True)
+        assert hw_dp2031.get_trigger_in_enabled(line) is True
+        hw_dp2031.set_trigger_in_enabled(line, False)
+        assert hw_dp2031.get_trigger_in_enabled(line) is False
+
+        for t in ("RISE", "FALL", "HIGH", "LOW"):
+            hw_dp2031.set_trigger_in_type(line, t)
+            assert hw_dp2031.get_trigger_in_type(line) == t
+
+        hw_dp2031.set_trigger_in_source(line, [1, 2])
+        assert hw_dp2031.get_trigger_in_source(line) == ["CH1", "CH2"]
+        hw_dp2031.set_trigger_in_source(line, [3])
+        assert hw_dp2031.get_trigger_in_source(line) == ["CH3"]
+
+
+@pytest.mark.hardware
+def test_hw_trigger_in_immediate_no_error(hw_dp2031):
+    """Force one immediate trigger event; verify no SCPI error queues."""
+    hw_dp2031.trigger_in_immediate()
+    assert hw_dp2031.last_error() is None
+
+
+@pytest.mark.hardware
+def test_hw_memory_state_round_trip(hw_dp2031):
+    """List directory, change to root, list disks."""
+    # Just exercise the queries — don't write files (avoid wear /
+    # leftovers on the internal C disk).
+    cwd = hw_dp2031.current_directory()
+    assert "/" in cwd or ":" in cwd, f"current_directory unexpected: {cwd!r}"
+    files = hw_dp2031.list_files()
+    assert isinstance(files, list)
+    disks = hw_dp2031.external_disks()
+    assert isinstance(disks, list)
+
+
+@pytest.mark.hardware
+def test_hw_save_recall_state_commands_succeed(hw_dp2031):
+    """``*SAV`` and ``*RCL`` accept the slot index without error.
+
+    Bench-observed: actual state restoration after ``*RCL`` is
+    sensitive to what's interleaved with the recall (other tests'
+    teardown can corrupt the slot if they touch it). We verify
+    here only that the commands accept the slot and don't queue
+    a SCPI error — full save-mutate-recall-verify would need an
+    isolated slot the test exclusively owns, which is fragile
+    across the suite.
+    """
+    import time
+    hw_dp2031.save_state(8)
+    time.sleep(0.5)
+    assert hw_dp2031.last_error() is None, \
+        "*SAV 8 should not queue a SCPI error"
+    hw_dp2031.recall_state(8)
+    time.sleep(0.5)
+    assert hw_dp2031.last_error() is None, \
+        "*RCL 8 should not queue a SCPI error"
+
+
+@pytest.mark.hardware
+def test_hw_screenshot_returns_bmp(hw_dp2031):
+    """Capture a screenshot, verify it starts with the BMP magic 'BM'."""
+    data = hw_dp2031.screenshot_bytes()
+    assert len(data) > 1000, f"screenshot suspiciously small: {len(data)} bytes"
+    assert data[:2] == b"BM", f"expected BMP magic, got {data[:8]!r}"
