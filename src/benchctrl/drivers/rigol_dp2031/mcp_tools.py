@@ -523,6 +523,188 @@ def dp2031_set_power_on_mode(mode: str) -> dict:
     return {"power_on_mode": mode}
 
 
+# ---------------------------------------------------------------------------
+# Phase C — pair / tracking / sense / sampling / step / apply / bounds
+# ---------------------------------------------------------------------------
+
+
+def dp2031_set_channel_pair(mode: str) -> dict:
+    """Set CH1+CH2 pair mode: ``"OFF"`` / ``"SERies"`` / ``"PARallel"``.
+
+    SAFETY-CRITICAL: ``"SERies"`` ties CH1+ to CH2- for up to 64 V
+    composite; ``"PARallel"`` ties CH1 and CH2 in parallel for 6 A
+    composite. Disconnect any external load between CH1 and CH2 before
+    switching. Bench-discovered: ``PARallel`` may silently no-op on
+    some firmware — call :py:func:`dp2031_get_channel_pair` to verify.
+    """
+    _get_dp2031().set_channel_pair(mode)
+    return {"channel_pair": mode}
+
+
+def dp2031_get_channel_pair() -> dict:
+    return {"channel_pair": _get_dp2031().get_channel_pair()}
+
+
+def dp2031_set_tracking(on: bool) -> dict:
+    """Enable / disable CH1↔CH2 voltage tracking."""
+    _get_dp2031().set_tracking(on)
+    return {"tracking": on}
+
+
+def dp2031_get_tracking() -> dict:
+    return {"tracking": _get_dp2031().get_tracking()}
+
+
+def dp2031_set_track_mode(mode: str) -> dict:
+    """``:SYSTem:TMODe`` — alias for :py:func:`dp2031_set_tracking`.
+
+    Accepts ``"SYNC"`` / ``"INDE"`` (long forms ``SYNCHRONOUS`` /
+    ``INDEPENDENT`` also accepted).
+    """
+    _get_dp2031().set_track_mode(mode)
+    return {"track_mode": mode}
+
+
+def dp2031_get_track_mode() -> dict:
+    return {"track_mode": _get_dp2031().get_track_mode()}
+
+
+def dp2031_set_output_sync(on: bool) -> dict:
+    """Enable simultaneous CH1+CH2 output on/off (meaningful in tracking mode)."""
+    _get_dp2031().set_output_sync(on)
+    return {"output_sync": on}
+
+
+def dp2031_get_output_sync() -> dict:
+    return {"output_sync": _get_dp2031().get_output_sync()}
+
+
+def dp2031_set_remote_sense(channel, on: bool) -> dict:
+    """Enable / disable 4-wire remote sense for CHn (or ``"ALL"``).
+
+    SAFETY: with remote sense ON, the sense leads must be wired to
+    the DUT. With them unconnected the channel will drive its output
+    to the maximum the OVP allows trying to "find" the sense voltage.
+    """
+    _get_dp2031().set_remote_sense(channel, on)
+    return {"channel": channel, "remote_sense": on}
+
+
+def dp2031_get_remote_sense(channel: int) -> dict:
+    return {"channel": channel,
+            "remote_sense": _get_dp2031().get_remote_sense(channel)}
+
+
+def dp2031_set_sampling_mode(mode: str) -> dict:
+    """Set current-measurement sampling mode for CH1/CH2: ``AUTO/HIGH/LOW``.
+
+    LOW mode extends readback resolution to 1 µA for currents below
+    ~11 mA at the cost of slower acquisition. Has no effect on CH3.
+    """
+    _get_dp2031().set_sampling_mode(mode)
+    return {"sampling_mode": mode}
+
+
+def dp2031_get_sampling_mode() -> dict:
+    return {"sampling_mode": _get_dp2031().get_sampling_mode()}
+
+
+def dp2031_set_voltage_step(channel: int, volts: float) -> dict:
+    """Set the step size for ``dp2031_step_voltage_up`` / ``_down`` on CHn."""
+    _get_dp2031().set_voltage_step(channel, volts)
+    return {"channel": channel, "voltage_step_V": volts}
+
+
+def dp2031_get_voltage_step(channel: int) -> dict:
+    return {"channel": channel,
+            "voltage_step_V": _get_dp2031().get_voltage_step(channel)}
+
+
+def dp2031_set_current_step(channel: int, amps: float) -> dict:
+    """Set the step size for ``dp2031_step_current_up`` / ``_down`` on CHn."""
+    _get_dp2031().set_current_step(channel, amps)
+    return {"channel": channel, "current_step_A": amps}
+
+
+def dp2031_get_current_step(channel: int) -> dict:
+    return {"channel": channel,
+            "current_step_A": _get_dp2031().get_current_step(channel)}
+
+
+def dp2031_step_voltage_up(channel: int) -> dict:
+    """Increment CHn voltage by its configured step."""
+    _get_dp2031().step_voltage_up(channel)
+    return {"channel": channel, "stepped": "voltage up"}
+
+
+def dp2031_step_voltage_down(channel: int) -> dict:
+    """Decrement CHn voltage by its configured step."""
+    _get_dp2031().step_voltage_down(channel)
+    return {"channel": channel, "stepped": "voltage down"}
+
+
+def dp2031_step_current_up(channel: int) -> dict:
+    """Increment CHn current setpoint by its configured step."""
+    _get_dp2031().step_current_up(channel)
+    return {"channel": channel, "stepped": "current up"}
+
+
+def dp2031_step_current_down(channel: int) -> dict:
+    """Decrement CHn current setpoint by its configured step."""
+    _get_dp2031().step_current_down(channel)
+    return {"channel": channel, "stepped": "current down"}
+
+
+def dp2031_apply(
+    channel: int,
+    voltage: Optional[float] = None,
+    current: Optional[float] = None,
+) -> dict:
+    """One-shot V/I configuration via ``:APPLy`` — equivalent to
+    select_channel + set_voltage + set_current."""
+    _get_dp2031().apply(channel, voltage=voltage, current=current)
+    out: dict = {"channel": channel}
+    if voltage is not None:
+        out["voltage_V"] = voltage
+    if current is not None:
+        out["current_A"] = current
+    return out
+
+
+def dp2031_query_applied(channel: int, option: Optional[str] = None) -> dict:
+    """Read the APPLy-form V/I config for CHn.
+
+    Without ``option`` returns the full tuple as
+    ``{"rated", "voltage_V", "current_A"}``; with
+    ``option="VOLT"`` / ``"CURR"`` returns just that value.
+    """
+    result = _get_dp2031().query_applied(channel, option=option)
+    if option is None:
+        rated, v, i = result
+        return {"channel": channel, "rated": rated,
+                "voltage_V": v, "current_A": i}
+    key = "voltage_V" if option.strip().upper().startswith("V") else "current_A"
+    return {"channel": channel, key: result}
+
+
+def dp2031_voltage_bounds(channel: int) -> dict:
+    """Device-reported ``(min, max, default)`` voltage bounds for CHn.
+
+    Note: the device's ``MAX`` includes ~5 % headroom over the nominal
+    envelope (e.g. 33.6 V on CH1, whose nominal is 32 V).
+    """
+    lo, hi, dflt = _get_dp2031().voltage_bounds(channel)
+    return {"channel": channel,
+            "min_V": lo, "max_V": hi, "default_V": dflt}
+
+
+def dp2031_current_bounds(channel: int) -> dict:
+    """Device-reported ``(min, max, default)`` current bounds for CHn."""
+    lo, hi, dflt = _get_dp2031().current_bounds(channel)
+    return {"channel": channel,
+            "min_A": lo, "max_A": hi, "default_A": dflt}
+
+
 _TOOLS = (
     # Connection + identity
     dp2031_open, dp2031_close, dp2031_info,
@@ -569,6 +751,20 @@ _TOOLS = (
     dp2031_set_remote, dp2031_set_local,
     dp2031_set_screen_saver,
     dp2031_set_language, dp2031_set_power_on_mode,
+    # Phase C — pair / tracking / sense / sampling
+    dp2031_set_channel_pair, dp2031_get_channel_pair,
+    dp2031_set_tracking, dp2031_get_tracking,
+    dp2031_set_track_mode, dp2031_get_track_mode,
+    dp2031_set_output_sync, dp2031_get_output_sync,
+    dp2031_set_remote_sense, dp2031_get_remote_sense,
+    dp2031_set_sampling_mode, dp2031_get_sampling_mode,
+    # Phase C — step + apply + bounds
+    dp2031_set_voltage_step, dp2031_get_voltage_step,
+    dp2031_set_current_step, dp2031_get_current_step,
+    dp2031_step_voltage_up, dp2031_step_voltage_down,
+    dp2031_step_current_up, dp2031_step_current_down,
+    dp2031_apply, dp2031_query_applied,
+    dp2031_voltage_bounds, dp2031_current_bounds,
 )
 
 

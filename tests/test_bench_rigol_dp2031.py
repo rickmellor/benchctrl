@@ -20,6 +20,7 @@ from benchctrl.drivers.rigol_dp2031.driver import (
     RigolDP2031Error,
     RigolDP2031ValueError,
     _coerce_channel,
+    _coerce_channel_or_all,
     _parse_delay_ms,
 )
 
@@ -850,6 +851,311 @@ def test_set_power_on_mode_rejects_unknown():
 
 
 # ---------------------------------------------------------------------------
+# Phase C — pair / tracking / sync / sense / sampling / step / apply / bounds
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("input_val,expected", [
+    (1, "CH1"), (2, "CH2"), (3, "CH3"),
+    (DP2031Channel.CH1, "CH1"),
+    ("ALL", "ALL"), ("all", "ALL"), ("All", "ALL"),
+])
+def test_coerce_channel_or_all_accepts(input_val, expected):
+    assert _coerce_channel_or_all(input_val) == expected
+
+
+@pytest.mark.parametrize("bad", [0, 4, "CH4", "all_channels", None])
+def test_coerce_channel_or_all_rejects_invalid(bad):
+    with pytest.raises(RigolDP2031ValueError):
+        _coerce_channel_or_all(bad)
+
+
+# Channel pair
+
+
+@pytest.mark.parametrize("mode_in,scpi", [
+    ("OFF", "OFF"), ("off", "OFF"),
+    ("SERies", "SERies"), ("ser", "SERies"), ("SERIES", "SERies"),
+    ("PARallel", "PARallel"), ("par", "PARallel"), ("PARALLEL", "PARallel"),
+])
+def test_set_channel_pair_writes(mode_in, scpi):
+    drv, inst = _make()
+    drv.set_channel_pair(mode_in)
+    assert inst.writes == [f":OUTPut:PAIR {scpi}"]
+
+
+@pytest.mark.parametrize("bad", ["BOTH", "INDE", "ON", ""])
+def test_set_channel_pair_rejects_unknown(bad):
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_channel_pair(bad)
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("OFF", "OFF"), ("SERIES", "SERIES"), ("PARALLEL", "PARALLEL"),
+    ("ser", "SER"), ("  off  ", "OFF"),
+])
+def test_get_channel_pair_normalizes_to_upper(reply, expected):
+    drv, _ = _make({":OUTPut:PAIR?": reply})
+    assert drv.get_channel_pair() == expected
+
+
+# Tracking + track mode + sync
+
+
+def test_set_tracking_writes():
+    drv, inst = _make()
+    drv.set_tracking(True)
+    drv.set_tracking(False)
+    assert inst.writes == [":OUTPut:TRACk ON", ":OUTPut:TRACk OFF"]
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("0", False), ("1", True),
+    ("0 ", False), ("1 ", True),  # trailing-space form bench-observed
+])
+def test_get_tracking_parses(reply, expected):
+    drv, _ = _make({":OUTPut:TRACk?": reply})
+    assert drv.get_tracking() is expected
+
+
+@pytest.mark.parametrize("mode_in,scpi", [
+    ("SYNC", "SYNC"), ("sync", "SYNC"),
+    ("SYNCHRONOUS", "SYNC"), ("synchronous", "SYNC"),
+    ("INDE", "INDE"), ("INDEPENDENT", "INDE"),
+])
+def test_set_track_mode_writes(mode_in, scpi):
+    drv, inst = _make()
+    drv.set_track_mode(mode_in)
+    assert inst.writes == [f":SYSTem:TMODe {scpi}"]
+
+
+def test_set_track_mode_rejects_unknown():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_track_mode("BOTH")
+
+
+def test_get_track_mode_returns_device_reply():
+    drv, _ = _make({":SYSTem:TMODe?": "SYNCHRONOUS"})
+    assert drv.get_track_mode() == "SYNCHRONOUS"
+
+
+def test_set_output_sync_writes():
+    drv, inst = _make()
+    drv.set_output_sync(True)
+    assert inst.writes == [":SYSTem:SYNC ON"]
+
+
+@pytest.mark.parametrize("reply,expected", [("0", False), ("1", True)])
+def test_get_output_sync_parses(reply, expected):
+    drv, _ = _make({":SYSTem:SYNC?": reply})
+    assert drv.get_output_sync() is expected
+
+
+# Remote sense
+
+
+@pytest.mark.parametrize("ch", [1, 2, 3])
+def test_set_remote_sense_per_channel_writes(ch):
+    drv, inst = _make()
+    drv.set_remote_sense(ch, True)
+    drv.set_remote_sense(ch, False)
+    assert inst.writes == [
+        f":SYSTem:SENSe CH{ch},ON",
+        f":SYSTem:SENSe CH{ch},OFF",
+    ]
+
+
+def test_set_remote_sense_all_form():
+    drv, inst = _make()
+    drv.set_remote_sense("ALL", True)
+    assert inst.writes == [":SYSTem:SENSe ALL,ON"]
+
+
+@pytest.mark.parametrize("reply,expected", [("0", False), ("1", True)])
+def test_get_remote_sense_parses(reply, expected):
+    drv, _ = _make({":SYSTem:SENSe? CH2": reply})
+    assert drv.get_remote_sense(2) is expected
+
+
+# Sampling mode
+
+
+@pytest.mark.parametrize("mode", ["AUTO", "HIGH", "LOW"])
+def test_set_sampling_mode_writes(mode):
+    drv, inst = _make()
+    drv.set_sampling_mode(mode)
+    assert inst.writes == [f":SYSTem:SAMPling {mode}"]
+
+
+@pytest.mark.parametrize("mode", ["auto", "high", "low"])
+def test_set_sampling_mode_accepts_lowercase(mode):
+    drv, inst = _make()
+    drv.set_sampling_mode(mode)
+    assert inst.writes == [f":SYSTem:SAMPling {mode.upper()}"]
+
+
+@pytest.mark.parametrize("bad", ["MEDIUM", "FAST", "AUTOLOW", ""])
+def test_set_sampling_mode_rejects_unknown(bad):
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.set_sampling_mode(bad)
+
+
+def test_get_sampling_mode_normalises_upper():
+    drv, _ = _make({":SYSTem:SAMPling?": "auto"})
+    assert drv.get_sampling_mode() == "AUTO"
+
+
+# Voltage / current step
+
+
+@pytest.mark.parametrize("ch,step", [(1, 0.1), (2, 0.5), (3, 0.01)])
+def test_set_voltage_step_writes(ch, step):
+    drv, inst = _make()
+    drv.set_voltage_step(ch, step)
+    assert inst.writes == [
+        f":SOURce{ch}:VOLTage:LEVel:IMMediate:STEP {step:.6f}"
+    ]
+
+
+def test_get_voltage_step_parses_with_trailing_space():
+    drv, _ = _make({":SOURce1:VOLTage:LEVel:IMMediate:STEP?": "0.100 "})
+    assert drv.get_voltage_step(1) == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("ch,step", [(1, 0.05), (3, 0.5)])
+def test_set_current_step_writes(ch, step):
+    drv, inst = _make()
+    drv.set_current_step(ch, step)
+    assert inst.writes == [
+        f":SOURce{ch}:CURRent:LEVel:IMMediate:STEP {step:.6f}"
+    ]
+
+
+def test_get_current_step_parses():
+    drv, _ = _make({":SOURce2:CURRent:LEVel:IMMediate:STEP?": "0.0500"})
+    assert drv.get_current_step(2) == pytest.approx(0.05)
+
+
+@pytest.mark.parametrize("ch", [1, 2, 3])
+def test_step_voltage_up_down_writes(ch):
+    drv, inst = _make()
+    drv.step_voltage_up(ch)
+    drv.step_voltage_down(ch)
+    assert inst.writes == [
+        f":SOURce{ch}:VOLTage:LEVel:IMMediate UP",
+        f":SOURce{ch}:VOLTage:LEVel:IMMediate DOWN",
+    ]
+
+
+@pytest.mark.parametrize("ch", [1, 2, 3])
+def test_step_current_up_down_writes(ch):
+    drv, inst = _make()
+    drv.step_current_up(ch)
+    drv.step_current_down(ch)
+    assert inst.writes == [
+        f":SOURce{ch}:CURRent:LEVel:IMMediate UP",
+        f":SOURce{ch}:CURRent:LEVel:IMMediate DOWN",
+    ]
+
+
+# Apply
+
+
+def test_apply_with_v_and_i_writes_full():
+    drv, inst = _make()
+    drv.apply(1, voltage=5.0, current=1.5)
+    assert inst.writes == [":APPLy CH1,5.000000,1.500000"]
+
+
+def test_apply_with_v_only_writes_two_args():
+    drv, inst = _make()
+    drv.apply(2, voltage=3.3)
+    assert inst.writes == [":APPLy CH2,3.300000"]
+
+
+def test_apply_with_no_args_just_selects_channel():
+    drv, inst = _make()
+    drv.apply(3)
+    assert inst.writes == [":APPLy CH3"]
+
+
+def test_apply_with_i_only_uses_source_path():
+    """No bare current-positional form on :APPLy; we fall back to
+    the SOURce setter to honour 'leave V alone' semantics."""
+    drv, inst = _make()
+    drv.apply(1, current=0.5)
+    assert inst.writes == [":SOURce1:CURRent:LEVel:IMMediate 0.500000"]
+
+
+@pytest.mark.parametrize("kw,val", [
+    ("voltage", 100.0),    # CH1 over-range
+    ("current", 10.0),     # CH1 over-range
+])
+def test_apply_validates_arguments(kw, val):
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.apply(1, **{kw: val})
+
+
+def test_query_applied_no_option_parses_triplet():
+    drv, _ = _make({":APPLy? CH1": "CH1:32V/3A,5.000,1.5000"})
+    result = drv.query_applied(1)
+    assert result == ("CH1:32V/3A", pytest.approx(5.0), pytest.approx(1.5))
+
+
+def test_query_applied_malformed_raises():
+    drv, _ = _make({":APPLy? CH1": "only,two"})
+    with pytest.raises(RigolDP2031Error, match="expected"):
+        drv.query_applied(1)
+
+
+def test_query_applied_volt_option_returns_float():
+    drv, _ = _make({":APPLy? CH1,VOLT": "5.000"})
+    assert drv.query_applied(1, option="VOLT") == pytest.approx(5.0)
+
+
+def test_query_applied_curr_option_returns_float():
+    drv, _ = _make({":APPLy? CH2,CURR": "1.5000"})
+    assert drv.query_applied(2, option="CURR") == pytest.approx(1.5)
+
+
+def test_query_applied_invalid_option_rejected():
+    drv, _ = _make()
+    with pytest.raises(RigolDP2031ValueError):
+        drv.query_applied(1, option="POWER")
+
+
+# Bounds queries
+
+
+def test_voltage_bounds_queries_all_three():
+    drv, _ = _make({
+        ":SOURce1:VOLTage? MIN": "0.000",
+        ":SOURce1:VOLTage? MAX": "33.600",
+        ":SOURce1:VOLTage? DEF": "0.000",
+    })
+    lo, hi, dflt = drv.voltage_bounds(1)
+    assert lo == pytest.approx(0.0)
+    assert hi == pytest.approx(33.6)
+    assert dflt == pytest.approx(0.0)
+
+
+def test_current_bounds_queries_all_three():
+    drv, _ = _make({
+        ":SOURce3:CURRent? MIN": "0.0000",
+        ":SOURce3:CURRent? MAX": "5.2500",
+        ":SOURce3:CURRent? DEF": "0.1000",
+    })
+    lo, hi, dflt = drv.current_bounds(3)
+    assert lo == pytest.approx(0.0)
+    assert hi == pytest.approx(5.25)
+    assert dflt == pytest.approx(0.1)
+
+
+# ---------------------------------------------------------------------------
 # Context manager — best-effort output disable on exit
 # ---------------------------------------------------------------------------
 
@@ -1119,6 +1425,13 @@ def test_hw_ovp_trip_and_clear(hw_dp2031):
         v_setpoint, v_ovp = 3.000, 2.000
     else:
         v_setpoint, v_ovp = 5.000, 3.000
+    # Defensive: clear any latched OVP from prior tests + start from
+    # output OFF + OVP disabled. *RST in the fixture doesn't always
+    # clear the OVP latch on this firmware (bench-observed).
+    hw_dp2031.set_output(ch, False)
+    hw_dp2031.set_ovp_enabled(ch, False)
+    hw_dp2031.clear_ovp(ch)
+    time.sleep(0.3)
     hw_dp2031.set_voltage(ch, v_setpoint)
     hw_dp2031.set_current(ch, 0.500)
     hw_dp2031.set_ovp_level(ch, v_ovp)
@@ -1172,3 +1485,205 @@ def test_hw_remote_local_round_trip(hw_dp2031):
     assert hw_dp2031.last_error() is None
     hw_dp2031.set_local()
     assert hw_dp2031.last_error() is None
+
+
+# ---------------------------------------------------------------------------
+# Phase C — hardware tests
+# Run with the DP2031 outputs UNCONNECTED to anything (SERies / PARallel
+# pair modes internally tie CH1 and CH2 together; remote-sense without
+# sense leads connected could drive the channel to max).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("ch", [1, 2, 3])
+def test_hw_voltage_step_round_trip(hw_dp2031, ch):
+    """Set step, then UP / DOWN, verify the device updates by the step."""
+    import time
+    step = 0.5 if ch != 3 else 0.1
+    hw_dp2031.set_voltage(ch, 1.000)
+    hw_dp2031.set_voltage_step(ch, step)
+    assert hw_dp2031.get_voltage_step(ch) == pytest.approx(step, abs=0.01)
+    v0 = hw_dp2031.get_voltage(ch)
+    hw_dp2031.step_voltage_up(ch)
+    time.sleep(0.1)
+    assert hw_dp2031.get_voltage(ch) == pytest.approx(v0 + step, abs=0.01)
+    hw_dp2031.step_voltage_down(ch)
+    time.sleep(0.1)
+    assert hw_dp2031.get_voltage(ch) == pytest.approx(v0, abs=0.01)
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("ch", [1, 2, 3])
+def test_hw_current_step_round_trip(hw_dp2031, ch):
+    import time
+    step = 0.05 if ch != 3 else 0.1
+    hw_dp2031.set_current(ch, 0.500)
+    hw_dp2031.set_current_step(ch, step)
+    assert hw_dp2031.get_current_step(ch) == pytest.approx(step, abs=0.005)
+    i0 = hw_dp2031.get_current(ch)
+    hw_dp2031.step_current_up(ch)
+    time.sleep(0.1)
+    assert hw_dp2031.get_current(ch) == pytest.approx(i0 + step, abs=0.005)
+    hw_dp2031.step_current_down(ch)
+    time.sleep(0.1)
+    assert hw_dp2031.get_current(ch) == pytest.approx(i0, abs=0.005)
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("ch,v,i", [(1, 5.0, 1.5), (2, 12.0, 0.8), (3, 3.3, 2.0)])
+def test_hw_apply_round_trip(hw_dp2031, ch, v, i):
+    """APPLy sets both V and I in one round-trip; verify both took effect
+    and query_applied returns them."""
+    import time
+    hw_dp2031.apply(ch, voltage=v, current=i)
+    time.sleep(0.1)
+    assert hw_dp2031.get_voltage(ch) == pytest.approx(v, abs=0.02)
+    assert hw_dp2031.get_current(ch) == pytest.approx(i, abs=0.005)
+    rated, v_read, i_read = hw_dp2031.query_applied(ch)
+    assert rated.upper().startswith(f"CH{ch}")
+    assert v_read == pytest.approx(v, abs=0.02)
+    assert i_read == pytest.approx(i, abs=0.005)
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("ch", [1, 2, 3])
+def test_hw_voltage_bounds_match_nominal_or_above(hw_dp2031, ch):
+    """The device's reported MAX should be at least the nominal envelope
+    (bench-observed: 5 % headroom)."""
+    nominal_max = {1: 32.0, 2: 32.0, 3: 6.0}[ch]
+    lo, hi, dflt = hw_dp2031.voltage_bounds(ch)
+    assert lo == pytest.approx(0.0, abs=0.01)
+    assert hi >= nominal_max
+    # And not absurdly above nominal — 10 % headroom is enough
+    assert hi <= nominal_max * 1.10
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("ch", [1, 2, 3])
+def test_hw_current_bounds_match_nominal_or_above(hw_dp2031, ch):
+    nominal_max = {1: 3.0, 2: 3.0, 3: 5.0}[ch]
+    lo, hi, dflt = hw_dp2031.current_bounds(ch)
+    assert lo == pytest.approx(0.0, abs=0.001)
+    assert hi >= nominal_max
+    assert hi <= nominal_max * 1.10
+
+
+@pytest.mark.hardware
+def test_hw_tracking_state_round_trip(hw_dp2031):
+    """Tracking state writes round-trip and TMODe reflects it.
+
+    Bench-discovered on this firmware: enabling :OUTPut:TRACk sets
+    the state register (TRACk? = 1, TMODe? = SYNCHRONOUS) but does
+    NOT mirror CH1→CH2 setpoint changes with both outputs off. The
+    actual analog mirroring effect needs further investigation —
+    likely requires outputs enabled + connected loads. For now we
+    verify the state round-trip, which is what the API is responsible
+    for.
+    """
+    import time
+    hw_dp2031.set_tracking(True)
+    time.sleep(0.2)
+    assert hw_dp2031.get_tracking() is True
+    # When tracking is on, TMODe should report SYNCHRONOUS
+    assert hw_dp2031.get_track_mode() == "SYNCHRONOUS"
+    hw_dp2031.set_tracking(False)
+    time.sleep(0.2)
+    assert hw_dp2031.get_tracking() is False
+    assert hw_dp2031.get_track_mode() == "INDEPENDENT"
+
+
+@pytest.mark.hardware
+def test_hw_track_mode_alias_works(hw_dp2031):
+    """SYSTem:TMODe SYNC ≡ OUTPut:TRACk ON per the manual; verify."""
+    import time
+    hw_dp2031.set_track_mode("SYNC")
+    time.sleep(0.2)
+    assert hw_dp2031.get_tracking() is True
+    hw_dp2031.set_track_mode("INDE")
+    time.sleep(0.2)
+    assert hw_dp2031.get_tracking() is False
+
+
+@pytest.mark.hardware
+def test_hw_output_sync_round_trip(hw_dp2031):
+    """SYSTem:SYNC ON enables simultaneous CH1+CH2 enable/disable."""
+    import time
+    hw_dp2031.set_output_sync(True)
+    time.sleep(0.2)
+    assert hw_dp2031.get_output_sync() is True
+    hw_dp2031.set_output_sync(False)
+    time.sleep(0.2)
+    assert hw_dp2031.get_output_sync() is False
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("ch", [1, 2, 3])
+def test_hw_remote_sense_round_trip(hw_dp2031, ch):
+    """Round-trip 4-wire sense state per channel. Don't enable in a
+    test that runs without sense leads connected for long — leaving
+    sense ON with leads floating can drive the output to OVP."""
+    import time
+    hw_dp2031.set_remote_sense(ch, True)
+    time.sleep(0.2)
+    assert hw_dp2031.get_remote_sense(ch) is True
+    hw_dp2031.set_remote_sense(ch, False)
+    time.sleep(0.2)
+    assert hw_dp2031.get_remote_sense(ch) is False
+
+
+def _all_remote_sense_off(psu):
+    """Defensive teardown helper — ensures every channel ends with
+    remote sense disabled, since leaving it on with floating sense
+    leads is a hazard."""
+    for ch in (1, 2, 3):
+        try:
+            psu.set_remote_sense(ch, False)
+        except Exception:
+            pass
+
+
+@pytest.mark.hardware
+def test_hw_remote_sense_all_form(hw_dp2031):
+    """The 'ALL' selector writes all three channels in one command."""
+    import time
+    try:
+        hw_dp2031.set_remote_sense("ALL", True)
+        time.sleep(0.3)
+        for ch in (1, 2, 3):
+            assert hw_dp2031.get_remote_sense(ch) is True, \
+                f"CH{ch} did not turn on via ALL"
+    finally:
+        _all_remote_sense_off(hw_dp2031)
+
+
+@pytest.mark.hardware
+@pytest.mark.parametrize("mode", ["AUTO", "HIGH", "LOW"])
+def test_hw_sampling_mode_round_trip(hw_dp2031, mode):
+    import time
+    hw_dp2031.set_sampling_mode(mode)
+    time.sleep(0.2)
+    assert hw_dp2031.get_sampling_mode() == mode
+
+
+@pytest.mark.hardware
+def test_hw_channel_pair_series_engages(hw_dp2031):
+    """SERies pair mode is bench-verified to work on this firmware
+    (PARallel may silently no-op — see KNOWN_LIMITATIONS)."""
+    import time
+    # Make sure no external load is wired between CH1 and CH2 before
+    # running this test — see the test_bench_rigol_dp2031.py header.
+    try:
+        hw_dp2031.set_channel_pair("SERies")
+        time.sleep(1.5)  # mode transition is slow (~1 s) on this firmware
+        assert hw_dp2031.get_channel_pair() == "SERIES"
+    finally:
+        hw_dp2031.set_channel_pair("OFF")
+        time.sleep(1.0)
+        assert hw_dp2031.get_channel_pair() == "OFF"
+
+
+@pytest.mark.hardware
+def test_hw_channel_pair_off_default(hw_dp2031):
+    """Reset should leave the pair mode at OFF."""
+    assert hw_dp2031.get_channel_pair() == "OFF"

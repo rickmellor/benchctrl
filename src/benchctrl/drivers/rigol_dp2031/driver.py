@@ -1043,6 +1043,282 @@ class RigolDP2031:
         e.g. ``"ENGLISH"``)."""
         return self.query(":SYSTem:LANGuage:TYPE?")
 
+    # ------------------------------------------------------------------
+    # Phase C — channel pair, tracking, sync, remote sense, sampling,
+    # voltage/current step, APPLy convenience, bounds queries
+    # ------------------------------------------------------------------
+
+    _PAIR_MODES = {"OFF": "OFF", "SER": "SERies", "SERIES": "SERies",
+                   "PAR": "PARallel", "PARALLEL": "PARallel"}
+
+    def set_channel_pair(self, mode: str) -> None:
+        """Set the CH1+CH2 internal-pair mode.
+
+        Accepts ``"OFF"`` / ``"SERies"`` / ``"PARallel"`` (any case;
+        short forms ``"SER"`` / ``"PAR"`` also accepted).
+
+        SAFETY: ``"SERies"`` ties CH1+ to CH2- internally for up to
+        64 V composite. ``"PARallel"`` ties CH1 and CH2 in parallel
+        for 6 A composite. Disconnect any external load between CH1
+        and CH2 before switching pair modes — see manual safety notes.
+
+        NOTE: bench-discovered on this firmware (01.00.01.00.16),
+        the ``PARallel`` mode write is silently rejected — the
+        ``:OUTPut:PAIR?`` query returns ``"OFF"`` afterwards. Use
+        :py:meth:`get_channel_pair` after the call to verify the
+        device accepted it.
+        """
+        norm = mode.strip().upper()
+        scpi = self._PAIR_MODES.get(norm)
+        if scpi is None:
+            raise RigolDP2031ValueError(
+                f"channel-pair mode must be OFF / SERies / PARallel, got {mode!r}"
+            )
+        self.write(f":OUTPut:PAIR {scpi}")
+
+    def get_channel_pair(self) -> str:
+        """Returns ``"OFF"`` / ``"SERIES"`` / ``"PARALLEL"`` (the
+        device's verbatim reply, normalised to upper case)."""
+        return self.query(":OUTPut:PAIR?").strip().upper()
+
+    def set_tracking(self, on: bool) -> None:
+        """Enable CH1 ↔ CH2 voltage tracking (``:OUTPut:TRACk``).
+
+        When tracking is enabled, changing CH1's voltage setpoint
+        automatically updates CH2 to match (and vice versa). The
+        manual documents this as equivalent to
+        ``:SYSTem:TMODe SYNCHRONOUS`` (see
+        :py:meth:`set_track_mode`).
+        """
+        self.write(f":OUTPut:TRACk {'ON' if on else 'OFF'}")
+
+    def get_tracking(self) -> bool:
+        return self.query_int(":OUTPut:TRACk?") == 1
+
+    _TMODE_ALIASES = {
+        "SYNC": "SYNC", "SYNCHRONOUS": "SYNC",
+        "INDE": "INDE", "INDEPENDENT": "INDE",
+    }
+
+    def set_track_mode(self, mode: str) -> None:
+        """Set the CH1↔CH2 track mode via ``:SYSTem:TMODe``.
+
+        Accepts ``"SYNC"`` / ``"SYNCHRONOUS"`` (links CH1+CH2) or
+        ``"INDE"`` / ``"INDEPENDENT"`` (decoupled). Functionally
+        equivalent to :py:meth:`set_tracking` — the device exposes
+        both wire forms for compatibility.
+        """
+        norm = mode.strip().upper()
+        scpi = self._TMODE_ALIASES.get(norm)
+        if scpi is None:
+            raise RigolDP2031ValueError(
+                f"track mode must be SYNC / INDE (or SYNCHRONOUS / "
+                f"INDEPENDENT), got {mode!r}"
+            )
+        self.write(f":SYSTem:TMODe {scpi}")
+
+    def get_track_mode(self) -> str:
+        """Returns the device's reply verbatim, typically the long form
+        ``"SYNCHRONOUS"`` or ``"INDEPENDENT"``."""
+        return self.query(":SYSTem:TMODe?").strip().upper()
+
+    def set_output_sync(self, on: bool) -> None:
+        """Enable simultaneous CH1+CH2 output on/off via ``:SYSTem:SYNC``.
+
+        When sync is on, enabling either channel enables both. This is
+        meaningful in conjunction with tracking mode.
+        """
+        self.write(f":SYSTem:SYNC {'ON' if on else 'OFF'}")
+
+    def get_output_sync(self) -> bool:
+        return self.query_int(":SYSTem:SYNC?") == 1
+
+    # Remote sense (4-wire)
+
+    def set_remote_sense(self, channel, on: bool) -> None:
+        """Enable or disable 4-wire remote sense for a channel.
+
+        Accepts ``DP2031Channel`` / int 1/2/3, or the literal string
+        ``"ALL"`` to apply to every channel in one wire command.
+        """
+        sel = _coerce_channel_or_all(channel)
+        self.write(f":SYSTem:SENSe {sel},{'ON' if on else 'OFF'}")
+
+    def get_remote_sense(self, channel: ChannelLike) -> bool:
+        """Read the 4-wire sense state for one channel. Per the manual
+        the query form requires an explicit channel (no ALL on read)."""
+        ch = _coerce_channel(channel)
+        return self.query_int(f":SYSTem:SENSe? CH{ch}") == 1
+
+    # Sampling mode (CH1/CH2 low-current measurement extension)
+
+    _SAMPLING_MODES = ("AUTO", "HIGH", "LOW")
+
+    def set_sampling_mode(self, mode: str) -> None:
+        """Set the current-measurement sampling mode for CH1/CH2.
+
+        ``"AUTO"`` (default) auto-ranges between high (~mA / A) and
+        low (sub-mA, 1 µA resolution below ~11 mA) ranges. ``"HIGH"``
+        forces high range; ``"LOW"`` forces low range. Has no effect
+        on CH3 (single range). In PARallel mode the device forces
+        HIGH and rejects writes.
+        """
+        norm = mode.strip().upper()
+        if norm not in self._SAMPLING_MODES:
+            raise RigolDP2031ValueError(
+                f"sampling mode must be AUTO / HIGH / LOW, got {mode!r}"
+            )
+        self.write(f":SYSTem:SAMPling {norm}")
+
+    def get_sampling_mode(self) -> str:
+        return self.query(":SYSTem:SAMPling?").strip().upper()
+
+    # Voltage / current step + UP / DOWN
+
+    def set_voltage_step(self, channel: ChannelLike, volts: float) -> None:
+        """Set the step increment for ``:SOURce<n>:VOLTage UP|DOWN``.
+
+        Range: same envelope as the voltage setpoint (step can't
+        exceed the channel's max voltage). The default step on this
+        firmware after ``*RST`` is 0.1 V on CH1/CH2 and 0.01 V on CH3.
+        """
+        ch = _coerce_channel(channel)
+        _validate(volts, _CHANNEL_LIMITS[ch]["v"], f"voltage step (CH{ch})")
+        self.write(f":SOURce{ch}:VOLTage:LEVel:IMMediate:STEP {volts:.6f}")
+
+    def get_voltage_step(self, channel: ChannelLike) -> float:
+        ch = _coerce_channel(channel)
+        return self.query_float(
+            f":SOURce{ch}:VOLTage:LEVel:IMMediate:STEP?"
+        )
+
+    def set_current_step(self, channel: ChannelLike, amps: float) -> None:
+        """Set the step increment for ``:SOURce<n>:CURRent UP|DOWN``."""
+        ch = _coerce_channel(channel)
+        _validate(amps, _CHANNEL_LIMITS[ch]["i"], f"current step (CH{ch})")
+        self.write(f":SOURce{ch}:CURRent:LEVel:IMMediate:STEP {amps:.6f}")
+
+    def get_current_step(self, channel: ChannelLike) -> float:
+        ch = _coerce_channel(channel)
+        return self.query_float(
+            f":SOURce{ch}:CURRent:LEVel:IMMediate:STEP?"
+        )
+
+    def step_voltage_up(self, channel: ChannelLike) -> None:
+        """Increment CHn voltage by the current step (set via
+        :py:meth:`set_voltage_step`)."""
+        ch = _coerce_channel(channel)
+        self.write(f":SOURce{ch}:VOLTage:LEVel:IMMediate UP")
+
+    def step_voltage_down(self, channel: ChannelLike) -> None:
+        ch = _coerce_channel(channel)
+        self.write(f":SOURce{ch}:VOLTage:LEVel:IMMediate DOWN")
+
+    def step_current_up(self, channel: ChannelLike) -> None:
+        ch = _coerce_channel(channel)
+        self.write(f":SOURce{ch}:CURRent:LEVel:IMMediate UP")
+
+    def step_current_down(self, channel: ChannelLike) -> None:
+        ch = _coerce_channel(channel)
+        self.write(f":SOURce{ch}:CURRent:LEVel:IMMediate DOWN")
+
+    # APPLy convenience
+
+    def apply(
+        self,
+        channel: ChannelLike,
+        voltage: Optional[float] = None,
+        current: Optional[float] = None,
+    ) -> None:
+        """One-shot V/I configuration via the ``:APPLy`` shorthand.
+
+        Equivalent to :py:meth:`select_channel` + :py:meth:`set_voltage`
+        + :py:meth:`set_current`. Omitted arguments leave the current
+        setpoint unchanged.
+        """
+        ch = _coerce_channel(channel)
+        if voltage is not None:
+            _validate(voltage, _CHANNEL_LIMITS[ch]["v"],
+                      f"apply voltage (CH{ch})")
+        if current is not None:
+            _validate(current, _CHANNEL_LIMITS[ch]["i"],
+                      f"apply current (CH{ch})")
+        if voltage is None and current is None:
+            # bare :APPLy CHn just selects the channel
+            self.write(f":APPLy CH{ch}")
+        elif current is None:
+            self.write(f":APPLy CH{ch},{voltage:.6f}")
+        elif voltage is None:
+            # APPLy doesn't accept a current-only positional form, so
+            # explicitly set the current via the SOURce path. This
+            # also matches "leave V alone" semantics.
+            self.set_current(ch, current)
+        else:
+            self.write(f":APPLy CH{ch},{voltage:.6f},{current:.6f}")
+
+    def query_applied(
+        self,
+        channel: ChannelLike,
+        option: Optional[str] = None,
+    ) -> Union[tuple[str, float, float], float]:
+        """Read the channel's APPLy-form configuration.
+
+        - ``option=None`` → returns ``(rated_string, voltage, current)``
+          where ``rated_string`` looks like ``"CH1:32V/3A"``.
+        - ``option="VOLT"`` → returns the voltage setpoint as a float.
+        - ``option="CURR"`` → returns the current setpoint as a float.
+        """
+        ch = _coerce_channel(channel)
+        if option is None:
+            raw = self.query(f":APPLy? CH{ch}")
+            parts = [p.strip() for p in raw.split(",")]
+            if len(parts) != 3:
+                raise RigolDP2031Error(
+                    f"expected 'rated,V,I' from :APPLy? CH{ch}, got {raw!r}"
+                )
+            try:
+                return (parts[0], float(parts[1]), float(parts[2]))
+            except ValueError as e:
+                raise RigolDP2031Error(
+                    f"non-numeric V/I in :APPLy? CH{ch} response: {raw!r}"
+                ) from e
+        norm = option.strip().upper()
+        if norm in ("VOLT", "VOLTAGE"):
+            return self.query_float(f":APPLy? CH{ch},VOLT")
+        if norm in ("CURR", "CURRENT"):
+            return self.query_float(f":APPLy? CH{ch},CURR")
+        raise RigolDP2031ValueError(
+            f"option must be None / 'VOLT' / 'CURR', got {option!r}"
+        )
+
+    # Device-reported bounds (alternative to the driver's static envelope)
+
+    def voltage_bounds(self, channel: ChannelLike) -> tuple[float, float, float]:
+        """Return ``(min, max, default)`` voltage bounds reported by the device.
+
+        Bench-verified on this firmware: the device's ``MAX`` is the
+        nominal envelope plus ~5 % headroom (e.g. 33.6 V on CH1,
+        whose nominal is 32 V). The driver's own validation uses the
+        nominal envelope; pass setpoints up to the device-reported
+        ``MAX`` if you need that headroom and are comfortable bypassing
+        the driver's pre-write check.
+        """
+        ch = _coerce_channel(channel)
+        return (
+            self.query_float(f":SOURce{ch}:VOLTage? MIN"),
+            self.query_float(f":SOURce{ch}:VOLTage? MAX"),
+            self.query_float(f":SOURce{ch}:VOLTage? DEF"),
+        )
+
+    def current_bounds(self, channel: ChannelLike) -> tuple[float, float, float]:
+        """Return ``(min, max, default)`` current bounds reported by the device."""
+        ch = _coerce_channel(channel)
+        return (
+            self.query_float(f":SOURce{ch}:CURRent? MIN"),
+            self.query_float(f":SOURce{ch}:CURRent? MAX"),
+            self.query_float(f":SOURce{ch}:CURRent? DEF"),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1075,6 +1351,16 @@ def _validate(value: float, bounds: tuple[float, float], label: str) -> None:
         raise RigolDP2031ValueError(
             f"{label} must be in [{lo}, {hi}], got {value}"
         )
+
+
+def _coerce_channel_or_all(channel) -> str:
+    """Validate and convert a channel argument that may also be the
+    literal ``"ALL"`` (case-insensitive). Returns the SCPI form
+    (``"CH1"`` / ``"CH2"`` / ``"CH3"`` / ``"ALL"``).
+    """
+    if isinstance(channel, str) and channel.strip().upper() == "ALL":
+        return "ALL"
+    return f"CH{_coerce_channel(channel)}"
 
 
 def _validate_mask(value: int, label: str, *, maximum: int = 255) -> None:

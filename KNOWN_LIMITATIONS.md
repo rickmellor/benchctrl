@@ -171,6 +171,65 @@ Code reference: `scenarios/run.py` — see the
 `run_dynamic_list` `finally` block. `tests/test_bench_rigol_dp2031.py`
 — see the deferred-closed-loop comment block.
 
+### F-3.5. DP2031 bench-discovered quirks (firmware 01.00.01.00.16)
+
+Found while bringing up the DP2031 driver in Phase A–C against a
+DP2A243500269 unit. Documented here so future drivers / phases
+don't waste time rediscovering them.
+
+- **`:OUTPut:PAIR PARallel` silently no-ops.** `SERies` engages
+  fine (verified bench: CH1+CH2 internally tied for up to 64 V
+  composite), but writing `PARallel` leaves `:OUTPut:PAIR?` at
+  `OFF`. May be gated by an installed option (`DP2000-10A`?) we
+  don't have. The driver passes the command through; callers must
+  read back to confirm. No exception raised — the device queues
+  no SCPI error.
+
+- **OVP latch settles in ~150–250 ms after the trip condition.**
+  Querying `:OUTPut:OVP:ALAR?` immediately after `:OUTPut:STATe ON`
+  with V > OVP returns 0; wait at least 300 ms before checking.
+  Output state flips to OFF a bit later (the latch fires the
+  trip; the output drop is downstream).
+
+- **`:OUTPut:OVP:CLEar` clears the latch but does NOT re-enable
+  the output**, despite some manual wording suggesting it does.
+  The `:SOURce<n>:VOLTage:PROTection:CLEar` form may behave
+  differently; the driver picked the OUTPut form for predictable
+  semantics.
+
+- **`:OUTPut:TRACk ON` writes the tracking state register
+  (`TRACk?` = 1, `:SYSTem:TMODe?` = `SYNCHRONOUS`) but the
+  expected setpoint-mirroring effect** (set CH1 voltage → CH2
+  voltage follows) **does NOT engage with both outputs off and
+  no load.** The state round-trip works perfectly, so the driver
+  surfaces it; the analog mirroring behaviour remains
+  bench-unverified. Likely requires outputs enabled + a load.
+
+- **`:OUTPut:OCP:DELay?` returns a string with `ms` suffix**
+  (e.g. `"200ms"`) — parsed by `_parse_delay_ms` helper.
+
+- **`:SYSTem:LANGuage:TYPE?` returns the long form** (e.g.
+  `"ENGLISH"`) even though the input takes the short form (`EN`).
+  Driver accepts both on input; query returns whatever the
+  device replies.
+
+- **`:SYSTem:POWEron?`** same — returns `"DEFAULT"` (long form).
+
+- **`:SOURce<n>:VOLTage? MAX` and `:CURRent? MAX` return ~5%
+  over the nominal envelope** (e.g. 33.6 V on CH1, nominal 32 V).
+  The driver's static `_CHANNEL_LIMITS` matches nominal; the
+  device accepts setpoints up to its reported MAX. Use
+  `voltage_bounds()` / `current_bounds()` for the device's real
+  limits.
+
+- **`*OPT?` returns `"NONE"`** (literal string) when no options
+  are installed, not an empty string. `installed_options()` maps
+  both to `[]`.
+
+- **Boolean queries return with a trailing space** on some
+  paths (e.g. `:OUTPut:TRACk?` returns `"1 "`). `query_int` /
+  `query_float` strip whitespace before parsing.
+
 ### F-4. Manual misreads compensated by the driver
 
 Rigol's DL3000 programming guide is inconsistent in a few places.
