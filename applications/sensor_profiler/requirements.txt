@@ -1,0 +1,13 @@
+# sensor_profiler — runtime dependencies on top of benchctrl
+#
+# Install with:
+#   pip install -r applications/sensor_profiler/requirements.txt
+#
+# benchctrl itself is assumed installed (via `pip install -e .` from
+# the repo root, or a published version).
+
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+plotly>=5.18
+streamlit>=1.28
