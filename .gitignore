@@ -22,3 +22,8 @@ venv/
 !tests/fixtures/*.json
 !validation/scenarios/*.json
 !validation/scenarios/*.csv
+
+# sensor_profiler captured data — kept out of source control
+# (the application code is committed; users create their own runs/)
+applications/*/runs/
+applications/*/__pycache__/
