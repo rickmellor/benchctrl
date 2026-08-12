@@ -6,6 +6,7 @@ with deadlines. Knows nothing about commands or framing.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -15,6 +16,8 @@ import serial.tools.list_ports as list_ports
 
 from benchctrl.exceptions import BenchConnectionError
 from benchctrl.drivers.otii_arc.protocol import PID, VID
+
+log = logging.getLogger("benchctrl.drivers.otii_arc.transport")
 
 
 @dataclass(frozen=True)
@@ -78,9 +81,15 @@ class Transport:
             )
         except (OSError, serial.SerialException) as e:
             raise BenchConnectionError(f"could not open {self.port!r}: {e}") from e
-        # Match the Otii vendor stack's posture
-        self._ser.dtr = False
-        self._ser.rts = False
+        # Match the Otii vendor stack's posture. Modem-control lines are not
+        # universally supported — ptys and some virtual COM drivers raise
+        # EINVAL/ENOTTY on the underlying ioctl. The Arc doesn't need the
+        # lines asserted either way, so a failure here is cosmetic.
+        try:
+            self._ser.dtr = False
+            self._ser.rts = False
+        except (OSError, serial.SerialException) as e:
+            log.debug("could not set DTR/RTS on %s (non-fatal): %s", self.port, e)
         time.sleep(0.2)
         try:
             self._ser.reset_input_buffer()

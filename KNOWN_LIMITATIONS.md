@@ -328,6 +328,29 @@ timing and avoids the toggle.
 
 Code reference: `scenarios/README.md` § "Notes / known limits".
 
+### A-3. `start_recording()` does not flush stale inbound samples
+The Arc streams baseline samples (~6 Hz) continuously from the moment
+the port is opened. `start_recording()` creates the `Recording` and
+starts the reader thread without calling `reset_input_buffer()`, so any
+baseline samples already sitting in the OS serial buffer are consumed
+and appended as if they belonged to the recording.
+
+Consequence: the first few samples of a recording can predate it — and
+therefore predate whatever setup (`set_voltage`, `set_output`) happened
+just before. On a 1 s capture this pulls the mean off by ~0.5 %.
+
+Not fixed because a blind flush would also discard legitimate in-flight
+samples, and the correct boundary is ambiguous without a device-side
+timestamp. Workaround: discard the leading samples, or sleep briefly
+after the final setup command so the stale window is dominated by
+correct values.
+
+Reproduced deterministically by
+`tests/test_sim_loopback.py::test_recording_captures_a_known_waveform`.
+
+Code reference: `src/benchctrl/drivers/otii_arc/device.py` —
+`start_recording`.
+
 ## What's not in this list
 
 Things we **don't** consider limits — they're just facts:
