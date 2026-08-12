@@ -13,12 +13,13 @@ holding per-channel sample buffers. It supports:
 from __future__ import annotations
 
 import datetime as _dt
+import io
 import json
 import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, BinaryIO, Optional, Union
 
 from benchctrl.exceptions import BenchNotImplementedError, BenchValueError
 from benchctrl.samples import (
@@ -517,6 +518,20 @@ class Recording:
                 K B   block data (count * 4 bytes, float32 LE)
         """
         p = Path(path)
+        with p.open("wb") as f:
+            self.save_to_stream(f)
+        return p
+
+    def save_to_stream(self, fh: BinaryIO) -> int:
+        """Write the `.opensmu` encoding to any binary file object.
+
+        Same bytes as :py:meth:`save`, without requiring a filesystem path.
+        Remote mode transfers recordings as `.opensmu` blobs, so this is the
+        wire encoder as well as the file writer — one format, one
+        implementation, and ``load_from_stream`` is its exact inverse.
+
+        Returns the number of bytes written.
+        """
         header = {
             "schema_version": 1,
             "name": self.name,
@@ -531,67 +546,83 @@ class Recording:
             "channel_order": [ch.code for ch in self._buffers.keys()],
         }
         header_bytes = json.dumps(header).encode("utf-8")
-        with p.open("wb") as f:
-            f.write(self.BENCHCTRL_MAGIC)
-            f.write(struct.pack("<I", len(header_bytes)))
-            f.write(header_bytes)
-            for ch, buf in self._buffers.items():
-                block_header = {
-                    "code": ch.code,
-                    "wire_id": ch.wire_id,
-                    "unit": ch.unit,
-                    "label": ch.label,
-                    "count": len(buf.values),
-                    "sample_rate": buf.sample_rate,
-                    "t0": buf.t0,
-                    "dtype": "f32",
-                }
-                bh = json.dumps(block_header).encode("utf-8")
-                f.write(struct.pack("<I", len(bh)))
-                f.write(bh)
-                if buf.values:
-                    f.write(struct.pack(f"<{len(buf.values)}f", *buf.values))
-        return p
+        written = 0
+        written += fh.write(self.BENCHCTRL_MAGIC)
+        written += fh.write(struct.pack("<I", len(header_bytes)))
+        written += fh.write(header_bytes)
+        for ch, buf in self._buffers.items():
+            block_header = {
+                "code": ch.code,
+                "wire_id": ch.wire_id,
+                "unit": ch.unit,
+                "label": ch.label,
+                "count": len(buf.values),
+                "sample_rate": buf.sample_rate,
+                "t0": buf.t0,
+                "dtype": "f32",
+            }
+            bh = json.dumps(block_header).encode("utf-8")
+            written += fh.write(struct.pack("<I", len(bh)))
+            written += fh.write(bh)
+            if buf.values:
+                written += fh.write(struct.pack(f"<{len(buf.values)}f", *buf.values))
+        return written
+
+    def to_bytes(self) -> bytes:
+        """The `.opensmu` encoding as a bytes object."""
+        buf = io.BytesIO()
+        self.save_to_stream(buf)
+        return buf.getvalue()
 
     @classmethod
     def load(cls, path: str | Path) -> Recording:
         """Inverse of :py:meth:`save`."""
         p = Path(path)
         with p.open("rb") as f:
-            magic = f.read(8)
-            if magic != cls.BENCHCTRL_MAGIC:
-                raise BenchValueError(
-                    f"{p}: not an .opensmu file (bad magic {magic!r})"
-                )
-            (hlen,) = struct.unpack("<I", f.read(4))
-            header = json.loads(f.read(hlen).decode("utf-8"))
-            rec = cls(
-                name=header.get("name", "recording"),
-                offset=float(header.get("offset", 0.0)),
-                device_info=header.get("device", {}),
+            try:
+                return cls.load_from_stream(f)
+            except BenchValueError as exc:
+                # Re-raise with the path, which is what the operator needs.
+                raise BenchValueError(f"{p}: {exc}") from None
+
+    @classmethod
+    def load_from_stream(cls, fh: BinaryIO) -> Recording:
+        """Inverse of :py:meth:`save_to_stream`."""
+        magic = fh.read(8)
+        if magic != cls.BENCHCTRL_MAGIC:
+            raise BenchValueError(f"not an .opensmu stream (bad magic {magic!r})")
+        (hlen,) = struct.unpack("<I", fh.read(4))
+        header = json.loads(fh.read(hlen).decode("utf-8"))
+        rec = cls(
+            name=header.get("name", "recording"),
+            offset=float(header.get("offset", 0.0)),
+            device_info=header.get("device", {}),
+        )
+        if header.get("start_time"):
+            rec._start_time = _dt.datetime.fromisoformat(
+                header["start_time"].rstrip("Z")
             )
-            if header.get("start_time"):
-                rec._start_time = _dt.datetime.fromisoformat(
-                    header["start_time"].rstrip("Z")
-                )
-            if header.get("end_time"):
-                rec._end_time = _dt.datetime.fromisoformat(
-                    header["end_time"].rstrip("Z")
-                )
-            while True:
-                chunk = f.read(4)
-                if not chunk:
-                    break
-                (bhlen,) = struct.unpack("<I", chunk)
-                bh = json.loads(f.read(bhlen).decode("utf-8"))
-                ch = _get_channel_cls().from_code(bh["code"])
-                buf = rec._ensure_buffer(ch, int(bh["sample_rate"]))
-                buf.t0 = float(bh.get("t0", 0.0))
-                count = int(bh["count"])
-                if count:
-                    raw = f.read(count * 4)
-                    buf.values.extend(struct.unpack(f"<{count}f", raw))
+        if header.get("end_time"):
+            rec._end_time = _dt.datetime.fromisoformat(header["end_time"].rstrip("Z"))
+        while True:
+            chunk = fh.read(4)
+            if not chunk:
+                break
+            (bhlen,) = struct.unpack("<I", chunk)
+            bh = json.loads(fh.read(bhlen).decode("utf-8"))
+            ch = _get_channel_cls().from_code(bh["code"])
+            buf = rec._ensure_buffer(ch, int(bh["sample_rate"]))
+            buf.t0 = float(bh.get("t0", 0.0))
+            count = int(bh["count"])
+            if count:
+                raw = fh.read(count * 4)
+                buf.values.extend(struct.unpack(f"<{count}f", raw))
         return rec
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> Recording:
+        """Decode an `.opensmu` blob. Inverse of :py:meth:`to_bytes`."""
+        return cls.load_from_stream(io.BytesIO(data))
 
     # --- placeholders for deferred features -----------------------------
 

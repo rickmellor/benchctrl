@@ -80,3 +80,84 @@ def test_save_empty_recording_round_trip(tmp_path):
     loaded = Recording.load(out)
     assert loaded.name == "empty"
     assert loaded.channels == []
+
+
+# --------------------------------------------------------------------------
+# Stream I/O — the .opensmu encoding without a filesystem
+# --------------------------------------------------------------------------
+#
+# Remote mode ships recordings as .opensmu blobs, so these codecs are the
+# wire encoder as well as the file writer. They must agree byte-for-byte
+# with the path-based versions, which is what makes "one format, four
+# consumers" true rather than aspirational.
+
+
+def test_to_bytes_matches_save(tmp_path):
+    import io as _io
+
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel
+    from benchctrl.recording import Recording
+
+    rec = Recording(name="stream-test")
+    for i in range(100):
+        rec._append(OtiiArcChannel.MAIN_CURRENT, i * 0.001, 4000)
+        rec._append(OtiiArcChannel.MAIN_VOLTAGE, 3.3, 1000)
+
+    path = rec.save(tmp_path / "r.opensmu")
+    assert path.read_bytes() == rec.to_bytes()
+
+    buf = _io.BytesIO()
+    written = rec.save_to_stream(buf)
+    assert written == len(path.read_bytes())
+
+
+def test_from_bytes_round_trips():
+    from benchctrl.drivers.otii_arc.channels import OtiiArcChannel
+    from benchctrl.recording import Recording
+
+    rec = Recording(name="round-trip", offset=1.5)
+    for i in range(50):
+        rec._append(OtiiArcChannel.MAIN_CURRENT, i * 0.01, 4000)
+
+    loaded = Recording.from_bytes(rec.to_bytes())
+    assert loaded.name == "round-trip"
+    assert loaded.offset == 1.5
+    assert loaded.channels == rec.channels
+    # .opensmu stores float32 ("dtype": "f32"), so values written from
+    # Python float64 come back quantised. Device samples are already f32 and
+    # round-trip exactly — see test_sim_loopback's opensmu test.
+    import pytest as _pytest
+
+    assert loaded.data(OtiiArcChannel.MAIN_CURRENT) == _pytest.approx(
+        rec.data(OtiiArcChannel.MAIN_CURRENT), rel=1e-6
+    )
+
+
+def test_load_from_stream_rejects_bad_magic():
+    import io as _io
+
+    import pytest as _pytest
+
+    from benchctrl.exceptions import BenchValueError
+    from benchctrl.recording import Recording
+
+    with _pytest.raises(BenchValueError, match="bad magic"):
+        Recording.load_from_stream(_io.BytesIO(b"NOTOPENSMU" + b"\x00" * 32))
+
+
+def test_load_still_names_the_path_on_error(tmp_path):
+    import pytest as _pytest
+
+    from benchctrl.exceptions import BenchValueError
+    from benchctrl.recording import Recording
+
+    bad = tmp_path / "bad.opensmu"
+    bad.write_bytes(b"garbage!" + b"\x00" * 32)
+    with _pytest.raises(BenchValueError, match="bad.opensmu"):
+        Recording.load(bad)
+
+
+def test_empty_recording_round_trips():
+    from benchctrl.recording import Recording
+
+    assert Recording.from_bytes(Recording(name="empty").to_bytes()).channels == []
