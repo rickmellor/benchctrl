@@ -335,6 +335,99 @@ def test_qr10x_temperature(sim_qr):
 
 
 # --------------------------------------------------------------------------
+# SCPI instruments — real driver + real pyvisa over a pty
+# --------------------------------------------------------------------------
+
+
+def test_scpi_header_normalisation():
+    from benchctrl.sim.scpi import normalise
+
+    assert normalise(":SOURce:CURRent:LEVel:IMMediate") == ":SOUR:CURR:LEV:IMM"
+    assert normalise(":SOUR:CURR:LEV:IMM?") == ":SOUR:CURR:LEV:IMM"
+    assert normalise(":FETCh:DISChargingTime?") == ":FETC:DISC"
+    assert normalise("*IDN?") == "*IDN"
+
+
+@pytest.fixture()
+def dl3031a():
+    from benchctrl.sim.factories import make_dl3031a
+
+    drv = make_dl3031a()
+    yield drv
+    drv.close()
+
+
+def test_dl3031a_identity_over_pyvisa(dl3031a):
+    info = dl3031a.info()
+    assert info.manufacturer == "RIGOL TECHNOLOGIES"
+    assert info.model == "DL3031A"
+    assert info.resource.startswith("ASRL")
+
+
+def test_dl3031a_cc_mode_measurement(dl3031a):
+    dl3031a.set_mode("CC")
+    dl3031a.set_current(0.25)
+    dl3031a.set_input(True)
+    assert dl3031a.get_mode() == "CC"
+    assert dl3031a.get_input() is True
+    assert dl3031a.get_current() == pytest.approx(0.25)
+    assert dl3031a.measure_current() == pytest.approx(0.25)
+    assert dl3031a.measure_voltage() == pytest.approx(3.3)
+    assert dl3031a.measure_power() == pytest.approx(3.3 * 0.25)
+
+
+def test_dl3031a_input_off_sinks_nothing(dl3031a):
+    dl3031a.set_mode("CC")
+    dl3031a.set_current(0.5)
+    dl3031a.set_input(False)
+    assert dl3031a.measure_current() == pytest.approx(0.0)
+
+
+def test_dl3031a_cr_mode_follows_ohms_law(dl3031a):
+    dl3031a.set_mode("CR")
+    dl3031a.set_resistance(33.0)
+    dl3031a.set_input(True)
+    assert dl3031a.measure_current() == pytest.approx(3.3 / 33.0, rel=1e-4)
+
+
+def test_dl3031a_error_queue_round_trips(dl3031a):
+    assert dl3031a.last_error() is None
+    dl3031a._benchctrl_sim.inject_error(-222, "Data out of range")
+    dl3031a.write(":SOURce:CURRent:LEVel:IMMediate 1.0")
+    code, message = dl3031a.last_error()
+    assert code == -222
+    assert "out of range" in message
+
+
+def test_dp2031_identity_and_channels():
+    from benchctrl.sim.factories import make_dp2031
+
+    psu = make_dp2031()
+    try:
+        assert psu.info().model == "DP2031"
+        sim = psu._benchctrl_sim
+        sim.voltage[1] = 5.0
+        sim.output_on[1] = True
+        volts, amps = sim.measured(1)
+        assert volts == pytest.approx(5.0)
+        assert amps == pytest.approx(5.0 / 100.0)
+    finally:
+        psu.close()
+
+
+def test_dp2031_current_limit_folds_back():
+    from benchctrl.sim.scpi import SimulatedRigolDP2031
+
+    with SimulatedRigolDP2031(load_ohm=1.0) as sim:
+        sim.voltage[1] = 5.0
+        sim.current_limit[1] = 0.5
+        sim.output_on[1] = True
+        volts, amps = sim.measured(1)
+        assert amps == pytest.approx(0.5)
+        assert volts == pytest.approx(0.5)  # I*R, not the 5 V setpoint
+
+
+# --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
 

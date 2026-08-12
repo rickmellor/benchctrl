@@ -38,11 +38,19 @@ _lock = threading.RLock()
 
 
 def _get_smu() -> OtiiArc:
-    """Return the singleton Arc, opening it if not already connected."""
+    """Return the singleton Arc, opening it if not already connected.
+
+    The module global stays the cache; ``session.resolve`` is only the
+    populator, and returns a local driver, a remote proxy, or a simulated
+    instrument depending on configuration. With nothing configured this is
+    ``OtiiArc.open()`` — see :py:mod:`benchctrl.session`.
+    """
     global _smu
+    from benchctrl import session
+
     with _lock:
         if _smu is None or not _smu.is_connected:
-            _smu = OtiiArc.open()
+            _smu = session.resolve("otii_arc", opener=OtiiArc.open)
         return _smu
 
 

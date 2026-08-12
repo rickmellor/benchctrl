@@ -26,11 +26,15 @@ _dl3031a_lock = threading.RLock()
 
 def _get_dl3031a():
     from benchctrl.drivers.rigol_dl3031a.driver import RigolDLConnectionError
-    if _dl3031a is None:
-        raise RigolDLConnectionError(
-            "DL3031A not open — call dl3031a_open() first."
-        )
-    return _dl3031a
+
+    # Take the lock: dl3031a_open/dl3031a_close mutate this global from
+    # other threads, and reading it unguarded was a latent race.
+    with _dl3031a_lock:
+        if _dl3031a is None:
+            raise RigolDLConnectionError(
+                "DL3031A not open — call dl3031a_open() first."
+            )
+        return _dl3031a
 
 
 def dl3031a_open(resource: Optional[str] = None) -> dict:
@@ -43,6 +47,7 @@ def dl3031a_open(resource: Optional[str] = None) -> dict:
     Returns the device's *IDN? identity on success.
     """
     global _dl3031a
+    from benchctrl import session
     from benchctrl.drivers.rigol_dl3031a import RigolDL3031A
     with _dl3031a_lock:
         if _dl3031a is not None:
@@ -52,7 +57,11 @@ def dl3031a_open(resource: Optional[str] = None) -> dict:
                 "guidance": "Call dl3031a_close() before reopening.",
                 "current_resource": info.resource,
             }
-        _dl3031a = RigolDL3031A.open(resource)
+        _dl3031a = session.resolve(
+            "rigol_dl3031a",
+            opener=RigolDL3031A.open,
+            open_kwargs={"resource": resource},
+        )
     info = _dl3031a.info()
     return {
         "resource": info.resource,

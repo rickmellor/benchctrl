@@ -23,11 +23,15 @@ _qr10x_lock = threading.RLock()
 
 def _get_qr10x() -> QR10x:
     from benchctrl.drivers.eastwood_qr10x.driver import QR10xConnectionError
-    if _qr10x is None or not _qr10x.is_open:
-        raise QR10xConnectionError(
-            "QR10x not open — call qr10x_open(port=...) first."
-        )
-    return _qr10x
+
+    # Take the lock: the global is mutated by qr10x_open/qr10x_close on
+    # other threads, and reading it unguarded was a latent race.
+    with _qr10x_lock:
+        if _qr10x is None or not _qr10x.is_open:
+            raise QR10xConnectionError(
+                "QR10x not open — call qr10x_open(port=...) first."
+            )
+        return _qr10x
 
 
 def qr10x_open(port: str = "COM7", baudrate: int = 115200) -> dict:
@@ -40,6 +44,8 @@ def qr10x_open(port: str = "COM7", baudrate: int = 115200) -> dict:
     already open on a different port.
     """
     global _qr10x
+    from benchctrl import session
+
     with _qr10x_lock:
         if _qr10x is not None and _qr10x.is_open:
             return {
@@ -47,7 +53,11 @@ def qr10x_open(port: str = "COM7", baudrate: int = 115200) -> dict:
                 "guidance": "Call qr10x_close() before reopening on a different port.",
                 "current_port": _qr10x.port,
             }
-        _qr10x = QR10x.open(port, baudrate=baudrate)
+        _qr10x = session.resolve(
+            "eastwood_qr10x",
+            opener=QR10x.open,
+            open_kwargs={"port": port, "baudrate": baudrate},
+        )
     return {"port": _qr10x.port, "info": _qr10x.info().to_dict()}
 
 

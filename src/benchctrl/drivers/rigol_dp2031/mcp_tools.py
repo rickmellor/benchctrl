@@ -29,11 +29,15 @@ _dp2031_lock = threading.RLock()
 
 def _get_dp2031():
     from benchctrl.drivers.rigol_dp2031.driver import RigolDP2031ConnectionError
-    if _dp2031 is None:
-        raise RigolDP2031ConnectionError(
-            "DP2031 not open — call dp2031_open() first."
-        )
-    return _dp2031
+
+    # Take the lock: dp2031_open/dp2031_close mutate this global from other
+    # threads, and reading it unguarded was a latent race.
+    with _dp2031_lock:
+        if _dp2031 is None:
+            raise RigolDP2031ConnectionError(
+                "DP2031 not open — call dp2031_open() first."
+            )
+        return _dp2031
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +55,7 @@ def dp2031_open(resource: Optional[str] = None) -> dict:
     Returns the device's *IDN? identity on success.
     """
     global _dp2031
+    from benchctrl import session
     from benchctrl.drivers.rigol_dp2031 import RigolDP2031
     with _dp2031_lock:
         if _dp2031 is not None:
@@ -60,7 +65,11 @@ def dp2031_open(resource: Optional[str] = None) -> dict:
                 "guidance": "Call dp2031_close() before reopening.",
                 "current_resource": info.resource,
             }
-        _dp2031 = RigolDP2031.open(resource)
+        _dp2031 = session.resolve(
+            "rigol_dp2031",
+            opener=RigolDP2031.open,
+            open_kwargs={"resource": resource},
+        )
     info = _dp2031.info()
     return {
         "resource": info.resource,

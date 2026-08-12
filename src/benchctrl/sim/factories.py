@@ -1,0 +1,126 @@
+"""Build a real driver bound to a simulated instrument.
+
+``session.resolve(key, ...)`` in ``mode="sim"`` calls one of these. Each
+returns the *production driver class* connected over a pty to a simulator —
+not a mock of the driver. Sim mode therefore exercises the same code path as
+hardware: driver, transport, framing, and pyvisa where applicable.
+
+The simulator's lifetime is tied to the driver: closing the driver closes the
+simulator and releases the pty, so a test that forgets to clean up leaks a
+file descriptor rather than a thread.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Callable
+
+from benchctrl.exceptions import BenchValueError
+
+log = logging.getLogger("benchctrl.sim.factories")
+
+
+def _bind_lifetime(driver: Any, sim: Any) -> Any:
+    """Close ``sim`` when ``driver`` closes, and keep it referenced."""
+    driver._benchctrl_sim = sim  # also prevents GC of the simulator
+    original_close = driver.close
+
+    def close_both(*args, **kwargs):
+        try:
+            return original_close(*args, **kwargs)
+        finally:
+            sim.close()
+
+    driver.close = close_both  # type: ignore[method-assign]
+    return driver
+
+
+def make_otii_arc(**kwargs) -> Any:
+    """A real ``OtiiArc`` driving a :py:class:`SimulatedOtiiArc`."""
+    from benchctrl.drivers.otii_arc import OtiiArc
+    from benchctrl.sim.otii_arc import SimulatedOtiiArc
+
+    sim_kwargs = kwargs.pop("sim", {})
+    kwargs.pop("port", None)  # the caller's port is meaningless here
+    sim = SimulatedOtiiArc(**sim_kwargs)
+    sim.start()
+    try:
+        driver = OtiiArc.open(sim.port, **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
+def make_qr10x(**kwargs) -> Any:
+    """A real ``QR10x`` driving a :py:class:`SimulatedQR10x`."""
+    from benchctrl.drivers.eastwood_qr10x import QR10x
+    from benchctrl.sim.qr10x import SimulatedQR10x
+
+    sim_kwargs = kwargs.pop("sim", {})
+    kwargs.pop("port", None)
+    sim = SimulatedQR10x(**sim_kwargs)
+    sim.start()
+    try:
+        driver = QR10x.open(sim.port, **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
+def _asrl(port: str) -> str:
+    """VISA resource string for a serial device, via the pyvisa-py backend."""
+    return f"ASRL{port}::INSTR"
+
+
+def make_dl3031a(**kwargs) -> Any:
+    """A real ``RigolDL3031A`` over pyvisa-py's serial backend."""
+    from benchctrl.drivers.rigol_dl3031a import RigolDL3031A
+    from benchctrl.sim.scpi import SimulatedRigolDL3031A
+
+    sim_kwargs = kwargs.pop("sim", {})
+    kwargs.pop("resource", None)
+    sim = SimulatedRigolDL3031A(**sim_kwargs)
+    sim.start()
+    try:
+        driver = RigolDL3031A.open(_asrl(sim.port), **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
+def make_dp2031(**kwargs) -> Any:
+    """A real ``RigolDP2031`` over pyvisa-py's serial backend."""
+    from benchctrl.drivers.rigol_dp2031 import RigolDP2031
+    from benchctrl.sim.scpi import SimulatedRigolDP2031
+
+    sim_kwargs = kwargs.pop("sim", {})
+    kwargs.pop("resource", None)
+    sim = SimulatedRigolDP2031(**sim_kwargs)
+    sim.start()
+    try:
+        driver = RigolDP2031.open(_asrl(sim.port), **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
+FACTORIES: dict[str, Callable[..., Any]] = {
+    "otii_arc": make_otii_arc,
+    "eastwood_qr10x": make_qr10x,
+    "rigol_dl3031a": make_dl3031a,
+    "rigol_dp2031": make_dp2031,
+}
+
+
+def factory_for(device_key: str) -> Callable[..., Any]:
+    try:
+        return FACTORIES[device_key]
+    except KeyError:
+        raise BenchValueError(
+            f"no simulator for device key {device_key!r}; "
+            f"available: {sorted(FACTORIES)}"
+        ) from None
