@@ -351,6 +351,30 @@ Reproduced deterministically by
 Code reference: `src/benchctrl/drivers/otii_arc/device.py` —
 `start_recording`.
 
+### A-4. Live recording reads lag by up to 0.5 s
+`Transport.read_chunk()` calls `serial.read(8192)`, which blocks until
+either 8192 bytes arrive or pyserial's 0.5 s timeout expires. At normal
+sample rates the byte count is never reached, so the recording reader
+thread delivers samples in ~0.5 s batches.
+
+Consequence: `rec.statistics()` and `rec.data()` on a *running* recording
+can report zero samples for the first half-second, and progress reporting
+is quantised to that interval. After `stop_recording()` everything is
+present — the samples are not lost, only late.
+
+This bounds live progress reporting in remote mode: a `rec_progress`
+event stream cannot be more granular than ~0.5 s without changing the
+read strategy to `read(max(1, in_waiting))`, which trades the efficient
+blocking read for a busier loop. Not changed here: it alters timing on
+the hot path for every recording, and that is not a change to make
+without hardware to verify against.
+
+Reproduced by `tests/test_remote_protocol.py` — the recording tests sleep
+past this window deliberately.
+
+Code reference: `src/benchctrl/drivers/otii_arc/transport.py` —
+`read_chunk`, and `device.py` — `_reader_loop`.
+
 ## What's not in this list
 
 Things we **don't** consider limits — they're just facts:

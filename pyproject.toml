@@ -59,8 +59,11 @@ science = [
     "benchctrl[parquet]",
     "benchctrl[plot]",
 ]
+# Upper-bounded deliberately: mcp 2.0 removed `mcp.server.fastmcp`, which
+# `benchctrl.mcp` imports. Lifting the cap requires migrating to the 2.x
+# server API, not just relaxing this line.
 mcp = [
-    "mcp>=1.0",
+    "mcp>=1.0,<2",
 ]
 # `bench` instrument drivers (pyserial-only; already a base dep)
 bench = []
@@ -73,6 +76,7 @@ bench-visa = [
 [project.scripts]
 benchctrl = "benchctrl.cli:main"
 benchctrl-mcp = "benchctrl.mcp:main"
+benchctrl-agent = "benchctrl.agent.main:main"
 
 [project.urls]
 Documentation = "https://github.com/benchctrl/benchctrl#readme"

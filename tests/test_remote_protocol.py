@@ -1,0 +1,526 @@
+"""Remote mode end to end: real socket, real driver, simulated instrument.
+
+The stack under test is complete — MCP-facing proxy, wire protocol, agent
+dispatch, device worker, production driver, pty, simulator. Only the silicon
+is fake.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+import pytest
+
+from benchctrl.agent.registry import DeviceRegistry
+from benchctrl.agent.server import AgentServer, BenchAgent
+from benchctrl.config import EndpointConfig
+from benchctrl.exceptions import BenchCommandError, BenchValueError
+from benchctrl.interfaces import SourceMeasurementUnit
+from benchctrl.net.client import RemoteClient
+from benchctrl.net.errors import PolicyError
+from benchctrl.net.proxy import RemoteDevice, RemoteSMU
+from benchctrl.sim import SimulatedOtiiArc, Square
+
+TOKEN = "test-token-do-not-use-in-anger"
+
+
+@pytest.fixture()
+def bench():
+    """An agent serving a simulated Arc, and a connected client."""
+    from benchctrl.drivers.otii_arc import OtiiArc
+
+    sim = SimulatedOtiiArc()
+    sim.start()
+    smu = OtiiArc.open(sim.port)
+
+    registry = DeviceRegistry()
+    registry.register_open("otii_arc", smu)
+    agent = BenchAgent(registry, token=TOKEN, deadman_s=2.0, heartbeat_s=0.5)
+    server = AgentServer(agent, host="127.0.0.1", port=0).start()
+
+    endpoint = EndpointConfig(
+        host="127.0.0.1",
+        port=server.port,
+        token=TOKEN,
+        heartbeat_s=0.5,
+        deadman_s=2.0,
+    )
+    client = RemoteClient(endpoint).connect()
+    try:
+        yield type(
+            "Bench",
+            (),
+            {"sim": sim, "smu": smu, "agent": agent, "server": server, "client": client},
+        )
+    finally:
+        try:
+            client.close()
+        finally:
+            server.stop()
+            sim.close()
+
+
+@pytest.fixture()
+def arc(bench):
+    return bench.client.attach("otii_arc")
+
+
+# --------------------------------------------------------------------------
+# Handshake and auth
+# --------------------------------------------------------------------------
+
+
+def test_welcome_describes_the_bench(bench):
+    assert bench.client.welcome["agent"] == "benchctrl-agent"
+    assert "otii_arc" in bench.client.device_names()
+    assert bench.client.welcome["limits"]["max_recording_s"] > 0
+
+
+def test_bad_token_is_refused(bench):
+    endpoint = EndpointConfig(
+        host="127.0.0.1", port=bench.server.port, token="wrong-token"
+    )
+    with pytest.raises(Exception) as excinfo:
+        RemoteClient(endpoint).connect()
+    assert "auth" in str(excinfo.value).lower()
+
+
+def test_repeated_failures_tarpit_the_address(bench):
+    endpoint = EndpointConfig(host="127.0.0.1", port=bench.server.port, token="nope")
+    for _ in range(3):
+        with pytest.raises(Exception):
+            RemoteClient(endpoint).connect()
+    assert bench.agent.failures.is_blocked("127.0.0.1")
+
+    good = EndpointConfig(host="127.0.0.1", port=bench.server.port, token=TOKEN)
+    with pytest.raises(Exception) as excinfo:
+        RemoteClient(good).connect()
+    assert "retry in" in str(excinfo.value)
+
+
+def test_token_never_crosses_the_wire():
+    """A passive listener must not be able to lift the secret."""
+    from benchctrl.net import auth
+
+    hello, nonce_c = auth.build_hello()
+    challenge, nonce_s = auth.build_challenge()
+    payload = auth.build_auth(TOKEN, nonce_c, nonce_s)
+    blob = repr((hello, challenge, payload))
+    assert TOKEN not in blob
+    assert auth.verify_mac(TOKEN, nonce_c, nonce_s, payload["mac"])
+    assert not auth.verify_mac("other", nonce_c, nonce_s, payload["mac"])
+
+
+# --------------------------------------------------------------------------
+# The Protocol survives the wire
+# --------------------------------------------------------------------------
+
+
+def test_remote_smu_satisfies_the_protocol(arc):
+    assert isinstance(arc, RemoteSMU)
+    assert isinstance(arc, SourceMeasurementUnit)
+
+
+def test_setters_reach_the_device(bench, arc):
+    arc.set_voltage(3.3)
+    _wait(lambda: bench.sim.params[0x0B] == 3_300_000)
+    assert bench.smu.voltage == pytest.approx(3.3)
+
+
+def test_properties_read_through(bench, arc):
+    arc.set_voltage(2.5)
+    arc.set_current_limit(0.5)
+    assert arc.voltage == pytest.approx(2.5)
+    assert arc.current_limit == pytest.approx(0.5)
+    assert arc.is_connected is True
+
+
+def test_identity_queries(arc):
+    assert arc.get_device_name() == "Arc"
+    assert arc.get_fw_version() == "3.1.3"
+
+
+# --------------------------------------------------------------------------
+# The safety gate — the reason __getattr__ must raise
+# --------------------------------------------------------------------------
+
+
+def test_unknown_attribute_raises_rather_than_returning_a_callable(arc):
+    """This is what stops enable_output arming with no current limit."""
+    with pytest.raises(AttributeError):
+        arc.no_such_method
+    with pytest.raises(AttributeError):
+        arc.current_limitt  # typo — must not silently become a method
+
+
+def test_enable_output_refuses_without_a_current_limit(bench, arc):
+    """The MCP gate reads `smu.current_limit is None`. It must still work."""
+    from benchctrl.drivers.otii_arc import mcp_tools as arc_tools
+
+    assert arc.current_limit is None
+    saved = arc_tools._smu
+    arc_tools._smu = arc
+    try:
+        result = arc_tools.enable_output(confirm_dut_attached=True)
+        assert "REFUSED" in result["error"]
+        assert "current_limit" in result["error"]
+    finally:
+        arc_tools._smu = saved
+    assert bench.sim.params[0x09] == 0  # output never enabled
+
+
+def test_enable_output_succeeds_once_guards_are_satisfied(bench, arc):
+    from benchctrl.drivers.otii_arc import mcp_tools as arc_tools
+
+    arc.set_current_limit(0.5)
+    arc.set_voltage(3.3)
+    saved = arc_tools._smu
+    arc_tools._smu = arc
+    try:
+        result = arc_tools.enable_output(confirm_dut_attached=True)
+        assert "error" not in result
+    finally:
+        arc_tools._smu = saved
+    _wait(lambda: bench.sim.params[0x09] == 1)
+
+
+def test_state_snapshot_costs_one_round_trip(bench, arc):
+    """19 round trips per setter would make remote mode unusable."""
+    from benchctrl.drivers.otii_arc import mcp_tools as arc_tools
+
+    arc.set_voltage(1.0)  # primes the piggybacked snapshot
+    before = bench.agent.workers.get("otii_arc").calls_served
+    state = arc_tools._smu_state(arc)
+    after = bench.agent.workers.get("otii_arc").calls_served
+    assert state["voltage_V"] == pytest.approx(1.0)
+    assert after == before, "property reads must be served from the snapshot"
+
+
+# --------------------------------------------------------------------------
+# Policy
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("method", ["close", "calibrate", "firmware_upgrade"])
+def test_denied_methods_are_refused(bench, arc, method):
+    with pytest.raises((PolicyError, BenchValueError, AttributeError)):
+        getattr(arc, method)()
+
+
+def test_private_methods_are_not_reachable(bench):
+    with pytest.raises(PolicyError):
+        bench.client.call(
+            "device.call",
+            {"device": "otii_arc", "method": "_send_payload", "args": [], "kwargs": {}},
+        )
+
+
+def test_dunder_methods_are_not_reachable(bench):
+    with pytest.raises(PolicyError):
+        bench.client.call(
+            "device.call",
+            {"device": "otii_arc", "method": "__class__", "args": [], "kwargs": {}},
+        )
+
+
+def test_unknown_device_is_refused(bench):
+    with pytest.raises(BenchValueError):
+        bench.client.call("agent.open", {"device": "keithley_2400"})
+
+
+# --------------------------------------------------------------------------
+# Errors survive the round trip
+# --------------------------------------------------------------------------
+
+
+def test_client_side_validation_error_round_trips(arc):
+    with pytest.raises(BenchValueError) as excinfo:
+        arc.set_voltage(400.0)
+    assert "5.5" in str(excinfo.value)
+
+
+def test_bench_command_error_keeps_its_attributes(bench, arc):
+    """A rejected SET must arrive as BenchCommandError with error_code."""
+    with arc.record("mv"):
+        bench.sim.inject_error()
+        arc.set_voltage(3.3)
+        _wait(lambda: bench.sim.rejected)
+        time.sleep(0.2)
+        with pytest.raises(BenchCommandError) as excinfo:
+            for _ in range(20):
+                arc.set_voltage(3.3)
+                time.sleep(0.02)
+    assert excinfo.value.error_code == -101
+
+
+def test_unknown_exception_degrades_along_its_mro():
+    from benchctrl.exceptions import BenchError
+    from benchctrl.net.errors import decode_exception
+
+    exc = decode_exception(
+        {
+            "c": "SomeFutureDriverError",
+            "mro": ["SomeFutureDriverError", "BenchValueError", "BenchError"],
+            "msg": "from a newer agent",
+            "attrs": {},
+        }
+    )
+    assert isinstance(exc, BenchError)
+    assert exc.remote_class == "SomeFutureDriverError"
+
+
+def test_completely_unknown_exception_becomes_remote_bench_error():
+    from benchctrl.net.errors import RemoteBenchError, decode_exception
+
+    exc = decode_exception({"c": "Weird", "mro": ["Weird"], "msg": "?", "attrs": {}})
+    assert isinstance(exc, RemoteBenchError)
+
+
+def test_every_registered_exception_round_trips():
+    from benchctrl.net import errors
+
+    for name in errors.known_class_names():
+        cls = errors._registry()[name]
+        payload = {
+            "c": name,
+            "mro": [c.__name__ for c in cls.__mro__ if c is not object],
+            "msg": f"{name} message",
+            "attrs": {"error_code": -101},
+        }
+        exc = errors.decode_exception(payload)
+        assert isinstance(exc, BaseException)
+        # KeyError stringifies as repr(arg), so assert containment.
+        assert f"{name} message" in str(exc)
+
+
+# --------------------------------------------------------------------------
+# Recordings
+# --------------------------------------------------------------------------
+
+
+def test_record_captures_a_known_waveform(bench, arc):
+    bench.sim.waveforms["mc"] = Square(low=0.0, high=0.1, freq_hz=50.0, duty=0.5)
+    bench.sim.packed_frame_hz = 400.0
+    arc.set_voltage(3.3)
+    arc.set_output(True)
+
+    with arc.record("mc", "mv") as rec:
+        time.sleep(1.0)
+
+    stats = rec.statistics("mc")
+    assert stats.sample_count > 500
+    assert stats.average == pytest.approx(0.05, abs=0.01)
+
+
+def test_recording_is_usable_after_the_with_block(bench, arc, tmp_path):
+    """sensor_profiler depends on this: rec.save() after the block exits."""
+    arc.set_voltage(2.0)
+    arc.set_output(True)
+    with arc.record("mv") as rec:
+        time.sleep(1.0)
+
+    path = rec.save(tmp_path / "remote.opensmu")
+    assert path.exists()
+    assert len(rec.data("mv")) > 5
+
+    from benchctrl.recording import Recording
+
+    assert Recording.load(path).channels == rec.channels
+
+
+def test_recording_data_is_refused_while_running(bench, arc):
+    arc.set_output(True)
+    with arc.record("mv") as rec:
+        # Past the ~0.5 s reader-batch window — see KNOWN_LIMITATIONS A-4.
+        time.sleep(1.0)
+        with pytest.raises(BenchValueError, match="still running"):
+            rec.data("mv")
+        # Live queries work without transferring anything.
+        assert rec.counts()["mv"] > 0
+
+
+def test_live_statistics_avoid_transferring_samples(bench, arc):
+    arc.set_voltage(3.3)
+    arc.set_output(True)
+    with arc.record("mv") as rec:
+        time.sleep(1.0)  # past the reader-batch window (KNOWN_LIMITATIONS A-4)
+        live = rec.live_statistics("mv")
+        assert live["sample_count"] > 0
+        assert live["average"] == pytest.approx(3.3, rel=0.05)
+
+
+def test_over_long_recording_is_refused(bench, arc):
+    with pytest.raises(BenchValueError, match="max_recording_s"):
+        bench.client.call(
+            "rec.start",
+            {"device": "otii_arc", "channels": ["mv"], "expected_s": 100_000},
+        )
+
+
+def test_blob_transfer_is_checksummed(bench, arc):
+    arc.set_output(True)
+    with arc.record("mv") as rec:
+        time.sleep(1.0)
+    data = bench.client.fetch_blob(rec._blob_id)
+    import hashlib
+
+    assert hashlib.sha256(data).hexdigest() == rec._described["sha256"]
+
+
+# --------------------------------------------------------------------------
+# read_window's caller-keyed result
+# --------------------------------------------------------------------------
+
+
+def test_read_window_preserves_the_callers_channel_objects(bench, arc):
+    from benchctrl.channels import StandardChannel
+
+    requested = [StandardChannel.MAIN_VOLTAGE, "mc"]
+    result = arc.read_window(requested, 0.3)
+    assert set(result) == set(requested)
+    assert StandardChannel.MAIN_VOLTAGE in result
+
+
+# --------------------------------------------------------------------------
+# Safety governor
+# --------------------------------------------------------------------------
+
+
+def test_agent_tracks_arm_state_from_the_wire(bench, arc):
+    assert not bench.agent.governor.any_armed
+    arc.set_output(True)
+    _wait(lambda: bench.agent.governor.any_armed)
+    arc.set_output(False)
+    _wait(lambda: not bench.agent.governor.any_armed)
+
+
+def test_deadman_disarms_when_the_client_vanishes(bench, arc):
+    """The failure this whole layer exists for."""
+    arc.set_voltage(3.3)
+    arc.set_output(True)
+    _wait(lambda: bench.sim.params[0x09] == 1)
+    assert bench.agent.governor.any_armed
+
+    # Kill the socket without a clean close — the host has gone away.
+    bench.client._stop.set()
+    bench.client._sock.close()
+
+    _wait(lambda: bench.sim.params[0x09] == 0, timeout=8.0)
+    assert not bench.agent.governor.any_armed
+
+
+def test_shutdown_disarms(bench, arc):
+    arc.set_voltage(1.0)
+    arc.set_output(True)
+    _wait(lambda: bench.sim.params[0x09] == 1)
+    bench.agent.shutdown()
+    assert bench.sim.params[0x09] == 0
+
+
+def test_safety_events_reach_the_client(bench, arc):
+    arc.set_output(True)
+    _wait(lambda: bench.agent.governor.any_armed)
+    bench.agent.trip(__import__(
+        "benchctrl.agent.safety", fromlist=["TripReason"]
+    ).TripReason.OPERATOR)
+    _wait(lambda: any(e.get("kind") == "safety_trip" for e in bench.client.events))
+
+
+# --------------------------------------------------------------------------
+# Worker serialization
+# --------------------------------------------------------------------------
+
+
+def test_concurrent_calls_are_serialized_per_device(bench, arc):
+    """Transport is not thread-safe; the worker restores that invariant."""
+    errors = []
+
+    def hammer():
+        try:
+            for i in range(20):
+                arc.set_voltage(1.0 + (i % 3) * 0.1)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not errors
+    assert bench.agent.workers.get("otii_arc").calls_served >= 80
+
+
+def test_blocking_calls_are_clamped_server_side(bench, arc):
+    """A long read must not starve the safety lane."""
+    started = time.monotonic()
+    arc.read_raw(60.0)  # clamped to max_blocking_s
+    assert time.monotonic() - started < 15.0
+
+
+# --------------------------------------------------------------------------
+# Discovery over the wire
+# --------------------------------------------------------------------------
+
+
+def test_agent_reports_its_bench_inventory(bench):
+    inventory = bench.client.discover()
+    assert "devices" in inventory
+    assert "count" in inventory
+
+
+def test_agent_status_reports_workers_and_safety(bench, arc):
+    arc.set_voltage(1.0)
+    status = bench.client.status()
+    assert "safety" in status
+    assert "otii_arc" in status["workers"]
+
+
+# --------------------------------------------------------------------------
+# Completeness — new driver methods must be classified
+# --------------------------------------------------------------------------
+
+
+def test_every_public_arc_method_is_classified(bench):
+    """A new driver method must not silently become remotely callable."""
+    from benchctrl.agent import dispatch
+
+    buckets = dispatch.classify(bench.smu, "otii_arc")
+    everything = set()
+    for names in buckets.values():
+        everything.update(names)
+
+    public = {
+        name
+        for name in dir(type(bench.smu))
+        if not name.startswith("_")
+    }
+    unclassified = public - everything
+    assert not unclassified, f"unclassified public members: {sorted(unclassified)}"
+
+
+def test_special_methods_are_not_generically_callable(bench):
+    from benchctrl.agent import dispatch
+
+    surface = bench.agent.registry.surface_of("otii_arc")
+    for name in ("record", "stream", "start_recording", "read_window"):
+        with pytest.raises(PolicyError, match="dedicated protocol verb"):
+            dispatch.check_callable(surface, name)
+
+
+# --------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------
+
+
+def _wait(predicate, timeout: float = 5.0, interval: float = 0.02) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if predicate():
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(interval)
+    raise AssertionError("condition not met within timeout")

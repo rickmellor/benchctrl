@@ -1,0 +1,710 @@
+"""The agent: a threaded TCP server exposing the bench.
+
+One connection per client, one thread per connection, one worker thread per
+device. Sessions are authenticated, and exactly one may hold the *writer
+claim* per device; the rest are read-only observers. That preserves the
+single-writer semantics the MCP layer already assumes while letting a second
+client watch a long run without being able to disturb it.
+
+Stdlib only — no asyncio, no framework. The board runs Python 3.13 with
+nothing but ``pyserial`` installed, and the MCP stack cannot be installed
+there because its dependencies ship compiled wheels for the wrong
+architecture. Keeping the agent to the standard library is what makes it
+deployable at all.
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+import logging
+import socket
+import socketserver
+import threading
+import time
+import traceback
+from typing import Any, Optional
+
+from benchctrl.agent import dispatch
+from benchctrl.agent.blobs import CHUNK_BYTES, BlobStore
+from benchctrl.agent.recordings import PREVIEW_HZ, IteratorTable, RecordingTable
+from benchctrl.agent.registry import DeviceRegistry
+from benchctrl.agent.safety import SafetyGovernor, TripReason
+from benchctrl.agent.worker import PRIORITY_NORMAL, WorkerPool, clamp_blocking
+from benchctrl.exceptions import BenchValueError
+from benchctrl.net import auth as authmod
+from benchctrl.net.codec import Decoder, Encoder
+from benchctrl.net.errors import PolicyError, encode_exception
+from benchctrl.net.frames import FrameReader, FrameType, FrameWriter
+
+log = logging.getLogger("benchctrl.agent.server")
+
+AGENT_NAME = "benchctrl-agent"
+
+
+def _json(payload: dict) -> bytes:
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+class Session:
+    """Per-connection state."""
+
+    _ids = itertools.count(1)
+
+    def __init__(self, agent: "BenchAgent", sock: socket.socket, address) -> None:
+        self.agent = agent
+        self.sock = sock
+        self.address = address
+        self.session_id = f"s-{next(self._ids)}"
+        self.reader = FrameReader(sock)
+        self.writer = FrameWriter(sock)
+        self.authenticated = False
+        self.claims: set[str] = set()
+        self.opened_at = time.monotonic()
+        self._event_seq = itertools.count(1)
+
+    @property
+    def peer(self) -> str:
+        try:
+            return self.address[0]
+        except (TypeError, IndexError):  # pragma: no cover
+            return str(self.address)
+
+    def holds(self, device_key: str) -> bool:
+        return device_key in self.claims
+
+    def send_event(self, event: dict) -> None:
+        payload = dict(event)
+        payload.setdefault("seq", next(self._event_seq))
+        payload.setdefault("ts_mono", round(time.monotonic(), 6))
+        payload.setdefault("ts_utc", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        payload.setdefault("severity", "info")
+        try:
+            self.writer.send(FrameType.EVT, _json(payload))
+        except Exception:  # noqa: BLE001 - a dead client must not break the agent
+            pass
+
+
+class BenchAgent:
+    """Owns the devices, the workers, and the safety governor."""
+
+    def __init__(
+        self,
+        registry: DeviceRegistry,
+        *,
+        token: Optional[str] = None,
+        deadman_s: float = 15.0,
+        heartbeat_s: float = 5.0,
+        max_blocking_s: float = 5.0,
+        max_recording_s: float = 300.0,
+        blob_store: Optional[BlobStore] = None,
+    ) -> None:
+        self.registry = registry
+        self.token = token
+        self.deadman_s = deadman_s
+        self.heartbeat_s = heartbeat_s
+        self.max_blocking_s = max_blocking_s
+        self.workers = WorkerPool(max_blocking_s=max_blocking_s)
+        self.blobs = blob_store or BlobStore()
+        self.recordings = RecordingTable(max_recording_s=max_recording_s)
+        self.iterators = IteratorTable()
+        self.failures = authmod.FailureTracker()
+        self.governor = SafetyGovernor(
+            deadman_s=deadman_s, on_event=self._broadcast_event
+        )
+        self._sessions: dict[str, Session] = {}
+        self._claims: dict[str, str] = {}  # device -> session id
+        self._lock = threading.RLock()
+        self._deadman_thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    # --- lifecycle ------------------------------------------------------
+
+    def start_deadman(self) -> None:
+        if self._deadman_thread is not None:
+            return
+        self._stop.clear()
+        self._deadman_thread = threading.Thread(
+            target=self._deadman_loop, name="deadman", daemon=True
+        )
+        self._deadman_thread.start()
+
+    def _deadman_loop(self) -> None:
+        while not self._stop.wait(0.5):
+            try:
+                if self.governor.should_trip():
+                    self.trip(TripReason.HEARTBEAT_LOST)
+            except Exception:  # pragma: no cover
+                log.exception("deadman loop raised")
+
+    def trip(self, reason: TripReason) -> dict:
+        return self.governor.trip(
+            reason,
+            self.registry.open_devices(),
+            {k: self.workers.get(k) for k in self.registry.open_devices()},
+        )
+
+    def shutdown(self) -> None:
+        self._stop.set()
+        if self._deadman_thread is not None:
+            self._deadman_thread.join(timeout=2.0)
+            self._deadman_thread = None
+        # Anything still armed must not be left that way.
+        if self.governor.any_armed:
+            log.warning("agent: devices armed at shutdown — driving to safe state")
+            self.trip(TripReason.SHUTDOWN)
+        self.iterators.close_all()
+        self.workers.stop_all()
+        self.registry.close_all()
+        self.blobs.close()
+
+    # --- sessions -------------------------------------------------------
+
+    def register_session(self, session: Session) -> None:
+        with self._lock:
+            self._sessions[session.session_id] = session
+
+    def drop_session(self, session: Session) -> None:
+        with self._lock:
+            self._sessions.pop(session.session_id, None)
+            released = [d for d, s in self._claims.items() if s == session.session_id]
+            for device in released:
+                self._claims.pop(device, None)
+        for device in released:
+            log.info("agent: %s released claim on %s", session.session_id, device)
+        # If that was the last client and something is armed, the deadman
+        # thread will trip after the grace period. Shorten the clock so the
+        # grace actually applies from the disconnect, not from last contact.
+        if released and self.governor.any_armed:
+            log.warning(
+                "agent: client holding an armed device disconnected; "
+                "safe state in <= %.0fs unless it reconnects",
+                self.governor.grace_for_disconnect(),
+            )
+
+    def _broadcast_event(self, event: dict) -> None:
+        with self._lock:
+            sessions = list(self._sessions.values())
+        for session in sessions:
+            session.send_event(event)
+
+    def claim(self, session: Session, device_key: str) -> dict:
+        self.registry.entry(device_key)
+        with self._lock:
+            holder = self._claims.get(device_key)
+            if holder is not None and holder != session.session_id:
+                raise PolicyError(
+                    f"{device_key} is claimed by session {holder}; this session "
+                    f"is a read-only observer until it is released"
+                )
+            self._claims[device_key] = session.session_id
+            session.claims.add(device_key)
+        return {"device": device_key, "claimed": True, "session": session.session_id}
+
+    def release(self, session: Session, device_key: str) -> dict:
+        with self._lock:
+            if self._claims.get(device_key) == session.session_id:
+                self._claims.pop(device_key, None)
+            session.claims.discard(device_key)
+        return {"device": device_key, "claimed": False}
+
+    # --- codecs ---------------------------------------------------------
+
+    def encoder(self, session: Session) -> Encoder:
+        return Encoder(
+            store_blob=lambda data: self.blobs.put(data).blob_id,
+            register_iterator=lambda gen: self.iterators.register(
+                "unknown", gen, session_id=session.session_id
+            ).iter_id,
+            register_recording=lambda rec: self.recordings.start(
+                "unknown", rec, session_id=session.session_id
+            ).rec_id,
+        )
+
+    @staticmethod
+    def decoder() -> Decoder:
+        return Decoder()
+
+
+class _Handler(socketserver.BaseRequestHandler):
+    """One client connection."""
+
+    agent: BenchAgent  # injected by the server factory
+
+    def handle(self) -> None:  # noqa: C901 - protocol dispatch is inherently branchy
+        session = Session(self.agent, self.request, self.client_address)
+        log.info("agent: connection from %s (%s)", session.peer, session.session_id)
+        try:
+            if not self._authenticate(session):
+                return
+            self.agent.register_session(session)
+            self._serve(session)
+        except Exception as exc:  # noqa: BLE001
+            log.info("agent: session %s ended: %r", session.session_id, exc)
+        finally:
+            self.agent.drop_session(session)
+            session.writer.close()
+            try:
+                self.request.close()
+            except OSError:
+                pass
+            log.info("agent: %s disconnected", session.session_id)
+
+    # --- handshake ------------------------------------------------------
+
+    def _authenticate(self, session: Session) -> bool:
+        agent = self.agent
+        peer = session.peer
+
+        if agent.failures.is_blocked(peer):
+            remaining = agent.failures.seconds_remaining(peer)
+            log.warning("agent: rejecting tarpitted %s (%.0fs left)", peer, remaining)
+            self._send_error(
+                session, 0, PolicyError(f"too many failures; retry in {remaining:.0f}s")
+            )
+            return False
+
+        frame = session.reader.read_frame(timeout=authmod.HANDSHAKE_TIMEOUT)
+        if frame is None or frame[0] != FrameType.HELLO:
+            log.warning("agent: %s did not send HELLO", peer)
+            return False
+        hello = json.loads(frame[1] or b"{}")
+
+        version_error = authmod.check_version(hello)
+        if version_error:
+            self._send_error(session, 0, PolicyError(version_error))
+            return False
+
+        if not agent.token:
+            # No token configured: accept, but be loud about it. This is a
+            # bench that anyone on the subnet can drive.
+            log.warning(
+                "agent: no token configured — %s authenticated without proof. "
+                "Anyone on this network can drive the instruments.",
+                peer,
+            )
+            session.authenticated = True
+            self._send_welcome(session)
+            return True
+
+        challenge, nonce_s = authmod.build_challenge(AGENT_NAME)
+        session.writer.send(FrameType.CHALLENGE, _json(challenge))
+
+        frame = session.reader.read_frame(timeout=authmod.HANDSHAKE_TIMEOUT)
+        if frame is None or frame[0] != FrameType.AUTH:
+            agent.failures.record_failure(peer)
+            return False
+        presented = json.loads(frame[1] or b"{}").get("mac", "")
+
+        if not authmod.verify_mac(agent.token, hello.get("nonce_c", ""), nonce_s, presented):
+            agent.failures.record_failure(peer)
+            log.warning("agent: bad token from %s", peer)
+            self._send_error(session, 0, PolicyError("authentication failed"))
+            return False
+
+        agent.failures.record_success(peer)
+        session.authenticated = True
+        self._send_welcome(session)
+        return True
+
+    def _send_welcome(self, session: Session) -> None:
+        agent = self.agent
+        session.writer.send(
+            FrameType.WELCOME,
+            _json(
+                {
+                    "session": session.session_id,
+                    "agent": AGENT_NAME,
+                    "heartbeat_s": agent.heartbeat_s,
+                    "deadman_s": agent.deadman_s,
+                    "clock_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "devices": agent.registry.describe(),
+                    "limits": {
+                        "max_blocking_s": agent.max_blocking_s,
+                        "max_recording_s": agent.recordings.max_recording_s,
+                        "chunk_bytes": CHUNK_BYTES,
+                    },
+                }
+            ),
+        )
+
+    # --- main loop ------------------------------------------------------
+
+    def _serve(self, session: Session) -> None:
+        agent = self.agent
+        while True:
+            frame = session.reader.read_frame(timeout=max(agent.deadman_s * 2, 30.0))
+            if frame is None:
+                return
+            frame_type, payload = frame
+            agent.governor.touch()
+
+            if frame_type == FrameType.PING:
+                session.writer.send(FrameType.PONG)
+                continue
+            if frame_type == FrameType.REQ:
+                self._handle_request(session, json.loads(payload or b"{}"))
+                continue
+            if frame_type == FrameType.CANCEL:
+                continue  # best-effort; the worker checks job.cancelled
+            log.debug("agent: ignoring frame type 0x%02X", frame_type)
+
+    def _handle_request(self, session: Session, request: dict) -> None:
+        req_id = request.get("id", 0)
+        method = request.get("m", "")
+        params = request.get("p") or {}
+        try:
+            result, props = self._route(session, method, params)
+            body: dict = {"id": req_id, "r": result}
+            if props is not None:
+                body["props"] = props
+            session.writer.send(FrameType.RSP, _json(body))
+        except Exception as exc:  # noqa: BLE001 - relayed to the client
+            self._send_error(
+                session,
+                req_id,
+                exc,
+                device=params.get("device"),
+                method=params.get("method") or method,
+            )
+
+    def _send_error(self, session, req_id, exc, device=None, method=None) -> None:
+        payload = encode_exception(
+            exc,
+            device=device,
+            method=method,
+            traceback_text="".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            )[-4000:],
+        )
+        try:
+            session.writer.send(FrameType.ERR, _json({"id": req_id, "e": payload}))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # --- routing --------------------------------------------------------
+
+    def _route(self, session: Session, method: str, p: dict):
+        agent = self.agent
+
+        if method == "agent.hello":
+            return {"agent": AGENT_NAME, "devices": agent.registry.describe()}, None
+        if method == "agent.devices":
+            return agent.registry.describe(), None
+        if method == "agent.discover":
+            from benchctrl import discovery
+
+            return discovery.inventory(), None
+        if method == "agent.status":
+            return {
+                "safety": agent.governor.status(),
+                "workers": agent.workers.stats(),
+                "blobs": agent.blobs.stats(),
+                "recordings": agent.recordings.describe(),
+            }, None
+        if method == "agent.time":
+            return {"utc": time.time(), "mono": time.monotonic()}, None
+        if method == "agent.open":
+            entry = agent.registry.open(p["device"], **(p.get("open") or {}))
+            return entry.to_dict(), None
+        if method == "agent.close":
+            key = p["device"]
+            agent.governor.trip(
+                TripReason.OPERATOR,
+                {key: agent.registry.open_devices().get(key)},
+                {key: agent.workers.get(key)},
+            )
+            return {"device": key, "closed": agent.registry.close(key)}, None
+        if method == "agent.claim":
+            return agent.claim(session, p["device"]), None
+        if method == "agent.release":
+            return agent.release(session, p["device"]), None
+
+        if method == "device.call":
+            return self._device_call(session, p)
+        if method == "device.read_window":
+            return self._read_window(p), None
+        if method == "device.getprops":
+            key = p["device"]
+            obj = agent.registry.get(key)
+            surface = agent.registry.surface_of(key)
+            names = tuple(p.get("names") or surface.snapshot_props)
+            raw = dispatch.snapshot_properties(obj, surface, names)
+            return agent.encoder(session).encode(raw), None
+
+        if method == "blob.fetch":
+            return self._blob_fetch(session, p), None
+        if method == "blob.release":
+            return {"released": agent.blobs.release(p["blob"])}, None
+
+        if method == "rec.start":
+            return self._rec_start(session, p), None
+        if method == "rec.stop":
+            return self._rec_stop(session, p), None
+        if method == "rec.stats":
+            return self._rec_stats(p), None
+        if method == "rec.release":
+            return {"released": agent.recordings.release(p["rec_id"])}, None
+
+        if method == "iter.open":
+            return self._iter_open(session, p), None
+        if method == "iter.next":
+            return self._iter_next(p), None
+        if method == "iter.close":
+            return {"closed": agent.iterators.close(int(p["iter_id"]))}, None
+
+        raise PolicyError(f"unknown method {method!r}")
+
+    # --- device calls ---------------------------------------------------
+
+    def _device_call(self, session: Session, p: dict):
+        agent = self.agent
+        key = p["device"]
+        name = p.get("method", "")
+        obj = agent.registry.get(key)
+        surface = agent.registry.surface_of(key)
+
+        # Property read — a distinct path on purpose. If unknown names fell
+        # through to a callable, `enable_output`'s `current_limit is None`
+        # gate would always see a bound method and arm with no limit set.
+        if name in surface.properties:
+            raw = dispatch.snapshot_properties(obj, surface, (name,))[name]
+            return agent.encoder(session).encode(raw), None
+
+        dispatch.check_callable(surface, name)
+        dispatch.check_writer(surface, name, session.holds(key))
+
+        decoder = agent.decoder()
+        args = [decoder.decode(a) for a in (p.get("args") or [])]
+        kwargs = {k: decoder.decode(v) for k, v in (p.get("kwargs") or {}).items()}
+
+        # Clamp caller-supplied blocking durations so the safety lane is
+        # never starved for longer than max_blocking_s.
+        args, kwargs = _clamp_durations(name, args, kwargs, agent.max_blocking_s)
+
+        fn = getattr(obj, name)
+        worker = agent.workers.get(key)
+        result = worker.submit(
+            lambda: fn(*args, **kwargs),
+            priority=PRIORITY_NORMAL,
+            timeout=agent.max_blocking_s * 4,
+            label=f"{key}.{name}",
+        )
+        agent.governor.observe_call(
+            key, name, tuple(args), kwargs, session_id=session.session_id
+        )
+
+        encoder = agent.encoder(session)
+        encoded = encoder.encode(result)
+        props = None
+        if p.get("want_props", True) and surface.snapshot_props:
+            props = encoder.encode(dispatch.snapshot_properties(obj, surface))
+        return encoded, props
+
+    def _read_window(self, p: dict) -> dict:
+        """Drain a measurement window, returning a code-keyed dict.
+
+        A dedicated verb because the local method keys its result by *the
+        caller's own channel objects*, and object identity cannot cross a
+        wire. Codes travel; the proxy rebuilds the caller's mapping.
+        """
+        agent = self.agent
+        key = p["device"]
+        obj = agent.registry.get(key)
+        codes = list(p.get("channels") or ())
+        duration = clamp_blocking(float(p.get("duration_s", 0.0)), agent.max_blocking_s)
+        worker = agent.workers.get(key)
+        result = worker.submit(
+            lambda: obj.read_window(codes, duration),
+            timeout=duration + agent.max_blocking_s * 2,
+            label=f"{key}.read_window",
+        )
+        return {
+            _code_of(channel): list(values) for channel, values in (result or {}).items()
+        }
+
+    # --- recordings -----------------------------------------------------
+
+    def _rec_start(self, session: Session, p: dict) -> dict:
+        agent = self.agent
+        key = p["device"]
+        if not session.holds(key):
+            raise PolicyError(
+                f"recording {key} mutates device state — call agent.claim first"
+            )
+        agent.recordings.check_duration(p.get("expected_s"))
+        obj = agent.registry.get(key)
+        channels = tuple(p.get("channels") or ())
+        name = p.get("name", "recording")
+        worker = agent.workers.get(key)
+        rec = worker.submit(
+            lambda: obj.start_recording(name=name, channels=channels or None),
+            label=f"{key}.start_recording",
+        )
+        handle = agent.recordings.start(
+            key, rec, name=name, session_id=session.session_id
+        )
+        agent.governor.set_recording(key, True)
+        return handle.to_dict()
+
+    def _rec_stop(self, session: Session, p: dict) -> dict:
+        agent = self.agent
+        handle = agent.recordings.get(p["rec_id"])
+        obj = agent.registry.get(handle.device_key)
+        worker = agent.workers.get(handle.device_key)
+        worker.submit(obj.stop_recording, label=f"{handle.device_key}.stop_recording")
+        agent.governor.set_recording(handle.device_key, False)
+
+        data = handle.recording.to_bytes()
+        info = agent.blobs.put(data, content_type="application/x-opensmu")
+        agent.recordings.finish(
+            handle.rec_id, blob_id=info.blob_id, sha256=info.sha256, size=info.size
+        )
+        out = handle.to_dict()
+        out["summary"] = {
+            ch.code: _stats_dict(handle.recording.statistics(ch))
+            for ch in handle.recording.channels
+        }
+        return out
+
+    def _rec_stats(self, p: dict) -> dict:
+        handle = self.agent.recordings.get(p["rec_id"])
+        out: dict = {"rec_id": handle.rec_id, "counts": handle.counts()}
+        code = p.get("channel")
+        if code:
+            out["statistics"] = _stats_dict(handle.recording.statistics(code))
+        if p.get("preview"):
+            out["preview"] = handle.preview(code)
+        return out
+
+    # --- blobs ----------------------------------------------------------
+
+    def _blob_fetch(self, session: Session, p: dict) -> dict:
+        agent = self.agent
+        blob_id = p["blob"]
+        info = agent.blobs.info(blob_id)
+        session.writer.send(FrameType.BLOB_HDR, _json({"id": p.get("id", 0), **info.to_dict()}))
+        try:
+            for chunk in agent.blobs.iter_chunks(blob_id):
+                session.writer.send(FrameType.BLOB_CHUNK, chunk)
+        except Exception as exc:  # noqa: BLE001
+            session.writer.send(
+                FrameType.BLOB_END,
+                _json({"blob": blob_id, "ok": False, "error": repr(exc)}),
+            )
+            raise
+        session.writer.send(FrameType.BLOB_END, _json({"blob": blob_id, "ok": True}))
+        return info.to_dict()
+
+    # --- iterators ------------------------------------------------------
+
+    def _iter_open(self, session: Session, p: dict) -> dict:
+        agent = self.agent
+        key = p["device"]
+        if not session.holds(key):
+            raise PolicyError(f"streaming {key} requires the writer claim")
+        obj = agent.registry.get(key)
+        kwargs = {k: v for k, v in (p.get("kwargs") or {}).items()}
+        gen = obj.stream(**kwargs)
+        handle = agent.iterators.register(key, gen, session_id=session.session_id)
+        return {"iter_id": handle.iter_id}
+
+    def _iter_next(self, p: dict) -> dict:
+        handle = self.agent.iterators.get(int(p["iter_id"]))
+        items = handle.take(int(p.get("max", 64)))
+        return {
+            "items": [_sample_dict(s) for s in items],
+            "exhausted": handle.exhausted,
+            "error": handle.error,
+        }
+
+
+def _clamp_durations(name: str, args: list, kwargs: dict, limit: float):
+    """Bound the blocking duration of calls that take one."""
+    if name in ("read_raw", "read_window", "read_for") and args:
+        first = args[0]
+        if isinstance(first, (int, float)):
+            args = [clamp_blocking(float(first), limit)] + list(args[1:])
+    for key in ("seconds", "duration_s", "timeout"):
+        if key in kwargs and isinstance(kwargs[key], (int, float)):
+            kwargs[key] = clamp_blocking(float(kwargs[key]), limit * 4)
+    return args, kwargs
+
+
+def _code_of(channel) -> str:
+    """Reduce a channel object (or string) to its two-letter code."""
+    code = getattr(channel, "code", None)
+    return code if isinstance(code, str) else str(channel)
+
+
+def _stats_dict(stats) -> dict:
+    return {
+        "sample_count": stats.sample_count,
+        "duration": stats.duration,
+        "min": stats.min,
+        "max": stats.max,
+        "average": stats.average,
+        "rms": stats.rms,
+        "energy": stats.energy,
+        "charge": stats.charge,
+    }
+
+
+def _sample_dict(sample) -> dict:
+    return {
+        "channel": getattr(getattr(sample, "channel", None), "code", None),
+        "timestamp": getattr(sample, "timestamp", None),
+        "value": getattr(sample, "value", None),
+    }
+
+
+class _ThreadedTCPServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class AgentServer:
+    """Binds a socket and serves an agent on it."""
+
+    def __init__(
+        self,
+        agent: BenchAgent,
+        *,
+        host: str = "0.0.0.0",
+        port: int = 9737,
+    ) -> None:
+        self.agent = agent
+        handler = type("_BoundHandler", (_Handler,), {"agent": agent})
+        self._server = _ThreadedTCPServer((host, port), handler)
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def address(self) -> tuple[str, int]:
+        return self._server.server_address[:2]
+
+    @property
+    def port(self) -> int:
+        return self.address[1]
+
+    def start(self) -> AgentServer:
+        self.agent.start_deadman()
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, name="agent-server", daemon=True
+        )
+        self._thread.start()
+        log.info("agent: listening on %s:%d", *self.address)
+        return self
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+        self.agent.shutdown()
+
+    def __enter__(self) -> AgentServer:
+        return self.start()
+
+    def __exit__(self, *exc_info) -> None:
+        self.stop()
