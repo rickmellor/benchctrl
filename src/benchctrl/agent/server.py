@@ -29,6 +29,8 @@ from benchctrl.agent import dispatch
 from benchctrl.agent.blobs import CHUNK_BYTES, BlobStore
 from benchctrl.agent.recordings import PREVIEW_HZ, IteratorTable, RecordingTable
 from benchctrl.agent.registry import DeviceRegistry
+from benchctrl.agent.runs.engine import RunManager
+from benchctrl.agent.runs.spec import RunSpec
 from benchctrl.agent.safety import SafetyGovernor, TripReason
 from benchctrl.agent.worker import PRIORITY_NORMAL, WorkerPool, clamp_blocking
 from benchctrl.exceptions import BenchValueError
@@ -98,6 +100,8 @@ class BenchAgent:
         max_blocking_s: float = 5.0,
         max_recording_s: float = 300.0,
         blob_store: Optional[BlobStore] = None,
+        runs_dir=None,
+        llm_base_url: str = "",
     ) -> None:
         self.registry = registry
         self.token = token
@@ -108,6 +112,8 @@ class BenchAgent:
         self.blobs = blob_store or BlobStore()
         self.recordings = RecordingTable(max_recording_s=max_recording_s)
         self.iterators = IteratorTable()
+        self.runs = RunManager(runs_dir)
+        self.llm_base_url = llm_base_url
         self.failures = authmod.FailureTracker()
         self.governor = SafetyGovernor(
             deadman_s=deadman_s, on_event=self._broadcast_event
@@ -153,6 +159,7 @@ class BenchAgent:
         if self.governor.any_armed:
             log.warning("agent: devices armed at shutdown — driving to safe state")
             self.trip(TripReason.SHUTDOWN)
+        self.runs.abort_all("agent shutdown")
         self.iterators.close_all()
         self.workers.stop_all()
         self.registry.close_all()
@@ -446,6 +453,31 @@ class _Handler(socketserver.BaseRequestHandler):
         if method == "rec.release":
             return {"released": agent.recordings.release(p["rec_id"])}, None
 
+        if method == "run.submit":
+            return self._run_submit(session, p), None
+        if method == "run.status":
+            return self.agent.runs.get(p["run_id"]).status_dict(), None
+        if method == "run.list":
+            return agent.runs.list(), None
+        if method == "run.events":
+            store = agent.runs.store_for(p["run_id"])
+            return store.events_since(int(p.get("since_seq", 0)),
+                                      limit=int(p.get("limit", 500))), None
+        if method == "run.abort":
+            engine = agent.runs.get(p["run_id"])
+            engine.abort(p.get("reason", "operator"))
+            return {"run_id": engine.run_id, "aborting": True}, None
+        if method == "run.artifacts":
+            store = agent.runs.store_for(p["run_id"])
+            return {
+                "run_id": p["run_id"],
+                "chunks": store.chunks(),
+                "phases": store.phases(),
+                "info": store.info(),
+            }, None
+        if method == "run.fetch_chunk":
+            return self._run_fetch_chunk(session, p), None
+
         if method == "iter.open":
             return self._iter_open(session, p), None
         if method == "iter.next":
@@ -500,6 +532,49 @@ class _Handler(socketserver.BaseRequestHandler):
         if p.get("want_props", True) and surface.snapshot_props:
             props = encoder.encode(dispatch.snapshot_properties(obj, surface))
         return encoded, props
+
+    # --- runs -----------------------------------------------------------
+
+    def _run_submit(self, session: Session, p: dict) -> dict:
+        """Hand the bench a long experiment and let go of it."""
+        agent = self.agent
+        spec = RunSpec.from_dict(p["spec"])
+        if not session.holds(spec.device):
+            raise PolicyError(
+                f"submitting a run for {spec.device} requires the writer claim "
+                f"— call agent.claim first"
+            )
+        device = agent.registry.get(spec.device)
+        engine = agent.runs.submit(
+            spec,
+            device,
+            worker=agent.workers.get(spec.device),
+            governor=agent.governor,
+            on_event=agent._broadcast_event,
+            clock_scale=float(p.get("clock_scale", 1.0)),
+        )
+        if spec.llm.enabled:
+            from benchctrl.agent.llm.supervisor import build_supervisor
+
+            supervisor = build_supervisor(engine, base_url=agent.llm_base_url)
+            if supervisor is not None:
+                engine.attach_llm(supervisor.start())
+        engine.start()
+        return {"run_id": engine.run_id, "spec_sha256": spec.sha256}
+
+    def _run_fetch_chunk(self, session: Session, p: dict) -> dict:
+        """Expose one recorded chunk as a blob for the host to pull."""
+        from pathlib import Path as _Path
+
+        agent = self.agent
+        store = agent.runs.store_for(p["run_id"])
+        idx = int(p["idx"])
+        match = next((c for c in store.chunks() if c["idx"] == idx), None)
+        if match is None:
+            raise BenchValueError(f"run {p['run_id']} has no chunk {idx}")
+        data = _Path(match["path"]).read_bytes()
+        info = agent.blobs.put(data, content_type="application/x-opensmu")
+        return {"idx": idx, **info.to_dict()}
 
     def _read_window(self, p: dict) -> dict:
         """Drain a measurement window, returning a code-keyed dict.
