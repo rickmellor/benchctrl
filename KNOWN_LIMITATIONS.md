@@ -375,6 +375,54 @@ past this window deliberately.
 Code reference: `src/benchctrl/drivers/otii_arc/transport.py` —
 `read_chunk`, and `device.py` — `_reader_loop`.
 
+## Network (remote mode)
+
+### N-1. A software deadman cannot guarantee an output goes off
+The agent drives armed devices to their safe state when contact is lost,
+escalating from a priority command to a transport reset. Neither is a
+guarantee. If the driver thread is wedged inside a blocking read the
+governor cannot get a command out, and closing the serial port does not
+command an Arc's output off — it holds its last commanded state.
+
+For unattended overnight runs the only real guarantee is a hardware
+interlock: a relay on the DUT rail driven from a GPIO, or the Arc's own GPO
+(`device.py` `set_gpo`). Treat the governor as damage limitation.
+
+Code reference: `src/benchctrl/agent/safety.py` — `SafetyGovernor.trip`.
+
+### N-2. No confidentiality on the wire
+The HMAC handshake authenticates; it does not encrypt. Everything after it
+is plaintext on the LAN. Anyone who can sniff the link reads setpoints and
+measurements; anyone who can inject packets can interfere.
+
+Workaround: `ssh -L 9737:localhost:9737 arduino@<board>.local`.
+
+### N-3. Recordings are capped at ~5 minutes in remote mode
+`ChannelBuffer.values` is a Python `list[float]` at roughly 40 bytes per
+sample. At 9 ksps that is ~110 MB for five minutes and ~1.3 GB for an hour,
+on a board with 3.6 GB total and an LLM potentially holding 1.1 GB.
+
+The agent enforces `max_recording_s` (default 300 s). Longer captures go
+through the run engine, which chunks to disk. Note that
+`applications/sensor_profiler/capture.py` defaults to 60-minute chunks
+(`capture.py:354`) — that app must run in local mode or have its default
+lowered.
+
+A future `array('f')` buffer would cut this 10x, but it touches statistics,
+every writer, crop/downsample, and every test — a separate change.
+
+### N-4. Two clients cannot both drive one device
+One session holds the writer claim per device; others are read-only
+observers and get a `PolicyError` on any mutator. This preserves the
+single-client serialization `benchctrl.mcp` already assumes.
+
+### N-5. Rigol drivers need three extra wheels on the board
+`pyvisa`, `pyvisa-py` and `pyusb` are pure-Python but are not part of the
+base install. Without them the two Rigol drivers import fine (the pyvisa
+import is lazy, inside `open()`) but cannot open a device. Per-device mode
+resolution is the workaround: run the Rigols local and the Arc remote in the
+same MCP process.
+
 ## What's not in this list
 
 Things we **don't** consider limits — they're just facts:

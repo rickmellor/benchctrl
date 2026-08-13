@@ -15,8 +15,13 @@ any concrete driver.
 ```
                            ┌──────────────────────────────────────────┐
                            │   MCP server  (benchctrl.mcp)            │
-                           │   92 tools — orchestrator that calls     │
+                           │   226 tools — orchestrator that calls    │
                            │   each driver's register_mcp_tools(mcp)  │
+                           └──────────────────────────────────────────┘
+                                          │
+                           ┌──────────────┴───────────────────────────┐
+                           │  benchctrl.session — local / remote / sim│
+                           │  resolves each device key independently  │
                            └──────────────────────────────────────────┘
                               │                │                 │
                               ▼                ▼                 ▼
@@ -80,6 +85,9 @@ MCP tool surface.
   electronic load. USB-TMC + SCPI via pyvisa (or LAN/RS232). LIST
   sequence + transient + battery-discharge + trigger system.
   Concrete class.
+- `benchctrl.drivers.rigol_dp2031.RigolDP2031` — Rigol DP2000-series
+  three-channel programmable PSU. USB-TMC + SCPI via pyvisa. Concrete
+  class; the largest tool surface in the codebase.
 
 Each driver exposes its own exception hierarchy
 (`QR10xConnectionError`, `RigolDLCommandError`, etc.) so callers can
@@ -190,11 +198,12 @@ Tool inventory at v1.0:
 
 | Subsystem | Tools |
 |---|---|
-| Otii Arc SMU | 24 |
+| Otii Arc SMU | 23 |
 | QR10x | 11 |
 | Rigol DL3031A | 45 |
-| Cross-driver (recording I/O, battery, emulator) | 12 |
-| **Total** | **92** |
+| Rigol DP2031 | 134 |
+| Cross-driver (recording I/O, battery, emulator) | 13 |
+| **Total** | **226** |
 
 The MCP layer is intentionally thin: each tool wraps one SDK method,
 coerces JSON-friendly argument types where needed, returns a dict.
@@ -302,11 +311,49 @@ A few intentional non-goals worth knowing:
   protocol or implement its server. Use the official client +
   server if you need that.
 - **Not async.** Hardware is sequential. The streaming iterator
-  covers "what's the value right now" without async machinery.
+  covers "what's the value right now" without async machinery. This holds
+  for the network layer too — the agent is threads and blocking sockets,
+  because the board can install nothing beyond the standard library.
 - **Not a GUI** (yet). `dashboards/` is reserved for v1.x. Plot
   output today is matplotlib PNG.
 - **Not multi-device coordinated.** One Arc per `OtiiArc` instance.
   Coordinating multiple Arcs is v1.x work.
+
+## Layer 4 — remote mode
+
+`benchctrl.session` resolves each device key to `local`, `remote`, or `sim`
+independently, so one MCP server can drive an Arc on a remote bench and a
+Rigol plugged into the laptop it runs on. With nothing configured every key
+is `local` and behaviour is unchanged.
+
+```
+   host laptop                                    bench (e.g. Uno Q)
+   ┌────────────────────────┐                     ┌──────────────────────────┐
+   │ benchctrl.mcp          │                     │ benchctrl-agent          │
+   │   226 tools, unchanged │                     │   registry / dispatch    │
+   │        │               │                     │   DeviceWorker per device│
+   │        ▼               │                     │   SafetyGovernor         │
+   │ session.resolve()      │   length-prefixed   │   RunManager             │
+   │        │               │   frames over TCP   │        │                 │
+   │        ▼               │◄───────────────────►│        ▼                 │
+   │ net.proxy.RemoteSMU    │   HMAC handshake    │ real drivers ── USB ── DUT│
+   └────────────────────────┘                     └──────────────────────────┘
+```
+
+- `benchctrl.net` — framing, codec, error mapping, auth, beacon, client,
+  proxies. Shared by both ends; stdlib only.
+- `benchctrl.agent` — the board-side server, plus `runs/` (unattended
+  experiments) and `llm/` (advisory commentary).
+- `benchctrl.sim` — device simulators behind ptys, so all of the above is
+  developable and testable with no instruments attached.
+
+The network boundary sits *above* the driver, not below it. A transport-level
+proxy would put wifi latency inside the Arc's timed wake handshake and its
+4 kHz sample demux, and would only remote one of four drivers.
+
+Closed-loop subsystems (`Emulator`, `Profiler`) run on the bench, not across
+the link: 100 Hz × 2 round trips per tick is 0.6–2.0 s of network per second
+of wall clock.
 
 ## See also
 

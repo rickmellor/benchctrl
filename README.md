@@ -183,6 +183,27 @@ arguments.
 
 → [`docs/mcp.md`](docs/mcp.md)
 
+## Remote mode
+
+Instruments on one machine, agent on another — the 226 MCP tools are
+unchanged and cannot tell the difference.
+
+```bash
+benchctrl-agent --token <token>                 # on the bench machine
+BENCHCTRL_REMOTE=bench.local:9737 benchctrl-mcp # on the host
+```
+
+With nothing configured, everything stays local and behaviour is unchanged.
+
+No hardware to hand? `benchctrl-agent --simulate` backs every device with a
+simulator behind a pseudo-terminal, production driver still in the path.
+
+The agent can also be handed a declarative experiment and left alone: it
+keeps running when the host disconnects, persists events durably, and
+replays exactly what a reconnecting host missed.
+
+→ [`docs/remote.md`](docs/remote.md), [`docs/runs.md`](docs/runs.md)
+
 ### `scenarios/` — reproducible scenario harness
 
 End-to-end scenarios that drive the emulator against a programmable
@@ -271,6 +292,8 @@ More: [`docs/getting_started.md`](docs/getting_started.md).
 | [`docs/battery.md`](docs/battery.md) | Battery profile / emulator / profiler / life calculator |
 | [`docs/drivers.md`](docs/drivers.md) | QR10x + DL3031A drivers, firmware modes |
 | [`docs/mcp.md`](docs/mcp.md) | MCP server setup + tool inventory |
+| [`docs/remote.md`](docs/remote.md) | Remote mode — instruments on one machine, agent on another |
+| [`docs/runs.md`](docs/runs.md) | Unattended runs: declarative specs, safety envelope, artifacts |
 | [`docs/output_formats.md`](docs/output_formats.md) | `.opensmu` / Parquet / CSV / JSON / numpy / pandas / matplotlib |
 | [`docs/otii_arc_protocol.md`](docs/otii_arc_protocol.md) | Arc USB wire protocol reference (reverse-engineered) |
 | [`docs/AGENTS.md`](docs/AGENTS.md) | Briefing for AI agents picking up the codebase |
