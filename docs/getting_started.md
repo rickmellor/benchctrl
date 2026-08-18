@@ -3,16 +3,38 @@
 ## Install
 
 ```bash
-pip install benchctrl        # once published
+pip install benchctrl                  # SMU + battery + QR10x
+pip install benchctrl[mcp]             # + MCP server
+pip install benchctrl[bench-visa]      # + the Rigol drivers (pyvisa)
+pip install benchctrl[science]         # + numpy / pandas / parquet / matplotlib
 ```
 
 For development:
 
 ```bash
-git clone <repo>
+git clone https://github.com/rickmellor/benchctrl
 cd benchctrl
-pip install -e ".[dev]"
+pip install -e ".[dev,mcp,bench-visa,science]"
+pytest -m "not hardware" -q            # 956 tests, no device needed
 ```
+
+## No hardware yet?
+
+You don't need an instrument to work through this guide. Every driver
+has a simulator that speaks the real wire protocol over a
+pseudo-terminal, so the production driver runs unmodified:
+
+```python
+from benchctrl.sim import SimulatedOtiiArc
+from benchctrl.drivers.otii_arc import OtiiArc
+
+with SimulatedOtiiArc() as sim:
+    smu = OtiiArc.open(sim.port)
+    ...                                 # everything below works as written
+```
+
+Substitute that for `OtiiArc.open()` anywhere in this document. See
+[`simulation.md`](simulation.md) for the full picture.
 
 ## Plug in the device
 
@@ -193,19 +215,43 @@ with OtiiArc.open() as smu:
         print(f"Device rejected: err={e.error_code}, reverted to {e.last_good_value}")
 ```
 
-## What's not in v0.1
+## The rest of the bench
 
-See [`ROADMAP.md`](../ROADMAP.md) for the full list. Key items:
+The Arc is one driver among peers. Each lives in its own subpackage,
+so you import only what you own:
 
-- **Battery emulation** (deferred to v0.2) — `set_supply_battery_emulator`,
-  battery profiles, SoC tracking. Stubs raise `BenchNotImplementedError`.
-- **Calibration** — deferred for safety.
+```python
+from benchctrl.drivers.eastwood_qr10x import QR10x          # programmable resistor
+from benchctrl.drivers.rigol_dl3031a import RigolDL3031A    # electronic load
+from benchctrl.drivers.rigol_dp2031 import RigolDP2031      # triple-output PSU
+```
+
+They share the conventions you've already seen — `open()` as a context
+manager, `set_*` methods for writes, properties for cached reads.
+→ [`drivers.md`](drivers.md)
+
+Battery emulation, profiling, and life calculation work against *any*
+driver conforming to `benchctrl.interfaces.SourceMeasurementUnit`, not
+just the Arc. → [`battery.md`](battery.md)
+
+## What's not implemented
+
+See [`ROADMAP.md`](../ROADMAP.md) for the full list with rationale.
+Key items:
+
+- **Calibration** — deferred indefinitely for safety; writes
+  persistent state to the device and the wire format is unobserved.
 - **Firmware upgrade** — intentionally never; use the vendor app.
-- **Full-rate streaming** — the device's baseline stream is ~6 Hz; the
-  command that unlocks 1 kHz / 4 kHz native rates hasn't been decoded
-  yet. Sub-millisecond transients will be missed.
-- **Multi-device coordination** — single device only for now (multiple
-  independent instances work).
+- **Channel sample-rate control** — no wire command appears to exist.
+  Use `Recording.downsample(channel, factor)` on the host instead.
+- **UART log channel parsing** — the `rx` channel produces text
+  fragments; structured parsing is not built yet.
+- **Multi-device coordination** — multiple independent instances work
+  and can now be split across machines, but there are no fan-out
+  helpers or shared-timebase sync.
+
+These raise `BenchNotImplementedError` where a user-facing surface
+exists, rather than failing quietly.
 
 ## CLI
 
@@ -218,8 +264,22 @@ benchctrl capture 5.0 run.csv -c mc mv          # record for 5 s
 benchctrl stream 10                             # live print
 ```
 
+Two more entry points ship with the package:
+
+```bash
+benchctrl-mcp                    # MCP server — 226 tools for LLM agents
+benchctrl-agent --token <token>  # bench-side server for remote mode
+```
+
 ## Next steps
 
-- [`docs/api_reference.md`](api_reference.md) — every class and method
-- [`docs/protocol.md`](protocol.md) — what's on the USB cable
+- [`api_reference.md`](api_reference.md) — every class and method
+- [`drivers.md`](drivers.md) — the QR10x, DL3031A and DP2031 drivers
+- [`battery.md`](battery.md) — emulation, profiling, life calculation
+- [`output_formats.md`](output_formats.md) — where your samples can go
+- [`simulation.md`](simulation.md) — working without hardware
+- [`remote.md`](remote.md) — instruments on another machine
+- [`runs.md`](runs.md) — unattended declarative experiments
+- [`mcp.md`](mcp.md) — driving the bench from an LLM agent
+- [`otii_arc_protocol.md`](otii_arc_protocol.md) — what's on the USB cable
 - [`examples/`](../examples/) — copy-paste-friendly scripts

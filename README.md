@@ -3,9 +3,14 @@
 Open-source Python control stack for your lab bench. Drives the
 [Qoitech Otii Arc / Arc Pro][otii] SMU directly over USB CDC-ACM,
 plus a growing set of companion instruments (programmable loads,
-programmable resistors), with one MCP server that exposes the whole
+resistors, power supplies), with one MCP server that exposes the whole
 bench to LLM agents. Cross-platform (Windows / Linux / macOS) via
 [pyserial][pyserial] / [pyvisa][pyvisa].
+
+The bench doesn't have to be on the same machine as the agent, and it
+doesn't have to exist: `benchctrl.net` puts the instruments on a
+remote host and `benchctrl.sim` replaces them with wire-protocol
+simulators — the same 226 MCP tools drive all three cases unchanged.
 
 Driver-symmetric architecture: every instrument lives under
 `benchctrl.drivers.<vendor_model>/`, the Otii Arc included. Battery
@@ -15,11 +20,13 @@ slots in.
 
 | | |
 |---|---|
-| **Version** | 1.0.0 |
-| **Tests** | 313 hardware-free + 86 hardware-marked passing |
+| **Version** | 1.2.0 |
+| **Tests** | 956 hardware-free + 152 hardware-marked passing |
+| **MCP tools** | 226 |
 | **License** | MIT |
 | **Python** | 3.9 – 3.13 |
-| **Hardware (today)** | Qoitech Otii Arc / Arc Pro (SMU), Eastwood Tech QR10x (load), Rigol DL3031A (load) |
+| **Hardware (today)** | Qoitech Otii Arc / Arc Pro (SMU), Eastwood Tech QR10x (resistor), Rigol DL3031A (load), Rigol DP2031 (PSU) |
+| **No hardware?** | Every driver has a wire-protocol simulator — `--simulate` runs the whole stack |
 
 [otii]: https://www.qoitech.com/otii/
 [pyserial]: https://pyserial.readthedocs.io/
@@ -35,11 +42,17 @@ or two, and you want to:
   tracking and OCV-IR-drop modeling — and pick which instrument
   sources or sinks (the Arc plays battery; the DL3031A can play
   battery-side discharge at higher current).
-- Wire a programmable load (Eastwood QR10x resistor box, Rigol
-  DL3031A electronic load) into the same workflow.
+- Wire a programmable load or supply (Eastwood QR10x resistor box,
+  Rigol DL3031A electronic load, Rigol DP2031 triple-output PSU) into
+  the same workflow.
 - Hand a real bench to an LLM agent through the [Model Context
   Protocol][mcp] without writing your own tool surface.
 - Save reproducible test scenarios you can re-run as regression checks.
+- Keep the bench in the lab and drive it from your laptop, or develop
+  against simulators with no instruments attached at all.
+- Hand the bench a declarative experiment and walk away — it runs
+  unattended, survives the host disconnecting, and hands back a
+  self-describing artifact bundle.
 
 benchctrl is all of that, in one package.
 
@@ -49,29 +62,42 @@ benchctrl is all of that, in one package.
 
 ```
             +-----------------------------------------+
-            |  MCP server (benchctrl.mcp)             |   92 tools — drives every driver
+            |  MCP server (benchctrl.mcp)             |   226 tools — drives every driver
             |    orchestrates per-driver registration |   from Claude Code / Desktop / etc
             +-----------------------------------------+
+                                 |
+                                 v
+            +-----------------------------------------+
+            |  benchctrl.session  — resolve()         |   Per-device seam. Returns a local
+            |    local  |  remote  |  sim             |   driver, a remote proxy, or a
+            +-----------------------------------------+   simulator. Unconfigured = local.
                   |              |              |
                   v              v              v
-            +-----------+ +-------------+ +-----------+
-            | Otii Arc  | | QR10x       | | DL3031A   |   Drivers (peers)
-            | driver    | | driver      | | driver    |
-            +-----------+ +-------------+ +-----------+
-                  ^              ^              ^
-                  |              |              |
-            +-----+--------------+--------------+-----+
-            |       SourceMeasurementUnit             |   Protocol — drivers conform
-            |       (benchctrl.interfaces)            |
-            +-----------------------------------------+
-                  ^                            ^
-                  |                            |
-            +-----+----+              +--------+--------+
-            | battery  |              | scenarios/      |   Vendor-agnostic
-            | emulator |              | run.py harness  |   subsystems
-            | profiler |              +-----------------+
-            +----------+
+        +-----------+ +---------+ +----------+ +---------+
+        | Otii Arc  | | QR10x   | | DL3031A  | | DP2031  |  Drivers (peers)
+        | driver    | | driver  | | driver   | | driver  |
+        +-----------+ +---------+ +----------+ +---------+
+              ^            ^            ^           ^
+              |            |            |           |
+        +-----+------------+------------+-----------+-----+
+        |            SourceMeasurementUnit                |  Protocol — drivers conform
+        |            (benchctrl.interfaces)               |
+        +-------------------------------------------------+
+              ^                    ^                  ^
+              |                    |                  |
+        +-----+----+     +---------+--------+   +-----+------+
+        | battery  |     | scenarios/       |   | agent/runs |  Vendor-agnostic
+        | emulator |     | run.py harness   |   | unattended |  subsystems
+        | profiler |     +------------------+   +------------+
+        +----------+
 ```
+
+Two seams make the rest optional. `session.resolve()` decides
+per device whether you get real hardware, a proxy to another machine
+(`benchctrl.net`), or a wire-protocol simulator (`benchctrl.sim`) —
+and the 226 tools above it cannot tell the difference. The
+`SourceMeasurementUnit` Protocol means battery, scenarios, and the run
+engine never name a concrete driver.
 
 ### `benchctrl.drivers.otii_arc.OtiiArc` — direct hardware control
 
@@ -143,6 +169,7 @@ Each driver lives in its own subpackage; import only what you have.
 |---|---|---|---|
 | Eastwood Tech QR10x | `benchctrl.drivers.eastwood_qr10x.QR10x` | USB-Serial (CH340), AT commands | Passive load — sleep current / quiescent / low-mA |
 | Rigol DL3031A | `benchctrl.drivers.rigol_dl3031a.RigolDL3031A` | USB-TMC + SCPI via pyvisa | Active load — high-current / fast transients / built-in LIST / battery-discharge mode |
+| Rigol DP2031 | `benchctrl.drivers.rigol_dp2031.RigolDP2031` | USB-TMC + SCPI via pyvisa | Triple-output PSU — source side; series/parallel pairing, Arb timer sequencer, trigger I/O |
 
 ```python
 from benchctrl.drivers.eastwood_qr10x import QR10x
@@ -165,8 +192,9 @@ with RigolDL3031A.open() as dl:        # auto-discover by Rigol VID/PID
 
 ### `benchctrl.mcp` — Model Context Protocol server
 
-92 tools exposing the whole SDK to MCP-aware clients (Claude Code,
-Claude Desktop, etc). Each driver registers its own tools via
+226 tools exposing the whole SDK to MCP-aware clients (Claude Code,
+Claude Desktop, etc) — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
+plus 13 cross-driver. Each driver registers its own tools via
 `register_mcp_tools(mcp)` and the orchestrator wires them together.
 Lets an LLM agent run real measurements: "discover the Arc, set
 3.3 V, enable output, record for 10 seconds, report mean current."
@@ -183,7 +211,7 @@ arguments.
 
 → [`docs/mcp.md`](docs/mcp.md)
 
-## Remote mode
+### `benchctrl.net` + `benchctrl.agent` — remote mode
 
 Instruments on one machine, agent on another — the 226 MCP tools are
 unchanged and cannot tell the difference.
@@ -195,14 +223,41 @@ BENCHCTRL_REMOTE=bench.local:9737 benchctrl-mcp # on the host
 
 With nothing configured, everything stays local and behaviour is unchanged.
 
-No hardware to hand? `benchctrl-agent --simulate` backs every device with a
-simulator behind a pseudo-terminal, production driver still in the path.
-
 The agent can also be handed a declarative experiment and left alone: it
 keeps running when the host disconnects, persists events durably, and
 replays exactly what a reconnecting host missed.
 
 → [`docs/remote.md`](docs/remote.md), [`docs/runs.md`](docs/runs.md)
+
+### `benchctrl.sim` — hardware-free simulation
+
+Every driver has a simulator that speaks its instrument's **real wire
+protocol** over a pseudo-terminal, so the production driver connects to
+it unmodified. These aren't mocks of benchctrl classes — `Transport`,
+the binary framing, the session handshake and the recording reader
+thread all run for real, with nothing monkeypatched. The Rigols are
+reached through pyvisa-py's ASRL backend, so the real pyvisa stack is
+in the path too.
+
+```bash
+benchctrl-agent --simulate                        # whole bench, no instruments
+BENCHCTRL_SIM_DEVICES=otii_arc,rigol_dp2031 benchctrl-mcp   # or just some
+```
+
+```python
+from benchctrl.sim import SimulatedOtiiArc
+from benchctrl.drivers.otii_arc import OtiiArc
+
+with SimulatedOtiiArc() as sim:
+    smu = OtiiArc.open(sim.port)       # the production driver, unmodified
+    smu.set_voltage(3.3)
+    with smu.record("mc", "mv") as rec:
+        ...
+```
+
+Simulator waveforms are analytically known, so tests assert exact
+statistics rather than "a number arrived", and `OhmicLoad` closes the
+V→I loop — the battery emulator is exercisable without a cell.
 
 ### `scenarios/` — reproducible scenario harness
 
@@ -290,8 +345,9 @@ More: [`docs/getting_started.md`](docs/getting_started.md).
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Driver-symmetric layout, Protocol contract, registration model |
 | [`docs/design.md`](docs/design.md) | Arc driver internals + design decisions |
 | [`docs/battery.md`](docs/battery.md) | Battery profile / emulator / profiler / life calculator |
-| [`docs/drivers.md`](docs/drivers.md) | QR10x + DL3031A drivers, firmware modes |
+| [`docs/drivers.md`](docs/drivers.md) | QR10x + DL3031A + DP2031 drivers, firmware modes |
 | [`docs/mcp.md`](docs/mcp.md) | MCP server setup + tool inventory |
+| [`docs/simulation.md`](docs/simulation.md) | Running the stack with no hardware attached |
 | [`docs/remote.md`](docs/remote.md) | Remote mode — instruments on one machine, agent on another |
 | [`docs/runs.md`](docs/runs.md) | Unattended runs: declarative specs, safety envelope, artifacts |
 | [`docs/output_formats.md`](docs/output_formats.md) | `.opensmu` / Parquet / CSV / JSON / numpy / pandas / matplotlib |
@@ -306,9 +362,10 @@ More: [`docs/getting_started.md`](docs/getting_started.md).
 ## Status & known limits
 
 benchctrl is in **beta** (`Development Status :: 4 - Beta`). The SDK
-surface is stable; we're not planning breaking changes before 1.0.
-The validation harness is the most active area — new scenario types
-land in `scenarios/` as they're characterized.
+surface is stable and follows semver — 1.1 added the DP2031 driver and
+1.2 added remote mode, simulation, and the run engine, all additively.
+Remote mode and the run engine are the newest subsystems and the most
+likely to grow; the local driver surface has been stable since 1.0.
 
 We document hardware caps, firmware quirks, and harness workarounds
 explicitly in [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) rather
@@ -322,6 +379,12 @@ than burying them in per-version CHANGELOG entries. Notable ones:
   returns the device to FIX mode
 - Emulator + `SMU.record()` deadlock if run concurrently (workaround
   in the hires validation runner)
+- **Remote mode authenticates but does not encrypt.** The token is
+  never sent (HMAC challenge-response), but instrument traffic is
+  readable on the wire — tunnel over SSH on an untrusted network
+- **A software deadman cannot guarantee an output goes off** through
+  a wedged driver. For genuinely unattended runs a hardware interlock
+  is the only real guarantee (§ N-1)
 
 If you hit something that isn't documented, please open an issue —
 that's how we keep the list honest.
@@ -334,11 +397,11 @@ public method has a test, firmware bugs get documented in
 `KNOWN_LIMITATIONS.md`).
 
 ```bash
-git clone https://github.com/benchctrl/benchctrl
+git clone https://github.com/rickmellor/benchctrl
 cd benchctrl
 pip install -e ".[dev,mcp,bench-visa,science]"
-pytest -m "not hardware"                 # ~3 minutes, no device needed
-pytest                                    # full suite (Arc Pro on USB)
+pytest -m "not hardware"                 # 956 tests, ~7 min, no device needed
+pytest                                    # full suite (bench on USB)
 ```
 
 ## Licensing & affiliation

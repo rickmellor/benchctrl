@@ -7,6 +7,237 @@ Known limitations across all versions are tracked in
 firmware quirks, harness workarounds). Read it before debugging a
 new failure — it's likely a documented limit.
 
+## [1.2.0] — remote mode, unattended runs, and hardware-free simulation
+
+Three things land together, each usable on its own: instrument
+**simulators** that let the whole stack run with no hardware
+attached, a **remote mode** that puts the instruments on one machine
+and the agent on another, and a **run engine** that takes a
+declarative experiment and executes it unattended.
+
+The through-line is that none of it changes the tool surface. All
+**226 MCP tools are byte-for-byte unchanged** and cannot tell whether
+they are driving a local device, a device across the network, or a
+simulator. With nothing configured, behaviour is identical to v1.1.0.
+
+### `benchctrl.sim` — instrument simulators
+
+Device simulators that speak their instrument's **real wire
+protocol** over a pty, so production drivers connect to them
+unmodified via `serial.Serial`. These are not mocks of benchctrl
+classes — an end-to-end test exercises `Transport`, the binary
+framing in `protocol.py`, the timed session-init handshake, and the
+recording reader thread with nothing monkeypatched.
+
+- `sim.loopback.SerialLoopback` — pty pair held in **raw** mode (a
+  cooked pty rewrites CR/LF and breaks every checksum), non-blocking
+  master with a bounded tx queue that reports overruns rather than
+  silently dropping samples
+- `sim.otii_arc.SimulatedOtiiArc` — session handshake, `SET` with
+  per-parameter range validation emitting genuine negative-status
+  error frames, `GET` readbacks including the 268 B channel
+  inventory, baseline streaming, and packed sub-1 / sub-4 high-rate
+  framing. Fault injection for the async `BenchCommandError` path
+- `sim.qr10x.SimulatedQR10x` — AT protocol, relay-ladder
+  quantisation, safety limit, settling delay
+- `sim.scpi` — SCPI simulators for both Rigols, reached through
+  **pyvisa-py's ASRL backend**, so the real driver and the real
+  pyvisa stack run against them over a pty. A generic register model
+  covers the bulk of the ~254 distinct SCPI strings; measurement,
+  identity and error-queue behaviour are explicit. Models the
+  DL3031A quirk where `:SOUR:FUNC` is set with `CURRent` but reads
+  back as `CC`
+- `sim.waveforms` — analytically-known signals, so tests assert
+  exact statistics rather than "a number arrived". `OhmicLoad`
+  closes the V→I loop, making the battery `Emulator` exercisable
+  without hardware
+- `sim.factories` — `mode="sim"` returns the **production driver**
+  bound to a simulator, never a mock, so sim mode exercises the real
+  code path. Simulator lifetime is tied to the driver
+
+### `benchctrl.session` / `benchctrl.config` / `benchctrl.discovery`
+
+- **`session`** — the local/remote/sim seam. Each driver's
+  `_get_<device>()` singleton populates via `session.resolve()`,
+  which returns a local driver, a remote proxy, or a simulated
+  instrument per configuration. Mode resolves **per device key, not
+  per process**: an Arc on a remote bench and a Rigol on the laptop
+  can be driven from one MCP server. Total diff across the four
+  `mcp_tools.py` files is 56 lines
+- **`config`** — layered configuration (explicit > CLI > env > file >
+  all-local). JSON rather than TOML because `tomllib` is 3.11+ and
+  the package declares `>=3.9`. `EndpointConfig` rejects
+  `deadman_s <= heartbeat_s`, which would make a healthy link trip
+  the safety governor. A remote device naming no reachable endpoint
+  is a **loud error**, never a silent fall back to local — the quiet
+  failure drives the wrong hardware
+- **`discovery`** — one signature table replacing three ad-hoc
+  mechanisms, answering "what is on this bench" rather than "where
+  is my device". Carries a **confidence level**: devices behind
+  generic USB-serial bridges (CH340, FTDI, CP210x) are never
+  claimed, because those VID/PIDs are shared by thousands of
+  products. The QR10x has no recorded VID/PID and is identified by
+  AT probe instead. A test asserts no driver signature collides with
+  a known bridge
+
+### `benchctrl.net` — the wire protocol
+
+- Length-prefixed **typed frames on one socket**, so binary rides
+  natively and 64 KB blob chunks interleave with heartbeats instead
+  of blocking them
+- **HMAC-SHA256 challenge-response** over a pre-shared token — the
+  secret never crosses the wire, so a passive listener on shared
+  wifi cannot lift it
+- Value codec with a **closed allowlist**; resolving a dotted class
+  path from the wire would be RCE on the client
+- Exceptions carry their class, MRO and attributes across all four
+  driver hierarchies, degrading to the nearest known ancestor on
+  version skew
+- `net.beacon` — stdlib UDP beacon (plus a static Avahi service
+  file) carrying a token **fingerprint** and a device count, never
+  models or serials, since it is broadcast to the whole subnet
+
+### `benchctrl.agent` — the bench-side server
+
+- One **owning thread per device**, restoring the invariant
+  `Transport` documents ("one thread owns one Transport") that a
+  networked server would otherwise break
+- Dispatch is an allowlist computed by **introspecting the driver
+  class** — never `getattr` on whatever arrives
+- Blobs spill to `/home/arduino`, not the 2 GB root partition
+- **Stdlib + pyserial only**, because the target board cannot
+  install anything else
+- `agent.safety` — the agent tracks armed state **from the wire**,
+  not from client bookkeeping, and drives outputs off when contact
+  is lost. This is the failure mode that does not exist locally,
+  where a dead process still runs `__exit__`
+- New `benchctrl-agent` console entry point
+
+### `benchctrl.agent.runs` — unattended experiments
+
+- A run is **data, not code**: a JSON spec validated before anything
+  is energised, content-hashed so a result always traces to the spec
+  that produced it
+- The **safety envelope is declared up front** and no later phase —
+  or model — can widen it
+- Ordering inside a tick is itself a safety property: sample, check
+  the envelope, evaluate rules, check phase exit, roll a chunk
+- Conditions carry a **dwell time**, because measurement noise
+  crosses any threshold occasionally and a run that aborted on one
+  stray sample would be worse than no rule at all
+- **Durability**: SQLite in WAL mode plus an `fsync`'d
+  `events.ndjson` mirror. The mirror is deliberately redundant — WAL
+  survives a crash but not an SD card losing power mid-write, which
+  is real on a board someone unplugs. Sequence numbers are assigned
+  inside the transaction that persists the event, so a reconnecting
+  host using `since_seq` can neither miss an event nor see one twice
+- A run still marked `running` under a previous boot id is marked
+  **interrupted and never silently resumed** — after a power cut the
+  DUT's state is unknown, so a human decides
+
+### `benchctrl.agent.llm` — advisory supervisor
+
+- **Eight tools, allowlisted in code**: four read, two annotate, two
+  move the run toward its end. No driver method is reachable — the
+  model cannot energise anything, widen the envelope, or repeat a
+  phase. `advance_phase` is forward-only within the declared list;
+  `abort_run` only stops things
+- Three policy violations in a phase disable the model for the run
+- Runs on its own thread and sees only pre-computed aggregates. A
+  test asserts a run finishes on time with a **30-second model stall
+  against a 3-second run**
+- The boundary is stated plainly in the code: deterministic rules
+  are the safety system, the model is commentary
+
+### `Recording` — stream codecs for `.opensmu`
+
+`save_to_stream()` / `load_from_stream()` / `to_bytes()` /
+`from_bytes()` expose the existing `.opensmu` encoding without
+requiring a filesystem path. Remote mode transfers recordings as
+`.opensmu` blobs, so these are the **wire codec as well as the file
+writer** — one format and one implementation shared by the file
+path, the wire, the run engine's chunks, and `sensor_profiler`'s
+analyzer.
+
+`save()` / `load()` become thin wrappers and are byte-for-byte
+unchanged; `load()` still names the offending path in its error,
+which the stream version cannot know.
+
+### Fixed
+
+- `transport.py` — the DTR/RTS assignment is now guarded. Modem-control
+  ioctls are not universally supported (ptys and some virtual COM
+  drivers raise) and the Arc does not need the lines asserted.
+  Mirrors the guard already on `reset_input_buffer`
+- Latent race: `_get_dl3031a` / `_get_dp2031` / `_get_qr10x` read
+  their module global without taking the lock their `open`/`close`
+  counterparts hold
+- Run spec content hashing — `chunk_s=60` and `chunk_s=60.0` compare
+  equal but serialise differently, so a spec's hash changed across a
+  JSON round trip. Numeric fields are now coerced at construction
+
+### Discovered
+
+Two platform findings that shaped the design, both recorded in the
+source:
+
+- Python 3.12+ resolves `runtime_checkable` `Protocol` members with
+  `inspect.getattr_static`, which does **not** invoke `__getattr__`.
+  A purely dynamic proxy can therefore never satisfy
+  `isinstance(x, SourceMeasurementUnit)` no matter how complete it
+  is. `RemoteSMU` declares the twelve contract methods explicitly;
+  everything else stays dynamic
+- `QR10xTimeoutError` inherits both `RuntimeError` and
+  `TimeoutError` (an `OSError`), whose C layouts are incompatible,
+  so `cls.__new__(cls)` is rejected outright. Exception rebuilding
+  is a three-strategy cascade rather than one clever call
+
+New `KNOWN_LIMITATIONS.md` entries:
+
+- **A-3** — `start_recording()` does not flush the inbound buffer,
+  so a recording's first samples can predate it. Found by the new
+  simulator tests; documented rather than fixed, since a blind flush
+  would also discard legitimate in-flight samples
+- **A-4** — `Transport.read_chunk` blocks in `serial.read(8192)`
+  until the buffer fills or the 0.5 s timeout expires, so a running
+  recording reports no samples for up to half a second. Bounds live
+  progress reporting
+- **N-1 … N-5** — the network section. N-1 states plainly that a
+  software deadman cannot guarantee an output goes off through a
+  wedged driver, and that a **hardware interlock is the only real
+  guarantee** for unattended runs
+
+### Docs
+
+- [`docs/remote.md`](docs/remote.md) — setup, per-device
+  local/remote/sim splitting, discovery, the security posture
+  (authentication without confidentiality, and the SSH tunnel that
+  fixes it), measured latencies from an actual Uno Q, behavioural
+  differences, and Uno Q deployment
+- [`docs/runs.md`](docs/runs.md) — spec format, the safety envelope
+  and why dwell times matter, the artifact bundle, restart
+  semantics, and the LLM layer's tool allowlist
+- `ARCHITECTURE.md` corrected on three counts: 92 tools (actual
+  226), 24 Arc tools (actual 23), and no mention of DP2031 at all.
+  Layer-4 section added for remote mode
+
+### Dependencies
+
+`mcp` pinned `<2` — 2.0 removed `mcp.server.fastmcp`, which
+`benchctrl.mcp` imports.
+
+### Tests
+
+**956 hardware-free passing** (+130 vs v1.1.0), 23 skipped, 152
+hardware-marked deselected. New suites: `test_sim_loopback.py` (21),
+`test_session_config.py` + `test_discovery.py` + `test_beacon.py`
+(54), `test_recording_io.py`, `test_remote_protocol.py` (49),
+`test_run_engine.py` + `test_llm_supervisor.py` (63).
+
+Remote mode verified end to end over the wire: submitted a run,
+disconnected the host mid-flight, reconnected, and replayed exactly
+the missed event range.
+
 ## [1.1.0] — Rigol DP2031 driver (4-phase rollout)
 
 New driver: **`benchctrl.drivers.rigol_dp2031.RigolDP2031`** — full
@@ -80,8 +311,8 @@ for this release).
 ### MCP tools
 
 134 new `dp2031_*` MCP tools across all four phases. Orchestrator
-grows 92 → **226 total** tools (Otii Arc 24 + QR10x 11 + DL3031A 45 +
-DP2031 134 + cross-driver 12).
+grows 92 → **226 total** tools (Otii Arc 23 + QR10x 11 + DL3031A 45 +
+DP2031 134 + cross-driver 13).
 
 ### Tests
 

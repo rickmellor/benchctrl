@@ -1,36 +1,47 @@
 # benchctrl API reference
 
 Every public name exported from `benchctrl` and its sub-packages.
-Internal modules (`benchctrl.transport`, `benchctrl.protocol`, etc.) are
-documented for contributors but not part of the stability surface.
+Driver-internal modules (`drivers/otii_arc/transport.py`,
+`drivers/otii_arc/protocol.py`, etc.) are documented for contributors
+but are not part of the stability surface.
 
 This document is structured by sub-package:
 
-- [`benchctrl` — SMU device control](#smu--the-device) (this layer)
+- [`OtiiArc` — the Otii Arc / Arc Pro driver](#otiiarc--the-device) (this layer)
+- [`Recording`](#recording), [`Sample`](#sample), [`Statistics`](#statistics) — captured data
 - [`benchctrl.battery` — battery characterisation + emulation](#benchctrlbattery--battery-characterisation--emulation)
-- [`benchctrl.bench` — companion instrument drivers](#benchctrlbench--companion-instrument-drivers)
-- [`benchctrl.mcp` — Model Context Protocol server](docs/mcp.md) (separate doc — 92 tools)
+- [`benchctrl.drivers` — companion instrument drivers](#benchctrldrivers--companion-instrument-drivers)
+- [`benchctrl.session` / `.config` / `.discovery` — the local/remote/sim seam](#benchctrlsession--the-localremotesim-seam)
+- [`benchctrl.sim` — simulators](simulation.md) (separate doc)
+- [`benchctrl.net` / `benchctrl.agent` — remote mode](remote.md) (separate doc)
+- [`benchctrl.agent.runs` — unattended runs](runs.md) (separate doc)
+- [`benchctrl.mcp` — Model Context Protocol server](mcp.md) (separate doc — 226 tools)
 
-## `SMU` — the device
+Every driver lives under `benchctrl.drivers.<vendor_model>`; there is
+no top-level `SMU` class and no `benchctrl.bench` package — both were
+removed in 1.0. Vendor-agnostic code depends on the
+`benchctrl.interfaces.SourceMeasurementUnit` Protocol instead.
+
+## `OtiiArc` — the device
 
 ### Construction
 
 ```python
-SMU.discover() -> list[SMUInfo]
-SMU.open(port=None, *, baudrate=9600) -> SMU
+OtiiArc.discover() -> list[OtiiArcInfo]
+OtiiArc.open(port=None, *, baudrate=9600) -> OtiiArc
 ```
 
 `port` accepts `None` (auto-discover first device), a port string
-(`"COM6"`, `"/dev/ttyACM0"`), an `SMUInfo`, or a `PortInfo`. The
-returned `SMU` has its transport open and the session-init handshake
-sent. Use as a context manager (`with SMU.open() as smu:`) or call
+(`"COM6"`, `"/dev/ttyACM0"`), an `OtiiArcInfo`, or a `PortInfo`. The
+returned `OtiiArc` has its transport open and the session-init handshake
+sent. Use as a context manager (`with OtiiArc.open() as smu:`) or call
 `smu.close()` explicitly.
 
 ### State properties (read-only, host-side cache)
 
 | Property | Type | Notes |
 |---|---|---|
-| `info` | `SMUInfo \| None` | Discovery-time descriptor |
+| `info` | `OtiiArcInfo \| None` | Discovery-time descriptor |
 | `is_connected` | `bool` | Transport open |
 | `voltage` | `float \| None` | Last set main V |
 | `main_current` | `float \| None` | Last set CC-mode current (A) |
@@ -229,7 +240,28 @@ rec.save_json(path) -> Path
 rec.save_raw(path, buf) -> Path           # raw byte buffer
 rec.save(path) -> Path                    # native .opensmu binary
 Recording.load(path) -> Recording
+
+# science extras (lazy imports — see output_formats.md)
+rec.save_parquet(path) -> Path
+rec.to_numpy(channel); rec.timestamps_numpy(channel)
+rec.to_pandas(channel=None)
+rec.plot(channels=None, show=True)
 ```
+
+The `.opensmu` encoding is also available without a filesystem path.
+These are the same codec, not a second format — remote mode transfers
+recordings as `.opensmu` blobs, so they are the wire format too:
+
+```python
+rec.save_to_stream(fh) -> int             # bytes written
+rec.to_bytes() -> bytes
+Recording.load_from_stream(fh) -> Recording
+Recording.from_bytes(data) -> Recording
+```
+
+`save()` / `load()` are thin wrappers over these. The only difference:
+`load()` names the offending path in its error message, which
+`load_from_stream()` cannot know.
 
 ### Deferred
 
@@ -369,7 +401,7 @@ as the analysis side of profiler / emulator workflows.
 
 ```python
 class Profiler:
-    def __init__(self, smu: SMU, config: ProfilerConfig): ...
+    def __init__(self, smu: SourceMeasurementUnit, config: ProfilerConfig): ...
     def run(self) -> ProfilerResult: ...
 
 ProfilerConfig(
@@ -392,7 +424,7 @@ a `BatteryProfile` for use with the life calculator or emulator.
 
 ```python
 class Emulator:
-    def __init__(self, smu: SMU, config: EmulatorConfig): ...
+    def __init__(self, smu: SourceMeasurementUnit, config: EmulatorConfig): ...
     def start(self) -> None: ...
     def stop(self) -> None: ...
     def state(self) -> EmulatorState: ...
@@ -435,16 +467,23 @@ sequence propagate (no silent swallow — see CONTRIBUTING.md § 4).
 
 ---
 
-## `benchctrl.bench` — companion instrument drivers
+## `benchctrl.drivers` — companion instrument drivers
 
 ```python
 from benchctrl.drivers.eastwood_qr10x import QR10x, QR10xInfo, QR10xError
 from benchctrl.drivers.rigol_dl3031a import RigolDL3031A, RigolDLInfo, RigolDLError
+from benchctrl.drivers.rigol_dp2031 import RigolDP2031, RigolDP2031Info, RigolDP2031Error
 ```
 
-`RigolDL3031A` is lazily imported (PEP 562) so users without
-`benchctrl[bench-visa]` don't get a pyvisa import error just for using
-the QR10x.
+Each driver lives in its own subpackage, so importing one never pulls
+in another's dependencies — no pyvisa import error just for using the
+QR10x.
+
+The DP2031 driver has the largest surface in the codebase (134 MCP
+tools) covering the Arb timer sequencer, the IoT power analyzer,
+trigger I/O and the device filesystem. It is documented in full in
+[`drivers.md`](drivers.md#rigol-dp2031--triple-output-programmable-psu)
+rather than duplicated here.
 
 ### `QR10x` — Eastwood Tech programmable resistor
 
@@ -474,7 +513,7 @@ production_date, temperature_coefficient_ppm)`.
 `QR10xProtocolError` / `QR10xTimeoutError` / `QR10xValueError`.
 
 Wire format: 115200 8N1, AT command set, ~60 ms quiet-window
-end-of-response detection. Details in [`bench.md`](bench.md).
+end-of-response detection. Details in [`drivers.md`](drivers.md).
 
 ### `RigolDL3031A` — Rigol DL3000-series electronic load
 
@@ -571,7 +610,7 @@ dl.program_list(
     trigger_source: str = "BUS",
 ) -> None
 
-# Granular SCPI wrappers (also available, see bench.md):
+# Granular SCPI wrappers (also available, see drivers.md):
 dl.list_set_mode / list_set_range / list_set_count / list_set_step_count /
    list_set_step / list_set_slew / list_set_end
 ```
@@ -628,6 +667,122 @@ RigolDLError
 
 `RigolDLInfo(manufacturer, model, serial, firmware, resource)`.
 
-Details + firmware quirks in [`bench.md`](bench.md). Hardware-marked
+Details + firmware quirks in [`drivers.md`](drivers.md). Hardware-marked
 tests in `tests/test_bench_rigol_dl3031a.py` exercise every wire
 format against the real device.
+
+## `benchctrl.session` — the local/remote/sim seam
+
+One function decides, per device, what a driver singleton actually
+gets. Everything above it — the 226 MCP tools, the battery emulator,
+the scenario harness — is unaware.
+
+```python
+from benchctrl import session
+
+session.resolve(
+    device_key: str,                     # one of config.DEVICE_KEYS
+    *,
+    opener: Callable[..., Any],          # normally the driver's .open
+    open_kwargs: dict | None = None,
+) -> Any
+```
+
+Returns a real driver instance, a simulated instrument, or a remote
+proxy. All three satisfy the same duck type. For a remote device
+`open_kwargs` is forwarded to the *agent*, so the bench opens the
+device the same way you would locally.
+
+## `benchctrl.config` — layered configuration
+
+```python
+from benchctrl import config
+
+config.DEVICE_KEYS   # ("otii_arc", "eastwood_qr10x",
+                     #  "rigol_dl3031a", "rigol_dp2031")
+config.MODES         # ("local", "remote", "sim")
+config.DEFAULT_PORT  # 9737
+
+config.resolve(path=None, cli=None, env=None) -> Config
+config.build(*, remote=None, token=None,
+             local_devices=(), sim_devices=()) -> Config
+config.load_file(path) -> Config
+config.load_env(env=None) -> Config | None
+```
+
+Precedence: **explicit > CLI > env > file > all-local**. With nothing
+set, every device is local and behaviour is identical to a build
+without any of this.
+
+### `Config`
+
+```python
+cfg.device(key) -> DeviceConfig          # defaults to local
+cfg.mode_for(key) -> str
+cfg.endpoint_for(key) -> EndpointConfig
+cfg.is_all_local() -> bool
+cfg.to_dict() / Config.from_dict(d)
+```
+
+`endpoint_for()` raises `BenchValueError` if a device is marked remote
+but names no reachable endpoint. That is deliberate — the alternative
+is silently falling back to local and driving the wrong hardware.
+
+`EndpointConfig` rejects `deadman_s <= heartbeat_s` at construction,
+which would otherwise make a healthy link trip the safety governor.
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `BENCHCTRL_REMOTE=host[:port]` | Bind every device to that agent |
+| `BENCHCTRL_TOKEN=...` | Shared secret for the handshake |
+| `BENCHCTRL_LOCAL_DEVICES=a,b` | Force these keys back to local |
+| `BENCHCTRL_SIM_DEVICES=a,b` | Force these keys to simulated |
+| `BENCHCTRL_CONFIG=/path.json` | Alternate config file |
+
+### File format
+
+JSON rather than TOML, because `tomllib` is 3.11+ and the package
+supports 3.9.
+
+```json
+{
+  "endpoints": {
+    "bench": { "host": "bench.local", "port": 9737,
+               "heartbeat_s": 2.0, "deadman_s": 10.0 }
+  },
+  "devices": {
+    "otii_arc":      { "mode": "remote", "endpoint": "bench" },
+    "rigol_dp2031":  { "mode": "sim" },
+    "eastwood_qr10x": { "mode": "local" }
+  }
+}
+```
+
+## `benchctrl.discovery` — what is on this bench
+
+One signature table replacing three ad-hoc mechanisms. Answers "what
+is on this bench", not "where is my device".
+
+```python
+from benchctrl import discovery
+
+discovery.discover() -> list[DiscoveredDevice]
+discovery.find_for(device_key, **kw) -> list[DiscoveredDevice]
+discovery.unidentified(**kw) -> list[DiscoveredDevice]
+discovery.inventory(**kw) -> dict
+discovery.format_inventory(devices) -> str
+
+# individual transports, if you want just one
+discovery.scan_serial() / scan_usbtmc() / scan_visa(rm=None)
+discovery.probe_serial_identity(path, timeout=1.0) -> str | None
+```
+
+Each result carries a **confidence level**. Devices sitting behind
+generic USB-serial bridges (CH340, FTDI, CP210x) are never claimed
+outright, because those VID/PIDs are shared by thousands of unrelated
+products and a guess produces confident false positives. The QR10x
+has no recorded VID/PID at all and is identified by AT probe.
+
+A test asserts that no driver signature collides with a known bridge.

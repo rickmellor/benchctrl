@@ -291,12 +291,15 @@ error frames are detected in-band by the transport reader.
 
 `tests/` has two kinds of tests:
 
-- **Hardware-free** (default): use mock SMUs / instruments. Run in
-  ~3 minutes, no device needed. 313 tests at v1.0.0.
+- **Hardware-free** (default): run in ~7 minutes with no device
+  attached. **956 tests at v1.2.0**, 23 skipped. Most now drive
+  `benchctrl.sim` simulators rather than mocks, so the transport,
+  binary framing, session handshake and reader threads are all
+  genuinely exercised — see [`docs/simulation.md`](docs/simulation.md).
 - **Hardware-marked** (`@pytest.mark.hardware`): require real
-  instruments. Skip gracefully if hardware is absent. 86 tests
-  passing at v1.0 (Arc + DL3031A), 6 QR10x skipped when not
-  connected.
+  instruments. Skip gracefully if hardware is absent. 152 tests at
+  v1.2.0 across Arc + DL3031A + DP2031, with the QR10x set skipped
+  when it isn't connected.
 
 Mock SMUs in battery tests partially implement the
 `SourceMeasurementUnit` Protocol — the methods the subsystem under

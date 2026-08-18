@@ -1,109 +1,128 @@
 # benchctrl build progress
 
-Live status log so anyone (human or AI) picking this up mid-flight knows
-exactly where it is. Updated after every milestone; latest entry on top.
+Live status log so anyone (human or AI) picking this up mid-flight
+knows exactly where it is. Updated after every milestone; latest entry
+on top.
+
+This file is the *working* snapshot. For the release-by-release
+history see [`CHANGELOG.md`](CHANGELOG.md); for what's deliberately
+not built yet see [`ROADMAP.md`](ROADMAP.md); for hardware and
+firmware caps see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 
 ## Status snapshot
 
-- **Phase**: v0.9.7 shipped — adversarial-review fix batch + LIST/battery firmware bugs found
-- **Tests**: 292 hw-free + 90 hardware passing (was 282 + 89 in v0.9.6)
-- **Scenarios captured**: 27 total — 11 QR10x + 11 DL3031A standard + 3 hires + 2 dynamic-list
-- **MCP tool count**: 93 (was 73 in v0.9.6) — DL3031A parity caught up to QR10x
-- **Hardware validation milestones**:
-  - **Profiler**: AA pair, OCV 3.19 V, ESR 3.18 Ω, 10-cycle short profile (15 s, 10.6 µAh used)
-  - **Emulator**: CR2032 profile + QR10x load sweep (100 kΩ → 12 Ω), voltage sag tracks ESR
-    exactly (predicted 28.8 mV vs measured 28 mV at 1 kΩ; predicted 279 mV vs measured 288 mV
-    at 100 Ω), cell "collapses" at 12 Ω as a real CR2032 would, SoC recovery shows new
-    OCV at lower SoC
-  - **Multi-profile matrix (v0.9.2)**: 8 profiles × static sweep + 3 × dynamic IoT pattern
-    saved as reusable test scenarios in `scenarios/saved/`. Validates chemistry-specific
-    behavior (CR2032 collapse, CR123A pulse capability) and LiPo temperature dependency
-    (ESR rises ~10× from +20 °C to −10 °C).
-  - **LiPo support**: auto-range to `set_range("high")` + safety_max clamp at startup.
-    Surfaced Arc Pro high-range limit (~4.2 V under load) — documented and worked around.
-- **MCP tool count**: 48
-- **Verified rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps (native)
-- **MCP server**: 26 tools (was 23 in v0.3.0); `benchctrl-mcp` ready
-- **Claude Code skill** at `skills/benchctrl/SKILL.md`
-- **Output formats**: `.opensmu` / Parquet / CSV / JSON / numpy / pandas
-  / matplotlib — all strictly optional, lazy-imported
-- **SDK ↔ MCP parity principle** documented in `docs/mcp.md` —
-  policy: new SDK features that make sense in a tool-calling context
-  ship with an MCP equivalent in the same release
-- **Last commit**: v0.4.1 MCP sync
-- **Hardware**: Arc Pro on COM6, output off, nothing connected
+- **Version**: 1.2.0
+- **Branch**: `feat/remote-mode` (6 feature commits + a docs pass ahead
+  of `master`)
+- **Tests**: 956 hardware-free + 152 hardware-marked, 23 skipped.
+  Hardware-free suite runs in ~7 minutes with nothing plugged in.
+- **MCP tools**: 226 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
+  cross-driver 13
+- **Drivers**: Otii Arc / Arc Pro (SMU), Eastwood QR10x (programmable
+  resistor), Rigol DL3031A (electronic load), Rigol DP2031
+  (triple-output PSU)
+- **Scenarios captured**: 27 — 11 QR10x + 11 DL3031A standard + 3 hires
+  + 2 dynamic-list
+- **Entry points**: `benchctrl`, `benchctrl-mcp`, `benchctrl-agent`
+- **Hardware**: Arc Pro, DL3031A, DP2031, QR10x. Outputs off between
+  runs; hardware tests skip cleanly when a device is absent.
 
-## v0.2.0 update — what was decoded
+## Where things stand
 
-Methodical sweep across phase33 + new captures phase34c, phase35-43.
+### Shipped and stable
 
-| Item | Status | Wire form |
-|---|---|---|
-| type=0x64 GET interface | DONE | `[seq][0x64][cmd][0]` |
-| Unified Response format | DONE | `[0e 03 99 ff][seq:u32][status:i32][data]` |
-| 180-byte ce-frame | DONE | envelope of baseline records (already parsed) |
-| type=0x0A POLL | DONE | optional host heartbeat |
-| cmd=0x0A SET_POWER_REGULATION | DONE | voltage=0/current=1/inline=10/off=100 |
-| set_tx = set_gpo(3, …) | DONE | bits 6/7 in SET_GPO bit pattern |
-| type=0x82 write_tx | DONE | `[seq][0x82][0x19][utf-8…]` |
-| 0x7E prepare-stop | DONE | flushes packed-stream buffer |
-| Channel inventory (cmd=0x8D) | DONE | 256-byte response, structured |
-| Calibration via API | DECODED as no-op — Desktop path TBD |
-| set_channel_samplerate | DECODED as not-a-wire-command (server concept) |
-| Device-side battery emulation | not observed in available captures |
+**Driver layer** (since 1.0, extended in 1.1). Every instrument is a
+peer under `benchctrl.drivers.<vendor_model>/`, conforming to the
+`SourceMeasurementUnit` Protocol where it makes sense. The DP2031
+landed in 1.1.0 as the largest surface in the codebase — 134 MCP tools
+covering the Arb timer sequencer, the IoT power analyzer, trigger I/O
+and the device filesystem.
 
-## v0.1.1 update (today)
+**Battery subsystem**. Profile I/O, life calculator, hardware
+profiler, and the 100 Hz host-side emulator. Vendor-agnostic — works
+against any conforming driver.
 
-Decoded the missing "start recording" command via a fresh USB capture of
-the Otii server doing a real recording (`33-otii-full-rate.raw` in the
-parent project). Three findings:
+**MCP server**. 226 tools. SDK ↔ MCP parity is a review gate, not an
+aspiration.
 
-1. **Per-channel `type=0x78` is the unlock.** `[seq][0x78][wire_id][1]`
-   enables that channel for streaming, `…[0]` disables. The 8-byte
-   `type=0x7C` cleanup follows the burst.
-2. **The 76-byte `69 83 2a ff …` payload v0.1 sent was wrong.** It was a
-   misread of the device's *inbound* packed sample frame (which carries
-   1 sample per sub-1 channel + 4 packed samples per sub-4 channel,
-   arriving every 1 ms). Sending it had no effect.
-3. **benchctrl's "init step 3"** is the same `type=0x78` command applied
-   to channel `0x17` (rx) — that's what triggers baseline streaming on
-   open.
+**Scenario harness**. Three kinds (static, dynamic, dynamic-list) with
+27 committed captures as reference data.
 
-Wired through `protocol.encode_channel_enable_for_recording`, updated
-`SMU.start_recording` / `stop_recording`, taught `iter_samples` to
-auto-detect and unpack the packed-frame format. Tightened test asserts
-the device actually delivers ≥6000 mc samples in 2 s now (was ≥5).
+### Shipped in 1.2, newest and most likely to move
 
-## What's done
+**`benchctrl.sim`** — wire-protocol simulators over ptys. The stack
+now runs end-to-end with no hardware, and most of the hardware-free
+suite drives simulators rather than mocks, so transport, framing,
+handshake and reader threads stay in the path.
 
-Everything in the v0.1 scope is built, tested, and documented. The
-package is installable (`pip install -e .` works), the CLI is wired up
-(`python -m benchctrl` and `benchctrl` both work), and every documented
-public method is exercised end-to-end.
+**`benchctrl.session` / `.config` / `.discovery`** — the local /
+remote / sim seam. Resolution is per device key, not per process.
+Unconfigured behaviour is byte-for-byte what it was before.
 
-| # | Phase | Status |
-|---|---|---|
-| 1 | Survey official `otii_tcp_client` API | DONE — see `docs/official_api_inventory.md` |
-| 2 | Write design doc | DONE — see `docs/design.md` |
-| 3 | Scaffold package | DONE — `pyproject.toml`, `src/benchctrl/`, MIT license |
-| 4 | Transport + protocol + framing | DONE — `transport.py`, `protocol.py` |
-| 5 | Device (SMU) class | DONE — `device.py` |
-| 6 | Recording + samples | DONE — `recording.py`, `samples.py`, native `.opensmu` format |
-| 7 | TEST_PLAN + pytest suite | DONE — see `TEST_PLAN.md`, `tests/` |
-| 8 | Validation against hardware | DONE — see `VALIDATION_REPORT.md` |
-| 9 | Documentation | DONE — getting started, API reference, protocol, AGENTS.md, design |
-| 10 | Polish + handoff | DONE — this file, CHANGELOG, final commits |
+**`benchctrl.net` + `benchctrl.agent`** — remote mode. Typed frames on
+one socket, HMAC-SHA256 challenge-response auth, allowlisted value
+codec, one owning thread per device, and a safety governor that drives
+outputs off when host contact is lost.
 
-## Resuming in the morning
+**`agent/runs` + `agent/llm`** — declarative unattended experiments
+with a durable event log (SQLite WAL + fsync'd ndjson mirror), and an
+advisory LLM supervisor confined to eight allowlisted tools that
+cannot energise anything.
 
-1. `cd C:\Users\rickm\Desktop\benchctrl`
-2. `cat PROGRESS.md` (this file)
-3. `git log --oneline` to see the trail
-4. `python -m pytest tests/ -q` to confirm all 132 tests still green
-5. `cat ROADMAP.md` to see what's deferred for v0.2
+## Verified measurements
 
-Use `benchctrl info` from the shell as a smoke test against the live
-device.
+Kept here because they are the evidence behind the claims elsewhere in
+the docs.
+
+- **Native rates**: mc 4042 sps, mp 4042 sps, mv 1015 sps
+- **Profiler**: AA pair, OCV 3.19 V, ESR 3.18 Ω, 10-cycle short
+  profile (15 s, 10.6 µAh used)
+- **Emulator**: CR2032 profile + QR10x load sweep (100 kΩ → 12 Ω).
+  Voltage sag tracks ESR closely — predicted 28.8 mV vs measured 28 mV
+  at 1 kΩ; predicted 279 mV vs measured 288 mV at 100 Ω. The cell
+  collapses at 12 Ω as a real CR2032 would, and SoC recovery shows the
+  new OCV at lower SoC.
+- **Multi-profile matrix**: 8 profiles × static sweep + 3 × dynamic IoT
+  pattern, saved in `scenarios/saved/`. Captures chemistry-specific
+  behaviour (CR2032 collapse, CR123A pulse capability) and LiPo
+  temperature dependency — ESR rises ~10× from +20 °C to −10 °C.
+- **Remote mode, end to end**: submitted a run, disconnected the host
+  mid-flight, reconnected, and replayed exactly the missed event range.
+- **LLM supervisor does not gate the run**: a test asserts a 3-second
+  run finishes on time against a 30-second model stall.
+
+## Open threads
+
+Ordered roughly by how much they'd change if picked up next.
+
+1. **Hardware interlock for unattended runs.** `KNOWN_LIMITATIONS` N-1
+   says plainly that a software deadman cannot guarantee an output
+   goes off through a wedged driver. Overnight runs deserve a relay on
+   the same timer. Scoped in `ROADMAP.md`.
+2. **DP2031 as a source in the scenario harness.** The driver shipped
+   in 1.1 but `scenarios/` still only models the load side, so
+   cell-charging scenarios aren't expressible yet.
+3. **DL3031A LIST timing in Arc Pro high range** (§ F-2). Still
+   unresolved; isolating it needs a scope on the trigger line.
+4. **Strict mypy.** `check_untyped_defs` is on, `--strict` is not. CI
+   has mypy as `continue-on-error`. Mostly mechanical.
+5. **Multi-device coordination.** Now partly unblocked — `sim` makes
+   the API designable without a second Arc, so what's left is
+   validation rather than design. Cross-machine timebase is the
+   genuinely hard part and may need a hardware trigger line.
+
+## Design questions currently open
+
+- Should cross-machine recording sync use a designated leader's
+  timebase, or admit that host-clock correlation is the honest limit
+  and expose the uncertainty in the recording metadata?
+- The run engine's chunk rolling is time-based (`chunk_s`). Should it
+  also roll on sample count, for runs whose rate varies a lot between
+  phases?
+- `discovery` currently refuses to claim anything behind a CH340 /
+  FTDI / CP210x bridge. Probing (as the QR10x already does by AT
+  command) is more useful but slower and more intrusive. Worth making
+  the probe opt-in per driver rather than hardcoded?
 
 ## Where to find what
 
@@ -111,72 +130,38 @@ device.
 |---|---|
 | Tutorial for a new user | `docs/getting_started.md` |
 | Every public API element | `docs/api_reference.md` |
-| The USB wire protocol | `docs/protocol.md` |
-| Architecture / decisions | `docs/design.md` |
-| What the official client exposes (for parity) | `docs/official_api_inventory.md` |
+| The Arc USB wire protocol | `docs/otii_arc_protocol.md` |
+| Architecture / decisions | `ARCHITECTURE.md`, `docs/design.md` |
+| Companion driver details | `docs/drivers.md` |
+| Running without hardware | `docs/simulation.md` |
+| Remote mode + deployment | `docs/remote.md` |
+| Unattended runs | `docs/runs.md` |
+| MCP server + tools | `docs/mcp.md` |
+| What the official Otii client exposes (for parity) | `docs/official_api_inventory.md` |
 | AI agent briefing | `docs/AGENTS.md` |
-| Deferred features (v0.2+) | `ROADMAP.md` |
-| Test inventory | `TEST_PLAN.md` |
-| Last validation results | `VALIDATION_REPORT.md` |
+| Deferred features | `ROADMAP.md` |
+| Test strategy + inventory | `TEST_PLAN.md` |
+| Validation results | `VALIDATION_REPORT.md` |
+| Hardware / firmware caps | `KNOWN_LIMITATIONS.md` |
 | Release notes | `CHANGELOG.md` |
-
-## Notable findings during the build
-
-### 1. Device baseline streams at ~6 Hz, not 1 kHz / 4 kHz
-
-The biggest surprise. Both benchctrl and the legacy `arc_direct` library
-get only ~6 Hz across all channels after standard session init. The
-documented native rates (1 kHz subtype-1, 4 kHz subtype-4) are
-capabilities, not the default. A wire-level command unlocks higher
-rates — it's deferred to v0.2 (see `ROADMAP.md` § Full-rate streaming).
-
-Tests were calibrated to the actual rate. Recording functionality is
-fully working; just slower than the maximum the hardware can deliver.
-Useful for any measurement where sub-1-ms detail isn't needed.
-
-### 2. Battery emulation is the biggest scope item for v0.2
-
-The user explicitly flagged battery emulation as the priority for the
-next pass. Scoped in `ROADMAP.md`.
-
-### 3. Floating-point boundaries in time-domain slicing
-
-Switched `slice_indices` from `floor(start*rate)` to `ceil(start*rate)`
-to fix off-by-one when window bounds land exactly on sample boundaries.
-Semantics now: include sample `k` iff `start <= t_k < end`.
-
-## v0.2 priority queue
-
-In order of user-stated interest:
-
-1. **Battery emulation** — host-side OCV/ESR control loop on top of
-   the existing wire vocabulary.
-2. **Full-rate streaming** — decode the unlock command so high-rate
-   channels actually deliver 4 kHz.
-3. **Calibration** — capture the calibration flow, expose with
-   appropriate safety warnings.
-4. **set_channel_samplerate** — re-attempt capture if the Otii server
-   bug is fixed in a newer version.
-
-Multi-device coordination + UART log parsing + project save/load are
-v0.3 candidates.
-
-## Open questions for tomorrow
-
-- Should `set_supply_battery_emulator()` accept a JSON file path
-  directly, or take a parsed `BatteryProfile` dataclass and a
-  `BatteryProfile.from_json()` factory? (Tomorrow's design call.)
-- Should the full-rate streaming unlock be implicit (always on after
-  init) or explicit (`SMU.set_streaming_mode("high")`)?
 
 ## Quick resume commands
 
-```powershell
-cd C:\Users\rickm\Desktop\benchctrl
+```bash
+cd ~/repos/benchctrl
 git log --oneline -20
-python -m pytest tests/ -m "not hardware" -q     # hardware-free, <1 s
-python -m pytest tests/ -m hardware -q            # requires Arc Pro on COM6, ~35 s
-python -m pytest tests/ -q                        # both, 132 tests
-benchctrl discover
-benchctrl info
+
+pytest -m "not hardware" -q     # 956 tests, ~7 min, no hardware
+pytest -m hardware -q           # 152 tests, needs the bench on USB
+pytest -q                       # both
+
+benchctrl discover              # what's on this bench
+benchctrl info                  # smoke test against a live Arc
+```
+
+No hardware to hand:
+
+```bash
+BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031 benchctrl-mcp
+benchctrl-agent --simulate
 ```

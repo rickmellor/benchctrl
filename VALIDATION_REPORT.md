@@ -1,128 +1,181 @@
-# benchctrl v0.1 — validation report
+# benchctrl v1.2.0 — validation report
 
-Generated during the v0.1 build pass. Re-run with `pytest` to refresh.
+Last refreshed **2026-08-17** against `feat/remote-mode`.
+
+Re-run with `pytest` to refresh. Strategy and coverage targets live in
+[`TEST_PLAN.md`](TEST_PLAN.md).
 
 ## Summary
 
-- **Hardware-free tests**: 89 / 89 passed
-- **Hardware-required tests**: 43 / 43 passed (against Arc Pro on COM6)
-- **Total**: 132 / 132 passed
-- **Skipped**: 0
-- **Failed**: 0
-- **Wall time**: ~35 s total
+| Tier | Result | When |
+|---|---|---|
+| Hardware-free | **956 passed, 23 skipped, 0 failed** | Executed 2026-08-17 for this report |
+| Hardware-marked | 152 passed | Last executed during the 1.1.0 / 1.2.0 build passes — **not re-run for this report** |
 
-All green on the first hardware run after one test-expectation calibration
-(see "Findings" below).
+That distinction is deliberate. The hardware-free tier below is a live
+result from this machine. The hardware tier is carried forward from
+the runs recorded in the commits that landed each feature, because no
+instruments were attached when this report was refreshed. Treat the
+hardware numbers as "last known green", not "green today".
 
-## Hardware under test
+### Hardware-free run detail
 
-- Arc Pro on COM6
-- Output: off
-- DUT: nothing connected to output terminals (safe to toggle output)
-- Firmware: opportunistically parsed from inbound stream (see `SMU.version()`)
+```
+956 passed, 23 skipped, 152 deselected in 403.42s (0:06:43)
+```
 
-## Coverage by module
+- **Platform**: Linux 7.0.0-28-generic, Python 3.12.3
+- **Relevant deps**: pyserial 3.5, PyVISA 1.16.2, PyVISA-py 0.8.1, mcp 1.29.0
+- **Hardware attached**: none
 
-| Module | Coverage |
+All 23 skips are environmental, not failures:
+
+| Count | Reason |
 |---|---|
-| `benchctrl.exceptions` | every class exercised, hierarchy + carried fields verified |
-| `benchctrl.channels` | every enum constant + every property + reverse lookup |
-| `benchctrl.protocol` | encode/decode round-trips, every SET command code, GPO bit pattern verified against earlier capture observations, error/ack frame discrimination, garbage skipping, truncation handling |
-| `benchctrl.samples` | parsing, ChannelBuffer slicing, statistics min/max/avg/rms, charge on current channels, energy on power channels, CSV (long/wide) + JSON exports |
-| `benchctrl.recording` | construction, info/statistics/data/timestamps/index_at/count, crop, downsample, rename, log, native binary save/load round-trip including empty recordings, deferred stubs |
-| `benchctrl.transport` | discovery returns typed list, PortInfo display |
-| `benchctrl.device` | every SET command end-to-end against hardware, every client-side range check raises before send, channel enable/disable + co-enables, recording context-manager + manual start/stop, stream iterator, error-frame surfacing, all deferred stubs raise `BenchNotImplementedError` |
+| 8 | `numpy` not installed in this venv |
+| 6 | `pandas` not installed |
+| 3 | `pyarrow` not installed |
+| 5 | `matplotlib` not installed |
+| 3 | Otii desktop app's bundled profiles not present on this system |
 
-## Pass list (selected highlights)
+The first four groups are the `benchctrl[science]` optional extras
+doing exactly what they should — the lazy-import paths skip cleanly
+rather than failing. Install `".[science]"` to clear them.
 
-### Hardware-free
+## What the hardware-free tier actually proves now
 
-- `test_set_main_voltage_encoding` — 3.3 V → 16-byte SET payload with the
-  expected microvolt value and command code
-- `test_gpo_bit_pattern_matches_capture_observations` — encoded values for
-  pin 1 / pin 2 / on / off all match the bytes observed in previous USB
-  captures
-- `test_recording_subtype_one_record_is_twelve_bytes` and
-  `test_recording_subtype_four_record_is_twentyfour_bytes` — the
-  variable-length channel records inside START_RECORDING are encoded with
-  the correct widths
-- `test_native_binary_round_trip` — save then load preserves channel data,
-  offsets, names, sample rates exactly
+This is the part that changed most since the v0.1 report. These tests
+no longer run against mocks of benchctrl classes. They run the
+production drivers against **device simulators** that speak the real
+wire protocol over a pseudo-terminal.
 
-### Hardware-required
+So a green hardware-free run exercises, with nothing monkeypatched:
 
-- `test_set_voltage_low_range_safe_values` — voltages 0.0 / 1.0 / 2.0 /
-  3.0 / 3.25 V all accepted
-- `test_set_output_toggle` — output enable/disable round-trips
-- `test_set_range_low_then_high` — both ranges accepted, state cached
-- `test_set_gpo_all_pin_state_combinations` — both pins × both states
-- `test_record_context_manager_yields_samples` — context manager start,
-  recording fills channel buffers, stop on exit
-- `test_recording_native_round_trip` — recorded data saved to `.opensmu`
-  binary and reloaded with identical sample counts
-- `test_recording_charge_on_current_channel` — `Statistics.charge` is
-  populated for current channels
-- `test_recording_energy_on_power_channel` — `Statistics.energy` is
-  populated for power channels
-- `test_stream_yields_samples` — typed `Sample` objects come out of the
-  iterator with correct `Channel` attribution
+- `Transport` and the pyserial call path
+- the Arc's binary framing, checksums, and resync behaviour
+- the timed three-step session-init handshake
+- `SET` range validation and genuine negative-status error frames
+- baseline streaming and packed sub-1 / sub-4 high-rate framing
+- the recording reader thread
+- for both Rigols, the **real pyvisa stack** via pyvisa-py's ASRL
+  backend
+
+It does not exercise the physics, the analog envelope, or the firmware
+defects catalogued in [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
+Those are what the hardware tier is for.
+
+## Coverage by subsystem
+
+| Subsystem | Coverage |
+|---|---|
+| `exceptions` | every class, hierarchy and carried fields |
+| `channels` | every enum constant, every property, reverse lookup |
+| `interfaces` | `SourceMeasurementUnit` Protocol conformance |
+| `drivers.otii_arc.protocol` | encode/decode round-trips, every SET command code, GPO bit pattern against capture observations, error/ack discrimination, garbage skipping, truncation |
+| `drivers.otii_arc.device` | every setter end-to-end against a simulator, every client-side range check raising before send, channel enable/disable and co-enables, recording context manager and manual start/stop, stream iterator, async error surfacing, deferred stubs |
+| `samples` | parsing, `ChannelBuffer` slicing, statistics incl. charge and energy |
+| `recording` | full lifecycle, plus file **and stream** codecs proven byte-identical |
+| `battery` | profile I/O round-trip, life calculator, profiler, and the 100 Hz emulator loop closed through `OhmicLoad` |
+| `drivers.eastwood_qr10x` | AT surface, relay-ladder quantisation, safety limit |
+| `drivers.rigol_dl3031a` | SCPI surface, LIST / transient / battery-discharge, 4-step rejection |
+| `drivers.rigol_dp2031` | the largest suite — source/measure, protection, IEEE 488.2 status, pairing, Arb timer, analyzer, trigger I/O, memory, block parsers |
+| `config` / `session` | precedence rules, per-device modes, and every loud-failure path |
+| `discovery` | signature table, confidence levels, no collision with known USB bridges |
+| `sim` | pty raw mode, bounded tx queue overrun reporting, end-to-end capture |
+| `net` | framing, blob chunking under heartbeat, HMAC auth incl. rejection, codec allowlist, exception marshalling across four hierarchies |
+| `agent.runs` | spec validation and hashing, tick ordering, dwell times, durability, replay exactness, interrupted-run handling |
+| `agent.llm` | tool allowlist, forward-only phase advance, violation lockout, run-not-gated-by-model |
+| `mcp` | registration, coercion, dict returns, safety guards |
 
 ## Findings
 
-### Finding 1 — device baseline stream rate is ~6 Hz, not 1 kHz / 4 kHz
+### Finding 1 — full-rate streaming resolved (was Finding 1 in v0.1)
 
-The channel capability rates declared in `Channel` (1 kHz for subtype-1
-channels, 4 kHz for subtype-4 channels like `MAIN_CURRENT` and
-`MAIN_POWER`) are *theoretical maxima*. The Arc Pro's actual stream
-after the standard three-step session init is approximately **6 Hz on
-all channels** — verified by:
+The v0.1 report concluded the Arc streamed at ~6 Hz and that a
+wire-level unlock existed but was undecoded. It was decoded in v0.1.1:
+a per-channel `[seq:u32][0x78][wire_id][1]` command. Verified native
+rates are **mc 4042 sps, mp 4042 sps, mv 1015 sps**. The ~6 Hz figure
+remains correct for the *baseline* stream before `start_recording()`.
 
-- Reading raw bytes for 2 s without `start_recording()` → 12 samples per
-  channel
-- Reading inside a `record()` block for 2 s → 11 samples per channel
-- Reading via the legacy `arc_direct.read_raw()` (which is what benchctrl
-  is reverse-engineered from) → same 12 samples per channel
+### Finding 2 — error frame timing (still current)
 
-Conclusion: this is the device's true post-init rate, not an benchctrl
-bug. The Otii desktop client achieves higher rates, so there is a
-wire-level "set high-rate streaming" command we have not yet decoded.
-Logged in `ROADMAP.md` as a v0.2 deferral ("Full-rate sample
-streaming"). Tests were calibrated to assert on the actual rate
-(`>= 5 samples in 2 s`).
+Device-side error responses for an out-of-range `set_voltage()` arrive
+asynchronously and are queued for the next SET to surface. At baseline
+rate this can take 1–2 s. The relevant hardware test polls with a
+timeout rather than asserting immediate delivery. The simulator
+reproduces this ordering, so the async path is now covered
+hardware-free too.
 
-### Finding 2 — error frame timing varies
+### Finding 3 — `start_recording()` does not flush the inbound buffer
 
-The device-side error response for an out-of-range `set_voltage(4.0)` in
-low range arrives in the inbound stream, but at the baseline 6 Hz rate
-it can take ~1-2 seconds to be parsed by the reader thread. The
-`test_set_4v_in_low_range_eventually_raises` test polls for up to 5
-seconds with `pytest.skip` if no error arrives (rather than failing).
-On every run during validation the error was observed within 2 s.
+**Found by the new simulator tests** (KNOWN_LIMITATIONS A-3). A
+recording's first samples can predate the call that started it.
+Documented rather than fixed: a blind flush would also discard
+legitimate in-flight samples.
 
-### Finding 3 — datetime deprecation warnings cleared
+### Finding 4 — `read_chunk` blocks up to 0.5 s
 
-Initial run surfaced `DeprecationWarning: datetime.datetime.utcnow()`
-from `Recording._begin/_end`. Replaced with timezone-aware
-`datetime.now(timezone.utc)`. No warnings on re-run.
+`Transport.read_chunk` blocks in `serial.read(8192)` until the buffer
+fills or the timeout expires, so a running recording reports no
+samples for up to half a second (KNOWN_LIMITATIONS A-4). This bounds
+live progress reporting. Not changed, because altering the read
+strategy touches timing on every recording's hot path.
+
+### Finding 5 — run spec hashing was float-sensitive
+
+`chunk_s=60` and `chunk_s=60.0` compare equal but serialise
+differently, so a spec's content hash changed across a JSON round
+trip — which would have broken the guarantee that a result traces to
+the spec that produced it. Numeric fields are now coerced at
+construction. Caught during 1.2 testing; fixed and covered.
+
+### Finding 6 — two platform constraints shaped the remote design
+
+- Python 3.12+ resolves `runtime_checkable` `Protocol` members with
+  `inspect.getattr_static`, which does not invoke `__getattr__`. A
+  purely dynamic proxy can therefore never satisfy
+  `isinstance(x, SourceMeasurementUnit)`. `RemoteSMU` declares the
+  twelve contract methods explicitly.
+- `QR10xTimeoutError` inherits both `RuntimeError` and `TimeoutError`
+  (an `OSError`), whose C layouts are incompatible, so
+  `cls.__new__(cls)` is rejected outright. Exception rebuilding is a
+  three-strategy cascade.
+
+## Remote-mode validation
+
+Performed during the 1.2 build pass, over the wire against a real
+agent: a run was submitted, the host was disconnected mid-flight,
+reconnected, and the missed event range replayed exactly. Not
+re-executed for this report.
 
 ## How to reproduce
 
-```powershell
-cd C:\Users\rickm\Desktop\benchctrl
-python -m pytest tests/ -m "not hardware" -q     # 89 tests, <1 s
-python -m pytest tests/ -m hardware -q            # 43 tests, ~35 s
-python -m pytest tests/ -q                        # both, 132 tests
+```bash
+cd ~/repos/benchctrl
+pytest -m "not hardware" -q      # 956 tests, ~7 min, no hardware
+pytest -m hardware -q            # 152 tests, needs the bench on USB
+pytest -q                        # both
 ```
 
-To run a single hardware test in isolation:
+To clear the 23 environmental skips:
 
-```powershell
-python -m pytest tests/test_smu_setters.py::test_set_voltage_3v25 -v
+```bash
+pip install -e ".[dev,mcp,bench-visa,science]"
+```
+
+A single test in isolation:
+
+```bash
+pytest tests/test_run_engine.py::test_spec_round_trips_and_hashes -v
 ```
 
 ## Open items
 
-- Re-run after the full-rate streaming command is decoded (ROADMAP.md
-  v0.2) to verify channel buffers see 1 kHz / 4 kHz throughput.
-- Re-run after battery emulation is decoded to add the battery test tier.
-- Add a multi-device run when a second Arc is available.
+- **Re-run the hardware tier and refresh the numbers above.** They are
+  carried forward, not measured today.
+- Add a scenario tier once the DP2031 works as a source in
+  `scenarios/` (see `ROADMAP.md`).
+- Add a multi-device run when a second Arc is available. The API can
+  now be prototyped against two simulators first.
+- Run the MCP suite against a live remote agent as a standing check
+  that the session seam stays transparent.

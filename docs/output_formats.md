@@ -7,7 +7,7 @@ matches what you're going to do with the data.
 
 | Format | Best for | Lossless? | Compact? | Universal? | Extra install? |
 |---|---|---|---|---|---|
-| `.opensmu` (native binary) | Long-term archive, round-trip in benchctrl | yes | yes | benchctrl only | none |
+| `.opensmu` (native binary) | Long-term archive, round-trip in benchctrl, and the remote-mode wire format | yes | yes | benchctrl only | none |
 | Parquet (`.parquet`) | Share with colleagues, load in pandas/polars/duckdb/Excel | yes | **yes** (~10-20× CSV) | pandas/polars/Arrow tooling | `benchctrl[parquet]` |
 | CSV long (`timestamp,channel,value,unit`) | Spreadsheets, shell pipelines, ad-hoc inspection | yes | no (huge for long captures) | universal | none |
 | CSV wide (one column per channel) | Quick plots, drag into Excel | lossy at lower-rate channels | medium | universal | none |
@@ -94,6 +94,35 @@ rec = Recording.load("run.opensmu")   # reconstructs an equivalent Recording
 import pandas as pd
 df = pd.read_parquet("run.parquet")
 ```
+
+### Streams and bytes — `.opensmu` without a filesystem
+
+The `.opensmu` encoding is also available without a path, for cases
+where the recording never touches disk:
+
+```python
+blob = rec.to_bytes()                  # the whole thing, in memory
+rec2 = Recording.from_bytes(blob)
+
+with open("run.opensmu", "wb") as fh:  # or stream it
+    n_bytes = rec.save_to_stream(fh)
+with open("run.opensmu", "rb") as fh:
+    rec3 = Recording.load_from_stream(fh)
+```
+
+This is not a second format. Remote mode transfers recordings as
+`.opensmu` blobs, so these functions are the **wire codec as well as
+the file writer** — one implementation shared by the file path, the
+network, the run engine's chunk files, and `sensor_profiler`'s
+analyzer. `save()` and `load()` are thin wrappers over them and are
+byte-for-byte unchanged.
+
+The one difference: `load()` names the offending path in its error
+message, which `load_from_stream()` cannot know.
+
+Use the stream form when you are sending a recording somewhere,
+embedding it in a larger container, or writing to something that
+isn't a file. Use `save()` / `load()` for ordinary files.
 
 ### In-memory data
 

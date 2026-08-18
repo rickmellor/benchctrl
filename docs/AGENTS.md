@@ -6,34 +6,53 @@ be useful to a user working on benchctrl.
 Companion docs to read alongside this:
 
 - [`README.md`](../README.md) — the project's front door
-- [`ARCHITECTURE.md`](../ARCHITECTURE.md) — one-page tour of the five subsystems
+- [`ARCHITECTURE.md`](../ARCHITECTURE.md) — one-page tour of the subsystems
 - [`KNOWN_LIMITATIONS.md`](../KNOWN_LIMITATIONS.md) — hardware caps, firmware quirks, harness workarounds. **Read this before debugging a new failure.**
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md) — conventions you're expected to follow
 - [`skills/benchctrl/SKILL.md`](../skills/benchctrl/SKILL.md) — Claude Code skill briefing (more usage-focused than this)
 
 ## What this library is
 
-**One sentence**: benchctrl drives a Qoitech Otii Arc / Arc Pro
-source-measurement unit directly over its USB CDC-ACM port from
-Python, with built-in battery emulation, companion-instrument
-drivers, an MCP server, and a reproducible scenarios harness.
+**One sentence**: benchctrl drives a bench of instruments — a Qoitech
+Otii Arc / Arc Pro SMU, programmable loads, a programmable supply —
+directly over USB from Python, with battery emulation, an MCP server,
+a reproducible scenarios harness, and the option to put the
+instruments on another machine or replace them with simulators.
 
 **Why it exists**: a single pure-Python entry point for an entire
-bench — talk to the SMU and the loads through one library, drive
+bench — talk to every instrument through one library, drive
 reproducible experiments from scripts, and expose the whole surface
 to LLM agents through MCP. The Arc wire protocol is documented in
 [`otii_arc_protocol.md`](otii_arc_protocol.md).
 
-The codebase has several subsystems:
+### Subsystems
 
+- **`benchctrl.drivers`** — instrument drivers, all peers: Otii Arc
+  (SMU), Eastwood QR10x (programmable resistor), Rigol DL3031A
+  (electronic load), Rigol DP2031 (triple-output PSU)
+- **`benchctrl.interfaces`** — the `SourceMeasurementUnit` Protocol
+  that drivers conform to; vendor-agnostic subsystems depend on this,
+  never on a concrete driver
 - **`benchctrl.battery`** — battery characterisation + emulation:
   profile I/O, life calculator, hardware profiler, 100 Hz host-side
-  emulator. Works against any `SourceMeasurementUnit`.
-- **`benchctrl.drivers`** — instrument drivers (Otii Arc, QR10x
-  programmable resistor, Rigol DL3031A electronic load)
-- **`benchctrl.mcp`** — MCP server, 92 tools, registers each
-  driver's surface separately
+  emulator
+- **`benchctrl.mcp`** — MCP server, **226 tools**, orchestrator that
+  calls each driver's `register_mcp_tools(mcp)`
+- **`benchctrl.session`** — the local/remote/sim seam. `resolve()`
+  decides *per device key* what a driver singleton actually gets
+- **`benchctrl.config`** — layered JSON configuration behind that seam
+- **`benchctrl.discovery`** — one signature table answering "what is
+  on this bench", with a confidence level
+- **`benchctrl.sim`** — wire-protocol simulators over ptys, so
+  production drivers run with no hardware attached
+- **`benchctrl.net`** — the remote wire protocol: typed frames, HMAC
+  challenge-response auth, allowlisted value codec
+- **`benchctrl.agent`** — the bench-side server, plus `agent.runs`
+  (unattended declarative experiments) and `agent.llm` (advisory
+  supervisor)
 - **`scenarios/`** — top-level harness for reproducible scenarios
+- **`applications/`** — standalone apps built on the SDK
+  (`sensor_profiler`)
 
 ## Where things live
 
@@ -42,59 +61,89 @@ benchctrl/
 ├── README.md, ARCHITECTURE.md          entry points
 ├── CHANGELOG.md, KNOWN_LIMITATIONS.md  changelog + caps/quirks
 ├── CONTRIBUTING.md, PROGRESS.md        dev guide + live status
-├── ROADMAP.md                           deferred features
-├── pyproject.toml                       extras list
+├── ROADMAP.md                          deferred features
+├── TEST_PLAN.md, VALIDATION_REPORT.md  test strategy + results
+├── pyproject.toml                      extras list, entry points
 ├── docs/
-│   ├── getting_started.md               tutorial for new users
-│   ├── api_reference.md                 every public name (all subpackages)
-│   ├── design.md                        SMU-layer architecture decisions
-│   ├── protocol.md                      USB wire protocol reference
-│   ├── battery.md                       battery subsystem walkthrough
-│   ├── bench.md                         bench drivers + firmware modes
-│   ├── mcp.md                           MCP server setup + tools
-│   ├── output_formats.md                .opensmu / Parquet / CSV / pandas / numpy
-│   ├── official_api_inventory.md        what we replicate from otii_tcp_client
-│   └── AGENTS.md                        this file
+│   ├── getting_started.md              tutorial for new users
+│   ├── api_reference.md                every public name
+│   ├── design.md                       Arc-layer architecture decisions
+│   ├── otii_arc_protocol.md            Arc USB wire protocol reference
+│   ├── battery.md                      battery subsystem walkthrough
+│   ├── drivers.md                      QR10x / DL3031A / DP2031 + firmware modes
+│   ├── mcp.md                          MCP server setup + tools
+│   ├── remote.md                       remote mode, security, deployment
+│   ├── runs.md                         unattended runs, spec format
+│   ├── simulation.md                   hardware-free simulators
+│   ├── output_formats.md               .opensmu / Parquet / CSV / pandas / numpy
+│   ├── official_api_inventory.md       what we replicate from otii_tcp_client
+│   └── AGENTS.md                       this file
 ├── src/benchctrl/
-│   ├── __init__.py                      public re-exports
-│   ├── exceptions.py                    BenchError + subclasses
-│   ├── channels.py                      Channel enum + ChannelInfo
-│   ├── protocol.py                      pure framing + command encoding
-│   ├── transport.py                     pyserial wrapper, discovery
-│   ├── samples.py                       parsing, ChannelBuffer, exports
-│   ├── recording.py                     Recording class + .opensmu format
-│   ├── device.py                        SMU class (public)
-│   ├── cli.py                           benchctrl CLI entry
+│   ├── __init__.py                     public re-exports
+│   ├── exceptions.py                   BenchError + subclasses
+│   ├── interfaces.py                   SourceMeasurementUnit Protocol
+│   ├── channels.py                     StandardChannel (driver-agnostic)
+│   ├── samples.py                      parsing, ChannelBuffer, exports
+│   ├── recording.py                    Recording + .opensmu file/stream codec
+│   ├── session.py                      resolve() — local | remote | sim
+│   ├── config.py                       layered config, DEVICE_KEYS
+│   ├── discovery.py                    bench-wide device identification
+│   ├── cli.py                          benchctrl CLI entry
+│   ├── mcp.py                          MCP orchestrator (13 cross-driver tools)
+│   ├── drivers/
+│   │   ├── otii_arc/                   protocol.py, transport.py, device.py,
+│   │   │                               channels.py, mcp_tools.py  (23 tools)
+│   │   ├── eastwood_qr10x/             driver.py, mcp_tools.py    (11 tools)
+│   │   ├── rigol_dl3031a/              driver.py, mcp_tools.py    (45 tools)
+│   │   └── rigol_dp2031/               driver.py, mcp_tools.py    (134 tools)
 │   ├── battery/
-│   │   ├── profile.py                   profile JSON I/O
-│   │   ├── calculator.py                life calculator
-│   │   ├── profiler.py                  fresh-profile generator
-│   │   └── emulator.py                  100 Hz emulator loop
-│   ├── bench/
-│   │   ├── __init__.py                  lazy-imports DL3031A (PEP 562)
-│   │   ├── qr10x.py                     Eastwood programmable resistor
-│   │   └── rigol_dl3031a.py             Rigol electronic load
-│   └── mcp.py                           MCP server (93 tools)
-├── tests/                               282 hw-free + 90 hw-marked
-├── scenarios/
-│   ├── run.py                scenario harness
-│   ├── README.md                        harness docs + results
-│   └── scenarios/                       saved captures (JSON / CSV / PNG)
-├── skills/benchctrl/SKILL.md              Claude Code skill briefing
-└── .github/                             PR + issue templates, CI
+│   │   ├── profile.py                  profile JSON I/O
+│   │   ├── calculator.py               life calculator
+│   │   ├── profiler.py                 fresh-profile generator
+│   │   └── emulator.py                 100 Hz emulator loop
+│   ├── sim/
+│   │   ├── base.py, loopback.py        SimDevice + pty pair
+│   │   ├── otii_arc.py, qr10x.py       per-instrument simulators
+│   │   ├── scpi.py                     both Rigols, via pyvisa-py ASRL
+│   │   ├── waveforms.py                analytically-known signals
+│   │   └── factories.py                production driver + simulator
+│   ├── net/
+│   │   ├── frames.py, codec.py         typed frames, allowlisted values
+│   │   ├── auth.py                     HMAC-SHA256 challenge-response
+│   │   ├── client.py, proxy.py         host side
+│   │   ├── beacon.py                   UDP discovery
+│   │   └── errors.py                   exception marshalling
+│   └── agent/
+│       ├── main.py, server.py          benchctrl-agent entry + server
+│       ├── worker.py, dispatch.py      one owning thread per device
+│       ├── registry.py, safety.py      device table + safety governor
+│       ├── blobs.py, recordings.py     chunked transfer
+│       ├── runs/                       spec.py, engine.py, rules.py, store.py
+│       └── llm/                        supervisor.py, tools.py, client.py
+├── tests/                              956 hw-free + 152 hardware-marked
+├── scenarios/                          harness + saved captures
+├── applications/sensor_profiler/       DUT power profiling + Streamlit browser
+├── examples/                           copy-paste-friendly scripts
+├── bugs/                               vendor firmware bug reports
+├── skills/benchctrl/SKILL.md           Claude Code skill briefing
+└── .github/                            PR + issue templates, CI
 ```
 
 ## Default starting points by task
 
 | Task | Where to look first |
 |---|---|
-| Add a new SMU SET command | `protocol.py` for the encoding, `device.py` for the public method |
-| Decode a new wire feature | `docs/protocol.md`, then `protocol.py` |
-| Understand a behavior | `ARCHITECTURE.md` for the wide view, `docs/design.md` for SMU-layer decisions |
-| Add bench instrument support | `src/benchctrl/bench/__init__.py` (lazy export pattern), then a new module modeled on `qr10x.py` or `rigol_dl3031a.py` |
-| Touch the battery emulator | `src/benchctrl/battery/emulator.py`. Pay attention to the explicit "no try/except" comments in `start()` — those are load-bearing |
-| Add an MCP tool | `src/benchctrl/mcp.py`. Every SDK public method should have a matching tool (SDK ↔ MCP parity — see CONTRIBUTING.md § 1) |
-| Add a validation scenario | `scenarios/run.py`. Three existing kinds: static, dynamic, dynamic-list — model new ones on whichever is closest |
+| Add a new Arc SET command | `drivers/otii_arc/protocol.py` for the encoding, `drivers/otii_arc/device.py` for the public method |
+| Decode a new Arc wire feature | `docs/otii_arc_protocol.md`, then `drivers/otii_arc/protocol.py` |
+| Understand a behavior | `ARCHITECTURE.md` for the wide view, `docs/design.md` for Arc-layer decisions |
+| Add an instrument driver | new package under `src/benchctrl/drivers/`, modeled on `rigol_dl3031a/` |
+| Touch the battery emulator | `battery/emulator.py`. The explicit "no try/except" comments in `start()` are load-bearing |
+| Add an MCP tool | the owning driver's `mcp_tools.py`, or `mcp.py` for cross-driver tools |
+| Change local/remote/sim behaviour | `session.py` first — it is the only seam |
+| Add a simulator behaviour | `sim/<instrument>.py`; SCPI devices share `sim/scpi.py`'s register model |
+| Touch the wire protocol | `net/frames.py` + `net/codec.py`. The codec allowlist is a security boundary |
+| Add a run-spec field | `agent/runs/spec.py` — remember it is content-hashed |
+| Add a validation scenario | `scenarios/run.py`. Three kinds: static, dynamic, dynamic-list |
 | Find out what's deferred | `ROADMAP.md` |
 | Resume mid-task | `PROGRESS.md` |
 | Find out why something doesn't work | `KNOWN_LIMITATIONS.md` |
@@ -104,14 +153,17 @@ benchctrl/
 When generating code for benchctrl users:
 
 ```python
-from benchctrl.drivers.otii_arc import OtiiArc, Channel
+import time
+from benchctrl.drivers.otii_arc import OtiiArc, OtiiArcChannel
+from benchctrl.drivers.eastwood_qr10x import QR10x
+from benchctrl.drivers.rigol_dl3031a import RigolDL3031A
+from benchctrl.drivers.rigol_dp2031 import RigolDP2031
 from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
-from benchctrl.drivers.eastwood_qr10x import QR10x, RigolDL3031A
 
-with SMU.open() as smu:
+with OtiiArc.open() as smu:
     smu.set_voltage(3.3)
     smu.set_current_limit(1.0)
-    smu.enable_channels(Channel.MAIN_VOLTAGE, Channel.MAIN_CURRENT)
+    smu.enable_channels(OtiiArcChannel.MAIN_VOLTAGE, OtiiArcChannel.MAIN_CURRENT)
     with smu.record() as rec:
         smu.set_output(True)
         time.sleep(5)
@@ -121,22 +173,30 @@ with SMU.open() as smu:
 
 Things that look right:
 
-- `SMU.open()` / `QR10x.open(port)` / `RigolDL3031A.open(resource=None)` as context managers
+- `OtiiArc.open()` / `QR10x.open(port)` / `RigolDL3031A.open(resource=None)` /
+  `RigolDP2031.open(resource=None)` as context managers
 - `set_*(...)` methods for writes; properties for cached state reads
-- `Channel` enum for channels (strings accepted at boundaries)
+- `OtiiArcChannel` for Arc channels, `StandardChannel` for
+  driver-agnostic code (strings accepted at both boundaries)
 - `with smu.record() as rec:` for time-bounded captures
 - `Emulator(smu, EmulatorConfig(...))` for battery emulation; `.start()` / `.stop()` / `.state()`
 - For DL3031A LIST mode: `dl.program_list(steps=[(level, width), ...], mode="CC", count=N, trigger_source="BUS")` + `dl.set_input(True)` + `dl.trigger_now()`
+- `SimulatedOtiiArc()` + `OtiiArc.open(sim.port)` for hardware-free work
 
 Things that look wrong (would surprise a maintainer):
 
 - `smu.voltage = 3.3` — properties are read-only; use `smu.set_voltage(3.3)`
 - `try: smu.set_voltage(x); except Exception: pass` — silent fallbacks are bugs; see CONTRIBUTING.md § 4
+- Importing a driver from the wrong package — each lives in its own
+  subpackage under `benchctrl.drivers`; there is no top-level `SMU`
+  and no `benchctrl.bench` (both were removed in 1.0)
 - Calls to deferred methods (calibration, firmware upgrade,
-  `set_supply_battery_emulator`) — these raise `BenchNotImplementedError`. The battery emulator lives in `benchctrl.battery`, not on `SMU`
+  `set_supply_battery_emulator`) — these raise `BenchNotImplementedError`. The battery emulator lives in `benchctrl.battery`, not on the driver
 - Manual wire-byte construction — go through `protocol.py` helpers
-- `subprocess` to drive an external Otii server — there is no server
-- TCP / port 1905 usage — there is no TCP layer
+- `subprocess` to drive an external Otii server — there is no vendor
+  server in the path. (`benchctrl-agent` is *our* server, and only for
+  remote mode)
+- Reaching around `session.resolve()` to decide local-vs-remote
 - 4-step DL3031A LIST programs — firmware bug; driver rejects them. Use 3 or 5 steps with appropriate `count`
 - `dl.set_function_mode("FIXed")` to escape a stuck LIST/WAV/BATT mode — doesn't work; only power-cycle restores FIX
 
@@ -164,68 +224,105 @@ Things that look wrong (would surprise a maintainer):
 - **`:SOUR:CURR:TRAN:FREQuency`**: takes Hz (manual says kHz)
 - **`:SOUR:FUNC:MODE FIXed`**: one-way; only power-cycle restores FIX
 
+### Rigol DP2031
+
+- **USB IDs**: VID `0x1AB1`, PID `0xA4A8` (DP2000 family)
+- **Envelope**: CH1/CH2 0–32 V / 3 A; CH3 0–6 V / 5 A
+- **`:OUTPut:PAIR`** SERies/PARallel survives `*RST`; the PARallel
+  transition takes ≥ 1 s and reads back stale `OFF` meanwhile
+- **`:OUTPut:OVP:CLEar`** clears the latch but does NOT re-enable the
+  output; the `:SOURce<n>:VOLT:PROT:CLEar` form does
+- **`:ANALyzer:COMMon:MEASure:TYPE`** write triggers
+  `VI_ERROR_SYSTEM_ERROR` over USB-TMC — firmware defect, see `bugs/`
+- **`:OCP:DELay?`** returns a string with a `"ms"` suffix
+- **`:SOURce<n>:VOLT? MAX`** includes ~5% headroom over nominal
+- Full list in `KNOWN_LIMITATIONS.md § F-3.5`
+
 ### Eastwood QR10x
 
 - **Wire**: USB-Serial CH340, 115200 8N1, AT command set
+- **No recorded VID/PID** — identified by AT probe in `discovery.py`,
+  because the CH340 bridge VID/PID is shared by thousands of products
 - **End-of-response**: no delimiter; driver uses ~60 ms quiet window heuristic
 - **Safety**: device-enforced `RLIMIT` clamps any setpoint at or above the configured value. Set it for the source voltage you're working with: `V**2 / P_max` (1 W rating gives ~12 Ω at 3.2 V, ~25 Ω at 5 V)
+
+### Remote mode
+
+- **Default port**: 9737. Device keys: `otii_arc`, `eastwood_qr10x`,
+  `rigol_dl3031a`, `rigol_dp2031`
+- **Auth is HMAC-SHA256 challenge-response** — the token never
+  crosses the wire, but traffic is **not encrypted**. SSH tunnel on an
+  untrusted network
+- **`deadman_s` must exceed `heartbeat_s`** or a healthy link trips
+  the safety governor; config rejects it
+- A remote device naming no reachable endpoint is a **loud error**,
+  never a silent fall back to local
 
 ## Common tasks
 
 ### Run the tests
 
 ```bash
-pytest -m "not hardware" -q              # 282 hardware-free, ~3 min
-pytest -m hardware -q                     # ~90 hardware-marked
-pytest -q                                  # all (~5 min with hardware)
+pytest -m "not hardware" -q              # 956 hardware-free, ~7 min
+pytest -m hardware -q                     # 152 hardware-marked
+pytest -q                                  # all (needs the bench on USB)
 ```
 
-### Add a SET command (SMU)
+### Add a SET command (Arc)
 
-1. Add `CMD_SET_*` constant to `protocol.py`
+1. Add `CMD_SET_*` constant to `drivers/otii_arc/protocol.py`
 2. If a new value-units helper is needed, add it
-3. Add a method on `SMU` in `device.py` that:
+3. Add a method on `OtiiArc` in `drivers/otii_arc/device.py` that:
    - validates the input range (client side)
    - calls `self._send_set(CMD_..., encoded_value)`
    - updates `self._state.<field>` with the new value
 4. Add a hardware-free test to `tests/test_protocol_commands.py`
 5. Add a hardware-required test to `tests/test_smu_setters.py`
-6. **Add a matching `@mcp.tool()` in `src/benchctrl/mcp.py`** — parity is checked in review
+6. **Add a matching tool in `drivers/otii_arc/mcp_tools.py`** and
+   append it to that module's `_TOOLS` tuple — parity is checked in review
+7. Teach `sim/otii_arc.py` to answer it, so the hardware-free path stays honest
 
 ### Add an MCP tool
 
-1. Find the corresponding SDK method (if it doesn't exist, you need to add it first)
-2. In `src/benchctrl/mcp.py`, add a `@mcp.tool()` function that calls the SDK method
+1. Find the corresponding SDK method (if it doesn't exist, add it first)
+2. In the owning driver's `mcp_tools.py`, add the function and list it
+   in `_TOOLS`. Cross-driver tools go in `mcp.py`
 3. Coerce JSON-friendly types; return a dict (never a custom dataclass)
 4. For setters that change state, read back via the corresponding `get_*` and include in the return dict for observability
+5. Do **not** reach for the driver directly — go through the
+   module's `_get_<device>()` singleton so `session.resolve()` stays
+   in the path and the tool works remote and simulated too
 
-### Add a bench instrument driver
+### Add an instrument driver
 
-1. Create `src/benchctrl/bench/<vendor_model>.py`
+1. Create `src/benchctrl/drivers/<vendor_model>/` with `driver.py`,
+   `__init__.py`, `mcp_tools.py`
 2. Define an exception hierarchy: `<Vendor>Error` → `<Vendor>ConnectionError` / `<Vendor>CommandError` / `<Vendor>TimeoutError` / `<Vendor>ValueError`
 3. Implement an `open(...)` class method that returns the instance with the transport open
 4. Implement `close()` and `__enter__` / `__exit__` for context-manager use; `__exit__` should also disable any output for safety
-5. Use the same property-read-method-write convention as the SMU class
-6. Add MCP tools in `src/benchctrl/mcp.py`
-7. Lazy-export in `src/benchctrl/bench/__init__.py` if the driver pulls in heavy dependencies (PEP 562 pattern used for `RigolDL3031A`)
-8. Document in `docs/bench.md`
+5. Use the same property-read-method-write convention as the other drivers
+6. Add `register_mcp_tools(mcp)` + a `_TOOLS` tuple in `mcp_tools.py`,
+   and a `_get_<device>()` singleton that populates via `session.resolve()`
+7. Add a key to `config.DEVICE_KEYS` and a signature to `discovery.py`
+8. Add a simulator under `sim/` (SCPI instruments can extend `ScpiDevice`)
+   and a factory in `sim/factories.py`
+9. Document in `docs/drivers.md`
 
 ### Document a firmware bug
 
-When you find an instrument behavior that contradicts the manufacturer's docs:
-
-1. Add an entry to `KNOWN_LIMITATIONS.md` under the appropriate section (`Hardware`, `Driver-firmware interactions`, or `Harness`)
-2. If the driver should reject the known-bad input, implement the rejection at the SDK boundary with a clear error message pointing to the workaround. See `list_set_step_count(4)` in `rigol_dl3031a.py` for the pattern
+1. Add an entry to `KNOWN_LIMITATIONS.md` under the appropriate section (`Hardware`, `Driver-firmware interactions`, `Harness`, or `Network`)
+2. If the driver should reject the known-bad input, implement the rejection at the SDK boundary with a clear error message pointing to the workaround. See `list_set_step_count(4)` in the DL3031A driver for the pattern
 3. Add a test that exercises the rejection
 4. CHANGELOG entry under the current version's "Discovered" subsection
+5. If it's worth filing with the vendor, add a report under `bugs/`
 
-### Decode something new from the SMU wire
+### Decode something new from the Arc wire
 
 1. Capture USB traffic of the vendor stack performing the operation
 2. Look for new `0x66` cmd codes, or new payload types
-3. Add the decoded format to `docs/protocol.md`
-4. Add `parse_*` / `encode_*` helpers to `protocol.py`
-5. Expose via `SMU` method
+3. Add the decoded format to `docs/otii_arc_protocol.md`
+4. Add `parse_*` / `encode_*` helpers to `drivers/otii_arc/protocol.py`
+5. Expose via an `OtiiArc` method
 
 ### Skip-and-mark a blocker
 
@@ -243,7 +340,7 @@ When you find an instrument behavior that contradicts the manufacturer's docs:
   property-reads-method-writes convention. New drivers follow the
   established exception hierarchy + context manager pattern.
 - **Cite line numbers** when discussing internal code:
-  `device.py:123` is more useful than "in the device class".
+  `drivers/otii_arc/device.py:123` beats "in the device class".
 - **Don't replace the wire protocol with a guess**. Every constant
   in `protocol.py` was observed in real captures. Adding a new
   constant needs evidence.
@@ -252,6 +349,14 @@ When you find an instrument behavior that contradicts the manufacturer's docs:
   cleanup that logs at warning level).
 - **Maintain SDK ↔ MCP parity**. Adding a public SDK method without
   the matching MCP tool will fail review.
+- **Respect the safety boundaries.** In `agent/runs`, deterministic
+  rules are the safety system and the LLM is commentary — do not add
+  a model-reachable path that energises anything or widens a declared
+  envelope. In `net/codec.py`, the value allowlist is closed on
+  purpose; resolving a dotted class path from the wire is RCE.
+- **Prefer simulators to mocks.** If you need a driver in a test,
+  reach for `benchctrl.sim` so the real transport and framing stay in
+  the path.
 - **Update PROGRESS.md** if you make non-trivial changes during a
   long-running session — that's how future-you (or another agent)
   picks up the thread.
@@ -261,9 +366,13 @@ When you find an instrument behavior that contradicts the manufacturer's docs:
 - Not affiliated with Qoitech AB, Rigol Technologies, or Eastwood Tech
 - Not a desktop app for end-users — it's a programmatic interface for
   automation and scripting from Python
-- Not a sniffer / man-in-the-middle (talks to the device directly)
+- Not a sniffer / man-in-the-middle (talks to each device directly)
 - Not a firmware update tool (intentionally deferred for safety)
 - Not async — hardware is sequential; the streaming iterator covers
-  "what's the value right now"
-- Not multi-device coordinated — one Arc per `OtiiArc` instance is
-  the supported topology
+  "what's the value right now". `benchctrl.net` is threaded, not
+  asyncio
+- Not encrypted on the wire. Remote mode authenticates; it does not
+  provide confidentiality (see `docs/remote.md`)
+- Not multi-Arc coordinated — one Arc per `OtiiArc` instance is
+  the supported topology. Multiple *different* instruments on one
+  bench is fully supported, and they can be split across machines

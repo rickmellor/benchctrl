@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "benchctrl"
-version = "1.1.0"
+version = "1.2.0"
 description = "Open-source Python control stack for your lab bench — drives an Otii Arc/Pro SMU plus companion programmable loads, with an MCP server, battery emulator, and reproducible-scenario harness."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -79,8 +79,8 @@ benchctrl-mcp = "benchctrl.mcp:main"
 benchctrl-agent = "benchctrl.agent.main:main"
 
 [project.urls]
-Documentation = "https://github.com/benchctrl/benchctrl#readme"
-Repository = "https://github.com/benchctrl/benchctrl"
+Documentation = "https://github.com/rickmellor/benchctrl#readme"
+Repository = "https://github.com/rickmellor/benchctrl"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -22,6 +22,12 @@
 - Async API. The hardware is inherently sequential; the simple sync API is
   easier to use correctly. The single streaming iterator covers the
   "what's the value right now" use case without needing async machinery.
+  This held up when remote mode landed: `benchctrl.net` is threaded,
+  not asyncio, and the driver surface it proxies stayed synchronous.
+- Confidentiality on the wire. Remote mode authenticates (HMAC
+  challenge-response, token never sent) but does not encrypt. An SSH
+  tunnel is the recommended answer on an untrusted network; see
+  `ROADMAP.md` for why TLS is deferred rather than dismissed.
 
 ## Architecture
 
@@ -133,7 +139,7 @@ existing exception-handling idioms still work.
 ## Wire protocol notes
 
 benchctrl implements the exact wire protocol reverse-engineered in the
-parent project (see `docs/protocol.md`). Key points the code relies on:
+parent project (see `docs/otii_arc_protocol.md`). Key points the code relies on:
 
 - Frame: `A3 2C B5 7F` magic + `u16` length + `u16` checksum + payload.
 - Checksum is `sum(payload) & 0xFFFF`.
@@ -218,4 +224,16 @@ DEBUG when `logging.getLogger("benchctrl.protocol").setLevel(logging.DEBUG)`.
 
 ## Versioning
 
-Semver. v0.x is unstable. v1.0 is the first stability commitment.
+Semver. v0.x was unstable; **v1.0 is the stability commitment** and it
+still holds — 1.1 (the DP2031 driver) and 1.2 (simulation, remote
+mode, the run engine) were both purely additive.
+
+The commitment covers the driver public APIs, the `Recording` surface,
+the `SourceMeasurementUnit` Protocol, and the `.opensmu` format.
+Driver-internal modules (`protocol.py`, `transport.py`) are not part
+of it.
+
+`benchctrl.net`, `benchctrl.agent` and `agent.runs` are the newest
+subsystems and the ones most likely to grow. Their *behaviour* through
+the MCP tools is stable — that was the design constraint — but their
+Python surfaces have had less time to settle than the driver layer.

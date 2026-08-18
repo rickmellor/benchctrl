@@ -1,20 +1,37 @@
 # benchctrl MCP server
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that
-exposes your Arc Pro as a set of tools any MCP-aware client (Claude Code,
+exposes your whole bench as tools any MCP-aware client (Claude Code,
 Claude Desktop, Cursor, custom agents) can call. Built on the official
 `mcp` Python SDK.
+
+**226 tools**, registered per driver:
+
+| Source | Tools |
+|---|---|
+| Otii Arc / Arc Pro | 23 |
+| Eastwood QR10x | 11 |
+| Rigol DL3031A | 45 |
+| Rigol DP2031 | 134 |
+| Cross-driver (battery, recording I/O, connection) | 13 |
+| **Total** | **226** |
+
+Each driver registers its own surface via `register_mcp_tools(mcp)`;
+`benchctrl.mcp` is the orchestrator that wires them together. A driver
+whose extras aren't installed simply contributes no tools.
 
 ## Install
 
 ```bash
-pip install "benchctrl[mcp]"
+pip install "benchctrl[mcp]"                  # server + Arc + QR10x
+pip install "benchctrl[mcp,bench-visa]"       # + both Rigols
+pip install "benchctrl[mcp,bench-visa,science]"  # + plot/parquet tools
 ```
 
 For development:
 
 ```bash
-pip install -e ".[mcp,dev]"
+pip install -e ".[mcp,dev,bench-visa,science]"
 ```
 
 ## Run
@@ -32,9 +49,29 @@ Or equivalently:
 python -m benchctrl.mcp
 ```
 
-The server holds the SMU connection for its lifetime — only one process
-can hold the device at a time. Closing the server (or calling the
-`disconnect` tool) releases it.
+The server holds each device connection for its lifetime — only one
+process can hold a given device at a time. Closing the server (or
+calling the `disconnect` tool) releases it.
+
+### Remote and simulated benches
+
+The tools are identical whether the instruments are local, on another
+machine, or simulated. `benchctrl.session` resolves that **per
+device**, so you can mix modes freely:
+
+```bash
+# every device on a bench machine
+BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_TOKEN=... benchctrl-mcp
+
+# Rigols remote, Arc on this laptop
+BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_LOCAL_DEVICES=otii_arc benchctrl-mcp
+
+# no hardware at all
+BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031 benchctrl-mcp
+```
+
+With nothing configured everything is local. See
+[`remote.md`](remote.md) and [`simulation.md`](simulation.md).
 
 ## Wire into Claude Code
 
@@ -73,8 +110,8 @@ Restart Claude Desktop.
 
 ## Safety model
 
-Only **one** tool drives voltage onto the output terminals:
-`enable_output`. It refuses unless **all three** of these are true:
+Tools that energise something require explicit confirmation. On the
+Arc, `enable_output` refuses unless **all three** of these are true:
 
 1. `set_current_limit(amps)` has been called (bounds DUT damage in faults)
 2. `set_voltage(volts)` has been called (so we know what's about to be driven)
@@ -83,10 +120,40 @@ Only **one** tool drives voltage onto the output terminals:
 If any guard fails, the tool returns a structured `{"error": ..., "guidance": ...}`
 response. The `guidance` field tells the LLM exactly what's needed.
 
+The same pattern applies to the companion drivers — `dl3031a_set_input`
+and the DP2031 output tools take confirmation arguments.
+
 Every other tool is non-destructive on a setup with nothing connected to
 the output terminals.
 
+Two boundaries worth knowing if you are pointing a model at a real
+bench:
+
+- **Remote mode does not change the tool surface, but it does change
+  the failure modes.** The agent runs a safety governor that drives
+  outputs off when contact with the host is lost. See
+  [`remote.md`](remote.md).
+- **The run engine's LLM supervisor is a separate, much narrower
+  surface** — eight allowlisted tools, none of which can energise
+  anything or widen a declared safety envelope. It is not this server.
+  See [`runs.md`](runs.md).
+
 ## Tool surface
+
+The tables below cover the Arc and the cross-driver tools. The
+companion drivers follow a prefix convention and map one-to-one onto
+their SDK methods, which are documented in [`drivers.md`](drivers.md):
+
+| Prefix | Driver | Count |
+|---|---|---|
+| `qr10x_*` | Eastwood QR10x | 11 |
+| `dl3031a_*` | Rigol DL3031A | 45 |
+| `dp2031_*` | Rigol DP2031 | 134 |
+
+The DP2031 set is the large one, covering source/measure, protection,
+IEEE 488.2 status, channel pairing and tracking, the Arb timer
+sequencer, the IoT power analyzer, trigger I/O, and the device
+filesystem.
 
 ### Information
 
@@ -260,12 +327,20 @@ plot-to-PNG) instead.
 
 ## What's not exposed
 
-- Battery emulation, calibration, firmware upgrade — deferred at the
-  library level (see [`../ROADMAP.md`](../ROADMAP.md)).
-- The native `.opensmu` file format is round-trippable — to analyse a
-  saved recording, use the Python `Recording.load()` API directly.
-- Multi-device coordination — open one server per device on different
-  port names if needed (one server holds one port).
+- **Calibration and firmware upgrade** — deferred at the library level
+  for safety, not omitted from the tool surface (see
+  [`../ROADMAP.md`](../ROADMAP.md)). The SDK stubs raise
+  `BenchNotImplementedError`.
+- **Multi-Arc coordination** — one server holds one Arc. Multiple
+  *different* instruments on one bench are fully supported by a single
+  server, and as of 1.2 they can be split across machines.
+- **The run engine** — submitting and steering unattended runs is the
+  agent's surface, not this one. See [`runs.md`](runs.md).
+
+Battery emulation *is* exposed (the `battery_*` tools), as is saved-
+recording analysis (`recording_summary`, `plot_recording`,
+`export_recording`) — both were listed as unavailable in older
+versions of this document.
 
 ## Troubleshooting
 

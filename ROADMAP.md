@@ -8,7 +8,7 @@ For shipped features, see [`CHANGELOG.md`](CHANGELOG.md). For known
 hardware/firmware caps and workarounds, see
 [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 
-## Near-term (v0.10 / v1.0)
+## Near-term
 
 ### Resolve DL3031A LIST timing in Arc Pro high range
 
@@ -46,21 +46,45 @@ correlating record timestamps with the trigger instant.
 3. Achievable phase-tagging accuracy: ±1 sample (~250 µs at 4 kHz),
    vs. ±200 ms today
 
-### Hardware test for the DP2031 power supply
+### Validation harness: DP2031 as a source
 
-**Status**: user has expressed interest in adding a Rigol DP2031
-programmable supply for advanced battery emulation (high-V cells the
-Arc can't drive, charge profile drives, etc.). SCPI surface is in the
-same family as DL3031A.
+**Status**: the DP2031 driver shipped in v1.1.0 with full MCP parity,
+but the scenario harness in `scenarios/` still only models the *load*
+side. Cell-charging scenarios need the supply as a first-class actor.
 
-**Scope when picked up** (~2 days with hardware):
-1. New `benchctrl.bench.RigolDP2031` driver modeled on RigolDL3031A
-2. CV/CC/CR modes, OVP/OCP, LIST sequence, timer/wave modes
-3. MCP parity (~25 tools)
-4. Validation harness: extend `_LoadAdapter` to also be a `_SourceAdapter`
-   for cell-charging scenarios
-5. Hardware-marked tests
-6. KNOWN_LIMITATIONS section if firmware quirks shake out
+**Scope when picked up**:
+1. Extend `_LoadAdapter` to also be a `_SourceAdapter`
+2. A charge-profile scenario kind alongside static / dynamic /
+   dynamic-list
+3. Reference captures committed like the existing 27
+
+### Hardware interlock for unattended runs
+
+**Status**: `KNOWN_LIMITATIONS.md § N-1` states the honest position —
+the agent's software deadman drives outputs off when contact is lost,
+but nothing in software can guarantee an output goes off through a
+wedged driver. For genuinely unattended overnight runs that is not
+good enough.
+
+**Scope when picked up**:
+1. Drive a relay or contactor from the agent host's GPIO on the same
+   deadman timer
+2. Expose its state in the run's event stream so the artifact bundle
+   records whether the interlock ever fired
+3. Document the wiring; make it opt-in but loudly recommended in
+   `docs/runs.md`
+
+### Transport-layer encryption for remote mode
+
+**Status**: `benchctrl.net` authenticates with HMAC-SHA256
+challenge-response, so the token never crosses the wire — but the
+traffic itself is plaintext. `docs/remote.md` recommends an SSH
+tunnel, which works and is what we use.
+
+**Why deferred**: TLS means certificate management on a board that
+someone re-flashes regularly, and the SSH tunnel is a complete answer
+for the deployments we have. Worth revisiting if benchctrl ends up on
+a network where a tunnel isn't practical.
 
 ## Foundation hardening
 
@@ -75,21 +99,27 @@ flip `--strict`. Mostly mechanical.
 
 ### Multi-device coordination
 
-**Status**: multiple independent `SMU` instances can already open on
-different ports concurrently. Each gets its own thread-safe protocol
-session. **What's missing**: fan-out helpers
-(`set_all_main(...)`), cross-device sync (shared timebase, simultaneous
-trigger), aggregated recording.
+**Status**: multiple independent `OtiiArc` instances can already open
+on different ports concurrently. Each gets its own thread-safe
+protocol session, and as of v1.2 they can live on different machines.
+**What's missing**: fan-out helpers (`set_all_main(...)`),
+cross-device sync (shared timebase, simultaneous trigger), aggregated
+recording.
 
 **Why deferred**: only one Arc Pro available for hardware validation;
-designing the API responsibly needs a multi-device rig.
+designing the API responsibly needs a multi-device rig. Note that
+`benchctrl.sim` now makes the *API* design testable without one — a
+second simulated Arc costs nothing — so the blocker is narrower than
+it was: it is validation, not design.
 
 **Scope when picked up**:
-1. Acquire a second Arc / Arc Pro
-2. Add a `MultiSMU` class that fans `set_*` / `enable_channels` /
-   recording out across multiple devices
-3. Decide on timebase strategy (host clock vs designated leader)
-4. End-to-end demo: synchronized capture on 2+ devices
+1. Prototype `MultiSMU` against two simulated Arcs
+2. Fan `set_*` / `enable_channels` / recording out across devices
+3. Decide on timebase strategy (host clock vs designated leader).
+   Remote mode makes this harder and more interesting — the honest
+   answer may be that cross-machine sync needs a hardware trigger line
+4. Acquire a second Arc / Arc Pro and validate
+5. End-to-end demo: synchronized capture on 2+ devices
 
 ### Project save/load
 
@@ -171,3 +201,6 @@ got picked up. Full release notes in [`CHANGELOG.md`](CHANGELOG.md).)
 - **v0.6.0** through **v0.8.0**: Battery profile I/O, life calculator, profiler, and emulator landed in `benchctrl.battery`. Implemented as a host-side stack on top of benchctrl's existing wire vocabulary.
 - **v0.9.0** through **v0.9.6**: Bench instrument drivers (QR10x, RigolDL3031A) including firmware-side LIST / transient / battery-discharge modes; MCP server expanded to 93 tools; validation harness with three scenario kinds.
 - **v0.9.7**: Adversarial-review fix-batch — propagating-error model in the emulator, parity catch-up, KNOWN_LIMITATIONS.md, several firmware bugs discovered and worked around.
+- **v1.0.0**: Driver-symmetric architecture. Package renamed `opensmu` → `benchctrl`; the Arc stopped being a privileged top-level class and became a peer under `drivers/`, with the `SourceMeasurementUnit` Protocol as the contract.
+- **v1.1.0**: Rigol DP2031 driver over four phases — the "hardware test for the DP2031 power supply" item from this roadmap. Landed larger than the ~25 tools estimated here: 134 MCP tools covering the Arb timer sequencer, the IoT power analyzer, trigger I/O and the device filesystem.
+- **v1.2.0**: Three items that were never on this roadmap but became obvious once the driver surface stabilised — `benchctrl.sim` (wire-protocol simulators, so the whole stack runs hardware-free), `benchctrl.net` + `benchctrl.agent` (remote mode, instruments on one machine and the agent on another), and `agent/runs` (declarative unattended experiments with a durable event log). All three sit behind `session.resolve()`, so the 226 MCP tools were unchanged.
