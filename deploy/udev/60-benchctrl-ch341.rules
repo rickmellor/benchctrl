@@ -1,0 +1,21 @@
+# Grant the bench user write access to a CH340/CH341 USB-serial bridge.
+#
+# Needed only where the kernel has no ch341 driver (Arduino's Uno Q builds
+# without CONFIG_USB_SERIAL_CH341), so benchctrl drives the chip from
+# userspace over libusb. libusb writes to /dev/bus/usb/BBB/DDD, which the
+# kernel creates root:root 0664 — readable but not writable by the service
+# user, and control transfers need write access.
+#
+# Scoped to this one VID/PID rather than a blanket usb_device rule: 1a86:7523
+# is the CH340G. Do not widen this to all USB devices.
+#
+# Where a kernel ch341 module IS present, this rule is harmless but pointless
+# — use /dev/ttyUSB* instead and skip the userspace driver entirely.
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="7523", \
+    MODE="0660", GROUP="dialout"
+
+# The QR10x has no VID/PID of its own — it is identified by probing the AT
+# command set (see benchctrl/discovery.py). A stable symlink is therefore
+# per-adapter, not per-instrument: only safe when one CH340 is attached.
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="7523", \
+    SYMLINK+="benchctrl/ch341"

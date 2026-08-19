@@ -27,6 +27,31 @@ that enables a DP/HDMI output negotiated *after* Xorg's startup probe,
 which is how HDMI-through-a-USB-C-hub behaves on an Uno Q. Verified
 against the real race, not just a synthetic `udevadm trigger`.
 
+### Userspace CH341 driver — the QR10x on a kernel without `ch341`
+
+Arduino's Uno Q kernel is built `# CONFIG_USB_SERIAL_CH341 is not set`
+with no generic fallback, so the CH340 bridge the QR10x speaks through
+enumerates but binds no driver and no `/dev/ttyUSB*` appears. Loading a
+prebuilt module is out (`CONFIG_MODULE_FORCE_LOAD` off, vermagic
+mismatch) and so is building one (no compiler, no headers package for
+`6.16.7-g0dd6551ae96b`).
+
+`transports/ch341.py` therefore speaks the chip's register protocol over
+libusb, and `transports/ptybridge.py` exposes it as a **real pty**. The
+payoff is that no driver changes: `QR10x.open()` gets a `/dev/pts/N`
+path and opens it with unmodified `serial.Serial`.
+
+Baud and framing registers are pinned against the in-tree
+`drivers/usb/serial/ch341.c` (115200 → prescaler `0x03`, divisor
+`0xcc`; 8N1 LCR → `0xc3`). An unrepresentable rate raises rather than
+programming the nearest one — silently mis-clocking opens the port and
+corrupts every byte, which reads as a protocol bug.
+
+`deploy/udev/60-benchctrl-ch341.rules` grants the bench user write
+access to `/dev/bus/usb/*` for this one VID/PID: libusb control
+transfers need write, and the kernel creates those nodes `root:root
+0664`. Scoped deliberately — not a blanket `usb_device` rule.
+
 ### Fixed
 
 - **`runs_dir` in `agent.json` was silently ignored.** `agent/main.py`
