@@ -27,3 +27,12 @@ venv/
 # (the application code is committed; users create their own runs/)
 applications/*/runs/
 applications/*/__pycache__/
+
+# Vendor manuals and datasheets used while writing drivers. Redistributing
+# them here would be a copyright problem, and they're large binaries that
+# bloat clones. Drivers cite the specific facts they depend on in comments
+# (command, range, tolerance) so the code stands alone without the PDF.
+references/
+*.pdf
+*.pdf:Zone.Identifier
+*.pdf:MSOAVINFO
