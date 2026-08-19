@@ -1,0 +1,10 @@
+# Enable a DP/HDMI output that appears after Xorg has already started.
+#
+# The Uno Q's HDMI arrives as DP altmode through a USB-C hub, which can
+# negotiate later than Xorg's startup probe. See benchctrl-display-hotplug.
+#
+# Deliberately launched via systemd rather than RUN+=: udev kills RUN
+# processes after ~59 s and forbids long-running or sleeping helpers, and this
+# helper waits for the connector's mode list to populate.
+ACTION=="change", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}+="benchctrl-display-hotplug.service"

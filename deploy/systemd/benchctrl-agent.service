@@ -1,0 +1,60 @@
+[Unit]
+Description=benchctrl bench agent (serves instruments over the network)
+Documentation=https://github.com/rickmellor/benchctrl/blob/master/docs/remote.md
+# Binding 0.0.0.0 does not need the network, but the discovery beacon does.
+Wants=network-online.target
+After=network-online.target
+
+# Six failures in a minute means the config or the hardware is wrong; stop
+# power-cycling the instruments and leave the failure visible.
+# These belong in [Unit], not [Service] — systemd moved them in v229 and
+# warns about (and ignores) the old placement.
+StartLimitBurst=6
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+# Invoked as a module rather than the console script because the target board
+# has no pip: the package is unzipped next to pyserial and reached through
+# PYTHONPATH in the environment file. A pip/venv install works too — point
+# PYTHON= at the venv interpreter when running install-agent.sh.
+EnvironmentFile=/etc/benchctrl/agent.env
+ExecStart=/usr/bin/python3 -m benchctrl.agent.main --config /etc/benchctrl/agent.json
+
+# The whole point of the unit. A restart otherwise leaves the DUT rail live
+# across the gap between the old process dying and the new one binding.
+# Best-effort by design: if the driver thread is wedged in a blocking read,
+# no software path can command the output off (see KNOWN_LIMITATIONS.md).
+ExecStopPost=/usr/bin/python3 -m benchctrl.agent.main --config /etc/benchctrl/agent.json --safe-stop
+
+# Disarming talks to real instruments over serial, so give it room to finish
+# rather than having systemd SIGKILL it half way through.
+TimeoutStopSec=60
+
+Restart=on-failure
+RestartSec=5
+
+# Serial instruments are root:dialout 0660, so group membership is what grants
+# access — no need to run this as root.
+User=arduino
+Group=arduino
+SupplementaryGroups=dialout
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+# ProtectSystem=strict would also cover /home, where blob_dir and runs_dir
+# live; "full" leaves /usr, /boot and /etc read-only, which is the part worth
+# protecting here.
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+# PrivateDevices=yes would hide /dev/ttyACM*, which is the entire job.
+PrivateDevices=no
+
+SyslogIdentifier=benchctrl-agent
+
+[Install]
+WantedBy=multi-user.target

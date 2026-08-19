@@ -1,0 +1,18 @@
+{
+  "host": "0.0.0.0",
+  "port": 9737,
+
+  "token": "REPLACE-ME — generate with: benchctrl-agent --generate-token",
+
+  "devices": ["otii_arc"],
+
+  "deadman_s": 15,
+  "heartbeat_s": 5,
+  "max_recording_s": 300,
+
+  "blob_dir": "/home/arduino/benchctrl/blobs",
+  "runs_dir": "/home/arduino/benchctrl/runs",
+
+  "no_beacon": false,
+  "simulate": false
+}

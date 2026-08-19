@@ -152,9 +152,11 @@ guarantee is a hardware interlock: a relay on the DUT rail driven from a
 GPIO, or the Arc's own GPO. Treat the governor as damage limitation, not a
 safety certificate.
 
-Deploy with `ExecStopPost=/usr/local/bin/benchctrl-agent --safe-stop` so a
-service restart disarms the bench rather than leaving an output live across
-the gap.
+Deploy with `ExecStopPost=... --safe-stop` so a service restart disarms the
+bench rather than leaving an output live across the gap. That is what the unit
+in [`deploy/`](../deploy/README.md) does — it invokes `python3 -m
+benchctrl.agent.main` rather than the console script, because the board has no
+pip and reaches the package through `PYTHONPATH`.
 
 ## What is different in remote mode
 
@@ -245,6 +247,17 @@ PYTHONPATH=. python3 -m benchctrl.agent.main --simulate
 ```
 
 A wheel is a zip; unzipping `pyserial` next to the package is enough.
+
+Once that runs by hand, install the service — unit, config and token in one
+step:
+
+```bash
+cd deploy && sudo ./install-agent.sh
+```
+
+See [`deploy/README.md`](../deploy/README.md) for the installed layout, the
+`SRC_DIR`/`PYTHON`/`RUN_USER` knobs, how to prove the `--safe-stop` path
+actually fires, and an optional fix for HDMI through a USB-C hub.
 
 Other board notes:
 

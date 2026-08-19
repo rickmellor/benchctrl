@@ -87,11 +87,15 @@ def load_agent_config(path: Optional[Path]) -> dict:
     except (OSError, json.JSONDecodeError) as exc:
         log.error("could not read %s: %s", candidate, exc)
         return {}
-    mode = Path(candidate).stat().st_mode & 0o077
+    # Only "other" bits are a finding. The documented deployment mode is 0640
+    # root:<service user>, so masking group bits too made the warning fire on
+    # the very mode it recommends — and the service user needs group read.
+    mode = Path(candidate).stat().st_mode & 0o007
     if raw.get("token") and mode:
         log.warning(
-            "%s holds a token but is group/world-readable — run: chmod 640 %s",
+            "%s holds a token but is world-accessible (mode %o) — run: chmod 640 %s",
             candidate,
+            Path(candidate).stat().st_mode & 0o777,
             candidate,
         )
     return raw
@@ -158,6 +162,11 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901
         heartbeat_s=heartbeat_s,
         max_recording_s=max_recording_s,
         blob_store=BlobStore(spill_dir=cfg.get("blob_dir") or default_spill_dir()),
+        # Under systemd there is no meaningful cwd, so the fallback
+        # ``$CWD/benchctrl-runs`` would scatter run bundles wherever the unit
+        # happened to start. The config key has to reach the RunManager.
+        runs_dir=Path(cfg["runs_dir"]) if cfg.get("runs_dir") else None,
+        llm_base_url=cfg.get("llm_base_url", ""),
     )
     server = AgentServer(agent, host=host, port=port).start()
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Enable connected-but-unconfigured DRM outputs on the running X server
+Documentation=file:/usr/local/bin/benchctrl-display-hotplug
+# Nothing to do without a display manager; also covers the boot-time race,
+# since a hotplug that lands before lightdm is up will find no Xorg and exit 0.
+After=lightdm.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/benchctrl-display-hotplug
+# Hotplug can fire several times in a burst (unplug/replug, DP link retrain);
+# serialise rather than racing xrandr against itself.
+ExecStartPre=/bin/sh -c 'sleep 1'
+TimeoutStartSec=30

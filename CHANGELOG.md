@@ -7,6 +7,39 @@ Known limitations across all versions are tracked in
 firmware quirks, harness workarounds). Read it before debugging a
 new failure — it's likely a documented limit.
 
+## [Unreleased]
+
+### `deploy/` — the agent as a systemd service
+
+`docs/remote.md` prescribed an `ExecStopPost=... --safe-stop` unit but
+shipped no unit file. `deploy/` now holds the real thing plus
+`install-agent.sh`, which generates a token, writes
+`/etc/benchctrl/agent.json` at 0640, installs the unit and verifies
+the import path *before* touching systemd — a wrong `PYTHONPATH`
+otherwise surfaces only as a unit flapping every 5 s.
+
+`ExecStart` invokes `python3 -m benchctrl.agent.main`, not the console
+script the docs suggested: the target board has no pip and reaches the
+package through `PYTHONPATH`. `PYTHON=` covers the venv case.
+
+Also `deploy/install-display-hotplug.sh` — a udev-triggered oneshot
+that enables a DP/HDMI output negotiated *after* Xorg's startup probe,
+which is how HDMI-through-a-USB-C-hub behaves on an Uno Q. Verified
+against the real race, not just a synthetic `udevadm trigger`.
+
+### Fixed
+
+- **`runs_dir` in `agent.json` was silently ignored.** `agent/main.py`
+  built `BenchAgent` without forwarding it, so every run bundle landed
+  in `$CWD/benchctrl-runs` regardless of config. Invisible when
+  launching by hand from a checkout; under systemd there is no
+  meaningful cwd. `llm_base_url` was unforwarded the same way.
+- **The token-permission warning fired on the mode it recommended.**
+  The check masked `st_mode & 0o077`, so the documented 0640
+  `root:<service user>` deployment tripped it and was told to `chmod
+  640`. Now masks `0o007` — group read is required for the service
+  user to read its own config; only world access is a finding.
+
 ## [1.2.0] — remote mode, unattended runs, and hardware-free simulation
 
 Three things land together, each usable on its own: instrument

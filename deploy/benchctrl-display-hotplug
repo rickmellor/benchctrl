@@ -1,0 +1,83 @@
+#!/bin/sh
+# Enable any connected-but-unconfigured DRM output on the running X server.
+#
+# Why this exists: the Uno Q's only connector is card0-DP-1, fed by DP altmode
+# through a USB-C hub. If the hub negotiates DP *after* Xorg starts, Xorg logs
+# "No outputs definitely connected" and never assigns a CRTC. The kernel sees
+# the later hotplug (sysfs `status` becomes "connected" and `modes` fills in),
+# but nothing tells X to use it, so `enabled` stays "disabled" and the panel
+# stays dark.
+#
+# Invoked from udev via display-hotplug.service on drm change events, so it
+# runs as root with no DISPLAY/XAUTHORITY in the environment — both are
+# recovered from the running Xorg process.
+
+set -eu
+
+log() { logger -t display-hotplug "$@"; }
+
+# Xorg's own argv is the source of truth for the auth file. Parsing it beats
+# guessing /var/run/lightdm/root/:0, which is lightdm-specific and versioned.
+xorg_pid=$(pgrep -x Xorg | head -1 || true)
+if [ -z "$xorg_pid" ]; then
+    log "no Xorg running; nothing to do"
+    exit 0
+fi
+
+# cmdline is NUL-separated; the display is the ":N" argv entry and the auth
+# file is the token after -auth.
+auth=""
+display=""
+prev=""
+for arg in $(tr '\0' '\n' < "/proc/$xorg_pid/cmdline"); do
+    [ "$prev" = "-auth" ] && auth="$arg"
+    case "$arg" in
+        :[0-9]*) display="$arg" ;;
+    esac
+    prev="$arg"
+done
+
+if [ -z "$display" ] || [ -z "$auth" ]; then
+    log "could not recover display/auth from Xorg pid $xorg_pid"
+    exit 0
+fi
+if [ ! -r "$auth" ]; then
+    log "auth file $auth not readable"
+    exit 0
+fi
+
+export DISPLAY="$display" XAUTHORITY="$auth"
+
+# A hotplug can fire before the connector's mode list is populated; a bare
+# --auto then has nothing to pick and silently does nothing.
+changed=0
+for status_file in /sys/class/drm/card*-*/status; do
+    conn_dir=$(dirname "$status_file")
+    conn=$(basename "$conn_dir")
+    # Strip the "cardN-" prefix: sysfs says card0-DP-1, xrandr says DP-1.
+    name=${conn#card*-}
+
+    [ "$(cat "$status_file" 2>/dev/null)" = "connected" ] || continue
+    [ "$(cat "$conn_dir/enabled" 2>/dev/null)" = "disabled" ] || continue
+
+    # Wait for at least one mode to appear (EDID/DDC can lag the hotplug).
+    i=0
+    while [ ! -s "$conn_dir/modes" ] && [ "$i" -lt 10 ]; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+    if [ ! -s "$conn_dir/modes" ]; then
+        log "$name connected but reported no modes; skipping"
+        continue
+    fi
+
+    if xrandr --output "$name" --auto 2>&1 | logger -t display-hotplug; then
+        log "enabled $name ($(head -1 "$conn_dir/modes"))"
+        changed=1
+    else
+        log "xrandr failed to enable $name"
+    fi
+done
+
+[ "$changed" -eq 0 ] && log "no connected-but-disabled outputs found"
+exit 0
