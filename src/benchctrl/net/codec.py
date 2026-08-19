@@ -72,6 +72,7 @@ def _wire_types() -> dict[str, type]:
     add("benchctrl.drivers.eastwood_qr10x.driver", "QR10xInfo")
     add("benchctrl.drivers.rigol_dl3031a.driver", "RigolDLInfo")
     add("benchctrl.drivers.rigol_dp2031.driver", "RigolDP2031Info")
+    add("benchctrl.drivers.siglent_sdm4065a.driver", "SDM4065AInfo")
     add("benchctrl.battery.profile", "BatteryProfile", "DischargeStep")
     add("benchctrl.battery.emulator", "EmulatorState")
 

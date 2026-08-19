@@ -40,6 +40,7 @@ DEVICE_KEYS: tuple[str, ...] = (
     "eastwood_qr10x",
     "rigol_dl3031a",
     "rigol_dp2031",
+    "siglent_sdm4065a",
 )
 
 MODES: tuple[str, ...] = ("local", "remote", "sim")

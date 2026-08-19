@@ -65,13 +65,14 @@ Mode resolves **per device key**, which is what lets you split a bench:
     "otii_arc":       {"mode": "remote", "endpoint": "bench"},
     "eastwood_qr10x": {"mode": "remote", "endpoint": "bench"},
     "rigol_dl3031a":  {"mode": "local"},
-    "rigol_dp2031":   {"mode": "local"}
+    "rigol_dp2031":   {"mode": "local"},
+    "siglent_sdm4065a": {"mode": "remote", "endpoint": "bench"}
   }
 }
 ```
 
-Arc and QR10x on the bench, both Rigols plugged into the laptop, one MCP
-server driving all four.
+Arc, QR10x and the DMM on the bench, both Rigols plugged into the
+laptop, one MCP server driving all five.
 
 Agent side, `/etc/benchctrl/agent.json` (mode 0640):
 
@@ -247,6 +248,29 @@ PYTHONPATH=. python3 -m benchctrl.agent.main --simulate
 ```
 
 A wheel is a zip; unzipping `pyserial` next to the package is enough.
+
+### USB-TMC instruments need three more wheels, and a udev rule
+
+The SDM4065A and both Rigols talk USB-TMC, which `pyserial` cannot do. Where
+the board's kernel has no `usbtmc` module — Arduino's Uno Q build does not —
+`pyvisa-py` speaks the protocol over libusb instead. All of it is pure Python,
+so the same unzip trick works:
+
+```bash
+pip download --no-deps -d /tmp/w pyvisa pyvisa-py typing_extensions pyusb
+cd /tmp/w && for w in *.whl; do unzip -q -o "$w" -d staged; done
+rm -rf staged/*.dist-info
+scp -O -r staged/. board:/home/arduino/benchctrl-1.2.0/src/
+```
+
+`libusb-1.0.so.0` itself is a system library and was already present on the
+Uno Q.
+
+Then install `deploy/udev/61-benchctrl-usbtmc.rules`, or the instruments are
+**invisible rather than unopenable** — `discover()` returns `[]` and the driver
+reports "no SDM4065A found", which looks exactly like a bad cable. See
+[`KNOWN_LIMITATIONS.md`](../KNOWN_LIMITATIONS.md) § F-6 for why, and
+[`deploy/README.md`](../deploy/README.md) for the install.
 
 Once that runs by hand, install the service — unit, config and token in one
 step:

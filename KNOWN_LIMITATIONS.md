@@ -73,6 +73,40 @@ input on for the whole list and changes only the LIST setpoints.
 
 Code reference: `scenarios/README.md` § "DL3031A switching latency".
 
+### H-5. SDM4065A 2-wire resistance carries ~0.2 Ω of lead error
+Per the SDM4000A datasheet note [6], the 2-wire (`RESistance`)
+function's accuracy spec assumes lead and contact resistance has been
+nulled out; unnulled it contributes about **0.2 Ω** in series with the
+DUT. At 100 Ω that is a 0.2 % error — an order of magnitude larger
+than the meter's own accuracy contribution, and 5x larger than the
+38 mΩ offset the QR10x cross-validation is trying to resolve.
+
+Affects: any 2-wire reading below a few hundred ohms.
+
+Workaround: use `measure_resistance_4wire()` with sense leads, or
+short the leads and call `null_now()` before measuring. For a
+4½-digit reading of a 100 Ω part, 2-wire without a null is not a
+measurement.
+
+Not yet bench-quantified on our unit — the figure is the datasheet's.
+`test_cross_validate_sdm4065a_qr10x.py::test_4_wire_beats_2_wire_by_
+about_the_lead_resistance` measures it (same resistance read both ways
+on the same leads, printing the difference in mΩ) and this entry gets
+the measured number once that has run. It is blocked on F-6, not on
+wiring.
+
+Note what the cross-validation *cannot* settle: the QR10x's ±0.05%
+spec dominates the meter's, so two-instrument agreement at 100 Ω is
+budgeted at ~0.07 Ω — wider than the 0.2 Ω lead error but also wider
+than the 38 mΩ offset. The lead-resistance measurement works because
+it differences two readings from the *same* meter, cancelling the
+QR10x term entirely.
+
+Code reference:
+`src/benchctrl/drivers/siglent_sdm4065a/driver.py` —
+`measure_resistance` docstring; `docs/drivers.md` § "2-wire vs 4-wire";
+`tests/test_cross_validate_sdm4065a_qr10x.py`.
+
 ## Driver / firmware interactions
 
 ### F-1. DL3031A `:SOUR:LIST:STEP 4` fires no steps (firmware bug)
@@ -292,6 +326,89 @@ Code reference: `src/benchctrl/bench/rigol_dl3031a.py` —
 `list_set_step_count`, `list_set_slew`, `_LIST_END_VALUES`,
 `_fetch_discharging_time_s`, `transient_set_frequency`.
 
+### F-5. SDM4065A command semantics that make the obvious call wrong
+From the SDM4000A remote manual, verified against the extracted text
+section by section rather than taken on trust. All four are handled by
+the driver; they are recorded here because each one silently produces
+a *plausible* wrong number, which is the hardest class of defect to
+notice on a meter.
+
+- **`MEASure:<fn>?` is `CONFigure` + `READ?` in one command**, and
+  `CONFigure` resets that function's NPLC, null state, null value and
+  range to defaults. So `null_now()` followed by
+  `measure_resistance()` silently discards the null — the API's most
+  natural call sequence is the broken one. The driver samples the
+  offset with `READ?`, and `read_nulled()` raises rather than quietly
+  returning an un-nulled number.
+- **Enabling `NULL:STATe` arms `NULL:VALue:AUTO`** (§7.4.2), so the
+  instrument overwrites the offset with its own next reading. Writing
+  a value disarms AUTO (§7.4.3), so the order must be state first,
+  value second. The natural value-then-state order nulls by the wrong
+  number.
+- **The default resistance range is 2 kΩ, not autorange** (§7.4.5).
+  A 100 Ω DUT lands there silently, costing a factor of ten on the
+  percent-of-range accuracy term.
+- **One manual covers the SDM4045A / 4055A / 4065A**, and the columns
+  differ: the 4065A tops out at 1 MΩ where the 4055A has 2 MΩ, and
+  accepts six NPLC values where the 4055A accepts three. Resistance
+  autozero is 4065A-only and defaults **off** (§7.4.7). A constant
+  taken from the wrong column yields a driver that works and reports
+  plausible numbers; both lists are validated against the 4065A
+  column and the rejection message names the sibling model.
+
+Also worth knowing, though not a limitation: Siglent documents SCPI
+headers **without** the leading root colon (`SYSTem:ERRor?` where
+Rigol writes `:SYSTem:ERRor?`). Both work on the instrument. Our
+simulator accepts both deliberately — matching only the prefixed form
+would send error queries to the generic register model, which answers
+`0`, i.e. a permanently clean error queue.
+
+Code reference:
+`src/benchctrl/drivers/siglent_sdm4065a/driver.py` — `null_now`,
+`read_nulled`, `_validate_range`, `set_nplc`, `set_autozero`;
+`src/benchctrl/sim/sdm4065a.py` — `_install_rootless_aliases`.
+
+### F-6. USB-TMC instruments are *invisible*, not unopenable, without a udev rule
+Bench-verified on the Uno Q board. Its kernel has no `usbtmc` module,
+so pyvisa-py drives USB-TMC instruments over libusb, which needs write
+access to `/dev/bus/usb/BBB/DDD` — created `root:root 0664`.
+
+The surprise is the symptom. A permission problem would normally raise;
+here the device silently vanishes:
+
+```
+discover() -> []
+SDM4065AConnectionError: no SDM4065A found (0xF4EC:0x1220). VISA
+reported: ['ASRL/dev/ttyACM0::INSTR', ...]
+```
+
+pyvisa-py must read the USB **string descriptors** to build a resource
+name, and that read is a control transfer needing write access. It
+fails, so the device never appears in `list_resources()` at all. The
+error message is then indistinguishable from an unplugged instrument.
+
+Confirmed as permissions, not cabling: `usb.core.find()` locates
+`f4ec:1220` and reads its bus/address, but `os.access(node, os.W_OK)`
+is `False` where `os.R_OK` is `True`, and reading `device.manufacturer`
+raises `ValueError: The device has no langid (permission issue, ...)`.
+
+Affects: SDM4065A and both Rigols, on any board without a kernel
+`usbtmc` module.
+
+Workaround: install `deploy/udev/61-benchctrl-usbtmc.rules`, then
+`udevadm control --reload-rules && udevadm trigger --action=add` — the
+trigger is required, since udev sets permissions at event time and an
+already-plugged device is not re-evaluated by a reload alone.
+
+Not fixable in the driver: no amount of Python can widen a file mode
+it does not own. The driver's `open()` error message names the
+pyusb/libusb requirement for this reason.
+
+Code reference:
+`deploy/udev/61-benchctrl-usbtmc.rules`; `deploy/README.md` §
+"USB-TMC instruments on a kernel without `usbtmc`";
+`src/benchctrl/drivers/siglent_sdm4065a/driver.py` — `open`, `discover`.
+
 ## Harness
 
 ### A-1. Emulator + `SMU.record()` deadlock
@@ -455,3 +572,8 @@ Things we **don't** consider limits — they're just facts:
 - The QR10x's relay-switching delay (30–95 ms) is documented as a
   hardware spec, not a limit.
 - The DL3031A's 60 A / 350 W rating is a hardware spec.
+- The SDM4065A's `9.9E37` overload sentinel is documented instrument
+  behaviour, not a defect. The driver raising `SDM4065AOverloadError`
+  instead of returning it is a deliberate choice: the sentinel is a
+  valid float and would otherwise propagate into arithmetic as a
+  believable reading.

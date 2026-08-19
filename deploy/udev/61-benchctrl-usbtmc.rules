@@ -1,0 +1,33 @@
+# Grant the bench user write access to USB-TMC instruments driven over libusb.
+#
+# Needed on boards with no kernel `usbtmc` module (Arduino's Uno Q builds
+# without it, so there is no /dev/usbtmc0 to open). pyvisa-py then speaks
+# USB-TMC over libusb, which writes to /dev/bus/usb/BBB/DDD — created
+# root:root 0664 by the kernel. Bulk and control transfers need *write*, so
+# without this the agent fails at open with an empty resource list rather
+# than a permission error: pyvisa-py cannot read the string descriptors it
+# needs to build the resource name, so the instrument is invisible rather
+# than merely unopenable. That silent-invisibility failure mode is why this
+# rule is easy to misdiagnose as a bad cable.
+#
+# Same mechanism as 60-benchctrl-ch341.rules; separate file because that one
+# is about a missing *serial* driver and this is about a missing *TMC* one.
+#
+# Scoped per VID/PID rather than a blanket usb_device rule — do not widen.
+
+# Siglent (Atten) — SDM4045A/4055A/4065A bench DMMs share 0xf4ec:0x1220.
+SUBSYSTEM=="usb", ATTR{idVendor}=="f4ec", ATTR{idProduct}=="1220", \
+    MODE="0660", GROUP="dialout"
+
+# Rigol DL3000-series electronic load.
+SUBSYSTEM=="usb", ATTR{idVendor}=="1ab1", ATTR{idProduct}=="0e11", \
+    MODE="0660", GROUP="dialout"
+
+# Rigol DP2000-series power supply.
+SUBSYSTEM=="usb", ATTR{idVendor}=="1ab1", ATTR{idProduct}=="a4a8", \
+    MODE="0660", GROUP="dialout"
+
+# NOTE: no SYMLINK+= here, deliberately. The CH341 rule can offer a stable
+# symlink because the QR10x is opened by *path*; USB-TMC instruments are
+# opened by VISA resource string built from the USB serial number, which is
+# already stable and unique per instrument.

@@ -9,8 +9,9 @@ none of it; see [`docs/remote.md`](../docs/remote.md) for the client config.
 | [`install-agent.sh`](install-agent.sh) | the agent as a systemd service, disarming the bench on stop |
 | [`install-display-hotplug.sh`](install-display-hotplug.sh) | optional: makes HDMI-through-a-USB-C-hub work on an Uno Q |
 | [`verify-ch341-qr10x.sh`](verify-ch341-qr10x.sh) | required for a QR10x on a kernel without `ch341`: installs the udev rule, then proves the instrument end to end |
+| [`udev/61-benchctrl-usbtmc.rules`](udev/61-benchctrl-usbtmc.rules) | required for USB-TMC instruments (SDM4065A, both Rigols) on a kernel without `usbtmc` |
 
-All three are POSIX `sh`, root-only, and idempotent.
+The three scripts are POSIX `sh`, root-only, and idempotent.
 
 ## The agent service
 
@@ -152,6 +153,42 @@ same as `pyserial`; see [`docs/remote.md`](../docs/remote.md)).
 
 Verified end to end on a real QR101A-1M-R1 (serial 00000248, fw 5.967KS): a
 100.0 Ω setpoint reading back 100.038 Ω, repeatable across open/close cycles.
+
+## USB-TMC instruments on a kernel without `usbtmc`
+
+| File | Installs to |
+|---|---|
+| `udev/61-benchctrl-usbtmc.rules` | `/etc/udev/rules.d/` (0644) |
+
+Same mechanism as the CH341 rule above, different missing driver. The Uno Q
+builds without `CONFIG_USB_TMC`, so there is no `/dev/usbtmc0` for the SDM4065A
+or either Rigol; pyvisa-py drives them over libusb instead, which again needs
+write access to `/dev/bus/usb/BBB/DDD`.
+
+**The failure mode is worse than a permission error.** Without the rule the
+instrument is *invisible*, not merely unopenable:
+
+```
+$ python3 -c "from benchctrl.drivers.siglent_sdm4065a import discover; print(discover())"
+[]
+```
+
+pyvisa-py needs to read the USB **string descriptors** to build a resource
+name, and that read is a control transfer — so it fails, and the device is
+omitted from `list_resources()` entirely. The driver then reports "no SDM4065A
+found", which reads exactly like a bad cable. Confirmed on the bench board:
+`usb.core.find()` locates `f4ec:1220` fine, and `os.access(node, os.W_OK)` is
+`False` while `os.R_OK` is `True`.
+
+```bash
+sudo install -m 0644 udev/61-benchctrl-usbtmc.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger --action=add     # existing devices need this, see above
+```
+
+Needs `pyvisa` and `pyvisa-py` on the board alongside `pyusb`. All three are
+pure Python — unzip the wheels next to `benchctrl`, same as `pyserial`.
+`pyvisa-py` also wants `typing_extensions`.
 
 ## Display hotplug
 

@@ -16,6 +16,7 @@ Each driver is independent and optional. Import only what you need.
 | Eastwood Tech QR10x programmable resistance | `benchctrl.drivers.eastwood_qr10x.QR10x` | USB-Serial (CH340) | **shipped (v0.9.0)** |
 | Rigol DL3031A electronic load | `benchctrl.drivers.rigol_dl3031a.RigolDL3031A` | USB-TMC + SCPI via pyvisa | **shipped (v0.9.3)** |
 | Rigol DP2031 triple-output programmable PSU | `benchctrl.drivers.rigol_dp2031.RigolDP2031` | USB-TMC + SCPI via pyvisa | **shipped (v1.1.0)** |
+| Siglent SDM4065A 6½-digit bench DMM | `benchctrl.drivers.siglent_sdm4065a.SiglentSDM4065A` | USB-TMC + SCPI via pyvisa | **shipped (unreleased)** |
 
 ## QR10x — programmable resistance
 
@@ -430,3 +431,196 @@ reproductions ready to file with Rigol. Highlights:
 - `:ANALyzer:COMMon:MEASure:TYPE` write triggers
   `VI_ERROR_SYSTEM_ERROR` over USB-TMC — firmware defect. The SDK
   method is per-spec but unusable on this firmware.
+
+## Siglent SDM4065A — 6½-digit bench DMM
+
+[Siglent SDM4065A](https://www.siglent.eu) — 6½-digit dual-display
+bench multimeter. DC/AC volts and amps, 2- and 4-wire resistance,
+capacitance, frequency, period, continuity, diode and temperature.
+
+This is the first *measurement-only* driver in the tree: it sources
+nothing, so unlike the load and the supply there is no output an agent
+can accidentally energise. The failure mode to guard against is a
+**plausible wrong number**, and the API is shaped around that.
+
+USB-TMC via pyvisa. LXI also works — pass a `TCPIP::` resource string.
+
+### Quick start
+
+```python
+from benchctrl.drivers.siglent_sdm4065a import SiglentSDM4065A
+
+with SiglentSDM4065A.open() as dmm:     # auto-discover by Siglent VID + PID
+    print(dmm.info())
+
+    # 4-wire, pinned to the 200 Ω range — see "Getting the number right"
+    print(dmm.measure_resistance_4wire(200))
+
+    print(dmm.measure_dc_voltage(2))    # 2 V range
+```
+
+### Getting the number right
+
+Three manual-documented behaviours make the obvious call sequence the
+wrong one. All three are handled by the driver, but they shape how you
+should use it.
+
+**`MEASure:<fn>?` is `CONFigure` + `READ?` in one command.** That
+means it *reconfigures* before it triggers: this function's NPLC, null
+state, null value and range all go back to defaults. So
+
+```python
+dmm.null_now()                  # install a null offset
+dmm.measure_resistance(200)     # ← silently discards it
+```
+
+does not do what it looks like. Use `read()` — which triggers without
+reconfiguring — or `read_nulled()`, which raises rather than quietly
+returning an un-nulled number:
+
+```python
+dmm.configure_resistance(200)   # configure once
+dmm.set_nplc(100)               # then set integration time
+dmm.null_now(samples=3)         # then null, with leads shorted
+dmm.read_nulled()               # trigger, keeping all of the above
+```
+
+**The default resistance range is 2 kΩ, not autorange** (§7.4.5 of the
+remote manual). A 100 Ω DUT lands on the 2 kΩ range silently, which
+costs a factor of ten on the percent-of-range accuracy term. Pass the
+range explicitly whenever accuracy matters.
+
+**Enabling null arms automatic null-value selection.** Writing
+`NULL:STATe ON` sets `NULL:VALue:AUTO`, so the instrument overwrites
+your offset with its own next reading. The order must be state first,
+then value — writing a value disarms AUTO. `null_now()` sequences this
+correctly and returns the offset the instrument actually stored, read
+back rather than assumed.
+
+### 2-wire vs 4-wire
+
+2-wire resistance carries lead and contact resistance in series —
+about 0.2 Ω per the datasheet. At 100 Ω that is a 0.2 % error, which
+swamps anything the meter's own accuracy spec would contribute. Either
+use `measure_resistance_4wire()` with sense leads, or short the leads
+and `null_now()` first. For a 4½-digit reading of a 100 Ω part, 2-wire
+without a null is not a measurement.
+
+### Validating against a second instrument
+
+`tests/test_cross_validate_sdm4065a_qr10x.py` measures one physical
+resistance with both the SDM4065A and the QR10x. This catches the class
+of bug no single-instrument test can: a units error, a range
+mis-scaling, a swapped 2-/4-wire function, a null applied with the
+wrong sign — all of which produce self-consistent readings.
+
+```bash
+export BENCHCTRL_SDM4065A=auto
+export BENCHCTRL_QR10X_PORT=/dev/ttyUSB0
+export BENCHCTRL_SDM4065A_WIRING=4      # 4-wire: sense leads connected
+pytest -m hardware tests/test_cross_validate_sdm4065a_qr10x.py -q -s
+```
+
+`WIRING=4` is the primary path; `=2` makes the tests null first and
+skip the comparisons that need 4-wire. `-s` surfaces the measured
+lead-and-contact resistance the lead test prints.
+
+Be clear about what the pair proves. The QR10x's ±0.05% dominates the
+meter's ±(0.010% + 0.005%), so **agreement** between the two is
+budgeted at roughly 0.07 Ω at 100 Ω — wider than the ~38 mΩ offset the
+QR101A-1M-R1 actually shows. The meter *alone* (0.02 Ω on the 200 Ω
+range) resolves that offset. So: use the pair to catch gross errors,
+and the meter to measure. The test file derives both budgets from the
+datasheets and pins them with hardware-free tests, so a tolerance
+cannot be quietly loosened.
+
+All tolerances are **linear sums**, not root-sum-square. RSS is for
+independent random errors; these are specification bounds, and two
+instruments each permitted ±X can legitimately sit 2X apart — RSS would
+fail on conforming hardware.
+
+### Model-family traps
+
+One manual covers the SDM4045A / SDM4055A / SDM4065A, and the columns
+differ in ways that produce a working driver reporting wrong numbers:
+
+| | SDM4065A (this driver) | SDM4055A |
+|---|---|---|
+| Top resistance range | **1 MΩ** | 2 MΩ |
+| NPLC values | 100 / 10 / 1 / 0.1 / 0.01 / 0.001 | 10 / 1 / 0.01 |
+| Resistance autozero | yes, **defaults off** (§7.4.7) | not available |
+
+Both range and NPLC are validated against the 4065A column, and the
+rejection message names the sibling model so a wrong-model constant
+reads as a wrong model rather than a broken driver.
+
+### Overload
+
+An out-of-range input returns `9.9E37`. The driver raises
+`SDM4065AOverloadError` instead of returning it — it is a valid float
+and would otherwise propagate into arithmetic as a believable reading.
+The exception carries the function and range, so a caller can widen
+and retry:
+
+```python
+from benchctrl.drivers.siglent_sdm4065a import SDM4065AOverloadError
+
+try:
+    r = dmm.measure_resistance_4wire(200)
+except SDM4065AOverloadError:
+    r = dmm.measure_resistance_4wire(2000)
+```
+
+This is a fifth exception type where every other driver has four
+(Connection / Command / Timeout / Value). It exists because "the input
+exceeded the range" is a distinct *recoverable* condition, not a
+protocol failure.
+
+### API
+
+| Subsystem | Methods |
+|---|---|
+| Identity / housekeeping | `info`, `reset`, `clear_status`, `self_test`, `last_error`, `raise_if_error` |
+| Function select | `set_function`, `get_function` |
+| One-shot measurement | `measure_dc_voltage`, `measure_ac_voltage`, `measure_dc_current`, `measure_ac_current`, `measure_resistance`, `measure_resistance_4wire`, `measure_capacitance`, `measure_frequency`, `measure_period`, `measure_continuity`, `measure_diode`, `measure_temperature` |
+| Configure + trigger | `configure_resistance`, `configure_dc_voltage`, `get_configuration`, `read`, `read_nulled`, `initiate`, `fetch`, `abort`, `set_sample_count`, `get_sample_count` |
+| Accuracy controls | `set_nplc`, `get_nplc`, `set_range`, `get_range`, `set_autorange`, `set_autozero`, `get_autozero`, `reading_timeout_ms` |
+| Null ("Ref") | `null_now`, `set_null`, `get_null`, `set_null_value`, `get_null_value`, `set_null_auto`, `get_null_auto` |
+| Temperature | `set_temperature_unit`, `get_temperature_unit` |
+| Escape hatch | `write`, `query`, `query_float`, `query_floats` |
+
+`read()` and `fetch()` always return `list[float]`, one entry per
+`sample_count`. A scalar return would silently keep only the first
+sample when a caller raised the count.
+
+### Long integrations and the VISA timeout
+
+`open()` defaults to a 10 s timeout, which covers a single reading at
+any integration time. A burst does not: 100 PLC × 10 samples at 50 Hz
+mains is 20 s of integration alone. `reading_timeout_ms()` does the
+arithmetic:
+
+```python
+ms = SiglentSDM4065A.reading_timeout_ms(nplc=100, samples=10)
+dmm = SiglentSDM4065A.open(timeout_ms=ms)
+```
+
+It assumes **50 Hz** mains unless told otherwise, because assuming
+60 Hz underestimates the time a 50 Hz instrument takes and produces a
+timeout that looks like a dead instrument.
+
+### MCP tools
+
+49 tools, prefixed `sdm4065a_`. There is no confirmation-argument tool
+here — nothing to arm. The tools that affect accuracy (range, NPLC,
+null) say so in their docstrings, which is what the model reads before
+calling them.
+
+### Note on SCPI headers
+
+Siglent's manual writes headers **without** the leading root colon
+(`SYSTem:ERRor?` where Rigol writes `:SYSTem:ERRor?`). Both forms work
+on the instrument. The simulator accepts both deliberately: matching
+only the colon-prefixed form would make error queries fall through to
+the generic register model and answer `0`, i.e. a permanently clean
+error queue — the one failure a driver cannot detect for itself.

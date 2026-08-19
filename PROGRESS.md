@@ -12,20 +12,19 @@ firmware caps see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 ## Status snapshot
 
 - **Version**: 1.2.0
-- **Branch**: `feat/remote-mode` (6 feature commits + a docs pass ahead
-  of `master`)
-- **Tests**: 956 hardware-free + 152 hardware-marked, 23 skipped.
-  Hardware-free suite runs in ~7 minutes with nothing plugged in.
-- **MCP tools**: 226 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
-  cross-driver 13
+- **Branch**: `feat/siglent-sdm4065a` off `master`
+- **Tests**: 1142 hardware-free + 171 hardware-marked. Hardware-free
+  suite runs in ~10 minutes with nothing plugged in.
+- **MCP tools**: 275 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
+  SDM4065A 49, cross-driver 13
 - **Drivers**: Otii Arc / Arc Pro (SMU), Eastwood QR10x (programmable
   resistor), Rigol DL3031A (electronic load), Rigol DP2031
-  (triple-output PSU)
+  (triple-output PSU), Siglent SDM4065A (6½-digit DMM)
 - **Scenarios captured**: 27 — 11 QR10x + 11 DL3031A standard + 3 hires
   + 2 dynamic-list
 - **Entry points**: `benchctrl`, `benchctrl-mcp`, `benchctrl-agent`
-- **Hardware**: Arc Pro, DL3031A, DP2031, QR10x. Outputs off between
-  runs; hardware tests skip cleanly when a device is absent.
+- **Hardware**: Arc Pro, DL3031A, DP2031, QR10x, SDM4065A. Outputs off
+  between runs; hardware tests skip cleanly when a device is absent.
 
 ## Where things stand
 
@@ -42,7 +41,7 @@ and the device filesystem.
 profiler, and the 100 Hz host-side emulator. Vendor-agnostic — works
 against any conforming driver.
 
-**MCP server**. 226 tools. SDK ↔ MCP parity is a review gate, not an
+**MCP server**. 275 tools. SDK ↔ MCP parity is a review gate, not an
 aspiration.
 
 **Scenario harness**. Three kinds (static, dynamic, dynamic-list) with
@@ -99,14 +98,36 @@ Ordered roughly by how much they'd change if picked up next.
    says plainly that a software deadman cannot guarantee an output
    goes off through a wedged driver. Overnight runs deserve a relay on
    the same timer. Scoped in `ROADMAP.md`.
-2. **DP2031 as a source in the scenario harness.** The driver shipped
+2. **SDM4065A ↔ QR10x cross-validation on hardware.** The driver, its
+   whole remote path and both hardware test sets are written and
+   sim-verified; the tolerances are derived from the two datasheets in
+   `tests/test_cross_validate_sdm4065a_qr10x.py` and pinned by
+   hardware-free tests. **Blocked on `KNOWN_LIMITATIONS` F-6**: the
+   board's kernel has no `usbtmc` module, so pyvisa-py needs libusb
+   write access to the USB node, and until
+   `deploy/udev/61-benchctrl-usbtmc.rules` is installed (root) the
+   meter does not appear in `list_resources()` at all. `lsusb` on the
+   board already shows it at `f4ec:1220`, which is the VID/PID now in
+   `discovery.SIGNATURES`.
+
+   To run once the rule is in:
+
+   ```bash
+   BENCHCTRL_SDM4065A=auto BENCHCTRL_QR10X_PORT=/dev/ttyUSB0 \
+     BENCHCTRL_SDM4065A_WIRING=4 pytest -m hardware \
+     tests/test_cross_validate_sdm4065a_qr10x.py -q -s
+   ```
+
+   `-s` matters: the lead-resistance test prints the measured mΩ that
+   H-5 is waiting for.
+3. **DP2031 as a source in the scenario harness.** The driver shipped
    in 1.1 but `scenarios/` still only models the load side, so
    cell-charging scenarios aren't expressible yet.
-3. **DL3031A LIST timing in Arc Pro high range** (§ F-2). Still
+4. **DL3031A LIST timing in Arc Pro high range** (§ F-2). Still
    unresolved; isolating it needs a scope on the trigger line.
-4. **Strict mypy.** `check_untyped_defs` is on, `--strict` is not. CI
+5. **Strict mypy.** `check_untyped_defs` is on, `--strict` is not. CI
    has mypy as `continue-on-error`. Mostly mechanical.
-5. **Multi-device coordination.** Now partly unblocked — `sim` makes
+6. **Multi-device coordination.** Now partly unblocked — `sim` makes
    the API designable without a second Arc, so what's left is
    validation rather than design. Cross-machine timebase is the
    genuinely hard part and may need a hardware trigger line.
@@ -151,8 +172,8 @@ Ordered roughly by how much they'd change if picked up next.
 cd ~/repos/benchctrl
 git log --oneline -20
 
-pytest -m "not hardware" -q     # 956 tests, ~7 min, no hardware
-pytest -m hardware -q           # 152 tests, needs the bench on USB
+pytest -m "not hardware" -q     # 1142 tests, ~9 min, no hardware
+pytest -m hardware -q           # 171 tests, needs the bench on USB
 pytest -q                       # both
 
 benchctrl discover              # what's on this bench
@@ -162,6 +183,6 @@ benchctrl info                  # smoke test against a live Arc
 No hardware to hand:
 
 ```bash
-BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031 benchctrl-mcp
+BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a benchctrl-mcp
 benchctrl-agent --simulate
 ```

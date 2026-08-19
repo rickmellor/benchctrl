@@ -12,7 +12,7 @@ tiers:
   when the device isn't present.
 
 ```bash
-pytest -m "not hardware"     # 956 pass, 23 skip, ~7 min, no hardware
+pytest -m "not hardware"     # 1142 collected, ~10 min, no hardware
 pytest -m hardware           # 152, needs the bench
 pytest                       # both
 ```
@@ -90,6 +90,8 @@ than "a number arrived".
 | `test_bench_qr10x.py` | AT command surface, relay-ladder quantisation, safety limit enforcement |
 | `test_bench_rigol_dl3031a.py` | SCPI surface, LIST / transient / battery-discharge modes, and rejection of the known-bad 4-step LIST program |
 | `test_bench_rigol_dp2031.py` | the largest suite in the repo — source/measure, protection, IEEE 488.2 status, pairing and tracking, the Arb timer sequencer, analyzer, trigger I/O, memory, block-format parsers |
+| `test_bench_siglent_sdm4065a.py` | the SDM4065A's measurement surface *and its traps*: that `MEASure?` discards a null, that the naive value-then-state null ordering genuinely fails, that a 4-wire read resolves a 38 mΩ offset a 2-wire read cannot, and that the 2 MΩ range is rejected because it belongs to the SDM4055A |
+| `test_remote_sdm4065a.py` | the same driver through the full remote stack — proxy, wire protocol, agent dispatch, production driver, pyvisa, pty, simulator. Only the silicon is fake. Catches the registry entries and codec/exception round-trips that local tests cannot see |
 
 ### The local / remote / sim seam
 
@@ -122,7 +124,7 @@ than "a number arrived".
 
 ## Coverage matrix — hardware-required
 
-152 tests across four instruments. They exercise every wire command
+171 tests across five instruments. They exercise every wire command
 and SCPI string at least once against the real device, with nothing
 connected to the output terminals unless the test says otherwise.
 
@@ -138,6 +140,8 @@ connected to the output terminals unless the test says otherwise.
 | `test_bench_qr10x.py` | QR10x | AT round-trips, resistance setting, safety limit |
 | `test_bench_rigol_dl3031a.py` | DL3031A | SCPI round-trips, LIST playback, transient mode, battery discharge |
 | `test_bench_rigol_dp2031.py` | DP2031 | OVP trip + clear on CH3, multi-channel setpoint round-trip, tracking and pair state, `program_timer` + readback via the IEEE 488.2 block parser, screenshot BMP capture |
+| `test_bench_siglent_sdm4065a.py` | SDM4065A | the three manual quirks proven on silicon rather than against my own simulator: `CONFigure` resetting NPLC to 10 *and* the range to 2 kΩ, and `NULL:STATe` arming `NULL:VALue:AUTO` (with an explicit value disarming it). Plus all six 4065A NPLC values and every resistance range read back to catch silent coercion, autozero defaulting OFF, the overload sentinel raising, and a 100 NPLC × 10-sample read finishing inside `reading_timeout_ms` |
+| `test_cross_validate_sdm4065a_qr10x.py` | SDM4065A **+** QR10x | the meter and the programmable resistance measuring the same physical ohms. Catches errors no single-instrument test can see — units, range scaling, swapped 2-/4-wire, a null with the wrong sign. Tolerances are derived from both datasheets in-file and pinned by hardware-free tests, and the file is explicit that this resolves *gross* errors only: the QR10x's ±0.05% dominates, so the agreement budget (~0.07 Ω at 100 Ω) is wider than the 38 mΩ offset the meter alone can see |
 | `test_mcp_hw.py` | bench | MCP tools against real devices |
 
 ## Deferred features — explicit no-op assertions

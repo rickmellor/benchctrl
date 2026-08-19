@@ -111,6 +111,18 @@ def _registry() -> dict[str, type]:
              "RigolDP2031CommandError", "RigolDP2031TimeoutError",
              "RigolDP2031ValueError"),
         ),
+        (
+            "benchctrl.drivers.siglent_sdm4065a.driver",
+            # SDM4065AOverloadError is the odd one out: every other driver
+            # has exactly Connection/Command/Timeout/Value. A DMM needs one
+            # more, because "the input exceeded the range" is a distinct
+            # recoverable condition (widen the range) rather than a bad
+            # command or a dead link — and it must survive the wire, or a
+            # remote caller sees a bare RuntimeError it cannot act on.
+            ("SDM4065AError", "SDM4065AConnectionError", "SDM4065ACommandError",
+             "SDM4065AOverloadError", "SDM4065ATimeoutError",
+             "SDM4065AValueError"),
+        ),
     ):
         try:
             module = __import__(module_path, fromlist=["*"])

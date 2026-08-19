@@ -9,6 +9,93 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### Siglent SDM4065A — 6½-digit bench DMM
+
+A fifth instrument, and the first *measurement-only* one: it sources
+nothing, so unlike the load and the supply there is no output an agent
+can accidentally energise. The failure mode to guard against is a
+plausible wrong number, and the driver is shaped around that.
+
+Speaks USB-TMC via pyvisa (LXI works too — pass a `TCPIP::` resource).
+49 MCP tools, full remote support, a simulator, and 144 tests. DC/AC
+volts and amps, 2- and 4-wire resistance, capacitance, frequency,
+period, continuity, diode, temperature.
+
+Three quirks drove the API shape, all from the SDM4000A remote manual
+and all verified by hand against the extracted text rather than taken
+on trust:
+
+- **`MEASure:<fn>?` is `CONFigure` + `READ?` in one command**, and
+  `CONFigure` resets that function's NPLC, null state, null value
+  *and* range to defaults. So `null_now()` followed by
+  `measure_resistance()` silently discards the null — the most natural
+  call sequence is the broken one. `null_now()` therefore samples with
+  `READ?`, and `read_nulled()` exists to raise rather than quietly
+  return an un-nulled number when no null is active.
+- **Enabling `NULL:STATe` arms `NULL:VALue:AUTO`** (§7.4.2), which
+  makes the instrument overwrite the offset with its own next reading.
+  Correct order is state-then-value, since writing a value disarms
+  AUTO (§7.4.3). The natural value-then-state order nulls by the wrong
+  number; a test pins that the naive ordering really does fail.
+- **The default resistance range is 2 kΩ, not autorange** (§7.4.5). A
+  100 Ω DUT lands there silently, a factor of ten on the
+  percent-of-range accuracy term.
+
+Model-family traps, since one manual covers the SDM4045A/4055A/4065A:
+the 4065A tops out at **1 MΩ** where the 4055A has 2 MΩ, and accepts
+six NPLC values (100/10/1/0.1/0.01/0.001) where the 4055A accepts
+three. Both are validated against the 4065A column and the error
+message names the sibling model, because a constant taken from the
+wrong column produces a driver that works and reports plausible
+numbers. Resistance autozero is 4065A-only and defaults **off**
+(§7.4.7).
+
+The `9.9E37` overload sentinel raises `SDM4065AOverloadError` rather
+than being returned — it is a valid float and would otherwise
+propagate into arithmetic as a believable reading. That is a fifth
+exception type where every other driver has four
+(Connection/Command/Timeout/Value); "the input exceeded the range" is
+a distinct recoverable condition, and a caller widens the range and
+retries on it.
+
+Siglent documents SCPI headers **without** the leading root colon
+(`SYSTem:ERRor?` where Rigol writes `:SYSTem:ERRor?`). The simulator
+aliases both forms: without that, `ScpiDevice`'s `:SYSTem:ERRor`
+registration would not match, the query would fall through to the
+generic register lookup, and `last_error()` would answer `0` — a
+silently clean error queue, the one failure a driver cannot detect.
+
+`discovery.SIGNATURES` gains the Siglent VID/PID (0xF4EC/0x1220) so
+the meter appears in the bench inventory the remote agent reports, not
+just to the driver's own VISA scan. The signature identifies the
+*family*; its `note` says to read `*IDN?` for the model. The VID/PID is
+confirmed against the physical meter (`lsusb` on the bench board), not
+taken from the datasheet.
+
+Two hardware-marked test sets ship with it, both currently skipping:
+
+- `test_bench_siglent_sdm4065a.py` proves the three manual quirks on
+  silicon rather than against the simulator I wrote from the same
+  manual — a circularity worth closing — plus NPLC/range coercion,
+  autozero's OFF default, and the overload sentinel.
+- `test_cross_validate_sdm4065a_qr10x.py` measures one physical
+  resistance with both instruments. Its tolerances are derived from the
+  two datasheets in-file and pinned by hardware-free tests, and it is
+  explicit that the QR10x's ±0.05% dominates: the pair resolves *gross*
+  errors (units, scaling, swapped 2-/4-wire, a null with the wrong
+  sign), while only the meter alone resolves the 38 mΩ offset.
+
+Running them is blocked on a deployment problem, not the drivers —
+see `KNOWN_LIMITATIONS.md` § F-6 and the new
+`deploy/udev/61-benchctrl-usbtmc.rules`. On a kernel with no `usbtmc`
+module, pyvisa-py drives the instrument over libusb and needs write
+access to `/dev/bus/usb/BBB/DDD`; without it the meter is *invisible*
+rather than unopenable, because pyvisa-py cannot read the string
+descriptors it needs to build a resource name. `discover()` returns
+`[]` and the driver says "no SDM4065A found" — indistinguishable from
+an unplugged instrument. The rule covers both Rigols too, which had the
+same latent problem.
+
 ### `deploy/` — the agent as a systemd service
 
 `docs/remote.md` prescribed an `ExecStopPost=... --safe-stop` unit but
