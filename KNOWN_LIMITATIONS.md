@@ -423,6 +423,27 @@ import is lazy, inside `open()`) but cannot open a device. Per-device mode
 resolution is the workaround: run the Rigols local and the Arc remote in the
 same MCP process.
 
+### N-6. The Uno Q kernel has no `ch341`, so the QR10x needs a udev rule
+Arduino's Uno Q kernel is built `# CONFIG_USB_SERIAL_CH341 is not set` with no
+generic fallback, so the CH340 bridge the QR10x speaks through enumerates but
+binds no driver and no `/dev/ttyUSB*` appears. `benchctrl.transports.ch341`
+drives the chip from userspace over libusb instead and exposes it as a pty, so
+the QR10x driver itself is unchanged.
+
+The catch is permissions: libusb writes to `/dev/bus/usb/BBB/DDD`, which the
+kernel creates `root:root 0664`, so control transfers fail with `[Errno 13]
+Access denied` for a non-root user. Install
+`deploy/udev/60-benchctrl-ch341.rules` (needs root once) to make those nodes
+`root:dialout 0660`. A one-off `chmod` is not enough — the node is recreated on
+every replug, and the device number changes.
+
+Not fixable without root, and not fixable in-kernel on this board: force-loading
+a prebuilt `ch341.ko` fails (`CONFIG_MODULE_FORCE_LOAD` off, vermagic mismatch),
+the 7.0.0 kernel package contains no `ch341.ko` either, and nothing can be
+compiled on-board (no toolchain, no headers for `6.16.7-g0dd6551ae96b`).
+
+Verified end to end on real hardware: QR101A-1M-R1, serial 00000248.
+
 ## What's not in this list
 
 Things we **don't** consider limits — they're just facts:

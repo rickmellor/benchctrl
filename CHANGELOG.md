@@ -52,6 +52,18 @@ access to `/dev/bus/usb/*` for this one VID/PID: libusb control
 transfers need write, and the kernel creates those nodes `root:root
 0664`. Scoped deliberately — not a blanket `usb_device` rule.
 
+Verified end to end on the real instrument (QR101A-1M-R1, serial
+00000248, fw 5.967KS) as the unprivileged service user: setpoint
+100.0 Ω reading back 100.038 Ω, repeatable across open/close cycles.
+See `KNOWN_LIMITATIONS.md` N-6 for the one-time root step.
+
+Reading real values also exposed a simulator fidelity bug: `DEV.PROD`
+answered `"QR104"`, a model code, where the field is a YYYYMMDD
+production date (hardware returns `20221119`). The sim could therefore
+never have caught a driver that mis-parsed that field. Its identity is
+now shaped after the real unit, with the serial left obviously
+synthetic so captured logs stay attributable.
+
 ### Fixed
 
 - **`runs_dir` in `agent.json` was silently ignored.** `agent/main.py`

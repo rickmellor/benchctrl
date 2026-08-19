@@ -283,11 +283,15 @@ def test_qr10x_identity(sim_qr):
     qr = QR10x.open(sim_qr.port)
     try:
         info = qr.info()
-        assert info.device_type == "QR10X"
+        assert info.device_type == "QR101A-1M-R1"
         assert info.serial == "SIM-QR10X-0001"
-        assert info.hardware_version == "1.0"
-        assert info.firmware_version == "2.4.1"
+        assert info.hardware_version == "5.1N"
+        assert info.firmware_version == "5.967KS"
         assert info.temperature_coefficient_ppm == 25
+        # A YYYYMMDD date, not a model code: the field is production_date, and
+        # real hardware answers e.g. 20221119.
+        assert info.production_date.isdigit()
+        assert len(info.production_date) == 8
     finally:
         qr.close()
 

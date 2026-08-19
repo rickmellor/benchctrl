@@ -339,9 +339,9 @@ def test_driver_reads_identity_through_the_bridge(bridged_qr10x):
     """
     qr, _, _ = bridged_qr10x
     info = qr.info()
-    assert info.device_type == "QR10X"
+    assert info.device_type == "QR101A-1M-R1"
     assert info.serial == "SIM-QR10X-0001"
-    assert info.firmware_version == "2.4.1"
+    assert info.firmware_version == "5.967KS"
 
 
 def test_driver_readbacks_work_through_the_bridge(bridged_qr10x):
@@ -395,7 +395,7 @@ def test_a_chunked_reply_is_not_truncated_by_poll_gaps(bridged_qr10x):
             # A multi-line reply, delivered 4 bytes per pump iteration.
             info = qr2.info()
             assert info.serial == "SIM-QR10X-0001", "the reply was truncated"
-            assert info.firmware_version == "2.4.1", "the reply was truncated"
+            assert info.firmware_version == "5.967KS", "the reply was truncated"
         finally:
             qr2.close()
     finally:

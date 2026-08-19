@@ -22,12 +22,20 @@ from benchctrl.sim.loopback import SerialLoopback
 
 log = logging.getLogger("benchctrl.sim.qr10x")
 
+#: Shaped after a real QR101A-1M-R1 (read over the userspace CH341 bridge on
+#: an Uno Q), so the simulator exercises the same *formats* the driver parses.
+#: ``DEV.PROD`` previously answered ``"QR104"``, but the field is a YYYYMMDD
+#: production date — hardware returns e.g. ``20221119``. A model-code answer
+#: there meant the sim could not have caught a driver that mis-parsed the date.
+#:
+#: The serial stays obviously synthetic: a sim that claims a real unit's serial
+#: makes captured logs impossible to attribute.
 DEFAULT_IDENTITY = {
-    "DEV.TYPE": "QR10X",
+    "DEV.TYPE": "QR101A-1M-R1",
     "DEV.SN": "SIM-QR10X-0001",
-    "DEV.HW": "1.0",
-    "DEV.FW": "2.4.1",
-    "DEV.PROD": "QR104",
+    "DEV.HW": "5.1N",
+    "DEV.FW": "5.967KS",
+    "DEV.PROD": "20221119",
     "DEV.TCR": "25",
 }
 

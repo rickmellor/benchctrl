@@ -8,8 +8,9 @@ none of it; see [`docs/remote.md`](../docs/remote.md) for the client config.
 |---|---|
 | [`install-agent.sh`](install-agent.sh) | the agent as a systemd service, disarming the bench on stop |
 | [`install-display-hotplug.sh`](install-display-hotplug.sh) | optional: makes HDMI-through-a-USB-C-hub work on an Uno Q |
+| [`verify-ch341-qr10x.sh`](verify-ch341-qr10x.sh) | required for a QR10x on a kernel without `ch341`: installs the udev rule, then proves the instrument end to end |
 
-Both are POSIX `sh`, root-only, and idempotent.
+All three are POSIX `sh`, root-only, and idempotent.
 
 ## The agent service
 
@@ -111,6 +112,46 @@ needs root. Two settings are deliberately *not* tightened:
 - `PrivateDevices=no` — `yes` hides `/dev/ttyACM*`, which is the entire job.
 - `ProtectSystem=full`, not `strict` — `strict` also makes `/home` read-only,
   where `blob_dir` and `runs_dir` live.
+
+## The QR10x on a kernel without `ch341`
+
+Only needed where the kernel omits the CH340/CH341 driver — Arduino's Uno Q
+does (`# CONFIG_USB_SERIAL_CH341 is not set`, and no generic fallback). The
+symptom is a device that enumerates as `USB Serial` but binds no driver, so no
+`/dev/ttyUSB*` appears and the QR10x is unreachable.
+
+`benchctrl.transports.ch341` drives the chip from userspace over libusb and
+hands back a **real pty**, so the QR10x driver is untouched — it opens a
+`/dev/pts/N` path with ordinary `serial.Serial`.
+
+```bash
+sudo ./verify-ch341-qr10x.sh
+```
+
+That installs `udev/60-benchctrl-ch341.rules` and then proves the whole chain,
+running the instrument half **as the service user** rather than as root —
+proving it for root would prove the wrong thing.
+
+### Why a udev rule is required, and why `chmod` won't do
+
+libusb writes to `/dev/bus/usb/BBB/DDD`, which the kernel creates `root:root
+0664`. Control transfers need *write*, so an unprivileged agent fails with
+`[Errno 13] Access denied`. The rule makes those nodes `root:dialout 0660`.
+
+A one-off `chmod` looks like it works and then stops: the node is recreated on
+every replug, and `DDD` changes each time. The rule is also scoped to
+`1a86:7523` alone — deliberately not a blanket `usb_device` rule, which would
+hand the bench user write access to every USB device on the box.
+
+Re-triggering matters too. udev applies permissions at *event* time, so
+`udevadm control --reload-rules` alone changes nothing for an already-plugged
+device; the script follows it with `udevadm trigger --action=add`.
+
+Needs `pyusb` on the board (pure Python — unzip the wheel next to `benchctrl`,
+same as `pyserial`; see [`docs/remote.md`](../docs/remote.md)).
+
+Verified end to end on a real QR101A-1M-R1 (serial 00000248, fw 5.967KS): a
+100.0 Ω setpoint reading back 100.038 Ω, repeatable across open/close cycles.
 
 ## Display hotplug
 
