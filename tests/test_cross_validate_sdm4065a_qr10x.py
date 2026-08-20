@@ -100,6 +100,14 @@ QR10X_REL_ACCURACY = 0.0005
 QR10X_FLOOR_OHM = 0.02
 
 #: Datasheet note [6]: unnulled 2-wire adds this much lead/contact resistance.
+#:
+#: Kept at the datasheet's figure deliberately, though our own leads measure
+#: 78.9 mΩ (see :py:func:`test_4_wire_beats_2_wire_by_about_the_lead_resistance`
+#: and ``KNOWN_LIMITATIONS`` H-5). This is a *budget bound*, and lead resistance
+#: is a property of whatever cables are plugged in, not of the meter — tightening
+#: it to our measurement would make the suite fail for anyone with longer leads
+#: or dirtier contacts, which is not a driver defect. The measured number is
+#: recorded as evidence that 4-wire works; the bound stays conservative.
 TWO_WIRE_LEAD_OHM = 0.2
 
 #: The setpoints to compare at. Confined to the 200 Ω range: that is where the
