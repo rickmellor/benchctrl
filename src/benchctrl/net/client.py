@@ -85,6 +85,10 @@ class RemoteClient:
         self._hb_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._connected = False
+        #: Why the connection died, latched by :py:meth:`_die` so a call that
+        #: arrives after the rx thread has gone fails with the real reason
+        #: instead of a bare "not connected".
+        self._death: Optional[BaseException] = None
         self.welcome: dict = {}
         self.events: list[dict] = []
         self.on_event: Optional[Callable[[dict], None]] = None
@@ -100,6 +104,8 @@ class RemoteClient:
     def connect(self) -> RemoteClient:
         if self._connected:
             return self
+        # A reused client must not report the previous session's death.
+        self._death = None
         ep = self.endpoint
         try:
             sock = socket.create_connection(ep.address, timeout=ep.connect_timeout_s)
@@ -193,7 +199,7 @@ class RemoteClient:
             except OSError:
                 pass
         self._sock = None
-        self._fail_pending(BenchConnectionError("connection closed"))
+        self._die(BenchConnectionError("connection closed"))
 
     def __enter__(self) -> RemoteClient:
         return self.connect()
@@ -208,14 +214,34 @@ class RemoteClient:
             while not self._stop.is_set():
                 frame = self._reader.read_frame(timeout=60.0)
                 if frame is None:
+                    self._die(BenchConnectionError("agent closed the connection"))
                     break
                 self._on_frame(*frame)
         except Exception as exc:  # noqa: BLE001
             if not self._stop.is_set():
                 log.warning("client rx loop ended: %r", exc)
-                self._fail_pending(BenchConnectionError(f"connection lost: {exc}"))
+            self._die(BenchConnectionError(f"connection lost: {exc}"))
         finally:
+            # Belt and braces: any exit path leaves the client dead, even one
+            # that somehow skipped _die (a break on _stop, say).
             self._connected = False
+
+    def _die(self, error: BaseException) -> None:
+        """Mark the connection dead, then fail everything waiting on it.
+
+        The order is the point. Marking dead *first*, under the lock that
+        :py:meth:`call_with_props` uses to register, closes a window where a
+        request could be filed after the sweep had already run: nothing would
+        ever fail it, so it waited out the full call timeout (30 s by default)
+        against an agent that was already gone. A dashboard poll made that
+        visible, but it bites any client whose agent dies mid-call — which is
+        exactly what ``systemctl restart benchctrl-agent`` does.
+        """
+        with self._lock:
+            self._connected = False
+            if self._death is None:
+                self._death = error
+        self._fail_pending(error)
 
     def _on_frame(self, frame_type: int, payload: bytes) -> None:
         if frame_type == FrameType.RSP:
@@ -297,11 +323,15 @@ class RemoteClient:
     def call_with_props(
         self, method: str, params: Optional[dict] = None, *, timeout: float = DEFAULT_CALL_TIMEOUT
     ) -> tuple[Any, Optional[dict]]:
-        if not self._connected or self._writer is None:
-            raise BenchConnectionError("not connected to an agent")
         req_id = next(self._ids)
         pending = _Pending()
+        # Registering and the liveness check happen under one lock, so a
+        # connection that dies concurrently either fails this call here or
+        # sweeps it in _die. Checking outside the lock would let a request slip
+        # into _pending after the sweep and then wait out the full timeout.
         with self._lock:
+            if not self._connected or self._writer is None:
+                raise self._death or BenchConnectionError("not connected to an agent")
             self._pending[req_id] = pending
         self._writer.send(
             FrameType.REQ, _json({"id": req_id, "m": method, "p": params or {}})
