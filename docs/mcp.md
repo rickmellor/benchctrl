@@ -5,7 +5,7 @@ exposes your whole bench as tools any MCP-aware client (Claude Code,
 Claude Desktop, Cursor, custom agents) can call. Built on the official
 `mcp` Python SDK.
 
-**226 tools**, registered per driver:
+**280 tools**, registered per driver:
 
 | Source | Tools |
 |---|---|
@@ -13,8 +13,9 @@ Claude Desktop, Cursor, custom agents) can call. Built on the official
 | Eastwood QR10x | 11 |
 | Rigol DL3031A | 45 |
 | Rigol DP2031 | 134 |
+| Siglent SDM4065A | 54 |
 | Cross-driver (battery, recording I/O, connection) | 13 |
-| **Total** | **226** |
+| **Total** | **280** |
 
 Each driver registers its own surface via `register_mcp_tools(mcp)`;
 `benchctrl.mcp` is the orchestrator that wires them together. A driver
@@ -24,7 +25,7 @@ whose extras aren't installed simply contributes no tools.
 
 ```bash
 pip install "benchctrl[mcp]"                  # server + Arc + QR10x
-pip install "benchctrl[mcp,bench-visa]"       # + both Rigols
+pip install "benchctrl[mcp,bench-visa]"       # + both Rigols and the SDM4065A
 pip install "benchctrl[mcp,bench-visa,science]"  # + plot/parquet tools
 ```
 
@@ -67,7 +68,7 @@ BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_TOKEN=... benchctrl-mcp
 BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_LOCAL_DEVICES=otii_arc benchctrl-mcp
 
 # no hardware at all
-BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031 benchctrl-mcp
+BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a benchctrl-mcp
 ```
 
 With nothing configured everything is local. See
@@ -149,11 +150,28 @@ their SDK methods, which are documented in [`drivers.md`](drivers.md):
 | `qr10x_*` | Eastwood QR10x | 11 |
 | `dl3031a_*` | Rigol DL3031A | 45 |
 | `dp2031_*` | Rigol DP2031 | 134 |
+| `sdm4065a_*` | Siglent SDM4065A | 54 |
 
 The DP2031 set is the large one, covering source/measure, protection,
 IEEE 488.2 status, channel pairing and tracking, the Arb timer
 sequencer, the IoT power analyzer, trigger I/O, and the device
 filesystem.
+
+The SDM4065A set has no confirmation-argument tools: a meter sources
+nothing, so there is nothing to arm. Its risk is a plausible wrong
+number instead, so the tools that affect accuracy — `sdm4065a_set_range`,
+`sdm4065a_set_nplc`, `sdm4065a_null_now` — carry the traps in their
+docstrings. In particular `sdm4065a_measure_*` reconfigures before it
+triggers and therefore discards a null; `sdm4065a_read` and
+`sdm4065a_read_nulled` are the ones to use after nulling.
+
+Four of its tools exist because of documented firmware defects rather
+than because the SCPI surface needed them: `sdm4065a_command_error`
+(`*ESR?` bit 5, the reliable rejection check when the error queue is
+not), `sdm4065a_drain_errors` (`*CLS` does not empty the queue),
+`sdm4065a_standard_event_status`, and `sdm4065a_clear_device_buffers`
+(USB-TMC `INITIATE_CLEAR`, for a wedged endpoint pair). The defects are
+written up in [`vendor-issues/`](vendor-issues/SDM4065A-firmware-bug-reports-README.md).
 
 ### Information
 

@@ -15,7 +15,7 @@ This document is structured by sub-package:
 - [`benchctrl.sim` — simulators](simulation.md) (separate doc)
 - [`benchctrl.net` / `benchctrl.agent` — remote mode](remote.md) (separate doc)
 - [`benchctrl.agent.runs` — unattended runs](runs.md) (separate doc)
-- [`benchctrl.mcp` — Model Context Protocol server](mcp.md) (separate doc — 226 tools)
+- [`benchctrl.mcp` — Model Context Protocol server](mcp.md) (separate doc — 280 tools)
 
 Every driver lives under `benchctrl.drivers.<vendor_model>`; there is
 no top-level `SMU` class and no `benchctrl.bench` package — both were
@@ -332,6 +332,7 @@ logger. Sub-loggers:
 - `benchctrl.battery.profiler` — profiler step transitions
 - `benchctrl.drivers.eastwood_qr10x` — QR10x AT command traffic
 - `benchctrl.drivers.rigol_dl3031a` — DL3031A SCPI traffic
+- `benchctrl.drivers.siglent_sdm4065a` — SDM4065A SCPI traffic
 - `benchctrl.mcp` — MCP server lifecycle + tool warnings
 
 Enable hex dumps:
@@ -473,6 +474,7 @@ sequence propagate (no silent swallow — see CONTRIBUTING.md § 4).
 from benchctrl.drivers.eastwood_qr10x import QR10x, QR10xInfo, QR10xError
 from benchctrl.drivers.rigol_dl3031a import RigolDL3031A, RigolDLInfo, RigolDLError
 from benchctrl.drivers.rigol_dp2031 import RigolDP2031, RigolDP2031Info, RigolDP2031Error
+from benchctrl.drivers.siglent_sdm4065a import SiglentSDM4065A, SDM4065AInfo, SDM4065AError
 ```
 
 Each driver lives in its own subpackage, so importing one never pulls
@@ -484,6 +486,13 @@ tools) covering the Arb timer sequencer, the IoT power analyzer,
 trigger I/O and the device filesystem. It is documented in full in
 [`drivers.md`](drivers.md#rigol-dp2031--triple-output-programmable-psu)
 rather than duplicated here.
+
+The SDM4065A is the only measurement-only driver, and the only one
+with a fifth exception type (`SDM4065AOverloadError`, for the `9.9E37`
+sentinel). Its accuracy traps — `MEASure?` discarding a null, the
+2 kΩ default range, null-state-before-null-value — are documented in
+[`drivers.md`](drivers.md#siglent-sdm4065a--6-digit-bench-dmm) and
+worth reading before trusting a reading from it.
 
 ### `QR10x` — Eastwood Tech programmable resistor
 
@@ -674,7 +683,7 @@ format against the real device.
 ## `benchctrl.session` — the local/remote/sim seam
 
 One function decides, per device, what a driver singleton actually
-gets. Everything above it — the 226 MCP tools, the battery emulator,
+gets. Everything above it — the 280 MCP tools, the battery emulator,
 the scenario harness — is unaware.
 
 ```python
@@ -699,7 +708,8 @@ device the same way you would locally.
 from benchctrl import config
 
 config.DEVICE_KEYS   # ("otii_arc", "eastwood_qr10x",
-                     #  "rigol_dl3031a", "rigol_dp2031")
+                     #  "rigol_dl3031a", "rigol_dp2031",
+                     #  "siglent_sdm4065a")
 config.MODES         # ("local", "remote", "sim")
 config.DEFAULT_PORT  # 9737
 

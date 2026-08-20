@@ -224,11 +224,17 @@ def build_default_registry(
 
         return RigolDP2031.open(**kw)
 
+    def _dmm(**kw):
+        from benchctrl.drivers.siglent_sdm4065a import SiglentSDM4065A
+
+        return SiglentSDM4065A.open(**kw)
+
     openers = {
         "otii_arc": _arc,
         "eastwood_qr10x": _qr,
         "rigol_dl3031a": _dl,
         "rigol_dp2031": _dp,
+        "siglent_sdm4065a": _dmm,
     }
 
     for key in keys:

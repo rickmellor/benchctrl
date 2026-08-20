@@ -385,3 +385,292 @@ def test_dp2031_close_surfaces_per_channel_failure():
     # CH1 and CH3 should still have been attempted via the original
     assert (1, False) in fake.set_output_calls
     assert (3, False) in fake.set_output_calls
+
+
+# ---------------------------------------------------------------------------
+# SDM4065A MCP layer — connection state, parity with the driver, tool shapes
+# ---------------------------------------------------------------------------
+
+
+class _FakeSDM4065A:
+    """Stub with the SDM4065A surface the MCP tools touch.
+
+    Deliberately records the *order* of null calls: the driver's contract is
+    state-then-value (enabling NULL:STATe arms NULL:VALue:AUTO, so the
+    reverse order nulls by the wrong number), and a tool that reordered them
+    would still return a plausible dict.
+    """
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self._null = False
+        self._null_auto = False
+        self._null_value = 0.0
+        self._closed = False
+
+    # identity ------------------------------------------------------------
+    def info(self):
+        from benchctrl.drivers.siglent_sdm4065a.driver import SDM4065AInfo
+
+        return SDM4065AInfo(
+            manufacturer="Siglent Technologies",
+            model="SDM4065A",
+            serial="FAKE0001",
+            firmware="1.01.01.15",
+            resource="ASRL/dev/null::INSTR",
+        )
+
+    # measurement ---------------------------------------------------------
+    def measure_resistance(self, range_=None):
+        self.calls.append(("measure_resistance", range_))
+        return 100.2
+
+    def measure_resistance_4wire(self, range_=None):
+        self.calls.append(("measure_resistance_4wire", range_))
+        return 100.0
+
+    def read(self):
+        self.calls.append(("read",))
+        return [100.0, 100.0]
+
+    def read_nulled(self):
+        self.calls.append(("read_nulled",))
+        return 100.0
+
+    def get_function(self):
+        return "RES"
+
+    # null ----------------------------------------------------------------
+    def null_now(self, *, function="RESistance", samples=1):
+        self.calls.append(("null_now", function, samples))
+        self._null = True
+        self._null_auto = False
+        self._null_value = 0.2
+        return self._null_value
+
+    def set_null(self, enable, *, function="RESistance"):
+        self.calls.append(("set_null", enable))
+        self._null = bool(enable)
+        if enable:
+            self._null_auto = True  # the real instrument's side effect
+
+    def get_null(self, *, function="RESistance"):
+        return self._null
+
+    def set_null_value(self, value, *, function="RESistance"):
+        self.calls.append(("set_null_value", value))
+        self._null_value = float(value)
+        self._null_auto = False
+
+    def get_null_value(self, *, function="RESistance"):
+        return self._null_value
+
+    def set_null_auto(self, enable, *, function="RESistance"):
+        self._null_auto = bool(enable)
+
+    def get_null_auto(self, *, function="RESistance"):
+        return self._null_auto
+
+    def close(self):
+        self._closed = True
+
+
+def test_sdm4065a_tools_raise_driver_connection_error_when_not_open():
+    """Same pattern as DL3031A/QR10x/DP2031 — a driver-specific connection
+    error, not a bare RuntimeError, when the singleton is None."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+    from benchctrl.drivers.siglent_sdm4065a.driver import SDM4065AConnectionError
+
+    sdm_tools._sdm4065a = None
+    with pytest.raises(SDM4065AConnectionError):
+        m.sdm4065a_info()
+    with pytest.raises(SDM4065AConnectionError):
+        m.sdm4065a_measure_resistance()
+
+
+def test_sdm4065a_close_needs_no_disarm():
+    """A DMM sources nothing, so unlike dl3031a_close/dp2031_close there is
+    no output to switch off first. Pinned so a future edit that added a
+    disarm step to a *meter* would look deliberate rather than copied."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+
+    fake = _FakeSDM4065A()
+    sdm_tools._sdm4065a = fake
+    try:
+        assert m.sdm4065a_close() == {"closed": True}
+        assert fake._closed is True
+        assert sdm_tools._sdm4065a is None
+        assert fake.calls == []  # nothing was written on the way out
+    finally:
+        sdm_tools._sdm4065a = None
+
+
+def test_sdm4065a_close_when_nothing_is_open_is_not_an_error():
+    from benchctrl import mcp as m
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+
+    sdm_tools._sdm4065a = None
+    result = m.sdm4065a_close()
+    assert result["closed"] is False
+
+
+def test_sdm4065a_measure_tools_pass_the_range_through():
+    """Singleton-injection sanity: the range argument must reach the driver,
+    because on this meter the default is 2 kΩ rather than autorange, and a
+    dropped range silently costs a factor of ten in accuracy."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+
+    fake = _FakeSDM4065A()
+    sdm_tools._sdm4065a = fake
+    try:
+        assert m.sdm4065a_measure_resistance(200)["resistance_ohm"] == 100.2
+        assert m.sdm4065a_measure_resistance_4wire(200)["resistance_ohm"] == 100.0
+        assert ("measure_resistance", 200.0) in [
+            (c[0], float(c[1])) for c in fake.calls if len(c) == 2
+        ]
+    finally:
+        sdm_tools._sdm4065a = None
+
+
+def test_sdm4065a_read_tool_returns_every_sample():
+    """``read()`` is ``list[float]``; a tool that unwrapped it to a scalar
+    would silently discard every sample after the first."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+
+    fake = _FakeSDM4065A()
+    sdm_tools._sdm4065a = fake
+    try:
+        assert m.sdm4065a_read()["readings"] == [100.0, 100.0]
+    finally:
+        sdm_tools._sdm4065a = None
+
+
+def test_sdm4065a_null_now_tool_reports_auto_disarmed():
+    """The tool's response is what the model reads back, so it must show
+    ``null_auto`` false — if auto were still armed the instrument would
+    overwrite the offset with its own next reading."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+
+    fake = _FakeSDM4065A()
+    sdm_tools._sdm4065a = fake
+    try:
+        result = m.sdm4065a_null_now(samples=3)
+        assert result["null_offset"] == pytest.approx(0.2)
+        assert result["null_enabled"] is True
+        assert result["null_auto"] is False
+        assert ("null_now", "RESistance", 3) in fake.calls
+    finally:
+        sdm_tools._sdm4065a = None
+
+
+def test_sdm4065a_set_null_tool_surfaces_the_armed_auto_flag():
+    """``sdm4065a_set_null(True)`` alone leaves auto armed. The tool reports
+    that rather than hiding it, so a model that used the low-level tool can
+    see it needs to set a value next."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+
+    fake = _FakeSDM4065A()
+    sdm_tools._sdm4065a = fake
+    try:
+        result = m.sdm4065a_set_null(True)
+        assert result["null_enabled"] is True
+        assert result["null_auto"] is True
+    finally:
+        sdm_tools._sdm4065a = None
+
+
+def test_sdm4065a_reading_timeout_ms_needs_no_open_device():
+    """A pure-arithmetic helper: it has to be callable *before* open, since
+    its whole purpose is choosing the timeout to open with."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+
+    sdm_tools._sdm4065a = None
+    slow = m.sdm4065a_reading_timeout_ms(100, samples=10)["timeout_ms"]
+    fast = m.sdm4065a_reading_timeout_ms(0.001, samples=1)["timeout_ms"]
+    assert slow > 10_000  # the point of the helper: exceeds the open default
+    assert slow > fast
+
+
+# ----- parity: every driver capability is reachable over MCP ---------------
+
+
+def test_sdm4065a_mcp_tools_cover_the_driver_surface():
+    """Every public driver method has a tool, except a documented few.
+
+    This is the test that fails when a method is added to the driver and the
+    tool is forgotten — the failure mode that leaves a capability working
+    locally and invisible to an agent.
+    """
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+    from benchctrl.drivers.siglent_sdm4065a.driver import SiglentSDM4065A
+
+    # Deliberately not exposed:
+    #   open        — sdm4065a_open is the tool; the classmethod is internal
+    #   query_float/query_floats — typed sugar over query(); sdm4065a_query
+    #                 is the single raw escape hatch, as for every other driver
+    #   get_null_value/get_null_auto — folded into sdm4065a_get_null's dict,
+    #                 which returns state, offset and auto together
+    #   get_autozero_cached — SDK-only by design: it returns the last
+    #                 commanded value without a round trip, which is useful
+    #                 inside a timed loop but would be a trap as a tool, since
+    #                 an agent cannot tell a cache from a measurement.
+    #                 sdm4065a_get_autozero reads the instrument instead.
+    exempt = {
+        "open",
+        "query_float",
+        "query_floats",
+        "get_null_value",
+        "get_null_auto",
+        "get_autozero_cached",
+    }
+    methods = {
+        name
+        for name in vars(SiglentSDM4065A)
+        if not name.startswith("_") and callable(getattr(SiglentSDM4065A, name))
+    } - exempt
+    tools = {fn.__name__[len("sdm4065a_"):] for fn in sdm_tools._TOOLS}
+
+    assert not (methods - tools), f"driver methods with no MCP tool: {sorted(methods - tools)}"
+    assert not (tools - methods - {"open"}), (
+        f"MCP tools with no driver method: {sorted(tools - methods - {'open'})}"
+    )
+
+
+def test_sdm4065a_tools_are_registered_on_the_shared_server():
+    """Owning the tools is not the same as registering them. This fails if
+    ``benchctrl.mcp`` forgot the ``register_mcp_tools`` call."""
+    import asyncio
+
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+    from benchctrl.mcp import mcp
+
+    registered = {t.name for t in asyncio.run(mcp.list_tools())}
+    for fn in sdm_tools._TOOLS:
+        assert fn.__name__ in registered, f"{fn.__name__} not registered on the server"
+
+
+def test_sdm4065a_tools_are_importable_from_the_orchestrator():
+    """The re-export block in ``benchctrl.mcp`` is how tests and callers
+    reach these; a missing name there breaks them without breaking MCP."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+
+    missing = [fn.__name__ for fn in sdm_tools._TOOLS if not hasattr(m, fn.__name__)]
+    assert missing == []
+
+
+def test_sdm4065a_tools_have_docstrings():
+    """The docstring is the tool description the model sees. For this driver
+    it is also where the accuracy traps live, so an empty one is a real
+    defect and not a style issue."""
+    from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
+
+    for fn in sdm_tools._TOOLS:
+        assert fn.__doc__ and fn.__doc__.strip(), f"{fn.__name__} missing docstring"

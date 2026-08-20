@@ -85,6 +85,20 @@ SIGNATURES: tuple[DriverSignature, ...] = (
         confidence=EXACT,
         product_hints=("dp20",),
     ),
+    DriverSignature(
+        device_key="siglent_sdm4065a",
+        label="Siglent SDM4000-series digital multimeter",
+        vid=0xF4EC,
+        pid=0x1220,
+        transport="usbtmc",
+        confidence=EXACT,
+        product_hints=("sdm40",),
+        # Siglent shares this VID/PID across the SDM4045A/4055A/4065A, so the
+        # match identifies the *family*. The driver is model-specific (the
+        # 4065A has a 1 MΩ top resistance range where the 4055A has 2 MΩ), so
+        # a caller that must be sure of the model has to read ``*IDN?``.
+        note="SDM4045A/4055A/4065A share this ID; check *IDN? for the model",
+    ),
 )
 
 #: Generic USB-serial bridges. A device behind one of these is *something*,

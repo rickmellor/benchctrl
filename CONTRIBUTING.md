@@ -24,7 +24,7 @@ The extras you actually need depend on what you're touching:
 |---|---|
 | SMU / battery / QR10x bench driver | `pip install -e ".[dev]"` |
 | MCP server | `pip install -e ".[dev,mcp]"` |
-| Rigol DL3031A / DP2031 drivers / `bench-visa` | `pip install -e ".[dev,bench-visa]"` |
+| Rigol DL3031A / DP2031 / Siglent SDM4065A drivers / `bench-visa` | `pip install -e ".[dev,bench-visa]"` |
 | Parquet / pandas / matplotlib output paths | `pip install -e ".[dev,science]"` |
 | `benchctrl.sim` simulators | `pip install -e ".[dev,bench-visa]"` (the SCPI sims need pyvisa-py) |
 | `benchctrl.net` / `benchctrl.agent` | `pip install -e ".[dev]"` — stdlib + pyserial only, by design |
@@ -43,8 +43,8 @@ via Zadig).
 The test suite is split by hardware requirement using pytest markers.
 
 ```bash
-pytest -m "not hardware" -q       # ~7 minutes, no device needed (956 tests)
-pytest -m hardware -q              # requires Arc Pro + companion instruments (152)
+pytest -m "not hardware" -q       # ~10 minutes, no device needed (1164 tests)
+pytest -m hardware -q              # requires Arc Pro + companion instruments (173)
 pytest -q                          # both
 ```
 
@@ -54,6 +54,7 @@ Hardware-marked tests need:
 - For DL3031A tests: a **Rigol DL3031A** on USB-TMC
 - For DP2031 tests: a **Rigol DP2031** on USB-TMC
 - For QR10x tests: an **Eastwood QR10x** on a USB-Serial port
+- For SDM4065A tests: a **Siglent SDM4065A** on USB-TMC
 
 Tests skip cleanly with a useful message if the hardware isn't
 present, so partial setups don't fail the suite — you just get fewer
@@ -97,9 +98,16 @@ them.
 
 Every public SDK method has a matching MCP tool. When you add a public
 method to `OtiiArc` / `Emulator` / `QR10x` / `RigolDL3031A` /
-`RigolDP2031`, add the matching MCP tool to that driver's
-`mcp_tools.py` (or, for cross-driver tools, `src/benchctrl/mcp.py`) in
-the same PR, and list it in that module's `_TOOLS` tuple.
+`RigolDP2031` / `SiglentSDM4065A`, add the matching MCP tool to that
+driver's `mcp_tools.py` (or, for cross-driver tools,
+`src/benchctrl/mcp.py`) in the same PR, and list it in that module's
+`_TOOLS` tuple.
+
+`test_sdm4065a_mcp_tools_cover_the_driver_surface` in
+`tests/test_mcp.py` asserts this mechanically for the SDM4065A, with
+the deliberate exemptions named and justified in the test. Copy that
+pattern for a new driver — the failure mode it catches is a capability
+that works locally and is invisible to an agent.
 
 Tools reach their device through the module's `_get_<device>()`
 singleton, which populates via `session.resolve()`. Don't open a
@@ -146,7 +154,8 @@ session.resolve()  —  local | remote | sim
     ↓
 SourceMeasurementUnit Protocol + framework primitives
     ↓
-Driver public API (OtiiArc / QR10x / RigolDL3031A / RigolDP2031)
+Driver public API (OtiiArc / QR10x / RigolDL3031A / RigolDP2031 /
+                  SiglentSDM4065A)
     ↓
 Driver-internal modules (channels / protocol / transport)
     ↓
@@ -272,13 +281,17 @@ benchctrl/
 │   │   ├── rigol_dl3031a/               Rigol DL3031A electronic load
 │   │   │   ├── driver.py                RigolDL3031A class
 │   │   │   └── mcp_tools.py
-│   │   └── rigol_dp2031/                Rigol DP2031 triple-output PSU
-│   │       ├── driver.py                RigolDP2031 class
+│   │   ├── rigol_dp2031/                Rigol DP2031 triple-output PSU
+│   │   │   ├── driver.py                RigolDP2031 class
+│   │   │   └── mcp_tools.py
+│   │   └── siglent_sdm4065a/            Siglent SDM4065A 6½-digit DMM
+│   │       ├── driver.py                SiglentSDM4065A class
 │   │       └── mcp_tools.py
 │   ├── sim/                             wire-protocol simulators (pty-backed)
 │   │   ├── base.py, loopback.py         SimDevice + pty pair
 │   │   ├── otii_arc.py, qr10x.py        per-instrument simulators
 │   │   ├── scpi.py                      both Rigols, via pyvisa-py ASRL
+│   │   ├── sdm4065a.py                  Siglent DMM, incl. its quirks
 │   │   ├── waveforms.py                 analytically-known signals
 │   │   └── factories.py                 production driver + simulator
 │   ├── net/                             remote wire protocol

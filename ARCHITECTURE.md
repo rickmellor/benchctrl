@@ -15,7 +15,7 @@ any concrete driver.
 ```
                            ┌──────────────────────────────────────────┐
                            │   MCP server  (benchctrl.mcp)            │
-                           │   226 tools — orchestrator that calls    │
+                           │   280 tools — orchestrator that calls    │
                            │   each driver's register_mcp_tools(mcp)  │
                            └──────────────────────────────────────────┘
                                           │
@@ -88,10 +88,22 @@ MCP tool surface.
 - `benchctrl.drivers.rigol_dp2031.RigolDP2031` — Rigol DP2000-series
   three-channel programmable PSU. USB-TMC + SCPI via pyvisa. Concrete
   class; the largest tool surface in the codebase.
+- `benchctrl.drivers.siglent_sdm4065a.SiglentSDM4065A` — Siglent
+  SDM4000-series 6½-digit bench DMM. USB-TMC + SCPI via pyvisa (or
+  LXI). Concrete class; the first *measurement-only* driver, so it
+  doesn't fit the SMU Protocol either — it sources nothing. No
+  `DigitalMultimeter` Protocol was introduced: per `CONTRIBUTING.md`
+  rule 3, that waits for the second DMM.
 
 Each driver exposes its own exception hierarchy
 (`QR10xConnectionError`, `RigolDLCommandError`, etc.) so callers can
 catch instrument-specific errors without coupling to other drivers.
+Each has exactly four types — Connection / Command / Timeout / Value —
+except the SDM4065A, which adds `SDM4065AOverloadError` for the
+`9.9E37` out-of-range sentinel. That is a distinct *recoverable*
+condition (widen the range and retry), and the sentinel is a valid
+float that would otherwise propagate into arithmetic as a believable
+reading.
 
 ## Layer 2 — Protocol + framework primitives
 
@@ -194,7 +206,7 @@ Connection singletons (`_smu`, `_qr10x`, `_dl3031a`) live in each
 driver's `mcp_tools` module — tests inject fakes by mutating that
 module.
 
-Tool inventory at v1.0:
+Tool inventory:
 
 | Subsystem | Tools |
 |---|---|
@@ -202,8 +214,9 @@ Tool inventory at v1.0:
 | QR10x | 11 |
 | Rigol DL3031A | 45 |
 | Rigol DP2031 | 134 |
+| Siglent SDM4065A | 54 |
 | Cross-driver (recording I/O, battery, emulator) | 13 |
-| **Total** | **226** |
+| **Total** | **280** |
 
 The MCP layer is intentionally thin: each tool wraps one SDK method,
 coerces JSON-friendly argument types where needed, returns a dict.
@@ -291,15 +304,19 @@ error frames are detected in-band by the transport reader.
 
 `tests/` has two kinds of tests:
 
-- **Hardware-free** (default): run in ~7 minutes with no device
-  attached. **956 tests at v1.2.0**, 23 skipped. Most now drive
-  `benchctrl.sim` simulators rather than mocks, so the transport,
-  binary framing, session handshake and reader threads are all
-  genuinely exercised — see [`docs/simulation.md`](docs/simulation.md).
+- **Hardware-free** (default): **1164 tests**, running in ~10 minutes
+  with no device attached. Most drive `benchctrl.sim` simulators rather
+  than mocks, so the transport, binary framing, session handshake and
+  reader threads are all genuinely exercised — see
+  [`docs/simulation.md`](docs/simulation.md).
 - **Hardware-marked** (`@pytest.mark.hardware`): require real
-  instruments. Skip gracefully if hardware is absent. 152 tests at
-  v1.2.0 across Arc + DL3031A + DP2031, with the QR10x set skipped
-  when it isn't connected.
+  instruments. Skip gracefully if hardware is absent. 173 tests across
+  Arc + DL3031A + DP2031 + QR10x + SDM4065A, each set skipped when its
+  instrument isn't connected. The SDM4065A sets are the newest: run
+  against the meter the driver suite is 13 passed / 1 skipped, and the
+  QR10x cross-validation 4 passed / 3 skipped — the cross-validation
+  skips are the 4-wire comparisons, which need sense leads that are not
+  currently attached. See `TEST_PLAN.md`.
 
 Mock SMUs in battery tests partially implement the
 `SourceMeasurementUnit` Protocol — the methods the subsystem under
@@ -333,7 +350,7 @@ is `local` and behaviour is unchanged.
    host laptop                                    bench (e.g. Uno Q)
    ┌────────────────────────┐                     ┌──────────────────────────┐
    │ benchctrl.mcp          │                     │ benchctrl-agent          │
-   │   226 tools, unchanged │                     │   registry / dispatch    │
+   │   280 tools, unchanged │                     │   registry / dispatch    │
    │        │               │                     │   DeviceWorker per device│
    │        ▼               │                     │   SafetyGovernor         │
    │ session.resolve()      │   length-prefixed   │   RunManager             │
@@ -352,7 +369,7 @@ is `local` and behaviour is unchanged.
 
 The network boundary sits *above* the driver, not below it. A transport-level
 proxy would put wifi latency inside the Arc's timed wake handshake and its
-4 kHz sample demux, and would only remote one of four drivers.
+4 kHz sample demux, and would only remote one of five drivers.
 
 Closed-loop subsystems (`Emulator`, `Profiler`) run on the bench, not across
 the link: 100 Hz × 2 round trips per tick is 0.6–2.0 s of network per second

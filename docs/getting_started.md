@@ -15,7 +15,7 @@ For development:
 git clone https://github.com/rickmellor/benchctrl
 cd benchctrl
 pip install -e ".[dev,mcp,bench-visa,science]"
-pytest -m "not hardware" -q            # 956 tests, no device needed
+pytest -m "not hardware" -q            # 1164 tests, no device needed
 ```
 
 ## No hardware yet?
@@ -224,6 +224,7 @@ so you import only what you own:
 from benchctrl.drivers.eastwood_qr10x import QR10x          # programmable resistor
 from benchctrl.drivers.rigol_dl3031a import RigolDL3031A    # electronic load
 from benchctrl.drivers.rigol_dp2031 import RigolDP2031      # triple-output PSU
+from benchctrl.drivers.siglent_sdm4065a import SiglentSDM4065A  # 6½-digit DMM
 ```
 
 They share the conventions you've already seen — `open()` as a context
@@ -267,14 +268,15 @@ benchctrl stream 10                             # live print
 Two more entry points ship with the package:
 
 ```bash
-benchctrl-mcp                    # MCP server — 226 tools for LLM agents
+benchctrl-mcp                    # MCP server — 280 tools for LLM agents
 benchctrl-agent --token <token>  # bench-side server for remote mode
 ```
 
 ## Next steps
 
 - [`api_reference.md`](api_reference.md) — every class and method
-- [`drivers.md`](drivers.md) — the QR10x, DL3031A and DP2031 drivers
+- [`drivers.md`](drivers.md) — the QR10x, DL3031A, DP2031 and
+  SDM4065A drivers
 - [`battery.md`](battery.md) — emulation, profiling, life calculation
 - [`output_formats.md`](output_formats.md) — where your samples can go
 - [`simulation.md`](simulation.md) — working without hardware

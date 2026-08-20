@@ -29,14 +29,15 @@ to LLM agents through MCP. The Arc wire protocol is documented in
 
 - **`benchctrl.drivers`** — instrument drivers, all peers: Otii Arc
   (SMU), Eastwood QR10x (programmable resistor), Rigol DL3031A
-  (electronic load), Rigol DP2031 (triple-output PSU)
+  (electronic load), Rigol DP2031 (triple-output PSU), Siglent
+  SDM4065A (6½-digit DMM — the only measurement-only one)
 - **`benchctrl.interfaces`** — the `SourceMeasurementUnit` Protocol
   that drivers conform to; vendor-agnostic subsystems depend on this,
   never on a concrete driver
 - **`benchctrl.battery`** — battery characterisation + emulation:
   profile I/O, life calculator, hardware profiler, 100 Hz host-side
   emulator
-- **`benchctrl.mcp`** — MCP server, **226 tools**, orchestrator that
+- **`benchctrl.mcp`** — MCP server, **280 tools**, orchestrator that
   calls each driver's `register_mcp_tools(mcp)`
 - **`benchctrl.session`** — the local/remote/sim seam. `resolve()`
   decides *per device key* what a driver singleton actually gets
@@ -61,6 +62,7 @@ benchctrl/
 ├── README.md, ARCHITECTURE.md          entry points
 ├── CHANGELOG.md, KNOWN_LIMITATIONS.md  changelog + caps/quirks
 ├── CONTRIBUTING.md, PROGRESS.md        dev guide + live status
+├── AGENTS.md                           sub-agent pattern for a new driver
 ├── ROADMAP.md                          deferred features
 ├── TEST_PLAN.md, VALIDATION_REPORT.md  test strategy + results
 ├── pyproject.toml                      extras list, entry points
@@ -70,7 +72,7 @@ benchctrl/
 │   ├── design.md                       Arc-layer architecture decisions
 │   ├── otii_arc_protocol.md            Arc USB wire protocol reference
 │   ├── battery.md                      battery subsystem walkthrough
-│   ├── drivers.md                      QR10x / DL3031A / DP2031 + firmware modes
+│   ├── drivers.md                      QR10x / DL3031A / DP2031 / SDM4065A + quirks
 │   ├── mcp.md                          MCP server setup + tools
 │   ├── remote.md                       remote mode, security, deployment
 │   ├── runs.md                         unattended runs, spec format
@@ -95,7 +97,8 @@ benchctrl/
 │   │   │                               channels.py, mcp_tools.py  (23 tools)
 │   │   ├── eastwood_qr10x/             driver.py, mcp_tools.py    (11 tools)
 │   │   ├── rigol_dl3031a/              driver.py, mcp_tools.py    (45 tools)
-│   │   └── rigol_dp2031/               driver.py, mcp_tools.py    (134 tools)
+│   │   ├── rigol_dp2031/               driver.py, mcp_tools.py    (134 tools)
+│   │   └── siglent_sdm4065a/           driver.py, mcp_tools.py    (54 tools)
 │   ├── battery/
 │   │   ├── profile.py                  profile JSON I/O
 │   │   ├── calculator.py               life calculator
@@ -105,6 +108,7 @@ benchctrl/
 │   │   ├── base.py, loopback.py        SimDevice + pty pair
 │   │   ├── otii_arc.py, qr10x.py       per-instrument simulators
 │   │   ├── scpi.py                     both Rigols, via pyvisa-py ASRL
+│   │   ├── sdm4065a.py                 Siglent DMM, incl. its quirks
 │   │   ├── waveforms.py                analytically-known signals
 │   │   └── factories.py                production driver + simulator
 │   ├── net/
@@ -120,7 +124,7 @@ benchctrl/
 │       ├── blobs.py, recordings.py     chunked transfer
 │       ├── runs/                       spec.py, engine.py, rules.py, store.py
 │       └── llm/                        supervisor.py, tools.py, client.py
-├── tests/                              956 hw-free + 152 hardware-marked
+├── tests/                              1164 hw-free + 173 hardware-marked
 ├── scenarios/                          harness + saved captures
 ├── applications/sensor_profiler/       DUT power profiling + Streamlit browser
 ├── examples/                           copy-paste-friendly scripts
@@ -136,7 +140,7 @@ benchctrl/
 | Add a new Arc SET command | `drivers/otii_arc/protocol.py` for the encoding, `drivers/otii_arc/device.py` for the public method |
 | Decode a new Arc wire feature | `docs/otii_arc_protocol.md`, then `drivers/otii_arc/protocol.py` |
 | Understand a behavior | `ARCHITECTURE.md` for the wide view, `docs/design.md` for Arc-layer decisions |
-| Add an instrument driver | new package under `src/benchctrl/drivers/`, modeled on `rigol_dl3031a/` |
+| Add an instrument driver | new package under `src/benchctrl/drivers/`, modeled on `rigol_dl3031a/`. Follow the sub-agent pattern in `../AGENTS.md` — the failure modes are research failures, not coding failures |
 | Touch the battery emulator | `battery/emulator.py`. The explicit "no try/except" comments in `start()` are load-bearing |
 | Add an MCP tool | the owning driver's `mcp_tools.py`, or `mcp.py` for cross-driver tools |
 | Change local/remote/sim behaviour | `session.py` first — it is the only seam |
@@ -263,8 +267,8 @@ Things that look wrong (would surprise a maintainer):
 ### Run the tests
 
 ```bash
-pytest -m "not hardware" -q              # 956 hardware-free, ~7 min
-pytest -m hardware -q                     # 152 hardware-marked
+pytest -m "not hardware" -q              # 1164 hardware-free, ~10 min
+pytest -m hardware -q                     # 173 hardware-marked
 pytest -q                                  # all (needs the bench on USB)
 ```
 

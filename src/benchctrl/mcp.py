@@ -61,6 +61,7 @@ from benchctrl.drivers.eastwood_qr10x import mcp_tools as _qr10x_tools
 from benchctrl.drivers.otii_arc import mcp_tools as _arc_tools
 from benchctrl.drivers.rigol_dl3031a import mcp_tools as _dl3031a_tools
 from benchctrl.drivers.rigol_dp2031 import mcp_tools as _dp2031_tools
+from benchctrl.drivers.siglent_sdm4065a import mcp_tools as _sdm4065a_tools
 from benchctrl.recording import Recording
 
 log = logging.getLogger("benchctrl.mcp")
@@ -76,6 +77,7 @@ _arc_tools.register_mcp_tools(mcp)
 _qr10x_tools.register_mcp_tools(mcp)
 _dl3031a_tools.register_mcp_tools(mcp)
 _dp2031_tools.register_mcp_tools(mcp)
+_sdm4065a_tools.register_mcp_tools(mcp)
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +326,64 @@ from benchctrl.drivers.rigol_dp2031.mcp_tools import (
     # Phase D — License + screenshot
     dp2031_install_license,
     dp2031_save_screenshot,
+)
+
+# SDM4065A tools
+from benchctrl.drivers.siglent_sdm4065a.mcp_tools import (
+    sdm4065a_abort,
+    sdm4065a_clear_device_buffers,
+    sdm4065a_clear_status,
+    sdm4065a_close,
+    sdm4065a_command_error,
+    sdm4065a_drain_errors,
+    sdm4065a_configure_dc_voltage,
+    sdm4065a_configure_resistance,
+    sdm4065a_fetch,
+    sdm4065a_get_autorange,
+    sdm4065a_get_autozero,
+    sdm4065a_get_configuration,
+    sdm4065a_get_function,
+    sdm4065a_get_nplc,
+    sdm4065a_get_null,
+    sdm4065a_get_range,
+    sdm4065a_get_sample_count,
+    sdm4065a_get_temperature_unit,
+    sdm4065a_info,
+    sdm4065a_initiate,
+    sdm4065a_last_error,
+    sdm4065a_measure_ac_current,
+    sdm4065a_measure_ac_voltage,
+    sdm4065a_measure_capacitance,
+    sdm4065a_measure_continuity,
+    sdm4065a_measure_dc_current,
+    sdm4065a_measure_dc_voltage,
+    sdm4065a_measure_diode,
+    sdm4065a_measure_frequency,
+    sdm4065a_measure_period,
+    sdm4065a_measure_resistance,
+    sdm4065a_measure_resistance_4wire,
+    sdm4065a_measure_temperature,
+    sdm4065a_null_now,
+    sdm4065a_open,
+    sdm4065a_query,
+    sdm4065a_raise_if_error,
+    sdm4065a_read,
+    sdm4065a_read_nulled,
+    sdm4065a_reading_timeout_ms,
+    sdm4065a_reset,
+    sdm4065a_self_test,
+    sdm4065a_set_autorange,
+    sdm4065a_set_autozero,
+    sdm4065a_set_function,
+    sdm4065a_set_nplc,
+    sdm4065a_set_null,
+    sdm4065a_set_null_auto,
+    sdm4065a_set_null_value,
+    sdm4065a_set_range,
+    sdm4065a_set_sample_count,
+    sdm4065a_set_temperature_unit,
+    sdm4065a_standard_event_status,
+    sdm4065a_write,
 )
 
 

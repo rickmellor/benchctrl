@@ -108,11 +108,29 @@ def make_dp2031(**kwargs) -> Any:
     return _bind_lifetime(driver, sim)
 
 
+def make_sdm4065a(**kwargs) -> Any:
+    """A real ``SiglentSDM4065A`` over pyvisa-py's serial backend."""
+    from benchctrl.drivers.siglent_sdm4065a import SiglentSDM4065A
+    from benchctrl.sim.sdm4065a import SimulatedSDM4065A
+
+    sim_kwargs = kwargs.pop("sim", {})
+    kwargs.pop("resource", None)
+    sim = SimulatedSDM4065A(**sim_kwargs)
+    sim.start()
+    try:
+        driver = SiglentSDM4065A.open(_asrl(sim.port), **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
 FACTORIES: dict[str, Callable[..., Any]] = {
     "otii_arc": make_otii_arc,
     "eastwood_qr10x": make_qr10x,
     "rigol_dl3031a": make_dl3031a,
     "rigol_dp2031": make_dp2031,
+    "siglent_sdm4065a": make_sdm4065a,
 }
 
 

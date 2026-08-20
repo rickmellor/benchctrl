@@ -57,28 +57,39 @@ free-running thread.
 | `SimulatedQR10x` | Eastwood QR10x | AT command set, relay-ladder quantisation, safety limit, settling delay |
 | `SimulatedRigolDL3031A` | Rigol DL3031A | SCPI over ASRL, incl. the `:SOUR:FUNC` set-as-`CURRent`/read-as-`CC` quirk |
 | `SimulatedRigolDP2031` | Rigol DP2031 | SCPI over ASRL, three channels, register model |
+| `SimulatedSDM4065A` | Siglent SDM4065A | SCPI over ASRL, per-function range/NPLC/null state, autoranging, the `9.9E37` overload sentinel, `CONFigure`'s reset side effects, and Siglent's colon-less headers |
 
 The SCPI simulators use a generic register model that covers the bulk
 of the ~254 distinct SCPI strings across the two Rigols; measurement,
 identity and error-queue behaviour are modelled explicitly rather than
 generically.
 
+The SDM4065A simulator models the instrument's **quirks** on purpose,
+not just its commands: `CONFigure` clearing the null and range,
+enabling `NULL:STATe` arming `NULL:VALue:AUTO`, autoranging down below
+10 % and up above 120 % of range, and `RANGe?` reporting the range
+actually *used* rather than the one last requested. A simulator that
+modelled only the happy path would have agreed with a driver that got
+the null ordering backwards. This one does not — a test pins that the
+naive ordering genuinely fails against it.
+
 ## Sim mode — no code changes
 
 `benchctrl.session` resolves each device to `local`, `remote` or `sim`
 independently, so you can simulate part of a bench and leave the rest
-real. Nothing above the seam changes — all 226 MCP tools are unaware.
+real. Nothing above the seam changes — all 280 MCP tools are unaware.
 
 ```bash
 # whole bench simulated
 benchctrl-agent --simulate
 
 # just the two you don't have on the desk today
-BENCHCTRL_SIM_DEVICES=otii_arc,rigol_dp2031 benchctrl-mcp
+BENCHCTRL_SIM_DEVICES=otii_arc,siglent_sdm4065a benchctrl-mcp
 ```
 
 Device keys are the canonical ones from `benchctrl.config.DEVICE_KEYS`:
-`otii_arc`, `eastwood_qr10x`, `rigol_dl3031a`, `rigol_dp2031`.
+`otii_arc`, `eastwood_qr10x`, `rigol_dl3031a`, `rigol_dp2031`,
+`siglent_sdm4065a`.
 
 Or in a config file:
 

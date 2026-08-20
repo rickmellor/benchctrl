@@ -111,6 +111,35 @@ def test_visa_scan_identifies_rigols(monkeypatch):
     assert None in keys  # the plain serial resource stays unclaimed
 
 
+def test_visa_scan_identifies_the_siglent_dmm(monkeypatch):
+    """The DMM is USB-TMC like the Rigols, but on Siglent's own VID.
+
+    Without a SIGNATURES entry the driver could still open the meter (it
+    scans VISA itself) while the bench inventory reported it as unidentified
+    — so a remote operator listing the bench would not see the instrument
+    the agent is perfectly able to serve.
+    """
+
+    class FakeRM:
+        def list_resources(self):
+            return ("USB0::0xF4EC::0x1220::SDM40FAKE0001::INSTR",)
+
+        def close(self):
+            pass
+
+    found = discovery.scan_visa(FakeRM())
+    assert [d.device_key for d in found] == ["siglent_sdm4065a"]
+    assert found[0].confidence == EXACT
+
+
+def test_the_siglent_signature_records_the_family_ambiguity():
+    """The VID/PID is shared by the SDM4045A/4055A/4065A, whose resistance
+    ranges and NPLC sets differ. A signature that claimed model certainty
+    would licence a caller to skip ``*IDN?`` and pick wrong constants."""
+    sig = next(s for s in discovery.SIGNATURES if s.device_key == "siglent_sdm4065a")
+    assert "IDN" in sig.note
+
+
 def test_visa_scan_is_silent_without_a_backend(monkeypatch):
     """A bench with only serial instruments is a valid bench."""
     import builtins
