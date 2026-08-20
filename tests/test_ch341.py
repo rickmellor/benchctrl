@@ -17,7 +17,7 @@ import pytest
 import serial
 
 from benchctrl.drivers.eastwood_qr10x import QR10x
-from benchctrl.exceptions import BenchValueError
+from benchctrl.exceptions import BenchConnectionError, BenchValueError
 from benchctrl.sim.qr10x import SimulatedQR10x
 from benchctrl.transports.ch341 import (
     CH341_LCR_CS8,
@@ -25,6 +25,7 @@ from benchctrl.transports.ch341 import (
     CH341_LCR_ENABLE_TX,
     CH341_LCR_STOP_BITS_2,
     CH341_OSC_HZ,
+    CH341Device,
     _baud_registers,
     _lcr_for,
 )
@@ -436,3 +437,60 @@ def test_a_failing_device_write_does_not_kill_the_pump(bridge):
         ser.write(b"second")
         ser.flush()
         assert _wait_for(lambda: b"second" in bytes(fake.from_host))
+
+
+# --------------------------------------------------------------------------
+# Selecting among adapters
+# --------------------------------------------------------------------------
+
+
+class _FakeUsbDev:
+    """Enough of a pyusb device for CH341Device.open's selection logic."""
+
+    def __init__(self, serial_number=None):
+        self.serial_number = serial_number
+
+
+def _patch_find_all(monkeypatch, devices):
+    monkeypatch.setattr(
+        CH341Device, "find_all", classmethod(lambda cls: list(devices))
+    )
+    # Selection happens before any USB I/O; stop there.
+    monkeypatch.setattr(CH341Device, "_connect", lambda self: None)
+
+
+def test_selecting_by_serial_says_so_when_no_adapter_publishes_one(monkeypatch):
+    """Our CH340G reports iSerialNumber=0, so no serial can ever match.
+
+    "found [None]" reads as a lookup miss and sends people hunting for the
+    right string; the real answer is that the hardware publishes nothing and
+    index= is the only way to choose.
+    """
+    _patch_find_all(monkeypatch, [_FakeUsbDev(None)])
+
+    with pytest.raises(BenchConnectionError) as excinfo:
+        CH341Device.open(serial_number="ABC123")
+
+    msg = str(excinfo.value)
+    assert "iSerialNumber=0" in msg
+    assert "index=" in msg, "the message must name the way that does work"
+
+
+def test_a_genuine_serial_miss_still_lists_what_was_found(monkeypatch):
+    """Where adapters *do* publish serials, the old message is the useful one."""
+    _patch_find_all(monkeypatch, [_FakeUsbDev("AAA"), _FakeUsbDev("BBB")])
+
+    with pytest.raises(BenchConnectionError) as excinfo:
+        CH341Device.open(serial_number="CCC")
+
+    msg = str(excinfo.value)
+    assert "AAA" in msg and "BBB" in msg
+    assert "iSerialNumber=0" not in msg
+
+
+def test_a_published_serial_selects_its_adapter(monkeypatch):
+    _patch_find_all(monkeypatch, [_FakeUsbDev("AAA"), _FakeUsbDev("BBB")])
+
+    dev = CH341Device.open(serial_number="BBB")
+
+    assert dev._dev.serial_number == "BBB"

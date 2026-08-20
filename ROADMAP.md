@@ -74,6 +74,56 @@ good enough.
 3. Document the wiring; make it opt-in but loudly recommended in
    `docs/runs.md`
 
+### Revalidate serial transport selection on a desktop Linux host
+
+**Status**: `benchctrl.transports.autoserial` prefers a kernel `ch341`
+driver over our userspace one, falling back only where the kernel bound
+nothing (`KNOWN_LIMITATIONS.md § N-6`). The **fallback** path is verified on
+silicon — QR101A-1M-R1 serial 00000248 on the Uno Q, open → close → reopen,
+the reopen proving the USB claim is released rather than leaked. The
+**kernel-first** path is not: it is covered by `tests/test_autoserial.py`
+(including a mutation check that inverting the precedence fails a test), but
+has never run against a host that actually has the module.
+
+**Why deferred**: no host on this bench can exercise it. The Uno Q is built
+`# CONFIG_USB_SERIAL_CH341 is not set`, and WSL has no CH340 passed through
+to it. This needs a "big iron" Linux host with the QR10x plugged in
+directly — not a code change, just hardware we don't currently have on the
+bench.
+
+**Scope when picked up**, on a host where `/dev/ttyUSB*` appears for
+`1a86:7523`:
+
+1. `resolve_ch341_port(port=None)` returns `how="kernel"` and the tty path,
+   and **no pty is created** — the userspace driver must not be touched. Also
+   assert no `_benchctrl_bridge` attribute on the driver, since the kernel
+   path should carry no bridge machinery.
+2. A QR10x round-trip over the kernel tty: `info()` matches what the
+   userspace path reports for the same unit (device type, serial, firmware).
+   Same instrument, same answers, different transport.
+3. Open → close → reopen, as on the Uno Q. The failure this catches is a
+   half-released tty rather than a leaked USB claim.
+4. `discovery.discover()` reports the adapter via `scan_serial()` with a real
+   device path, and `scan_driverless_bridges()` returns `[]` — the
+   self-suppression that stops it being double-reported.
+5. The negative case, which is the one that matters most: hold the tty open
+   from another process, then open through `autoserial`. It must **raise**,
+   not fall back to the userspace driver and silently succeed on a different
+   transport.
+6. Then the hardware suites end to end — `test_bench_qr10x.py` and
+   `test_cross_validate_sdm4065a_qr10x.py` — with no port configured, to
+   confirm one config genuinely works unmodified on both hosts.
+
+**Also unresolved, and cheap to settle on the same host**: whether
+`serial_number=` selection works at all. Our CH340G reports
+`iSerialNumber=0` — no serial-number descriptor — so `CH341Device.open(
+serial_number=...)` cannot match it and the `index=` path is the only way to
+pick among several. Adapters differ here; some CH340 variants do carry one.
+Worth confirming on a second adapter before relying on serial selection, and
+worth a clearer error than "no CH340 with serial None" if the descriptor is
+simply absent. Multi-adapter selection is untested on real hardware either
+way — only one CH340 has ever been attached to this bench at a time.
+
 ### Transport-layer encryption for remote mode
 
 **Status**: `benchctrl.net` authenticates with HMAC-SHA256

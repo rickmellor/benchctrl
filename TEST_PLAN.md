@@ -12,7 +12,7 @@ tiers:
   when the device isn't present.
 
 ```bash
-pytest -m "not hardware"     # 1182 collected, ~10 min, no hardware
+pytest -m "not hardware"     # 1185 collected, ~10 min, no hardware
 pytest -m hardware           # 173, needs the bench
 pytest                       # both
 ```
@@ -101,6 +101,7 @@ than "a number arrived".
 | `test_session_config.py` | config precedence (explicit > CLI > env > file > all-local), per-device mode resolution, rejection of `deadman_s <= heartbeat_s`, and the loud failure when a remote device names no reachable endpoint |
 | `test_discovery.py` | the signature table and confidence levels. Asserts **no driver signature collides with a known USB-serial bridge** (CH340 / FTDI / CP210x) — the test that stops confident false positives. Also that a CH340 with *no* kernel tty is still reported (`comports()` lists ttys, so a driverless adapter is invisible to it by construction) and is *not* double-reported once the kernel does bind it |
 | `test_autoserial.py` | transport precedence: an explicit port wins and probes nothing, a kernel tty beats the userspace CH341 driver, userspace runs only when the kernel bound nothing, and an unrelated FTDI tty does not suppress the fallback. Plus the two things that leak hardware if wrong — bridge closed when the driver closes (**even if the driver's `close()` raises**), and not leaked when the driver's open fails. Pins that a *failed* kernel open raises rather than silently falling back to a different transport |
+| `test_ch341.py` | the userspace CH340 driver: baud/LCR registers pinned against Linux's `ch341.c`, the pty bridge moving bytes both ways binary-safely, a chunked reply not truncated by poll gaps, and the real QR10x driver end to end over a loopback-backed bridge. Also adapter selection — that asking for a serial number when **no** adapter publishes one says so (`iSerialNumber=0`, use `index=`) rather than reporting a lookup miss, while a genuine miss still lists what was found |
 | `test_sim_loopback.py` | the pty pair in raw mode, bounded tx queue reporting overruns rather than dropping samples, and end-to-end capture through the production driver |
 
 ### Remote mode

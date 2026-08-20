@@ -13,7 +13,7 @@ firmware caps see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 
 - **Version**: 1.2.0
 - **Branch**: `feat/siglent-sdm4065a` off `master`
-- **Tests**: 1182 hardware-free + 173 hardware-marked. Hardware-free
+- **Tests**: 1185 hardware-free + 173 hardware-marked. Hardware-free
   suite runs in ~10 minutes with nothing plugged in.
 - **MCP tools**: 280 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
   SDM4065A 54, cross-driver 13
@@ -192,7 +192,7 @@ Ordered roughly by how much they'd change if picked up next.
 cd ~/repos/benchctrl
 git log --oneline -20
 
-pytest -m "not hardware" -q     # 1182 tests, ~10 min, no hardware
+pytest -m "not hardware" -q     # 1185 tests, ~10 min, no hardware
 pytest -m hardware -q           # 173 tests, needs the bench on USB
 pytest -q                       # both
 

@@ -69,7 +69,16 @@ reports the adapter where it previously reported nothing.
   is built without it, and WSL has no CH340 passed through. The precedence
   logic is covered by `tests/test_autoserial.py`, including a mutation check
   that each branch fails when inverted, but "kernel tty is preferred" has
-  not been observed on real hardware that has one.
+  not been observed on real hardware that has one. Scoped for revalidation
+  in `ROADMAP.md` § *Revalidate serial transport selection on a desktop
+  Linux host*, with the negative case (a busy kernel tty must raise rather
+  than fall back) called out as the one that matters most.
+- **`serial_number=` selection is unusable on our adapter, and untested
+  generally.** This CH340G reports `iSerialNumber=0` — no serial-number
+  descriptor — so there is nothing for `CH341Device.open(serial_number=...)`
+  to match, and `index=` is the only way to pick among several. Other CH340
+  variants do carry one. Multi-adapter selection has never been exercised on
+  hardware either way: only one CH340 has ever been attached to this bench.
 - **Only the CH340G (`1a86:7523`) is handled.** The CH9102 (`1a86:55d4`)
   uses a different register layout, and other bridges (FTDI, CP210x,
   PL2303) are untouched — they are only ever reachable through their kernel

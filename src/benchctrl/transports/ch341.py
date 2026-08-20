@@ -209,9 +209,21 @@ class CH341Device:
                     chosen = d
                     break
             if chosen is None:
+                seen = [_string_of(d, "serial_number") for d in devices]
+                if not any(seen):
+                    # Distinguishable and worth distinguishing: the caller asked
+                    # to select by something the hardware does not publish, which
+                    # no retry or different string will fix. Our CH340G reports
+                    # iSerialNumber=0. Saying "found [None]" reads as a lookup
+                    # miss and sends people hunting for the right serial.
+                    raise BenchConnectionError(
+                        f"cannot select a CH340 by serial: none of the "
+                        f"{len(devices)} adapter(s) present publish a "
+                        f"serial-number descriptor (iSerialNumber=0), so "
+                        f"{serial_number!r} can never match. Use index= instead."
+                    )
                 raise BenchConnectionError(
-                    f"no CH340 with serial {serial_number!r}; found "
-                    f"{[_string_of(d, 'serial_number') for d in devices]}"
+                    f"no CH340 with serial {serial_number!r}; found {seen}"
                 )
         else:
             if index >= len(devices):
