@@ -9,6 +9,80 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### Verifiable source sync to a board (`deploy/sync-board.sh`)
+
+Development tooling, not part of installation. It exists because the FUI
+reached the board twice as pre-review software: files went over one at a
+time with `scp`, the panel came up, and every surface check passed. The
+deployed `state.py` had none of the observer-role safety check. The root
+cause was not carelessness — it was that **"deployed" was a claim nobody
+could check.**
+
+So the copy is the easy half. The half that was missing is that afterwards
+a `sha256` manifest is taken on each end and compared, and the output
+either says `IN SYNC — N files identical` or names every file that
+differs. `--check` verifies without changing anything, because most days
+the useful question is "is the board current?"
+
+On its first real run (2026-08-20, repo at `3cfb8dc`) it found **16 files
+of genuine drift** on a board believed to be current — 14 differing, 2
+never delivered. Each differing file matched an older commit in
+`git log --all`, so the board was running stale deploys rather than local
+edits.
+
+Three files: `sync-board.sh` (workstation side),
+`board_sync_manifest.py` (the comparison; stdlib only, so it runs on a
+board with no pip and on a tree whose `benchctrl` package is broken —
+diagnosing a bad deploy is exactly when you need it), and
+`board_apply_sync.sh` (the board side). The last is a separate file rather
+than a string inside an `ssh` argument because it is the only destructive
+code here, and inline it was neither lintable nor testable: `sh -n` on the
+outer script saw one string literal, so an unbalanced quote inside it
+passed while failing on the board.
+
+What bounds the damage, and why each guard is enforced rather than
+documented:
+
+- The board's `src/` holds **vendored dependencies** beside our package —
+  `serial`, `usb`, `pyvisa`, `pyvisa_py` — because it has no pip. They are
+  not in this repo, so they are exactly what the stale-file sweep would
+  delete, taking the agent and the bench down. `PACKAGE` is validated as a
+  single plain directory name in all three files.
+- `REMOTE_SRC` must end in `/src`. `/home/arduino/benchctrl`, one
+  component from the default, is the agent's live blob and runs directory.
+- `check_sync` checks the exit status of every command. It is called from
+  an `if`, which suspends `set -e`, so an unchecked failure leaves an
+  empty manifest — and two empty manifests compare as *in sync*. A
+  zero-line manifest is refused outright as a second, independent
+  backstop.
+
+Nothing is restarted. Bouncing the agent disconnects instruments and
+restarting lightdm blanks the panel; both need root, which this never
+asks for. It does say two things it will not act on: a running agent ends
+up on a **mix** of old and new modules (drivers import lazily, so it picks
+up new driver files while keeping the old core), and killing the FUI would
+not work anyway — `benchctrl-kiosk` `exec`s the browser, discarding its
+cleanup trap, so nothing respawns the dashboard.
+
+Known blind spots, stated because a verification tool that overstates its
+coverage is worse than none:
+
+- **The push is not atomic.** `tar` extracts member by member into the
+  live tree, so a dropped connection or a full disk leaves the mixed tree
+  this exists to eliminate. `set -eu` aborts before the delete sweep
+  rather than sweeping against a partial extraction, and a trap prints
+  "the board WAS modified and was NOT verified" on any failure after the
+  push begins — but the window is real.
+- **`--check` does not delete, so it cannot fix stale `__pycache__`.** A
+  board carrying it reports `IN SYNC`, correctly: that bytecode is
+  excluded from the comparison by design, because the board's 3.13 and the
+  workstation's 3.12 never agree. Legacy-location `.pyc`
+  (`benchctrl/panel.pyc`) *is* compared and swept — that is the form PEP
+  3147 imports with no source present, verified both ways on 3.12.
+- CI lints and type-checks `src`, not `deploy/`. The only thing holding
+  `board_sync_manifest.py` to the 3.9 floor is `tests/` loading it by path
+  on every leg of the version matrix.
+
 ### Read-only bench status display on the board's HDMI panel
 
 The board boots straight into a full-screen status console instead of an

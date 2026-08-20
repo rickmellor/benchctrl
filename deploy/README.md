@@ -12,8 +12,14 @@ none of it; see [`docs/remote.md`](../docs/remote.md) for the client config.
 | [`install-fui.sh`](install-fui.sh) | optional: the read-only HDMI status display (`benchctrl-fui`) |
 | [`install-kiosk.sh`](install-kiosk.sh) | optional: boots the board straight into that display, **no login prompt** — run `install-fui.sh` first |
 | [`udev/61-benchctrl-usbtmc.rules`](udev/61-benchctrl-usbtmc.rules) | required for USB-TMC instruments (SDM4065A, both Rigols) on a kernel without `usbtmc` |
+| [`sync-board.sh`](sync-board.sh) | during development: push this checkout to a board and **prove** it landed — runs from your workstation, not the board |
+| [`board_sync_manifest.py`](board_sync_manifest.py) | what `sync-board.sh` compares with; also useful on its own to answer "is the board current?" |
+| [`board_apply_sync.sh`](board_apply_sync.sh) | the board-side half of that: extract, then delete what the tarball did not carry |
 
-The scripts are POSIX `sh`, root-only, and idempotent.
+The `install-*.sh` scripts are POSIX `sh`, root-only, and idempotent. The three
+sync files are the exception: they run **unprivileged** and never ask for root,
+and `board_sync_manifest.py` is Python (stdlib only, so it works on a board with
+no pip).
 
 `install-kiosk.sh` is the one with a way to hurt you: it removes the board's only
 local login. It refuses to run unless ssh is active and the display is already
@@ -196,6 +202,114 @@ sudo udevadm trigger --action=add     # existing devices need this, see above
 Needs `pyvisa` and `pyvisa-py` on the board alongside `pyusb`. All three are
 pure Python — unzip the wheels next to `benchctrl`, same as `pyserial`.
 `pyvisa-py` also wants `typing_extensions`.
+
+## Keeping a board's source current
+
+For development against a board that stays running. Not part of installation —
+`install-agent.sh` handles that. This is for the loop afterwards, where the
+board is on a bench and the code changes daily.
+
+```bash
+./deploy/sync-board.sh --check     # is the board current? change nothing
+./deploy/sync-board.sh             # make it current, then prove it
+./deploy/sync-board.sh --restart   # ...and bounce the FUI (never the agent)
+```
+
+Runs from your **workstation**. Configure with `BOARD=user@host`,
+`REMOTE_SRC=...`, and `SSH_OPTS=...` if your ssh needs explicit options.
+
+### Why it exists
+
+The FUI was installed on the board twice from a staging directory older than the
+repo, so `install-fui.sh` faithfully installed pre-fix software both times. The
+launchers were missing their fullscreen flags; the deployed `state.py` had none
+of the observer-role safety check. Every surface check passed, because the panel
+*was* up — just not running the version that had been reviewed.
+
+The root cause was not carelessness, it was that **"deployed" was a claim nobody
+could check**. Files went across one at a time with `scp` and nothing compared
+the result to anything. So the copy is the easy half of this script; the half
+that was missing is that afterwards a `sha256` manifest from each end is
+compared and the output either says `IN SYNC — N files identical` or names every
+file that differs. Hence `--check` being a first-class mode: most days the useful
+question is "is the board current?", not "make it current".
+
+On its first real run against the Uno Q (2026-08-20, repo at `3cfb8dc`) it found
+16 files of genuine drift on a board believed to be current: 14 differing and 2
+never delivered (`sim/sdm4065a.py`, `transports/autoserial.py`). Every differing
+file matched an older commit in `git log --all`, confirming stale deploy rather
+than local edits on the board — worth checking before overwriting, since this
+tool has no undo.
+
+### Two things it deliberately does not do
+
+**It does not touch anything outside the `benchctrl` package.** The board's
+`src/` also holds **vendored dependencies** — `serial`, `usb`, `pyvisa`,
+`pyvisa_py` — because it has no pip and no install path. They belong there and
+they are not in this repo. Comparing the whole directory buried the real drift
+under ~120 phantom differences, and worse, put them in the category the sync
+*deletes* ("on the board, absent from the repo") — which would have removed the
+board's only copy of pyserial and taken the agent down. So both manifests, the
+tarball, and the stale-file sweep are all scoped to `$PACKAGE`.
+
+The sweep itself is not optional: extracting a tarball over the top leaves a
+file you deleted in the repo still present on the board, which is how a removed
+module keeps running. It lives in `board_apply_sync.sh` rather than inside an
+`ssh` string so that the only destructive code in the sync is lintable and
+testable — embedded in a quoted argument it was neither, and `sh -n` could not
+see into it.
+
+Bytecode is handled asymmetrically, and the direction matters:
+
+- `__pycache__` is **deleted** on the board, not compared. Bytecode from the
+  board's 3.13 never matches the workstation's 3.12, so comparing it would report
+  permanent unfixable drift.
+- A `.pyc` in the **legacy location** (`benchctrl/panel.pyc`, beside the package)
+  *is* compared, and swept. That is the form PEP 3147 will import with no source
+  present — verified both ways on 3.12: with `pkg/mod.py` deleted, `pkg/mod.pyc`
+  imports and returns its value while `pkg/__pycache__/mod.cpython-312.pyc`
+  raises `ImportError`. Excluding it would make `--check` structurally blind to
+  the one bytecode case that can keep deleted code running.
+
+**It does not restart anything.** The board runs a bench. Bouncing the agent
+disconnects instruments; restarting lightdm blanks the panel. Both need root,
+which this script does not have, so it prints the commands and leaves the
+decision to you.
+
+Two things it will tell you rather than do:
+
+- **A running agent ends up on a mix of old and new modules.** `registry.py`
+  imports drivers lazily, inside the opener closure, so an agent that has not yet
+  opened a given instrument imports the *new* driver into a process whose core
+  modules are the *old* already-loaded ones. Restart it before trusting a driver
+  change.
+- **`--restart` does not kill the FUI.** `benchctrl-kiosk` starts the dashboard
+  once and then `exec`s the browser, which replaces the shell and discards its
+  cleanup trap — nothing supervises the dashboard, so nothing respawns it.
+  `pkill` would leave the browser on a dead port, on a panel with no keyboard.
+  `systemctl restart lightdm` is the thing that works.
+
+It also copies `deploy/`'s launchers across (they drifted independently and
+caused their own regression) but does **not** install them, because
+`/usr/local/bin` needs root. It tells you the one-line `sudo install` if a
+launcher changed.
+
+### What bounds the damage
+
+Two variables are the safety boundary, so both are validated rather than trusted:
+
+- **`PACKAGE`** must be a single plain directory name. `PACKAGE=.` would make the
+  sweep the unscoped sweep described above. Enforced in all three files, because
+  each is a usable entry point.
+- **`REMOTE_SRC`** must end in `/src`. Crude, but it excludes exactly the
+  destructive typo: `/home/arduino/benchctrl` — one component from the default —
+  is the agent's live blob and runs directory, holding verified run artifacts.
+
+`check_sync` also checks the exit status of every command it runs. That is not
+housekeeping: it is called from an `if`, which suspends `set -e`, so an unchecked
+failure would leave an empty manifest — and two empty manifests compare as *in
+sync*. "IN SYNC — 0 files identical" is the one output this tool must never
+produce.
 
 ## Display hotplug
 
