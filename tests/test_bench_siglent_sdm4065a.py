@@ -20,6 +20,7 @@ reasonable implementation gets wrong:
 from __future__ import annotations
 
 import os
+import warnings
 
 import pytest
 
@@ -216,14 +217,17 @@ def test_measure_without_a_range_argument_reverts_to_autoranging(dmm):
     assert dmm._benchctrl_sim.autorange["RES"] is True
 
 
-def test_configure_without_a_range_uses_the_2k_default(dmm):
-    """§7.4.5: the default resistance range is 2 kΩ, not the lowest range.
+def test_configure_without_a_range_leaves_autorange_on(dmm):
+    """Bench-measured: a bare ``CONFigure`` autoranges, reporting 200 Ω.
 
-    Worth pinning: a 100 Ω DUT left on 2 kΩ carries a "% of range" error
-    term computed on 2 kΩ — a 10x accuracy penalty, applied silently.
+    Worth pinning because the consequence is invisible in the reading. The
+    number comes back correct — autorange picks a sensible range — but the
+    "% of range" term in the error budget is then whatever range the input
+    happened to select, not one the caller chose.
     """
     dmm.configure_resistance()  # no range argument
-    assert dmm.get_range() == pytest.approx(2000.0)
+    assert dmm.get_autorange() is True
+    assert dmm.get_range() == pytest.approx(200.0)
 
 
 def test_read_nulled_refuses_when_no_null_is_active(dmm):
@@ -257,12 +261,46 @@ def test_null_value_beyond_110_megaohm_is_rejected(dmm):
         dmm.set_null_value(200e6)
 
 
-def test_set_null_value_disarms_auto(dmm):
+def test_set_null_value_does_not_disarm_auto_despite_the_manual(dmm):
+    """§7.4.3's claim is false on firmware 0.0.0.20 — pinned as measured.
+
+    The manual says writing ``NULL:VALue`` disables automatic null-value
+    selection. The real meter leaves ``NULL:VALue:AUTO`` armed, so an offset
+    written this way is overwritten by the instrument's next reading and the
+    null silently does nothing.
+
+    This test asserts the *hardware's* behaviour rather than the manual's,
+    which is the only version that keeps ``null_now``'s explicit ``AUTO OFF``
+    honest. Asserting the documented behaviour would make that call look
+    redundant, and deleting it would reintroduce a wrong-answer bug that no
+    single-instrument reading can reveal — a nulled meter agrees with itself
+    either way.
+    """
     dmm.configure_resistance(200)
     dmm.set_null_auto(True)
     assert dmm.get_null_auto() is True
     dmm.set_null_value(0.5)
-    assert dmm.get_null_auto() is False
+    assert dmm.get_null_auto() is True, (
+        "if this ever fails, Siglent fixed §7.4.3 in a firmware update — "
+        "check the firmware revision before relaxing null_now()"
+    )
+
+
+def test_null_now_disarms_auto_explicitly(dmm):
+    """The consequence: after ``null_now`` the offset is safe from AUTO.
+
+    Guards the fix rather than the bug. ``null_now`` must leave the null
+    enabled, the offset installed, *and* AUTO off — the third being the part
+    the instrument will not do for you.
+    """
+    dmm.configure_resistance(200)
+    dmm.set_nplc(1.0)
+    dmm.null_now(samples=2)
+    assert dmm.get_null() is True
+    assert dmm.get_null_auto() is False, (
+        "null_now left auto-null armed — the offset it just stored will be "
+        "overwritten by the next reading"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -408,6 +446,165 @@ def test_autozero_round_trips(dmm):
     dmm.set_autozero(True)
     assert dmm.get_autozero() is True
     dmm.set_autozero(False)
+    assert dmm.get_autozero() is False
+
+
+def test_autozero_uses_zero_auto_not_the_manuals_az(dmm):
+    """The mnemonic §7.4.7 documents does not exist on the instrument.
+
+    Bench-measured on firmware 0.0.0.20: every ``AZ`` spelling is rejected
+    with -113 "Undefined header", for reads and writes, on all four
+    functions. ``ZERO:AUTO`` works. This pins the wire format, because the
+    manual is the thing a future reader will check the code against — and
+    "fixing" it to match §7.4.7 costs a power cycle to discover.
+    """
+    from benchctrl.drivers.siglent_sdm4065a.driver import AUTOZERO_NODE
+
+    assert AUTOZERO_NODE == "ZERO:AUTO"
+    # The working form round-trips...
+    dmm.set_autozero(True)
+    assert dmm.get_autozero() is True
+    # ...and the manual's form must be *rejected*, not silently accepted. A sim
+    # that answered ``AZ?`` would hide the whole defect and let a driver that
+    # follows the manual pass every test right up to the real instrument.
+    dmm.write("RESistance:AZ ON")
+    err = dmm.last_error()
+    assert err is not None and err[0] == -113, (
+        f"the simulator accepted RESistance:AZ (error queue: {err}), which "
+        f"the real instrument rejects with -113 'Undefined header' — a sim "
+        f"more permissive than the hardware is worse than no sim"
+    )
+
+
+def test_cls_does_not_empty_the_error_queue(dmm):
+    """IEEE 488.2 says ``*CLS`` clears the error queue. This firmware doesn't.
+
+    Bench-measured on 0.0.0.20: queued errors survive ``*CLS``, survive
+    ``*RST``, and survive closing and reopening the session. Only reading them
+    removes them. Pinned because if it ever starts working, the driver's
+    read-until-empty drain can be simplified — and because a sim that modelled
+    the standard would make that drain look like dead code.
+    """
+    dmm.write("RESistance:AZ ON")  # a header this instrument does not have
+    dmm.write("*CLS")
+    err = dmm.last_error()
+    assert err is not None and err[0] == -113, (
+        "*CLS emptied the error queue — check the firmware revision, then "
+        "reconsider clear_status()'s drain"
+    )
+
+
+def test_clear_status_drains_the_queue_anyway(dmm):
+    """So the driver's own ``clear_status`` must leave it actually clean.
+
+    This is the property callers rely on: without it the queue fills, starts
+    answering -350 "Queue overflow", and a later check reports an error raised
+    by an unrelated command.
+    """
+    for _ in range(3):
+        dmm.write("RESistance:AZ ON")
+    dmm.clear_status()
+    assert dmm.last_error() is None
+
+
+def test_drain_errors_returns_what_it_removed(dmm):
+    """And reports the entries, so a caller can log what was discarded."""
+    dmm.write("RESistance:AZ ON")
+    dmm.write("RESistance:AZ:STATe ON")
+    drained = dmm.drain_errors()
+    assert [code for code, _ in drained] == [-113, -113]
+    assert dmm.last_error() is None
+
+
+def test_drain_errors_is_bounded(dmm):
+    """A queue that never empties must not hang the caller.
+
+    ``clear_status`` runs in ``finally`` blocks, where an unbounded loop is the
+    worst possible failure mode.
+    """
+    for _ in range(10):
+        dmm.write("RESistance:AZ ON")
+    drained = dmm.drain_errors(limit=4)
+    assert len(drained) == 4, "drain_errors ignored its limit"
+    # The rest are still queued — a short drain must not claim to be complete.
+    assert dmm.last_error() is not None
+    dmm.drain_errors()
+
+
+def test_esr_flags_a_command_error_and_clears_on_read(dmm):
+    """``*ESR?`` bit 5 marks a rejected header, and the read empties it.
+
+    Read-destructive is the property that makes this usable: because the
+    register cannot accumulate, a caller that clears, sends, then reads knows
+    the bit belongs to *that* command — which is exactly what the error queue
+    can no longer promise on this firmware.
+    """
+    dmm.clear_status()
+    assert dmm.command_error() is False
+
+    dmm.write("RESistance:AZ ON")
+    assert dmm.standard_event_status() == 32, "bit 5 (Command Error) not set"
+    assert dmm.standard_event_status() == 0, "*ESR? is not read-destructive"
+
+    dmm.drain_errors()
+
+
+def test_cls_clears_the_esr_even_though_it_spares_the_queue(dmm):
+    """The split that makes ``*ESR?`` the dependable signal.
+
+    ``*CLS`` leaves errors queued (see
+    :py:func:`test_cls_does_not_empty_the_error_queue`) but does zero the
+    status registers — bench-measured both ways on 0.0.0.20. If a firmware
+    update ever makes ``*CLS`` clear both, this still passes; it is the
+    register half that ``command_error`` depends on.
+    """
+    dmm.write("RESistance:AZ ON")
+    dmm.write("*CLS")
+    assert dmm.command_error() is False, "*CLS left the ESR set"
+    # ...while the queue entry it should have removed is still sitting there.
+    assert dmm.last_error() is not None
+
+
+def test_command_error_still_works_when_the_queue_goes_silent(dmm):
+    """The failure this fallback exists for.
+
+    Bench-measured after an error-queue overflow: ``SYSTem:ERRor?`` answered
+    ``0,"No Error"`` to everything, including immediately after a deliberately
+    bogus header, while ``*ESR?`` returned 32 for that same command. Only a
+    power cycle restored the queue. Any driver check that trusts the queue
+    silently stops detecting rejections in that state.
+    """
+    dmm._benchctrl_sim.error_queue_silent = True
+
+    # ``RESistance:AZ``, not an invented header: the sim only rejects writes it
+    # has a handler for, since the base ScpiDevice files unknown writes away as
+    # vendor extensions. The hardware rejects both.
+    dmm.write("RESistance:AZ ON")
+    assert dmm.last_error() is None, "the sim is not modelling the silent queue"
+    assert dmm.command_error() is True, (
+        "command_error fell back to the error queue — it must read *ESR?, "
+        "which stays accurate when the queue latches silent"
+    )
+
+
+def test_autozero_cached_agrees_with_the_readback(dmm):
+    """The tracked copy must not drift from the instrument.
+
+    ``get_autozero_cached`` exists for callers that cannot afford a round trip
+    (inside a timed loop). That is only safe while the two agree, so this pins
+    the agreement across a write and across ``reset``.
+    """
+    dmm.set_autozero(True)
+    assert dmm.get_autozero_cached() is True
+    assert dmm.get_autozero() is True
+
+    dmm.set_autozero(False)
+    assert dmm.get_autozero_cached() is False
+    assert dmm.get_autozero() is False
+
+    dmm.set_autozero(True)
+    dmm.reset()
+    assert dmm.get_autozero_cached() is False, "reset should re-seed the cache"
     assert dmm.get_autozero() is False
 
 
@@ -599,6 +796,73 @@ def test_reading_timeout_assumes_50hz_not_60():
     )
 
 
+def test_set_nplc_widens_the_visa_timeout(dmm):
+    """The helper existing is not enough — something has to *call* it.
+
+    ``reading_timeout_ms`` was correct arithmetic that nothing invoked, so the
+    VISA timeout never tracked the configured measurement at all. Asserts the
+    wiring, not the formula: the formula already had its own tests.
+
+    A *single* 100 NPLC read is measured at 2.09 s on the real meter, so the
+    10 s default does cover it — the resize matters once ``SAMPle:COUNt``
+    multiplies that, which the next test pins.
+    """
+    dmm.set_nplc(100.0)
+    assert dmm._inst.timeout >= SiglentSDM4065A.reading_timeout_ms(100.0, 1)
+
+
+def test_sample_count_widens_the_visa_timeout_past_the_default(dmm):
+    """``SAMPle:COUNt`` multiplies integration time past the default. Measured.
+
+    Bench-measured on firmware 0.0.0.20: one reading at 100 NPLC takes
+    2.09 s, and **5 readings take 10.14 s** — past the 10 s default, by a
+    margin small enough that it would look like a flaky instrument rather
+    than a configuration error.
+
+    That is the case worth guarding, because the consequence is not a failed
+    call. An aborted USB-TMC ``READ?`` leaves the reply queued in the
+    device's bulk-IN endpoint and stops it draining bulk-OUT, so every later
+    transfer fails with ``Errno 110`` while endpoint-0 control transfers keep
+    working — a wedged instrument that presents as a dead one. On this unit
+    it took a front-panel power cycle to clear.
+    """
+    dmm.set_nplc(100.0)
+    single = dmm._inst.timeout
+    dmm.set_sample_count(5)
+    assert dmm._inst.timeout > single
+    assert dmm._inst.timeout > SiglentSDM4065A.DEFAULT_TIMEOUT_MS, (
+        "5 x 100 NPLC is 10.14 s on real hardware; the default 10 s would "
+        "abort mid-read and strand the USB-TMC endpoints"
+    )
+    assert dmm._inst.timeout >= SiglentSDM4065A.reading_timeout_ms(100.0, 5)
+
+
+def test_the_measured_five_sample_time_really_does_exceed_the_default():
+    """Pins the bench measurement against the constant it invalidates.
+
+    10.14 s measured vs a 10 000 ms default. Kept as a separate assertion so
+    that raising ``DEFAULT_TIMEOUT_MS`` — a plausible "simpler fix" — is a
+    visible change here rather than a silent removal of the reason the resize
+    exists. Note the formula must cover the *measured* time, not the
+    theoretical 5 x 2.0 s of integration, since per-reading overhead is real.
+    """
+    measured_ms = 10_140
+    assert measured_ms > SiglentSDM4065A.DEFAULT_TIMEOUT_MS
+    assert SiglentSDM4065A.reading_timeout_ms(100.0, 5) > measured_ms
+
+
+def test_a_low_nplc_never_shrinks_below_the_requested_timeout(dmm):
+    """An explicit ``timeout_ms`` is a floor, not a starting suggestion.
+
+    Fast NPLC needs only milliseconds, so a naive resize would drop the
+    session to a timeout far below what the operator asked for — and every
+    other query (``*IDN?``, ``SYST:ERR?``) would inherit it. Those have
+    nothing to do with integration time.
+    """
+    dmm.set_nplc(0.001)
+    assert dmm._inst.timeout >= dmm._base_timeout_ms
+
+
 def test_resistance_range_table_is_the_4065a_not_the_4055a():
     from benchctrl.drivers.siglent_sdm4065a.driver import RESISTANCE_RANGES
 
@@ -622,12 +886,88 @@ def test_usb_ids_match_the_real_instrument():
     assert (SIGLENT_USB_VID, SDM4065A_USB_PID) == (0xF4EC, 0x1220)
 
 
-def test_default_resistance_range_is_2k_not_autorange():
-    """The instrument's own default (§7.4.5) — a 100 Ω DUT lands on 2 kΩ
-    unless the range is set, at a 10x cost in the % of range term."""
-    from benchctrl.sim.sdm4065a import DEFAULT_RESISTANCE_RANGE
+def test_default_resistance_state_is_autorange_reporting_200():
+    """Bench-measured, because the manual is not usable here.
 
-    assert DEFAULT_RESISTANCE_RANGE == 2e3
+    After ``*RST`` or a bare ``CONFigure:RESistance``, firmware 0.0.0.20
+    reports ``RANGe:AUTO?`` = 1 and ``RANGe?`` = 200. The pair is the fact:
+    the range number alone looks the same whether it was pinned or merely
+    selected by autorange, so a test on the range value on its own would pass
+    against a driver that got autorange backwards.
+    """
+    from benchctrl.drivers.siglent_sdm4065a.driver import (
+        DEFAULT_RESISTANCE_AUTORANGE,
+        DEFAULT_RESISTANCE_RANGE,
+    )
+    from benchctrl.sim import sdm4065a as sim_mod
+
+    assert DEFAULT_RESISTANCE_RANGE == 200.0
+    assert DEFAULT_RESISTANCE_AUTORANGE is True
+    # The sim must re-export, not redeclare — a private copy can drift from
+    # the driver it is meant to exercise.
+    assert sim_mod.DEFAULT_RESISTANCE_RANGE is DEFAULT_RESISTANCE_RANGE
+
+
+def test_the_def_parameter_is_2k_but_the_reset_range_is_200(dmm):
+    """§7.4.5 conflates two different things; the sim must not.
+
+    "default 2 kΩ" correctly describes the value of the literal ``DEF``
+    *parameter* — ``RESistance:RANGe? DEF`` answers 2 kΩ. It does not describe
+    the range after a reset, which is 200 Ω with autoranging on. Conflating
+    them is the documentation half of bug 4.
+
+    Also pins that ``RANGe? DEF`` is a pure query: it must report what ``DEF``
+    would select without selecting it.
+    """
+    dmm.reset()
+    assert dmm.query("RESistance:RANGe? DEF").strip().startswith("+2.00000000E+03")
+    assert dmm.query("RESistance:RANGe? MIN").strip().startswith("+2.00000000E+02")
+    assert dmm.query("RESistance:RANGe? MAX").strip().startswith("+1.00000000E+08")
+
+    # None of those queries may have changed the instrument.
+    assert dmm.get_range() == pytest.approx(200.0)
+    assert dmm.get_autorange() is True
+
+
+def test_the_two_def_forms_disagree_about_autorange(dmm):
+    """Firmware bug 4, modelled: only one ``DEF`` path disables autoranging.
+
+    §7.4.5's note says selecting a fixed range disables autoranging, so both
+    forms below should turn it off. Bench-measured on firmware 0.0.0.20, only
+    ``RESistance:RANGe DEF`` does; ``CONFigure:RESistance DEF`` leaves it on
+    while reporting a pinned-looking 2 kΩ.
+
+    Modelled as measured rather than as documented, because a sim more coherent
+    than the hardware would let a driver adopt ``DEF`` and only fail on the
+    bench. The driver never sends it.
+    """
+    dmm.reset()
+    dmm.write("RESistance:RANGe DEF")
+    assert dmm.get_range() == pytest.approx(2_000.0)
+    assert dmm.get_autorange() is False
+
+    dmm.reset()
+    dmm.write("CONFigure:RESistance DEF")
+    assert dmm.get_autorange() is True, (
+        "the sim disabled autorange for CONFigure:RESistance DEF — the "
+        "hardware does not, and a sim that is tidier than the instrument "
+        "hides the bug rather than pinning it"
+    )
+    # No assertion on get_range(): with autorange on the hardware's RANGe?
+    # tracks the input, answering 2 kΩ straight after the write and 200 Ω once
+    # a reading has been taken. The sim holds it static, so asserting the
+    # number here would pin sim-only behaviour.
+
+
+def test_reset_leaves_resistance_autoranging(dmm):
+    """The state a caller lands on by accident, asserted through the API."""
+    dmm.reset()
+    dmm.write("CONFigure:RESistance")
+    assert dmm.get_autorange() is True
+    assert dmm.get_range() == pytest.approx(200.0)
+    # An explicit range argument is what turns autorange off.
+    dmm.configure_resistance(200.0)
+    assert dmm.get_autorange() is False
 
 
 def test_discover_returns_a_list_without_hardware():
@@ -700,10 +1040,18 @@ def hw_dmm():
         pytest.skip(f"SDM4065A not reachable ({HW_RESOURCE}): {exc}")
     try:
         drv.reset()
+        # ``*CLS`` as well as ``*RST``: the error queue survives a reset, and
+        # this file deliberately sends commands the instrument rejects (see the
+        # ``AZ`` test). Left to accumulate, the queue reaches its depth and
+        # every later ``SYSTem:ERRor?`` answers -350 "Queue overflow" — so a
+        # test asserting "no error" fails, reporting a stale error raised by a
+        # different test. Bench-observed exactly that on the NPLC sweep.
+        drv.clear_status()
         yield drv
     finally:
         try:
             drv.reset()
+            drv.clear_status()
         finally:
             drv.close()
 
@@ -730,22 +1078,40 @@ def test_hw_identity_is_actually_a_4065a(hw_dmm):
 
 
 @pytest.mark.hardware
-def test_hw_the_error_queue_is_reachable(hw_dmm):
+def test_hw_error_reporting_is_reachable(hw_dmm):
     """Siglent writes SCPI headers without the leading root colon, and
     ``ScpiDevice`` registers ``:SYSTem:ERRor``. Get that wrong and error
     queries answer a cheerful ``"0"`` forever — every test that relies on
     error checking silently stops checking anything.
 
     So: provoke a real error and require the instrument to report it.
+
+    Asserted through ``*ESR?``, because the error *queue* is not a dependable
+    channel on this unit — bench-measured, it can latch into answering
+    ``0,"No Error"`` even to a deliberately bogus header, recoverable only by a
+    power cycle. ``*ESR?`` reported that same command correctly. The queue is
+    still checked below, but as a warning rather than a failure: a silent queue
+    is the instrument misbehaving, not the driver, and failing here would mask
+    the plumbing bug this test exists to catch.
     """
+    hw_dmm.clear_status()
     hw_dmm.write("NOSUCH:THING 1")
-    err = hw_dmm.last_error()
-    assert err is not None, (
-        "instrument reported no error after an undefined header — the error "
-        "queue is not actually being read"
+    assert hw_dmm.command_error() is True, (
+        "instrument reported no command error after an undefined header — "
+        "*ESR? is not actually being read"
     )
-    assert err[0] != 0
+
+    hw_dmm.write("NOSUCH:THING 1")
+    if hw_dmm.last_error() is None:
+        warnings.warn(
+            "SYSTem:ERRor? reported no error after an undefined header that "
+            "*ESR? flagged: this unit's error queue has latched silent. "
+            "Power-cycle the meter to restore it. Driver code must not rely "
+            "on last_error() to detect rejection — use command_error().",
+            stacklevel=1,
+        )
     hw_dmm.reset()
+    hw_dmm.clear_status()
 
 
 @pytest.mark.hardware
@@ -831,20 +1197,65 @@ def test_hw_overload_raises_on_a_deliberately_narrow_range(hw_dmm):
 
 
 @pytest.mark.hardware
-def test_hw_autozero_round_trips(hw_dmm):
-    """Autozero exists on the 4065A and defaults OFF (§7.4.7).
+def test_hw_autozero_round_trips_via_zero_auto(hw_dmm):
+    """Autozero works — but under ``ZERO:AUTO``, not the manual's ``AZ``.
 
-    The 4055A has no autozero at all, so a successful round trip here is
-    additional confirmation of the model — and of the default, which the
-    driver documents but until now had only the manual as evidence.
+    §7.4.7 documents ``[SENSe:]{RESistance|FRESistance}:AZ[:STATe]``. That
+    mnemonic does not exist on firmware 0.0.0.20: every ``AZ`` spelling is
+    rejected with -113 "Undefined header", for writes as well as queries.
+    ``ZERO:AUTO`` is accepted and round-trips on all four functions.
+
+    The distinction cost two power cycles to find, because a *query* of an
+    undefined header gets no reply at all — the read times out, the aborted
+    USB-TMC transfer strands the bulk endpoints, and every later transfer
+    fails with ``Errno 110`` while endpoint-0 control transfers keep working.
+    Neither ``INITIATE_CLEAR`` (which reports success) nor a libusb port reset
+    recovers it; only a front-panel power cycle does.
+
+    So this test also asserts the manual's form is *rejected*. That direction
+    matters more than it looks: if a future firmware implements ``AZ``, this
+    fails and tells the next reader the constant can be revisited.
+
+    Acceptance is judged by ``command_error()`` (``*ESR?`` bit 5), not by the
+    error queue. On this unit the queue can latch into answering ``0,"No
+    Error"`` to everything — bench-measured, it denied a deliberately bogus
+    header that ``*ESR?`` correctly reported — so a queue-based assertion here
+    fails for a reason that has nothing to do with autozero.
     """
     hw_dmm.configure_resistance(200)
-    assert hw_dmm.get_autozero() is False, "expected autozero OFF after CONFigure"
+    hw_dmm.clear_status()  # also zeroes *ESR?, so the next check is attributable
+    assert hw_dmm.command_error() is False
+
     hw_dmm.set_autozero(True)
+    assert hw_dmm.command_error() is False, (
+        "ZERO:AUTO ON was rejected — check *IDN?, since an SDM4055A differs"
+    )
     assert hw_dmm.get_autozero() is True
-    assert hw_dmm.last_error() is None
+
     hw_dmm.set_autozero(False)
+    assert hw_dmm.command_error() is False
     assert hw_dmm.get_autozero() is False
+
+    # The manual's mnemonic, confirmed absent. Write-only: querying it is what
+    # wedges the instrument, so this must never become a query.
+    hw_dmm.write("RESistance:AZ ON")
+    rejected = hw_dmm.command_error()
+    # Drain whatever that write queued, so this test cannot hand a stale error
+    # to the next one — the queue survives *RST and overflows at -350.
+    hw_dmm.clear_status()
+    assert rejected, (
+        "RESistance:AZ was accepted (*ESR? reported no command error). If this "
+        "firmware implements the §7.4.7 mnemonic, AUTOZERO_NODE can be "
+        "reconsidered — but verify the *query* answers before changing it, "
+        "because a query that does not answer takes a power cycle to recover"
+    )
+
+    # Liveness: a reading still works, which a wedged session would not allow.
+    hw_dmm.set_nplc(1.0)
+    try:
+        hw_dmm.read()
+    except SDM4065AOverloadError:
+        pass  # open input is fine; liveness is the point
 
 
 @pytest.mark.hardware
@@ -867,23 +1278,72 @@ def test_hw_configure_resets_nplc_to_ten(hw_dmm):
 
 
 @pytest.mark.hardware
-def test_hw_configure_resets_the_range_too(hw_dmm):
-    """And the range goes back to 2 kΩ, not autorange (§7.4.5).
+def test_hw_configure_resets_autorange_too(hw_dmm):
+    """And a bare ``CONFigure`` re-enables autorange (bench-measured).
 
     This is the half of the quirk most likely to bite: a caller who pins a
-    range, then calls ``measure_resistance``, gets a reading on the *default*
-    range. Proven here rather than assumed.
+    range, then calls ``measure_resistance``, is autoranging again without
+    having asked. The reading still looks right — autorange picks a sensible
+    range — so the only visible symptom is that the "% of range" term in the
+    error budget is no longer the one the caller reasoned about.
+
+    Asserts the *autorange flag*, not the range number, because ``RANGe?``
+    answers 200 in both states on this firmware. A test on the number alone
+    would pass while the configuration was wrong.
     """
-    from benchctrl.drivers.siglent_sdm4065a.driver import DEFAULT_RESISTANCE_RANGE
+    from benchctrl.drivers.siglent_sdm4065a.driver import (
+        DEFAULT_RESISTANCE_AUTORANGE,
+        DEFAULT_RESISTANCE_RANGE,
+    )
 
     hw_dmm.configure_resistance(200)
     assert hw_dmm.get_range() == pytest.approx(200.0)
+    assert hw_dmm.get_autorange() is False, (
+        "an explicit CONFigure:RESistance 200 left autorange on"
+    )
 
     hw_dmm.write("CONFigure:RESistance")
-    assert hw_dmm.get_range() == pytest.approx(DEFAULT_RESISTANCE_RANGE, rel=1e-3), (
-        f"bare CONFigure:RESistance left the range at {hw_dmm.get_range():G} "
-        f"rather than the documented {DEFAULT_RESISTANCE_RANGE:G} default"
+    assert hw_dmm.get_autorange() is DEFAULT_RESISTANCE_AUTORANGE, (
+        f"bare CONFigure:RESistance left autorange "
+        f"{hw_dmm.get_autorange()} rather than {DEFAULT_RESISTANCE_AUTORANGE}"
     )
+    assert hw_dmm.get_range() == pytest.approx(DEFAULT_RESISTANCE_RANGE, rel=1e-3)
+
+
+@pytest.mark.hardware
+def test_hw_the_two_def_forms_disagree_about_autorange(hw_dmm):
+    """``RESistance:RANGe DEF`` disables autorange; ``CONFigure ... DEF`` doesn't.
+
+    Both select 2 kΩ, and §7.4.5's note says selecting a fixed range disables
+    autoranging, so both should turn it off. Bench-measured on firmware
+    0.0.0.20, only the first does. Reported to Siglent;
+    ``docs/vendor-issues/SDM4065A-firmware-bug-report-4-range-defaults.md``.
+
+    Pinned because it is why the driver never sends ``DEF``: a caller who used
+    it via ``CONFigure`` would be autoranging while ``RANGe?`` reported a
+    pinned-looking 2 kΩ. If a firmware update makes the two agree, this fails
+    and the ``DEF`` path becomes usable.
+    """
+    hw_dmm.reset()
+    hw_dmm.write("RESistance:RANGe DEF")
+    assert hw_dmm.get_range() == pytest.approx(2_000.0, rel=1e-3)
+    assert hw_dmm.get_autorange() is False, (
+        "RESistance:RANGe DEF left autorange on — this direction used to work, "
+        "so check the firmware revision"
+    )
+
+    hw_dmm.reset()
+    hw_dmm.write("CONFigure:RESistance DEF")
+    assert hw_dmm.get_autorange() is True, (
+        "CONFigure:RESistance DEF now disables autorange — the firmware bug is "
+        "fixed, so DEF is safe to use and this test can go"
+    )
+    # Deliberately no assertion on get_range() here. With autorange on, RANGe?
+    # reports the range autorange has currently *selected*, so it moves with
+    # the input: measured 2 kΩ immediately after the write and 200 Ω once the
+    # 100 Ω DUT had been sampled. That instability is the point of the bug —
+    # the number is unusable for deciding whether the range is what you asked
+    # for, which is why get_autorange() is the assertion that means something.
 
 
 @pytest.mark.hardware
@@ -905,22 +1365,58 @@ def test_hw_enabling_null_arms_auto_null(hw_dmm):
 
 
 @pytest.mark.hardware
-def test_hw_writing_a_null_value_disarms_auto_null(hw_dmm):
-    """The other half of §7.4.3: an explicit value takes control back.
+def test_hw_writing_a_null_value_does_not_disarm_auto_null(hw_dmm):
+    """§7.4.3 is wrong on firmware 0.0.0.20 — the hardware source of truth.
 
-    Together with the test above, this is the complete justification for
-    ``null_now``'s ordering. If auto-null stayed armed, the instrument would
-    overwrite our offset with its own next reading and the null would silently
-    become a no-op.
+    The manual says writing ``NULL:VALue`` disables automatic null-value
+    selection. This unit leaves it armed, so the offset just written is
+    replaced by the instrument's next reading: the null looks applied
+    (``NULL:STATe?`` answers 1, ``NULL:VALue?`` reads back correctly) while
+    subtracting a number nobody chose.
+
+    This is the test that justifies ``null_now``'s explicit ``AUTO OFF``, and
+    the reason the simulator models the firmware rather than the manual —
+    see ``test_set_null_value_does_not_disarm_auto_despite_the_manual``.
+    Reported to Siglent;
+    ``docs/vendor-issues/SDM4065A-firmware-bug-report-1-null-value-auto.md``.
     """
     hw_dmm.configure_resistance(200)
     hw_dmm.set_null(True)
     hw_dmm.set_null_value(0.05)
-    assert hw_dmm.get_null_auto() is False, (
-        "writing NULL:VALue did not disarm NULL:VALue:AUTO — the stored "
-        "offset is not stable and null_now() cannot be trusted"
+    assert hw_dmm.get_null_auto() is True, (
+        "AUTO cleared on a value write — Siglent fixed §7.4.3 in a firmware "
+        f"update (this unit reports {hw_dmm.info().firmware}). Re-check "
+        "null_now() and the simulator before relaxing either."
     )
     assert hw_dmm.get_null_value() == pytest.approx(0.05, abs=1e-4)
+
+
+@pytest.mark.hardware
+def test_hw_null_now_leaves_auto_disarmed_on_real_hardware(hw_dmm):
+    """The fix, on real silicon: after ``null_now`` the offset is stable.
+
+    The pairing that matters — the test above proves the instrument will not
+    disarm AUTO by itself, and this proves the driver does it. Verified by
+    taking two readings: with AUTO still armed the first reading would become
+    the new offset and the second would sit near zero.
+    """
+    hw_dmm.configure_resistance(200)
+    hw_dmm.set_nplc(1.0)
+    try:
+        hw_dmm.null_now(samples=3)
+    except SDM4065AOverloadError:
+        pytest.skip("open/overloaded input — cannot null against it")
+
+    assert hw_dmm.get_null() is True
+    assert hw_dmm.get_null_auto() is False, (
+        "null_now left AUTO armed — the offset it stored will be overwritten"
+    )
+    stored = hw_dmm.get_null_value()
+    hw_dmm.read()
+    assert hw_dmm.get_null_value() == pytest.approx(stored, abs=1e-6), (
+        "the offset changed after a reading, which is exactly what AUTO does "
+        "— null_now's AUTO OFF did not take effect"
+    )
 
 
 @pytest.mark.hardware
@@ -954,3 +1450,74 @@ def test_hw_a_long_integration_completes_within_the_computed_timeout(hw_dmm):
         f"10 readings at 100 NPLC took {elapsed_ms:.0f} ms, over the "
         f"{budget_ms} ms the driver budgets — reading_timeout_ms is too tight"
     )
+
+
+# --------------------------------------------------------------------------
+# VISA resource matching — backends disagree on the radix
+# --------------------------------------------------------------------------
+
+
+def test_a_pyvisa_py_decimal_resource_is_recognised():
+    """The bug this test exists for, found on the bench rather than in review.
+
+    pyvisa-py renders the same meter as ``USB0::62700::4640::SN::0::INSTR``
+    where NI-VISA renders ``USB0::0xF4EC::0x1220::SN::INSTR``. 62700 is 0xF4EC
+    and 4640 is 0x1220.
+
+    The original matcher looked for the literal text ``F4EC``, so on exactly
+    the boards that need pyvisa-py — those with no kernel ``usbtmc`` module —
+    the instrument appeared in ``list_resources()`` and was invisible to the
+    driver. The error was "no SDM4065A found", indistinguishable from an
+    unplugged instrument.
+    """
+    from benchctrl.drivers.siglent_sdm4065a.driver import _is_sdm4065a_resource
+
+    assert _is_sdm4065a_resource("USB0::62700::4640::SDM46A0CA00021::0::INSTR")
+
+
+def test_a_hex_resource_is_still_recognised():
+    """Both spellings, since a laptop with NI-VISA is the other common case."""
+    from benchctrl.drivers.siglent_sdm4065a.driver import _is_sdm4065a_resource
+
+    assert _is_sdm4065a_resource("USB0::0xF4EC::0x1220::SDM46A0CA00021::INSTR")
+    assert _is_sdm4065a_resource("USB0::0xf4ec::0x1220::SDM46A0CA00021::INSTR")
+
+
+def test_the_other_bench_instruments_are_not_matched():
+    """The real resource strings from the bench board's five instruments.
+
+    A matcher that was merely radix-tolerant could still be too greedy. These
+    are the actual Rigol resources reported alongside the meter.
+    """
+    from benchctrl.drivers.siglent_sdm4065a.driver import _is_sdm4065a_resource
+
+    for other in (
+        "USB0::6833::3601::DL3D232300106::0::INSTR",   # DL3031A, decimal
+        "USB0::6833::42152::DP2A243500269::0::INSTR",  # DP2031, decimal
+        "USB0::0x1AB1::0x0E11::DL3D232300106::INSTR",  # DL3031A, hex
+        "ASRL/dev/ttyACM0::INSTR",
+        "TCPIP::192.168.1.7::INSTR",
+    ):
+        assert not _is_sdm4065a_resource(other), other
+
+
+def test_a_serial_number_containing_the_vid_digits_does_not_match():
+    """Why fields are parsed rather than the whole string searched.
+
+    A serial number is free-form text and can contain the digits of a VID.
+    Substring matching would match on the wrong field; field matching cannot.
+    """
+    from benchctrl.drivers.siglent_sdm4065a.driver import _is_sdm4065a_resource
+
+    assert not _is_sdm4065a_resource("USB0::6833::3601::F4EC1220::0::INSTR")
+    assert not _is_sdm4065a_resource("USB0::6833::3601::62700-4640::0::INSTR")
+
+
+def test_a_malformed_resource_is_rejected_rather_than_raising():
+    """``list_resources()`` output is not ours to validate, so odd entries
+    must be skipped quietly — a crash here would take out discovery for
+    every other instrument on the bench."""
+    from benchctrl.drivers.siglent_sdm4065a.driver import _is_sdm4065a_resource
+
+    for junk in ("", "USB0", "USB0::", "USB0::notanumber::4640::SN::INSTR", "::::"):
+        assert _is_sdm4065a_resource(junk) is False, junk

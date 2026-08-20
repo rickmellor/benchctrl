@@ -15,7 +15,7 @@ For development:
 git clone https://github.com/rickmellor/benchctrl
 cd benchctrl
 pip install -e ".[dev,mcp,bench-visa,science]"
-pytest -m "not hardware" -q            # 956 tests, no device needed
+pytest -m "not hardware" -q            # 1164 tests, no device needed
 ```
 
 ## No hardware yet?
@@ -268,7 +268,7 @@ benchctrl stream 10                             # live print
 Two more entry points ship with the package:
 
 ```bash
-benchctrl-mcp                    # MCP server — 275 tools for LLM agents
+benchctrl-mcp                    # MCP server — 280 tools for LLM agents
 benchctrl-agent --token <token>  # bench-side server for remote mode
 ```
 

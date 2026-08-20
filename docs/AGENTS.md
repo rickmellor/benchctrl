@@ -37,7 +37,7 @@ to LLM agents through MCP. The Arc wire protocol is documented in
 - **`benchctrl.battery`** — battery characterisation + emulation:
   profile I/O, life calculator, hardware profiler, 100 Hz host-side
   emulator
-- **`benchctrl.mcp`** — MCP server, **275 tools**, orchestrator that
+- **`benchctrl.mcp`** — MCP server, **280 tools**, orchestrator that
   calls each driver's `register_mcp_tools(mcp)`
 - **`benchctrl.session`** — the local/remote/sim seam. `resolve()`
   decides *per device key* what a driver singleton actually gets
@@ -98,7 +98,7 @@ benchctrl/
 │   │   ├── eastwood_qr10x/             driver.py, mcp_tools.py    (11 tools)
 │   │   ├── rigol_dl3031a/              driver.py, mcp_tools.py    (45 tools)
 │   │   ├── rigol_dp2031/               driver.py, mcp_tools.py    (134 tools)
-│   │   └── siglent_sdm4065a/           driver.py, mcp_tools.py    (49 tools)
+│   │   └── siglent_sdm4065a/           driver.py, mcp_tools.py    (54 tools)
 │   ├── battery/
 │   │   ├── profile.py                  profile JSON I/O
 │   │   ├── calculator.py               life calculator
@@ -124,7 +124,7 @@ benchctrl/
 │       ├── blobs.py, recordings.py     chunked transfer
 │       ├── runs/                       spec.py, engine.py, rules.py, store.py
 │       └── llm/                        supervisor.py, tools.py, client.py
-├── tests/                              956 hw-free + 152 hardware-marked
+├── tests/                              1164 hw-free + 173 hardware-marked
 ├── scenarios/                          harness + saved captures
 ├── applications/sensor_profiler/       DUT power profiling + Streamlit browser
 ├── examples/                           copy-paste-friendly scripts
@@ -267,8 +267,8 @@ Things that look wrong (would surprise a maintainer):
 ### Run the tests
 
 ```bash
-pytest -m "not hardware" -q              # 956 hardware-free, ~7 min
-pytest -m hardware -q                     # 152 hardware-marked
+pytest -m "not hardware" -q              # 1164 hardware-free, ~10 min
+pytest -m hardware -q                     # 173 hardware-marked
 pytest -q                                  # all (needs the bench on USB)
 ```
 

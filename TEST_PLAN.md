@@ -12,8 +12,8 @@ tiers:
   when the device isn't present.
 
 ```bash
-pytest -m "not hardware"     # 1142 collected, ~10 min, no hardware
-pytest -m hardware           # 152, needs the bench
+pytest -m "not hardware"     # 1164 collected, ~10 min, no hardware
+pytest -m hardware           # 173, needs the bench
 pytest                       # both
 ```
 
@@ -92,6 +92,7 @@ than "a number arrived".
 | `test_bench_rigol_dp2031.py` | the largest suite in the repo — source/measure, protection, IEEE 488.2 status, pairing and tracking, the Arb timer sequencer, analyzer, trigger I/O, memory, block-format parsers |
 | `test_bench_siglent_sdm4065a.py` | the SDM4065A's measurement surface *and its traps*: that `MEASure?` discards a null, that the naive value-then-state null ordering genuinely fails, that a 4-wire read resolves a 38 mΩ offset a 2-wire read cannot, and that the 2 MΩ range is rejected because it belongs to the SDM4055A |
 | `test_remote_sdm4065a.py` | the same driver through the full remote stack — proxy, wire protocol, agent dispatch, production driver, pyvisa, pty, simulator. Only the silicon is fake. Catches the registry entries and codec/exception round-trips that local tests cannot see |
+| `test_cross_validate_sdm4065a_qr10x.py` | 8 of its 15 tests need no hardware at all: they **pin the tolerance budgets** derived from the two datasheets — that the range term dominates at low resistance, that only the meter (not the two-instrument comparison) resolves the 38 mΩ offset, that a null buys back the 2-wire lead term, and that the budget is a linear sum rather than a quadrature sum. A tolerance cannot be quietly loosened to make a bench run pass |
 
 ### The local / remote / sim seam
 
@@ -124,7 +125,7 @@ than "a number arrived".
 
 ## Coverage matrix — hardware-required
 
-171 tests across five instruments. They exercise every wire command
+173 tests across five instruments. They exercise every wire command
 and SCPI string at least once against the real device, with nothing
 connected to the output terminals unless the test says otherwise.
 
@@ -140,9 +141,48 @@ connected to the output terminals unless the test says otherwise.
 | `test_bench_qr10x.py` | QR10x | AT round-trips, resistance setting, safety limit |
 | `test_bench_rigol_dl3031a.py` | DL3031A | SCPI round-trips, LIST playback, transient mode, battery discharge |
 | `test_bench_rigol_dp2031.py` | DP2031 | OVP trip + clear on CH3, multi-channel setpoint round-trip, tracking and pair state, `program_timer` + readback via the IEEE 488.2 block parser, screenshot BMP capture |
-| `test_bench_siglent_sdm4065a.py` | SDM4065A | the three manual quirks proven on silicon rather than against my own simulator: `CONFigure` resetting NPLC to 10 *and* the range to 2 kΩ, and `NULL:STATe` arming `NULL:VALue:AUTO` (with an explicit value disarming it). Plus all six 4065A NPLC values and every resistance range read back to catch silent coercion, autozero defaulting OFF, the overload sentinel raising, and a 100 NPLC × 10-sample read finishing inside `reading_timeout_ms` |
+| `test_bench_siglent_sdm4065a.py` | SDM4065A | the manual's quirks proven on silicon rather than against my own simulator: `CONFigure` resetting NPLC to 10 *and* re-enabling autorange, `NULL:STATe` arming `NULL:VALue:AUTO`, that writing a value does **not** disarm AUTO as §7.4.3 claims, that the two `DEF` forms disagree about autoranging, and that autozero answers to `ZERO:AUTO` rather than the manual's `AZ`. Plus all six 4065A NPLC values and every resistance range read back to catch silent coercion, the 2 MΩ range rejected as the sibling model's, the overload sentinel raising, and a 100 NPLC × 10-sample read finishing inside `reading_timeout_ms` |
 | `test_cross_validate_sdm4065a_qr10x.py` | SDM4065A **+** QR10x | the meter and the programmable resistance measuring the same physical ohms. Catches errors no single-instrument test can see — units, range scaling, swapped 2-/4-wire, a null with the wrong sign. Tolerances are derived from both datasheets in-file and pinned by hardware-free tests, and the file is explicit that this resolves *gross* errors only: the QR10x's ±0.05% dominates, so the agreement budget (~0.07 Ω at 100 Ω) is wider than the 38 mΩ offset the meter alone can see |
 | `test_mcp_hw.py` | bench | MCP tools against real devices |
+
+### SDM4065A — last hardware run
+
+The two SDM4065A sets have been run against the real meter (firmware
+0.0.0.20, serial SDM46A0CA00021):
+
+| Set | Result |
+|---|---|
+| `test_bench_siglent_sdm4065a.py` | 13 passed / 1 skipped / 0 failed |
+| `test_cross_validate_sdm4065a_qr10x.py` | 4 passed / 3 skipped |
+
+Every skip is a test that cannot produce the condition it checks with
+the present wiring, and skips rather than passing vacuously. 4-wire
+(`FRESistance`) is implemented and covered against the simulator, but
+**the hardware 4-wire tests are skipped because the sense leads are not
+physically attached** — the run set `BENCHCTRL_SDM4065A_WIRING=2` to
+match. (The var defaults to `4`, so an unset environment would have
+*attempted* 4-wire against 2-wire leads and reported lead error as
+disagreement. Setting it honestly is what turns that into a skip.)
+
+That accounts for all three cross-validation skips. Two of them are
+the un-nulled 2-wire comparisons, which skip from inside the test: an
+un-nulled 2-wire read carries 0.2 Ω of lead error, wider than the whole
+agreement budget, so the comparison could not fail meaningfully. The
+third is the lead-resistance measurement, which is why
+`KNOWN_LIMITATIONS § H-5` still carries the datasheet's 0.2 Ω rather
+than a measured number. H-5 is no longer blocked on § F-6 (the udev
+rule is installed); it is blocked on the leads.
+
+The driver suite's single skip is a different mechanism, and worth
+understanding because it is *self-balancing*. Two of its tests are
+exact complements on the state of the input terminals:
+`test_hw_overload_raises_on_a_deliberately_narrow_range` needs an
+**open** input to overload, and
+`test_hw_null_now_leaves_auto_disarmed_on_real_hardware` needs a
+**connected** one to null against. Whichever condition holds, exactly
+one of the two skips and the other runs — so 13 passed / 1 skipped is
+the expected shape with the 100 Ω DUT attached, not a coverage gap. Both
+skip messages name the input state, so the log says which case ran.
 
 ## Deferred features — explicit no-op assertions
 

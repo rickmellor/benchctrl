@@ -106,7 +106,28 @@ TWO_WIRE_LEAD_OHM = 0.2
 #: QR10x is most accurate, where lead resistance matters most (so where the
 #: 4-wire path is actually being exercised), and it keeps every reading on one
 #: DMM range so a range-scaling error cannot hide behind a range change.
+#:
+#: Filtered against the instrument's own ``RLIMIT`` at run time — see
+#: :py:func:`usable_setpoints`.
 SETPOINTS_OHM = (10.0, 47.0, 100.0, 150.0)
+
+
+def usable_setpoints(rlimit_ohm: float) -> tuple[float, ...]:
+    """The setpoints this QR10x will actually reach, given its ``RLIMIT``.
+
+    ``RLIMIT`` is a device-enforced *minimum* resistance — a power-rating
+    guard — and any setpoint below it is **clamped silently**, not rejected.
+    The bench unit ships at 12 Ω, which would clamp the 10 Ω entry above.
+
+    A clamp is the dangerous case: the meter would correctly read ~12 Ω, the
+    test would compare it against a requested 10 Ω, and the resulting 2 Ω
+    disagreement would look like a driver bug. Filtering here means an
+    unreachable setpoint is *skipped and reported* rather than silently
+    turned into a false failure — and lowering RLIMIT to widen the sweep
+    stays an explicit operator decision about power dissipation, not
+    something a test does behind your back.
+    """
+    return tuple(sp for sp in SETPOINTS_OHM if sp > rlimit_ohm)
 
 
 def dmm_accuracy_ohm(reading_ohm: float, range_ohm: float) -> float:
@@ -227,7 +248,7 @@ def test_the_2_wire_lead_term_dominates_even_the_agreement_budget():
     four = agreement_budget_ohm(100.0, 100.0, 200.0, four_wire=True, nulled=False)
     two = agreement_budget_ohm(100.0, 100.0, 200.0, four_wire=False, nulled=False)
     assert two - four == pytest.approx(TWO_WIRE_LEAD_OHM, abs=1e-9)
-    assert TWO_WIRE_LEAD_OHM > four, (
+    assert four < TWO_WIRE_LEAD_OHM, (
         "the lead term is meant to dominate the whole budget — that is the "
         "argument for 4-wire"
     )
@@ -307,6 +328,20 @@ def pair():
     original_sp = None
     try:
         original_sp = qr.get_setpoint()
+        rlimit = qr.get_safety_limit()
+        usable = usable_setpoints(rlimit)
+        if not usable:
+            pytest.skip(
+                f"RLIMIT is {rlimit:g} Ω, which clamps every setpoint in "
+                f"SETPOINTS_OHM {SETPOINTS_OHM} — lower it deliberately (mind "
+                f"the power rating) to run the sweep"
+            )
+        if len(usable) < len(SETPOINTS_OHM):
+            dropped = [sp for sp in SETPOINTS_OHM if sp not in usable]
+            print(
+                f"\nRLIMIT {rlimit:g} Ω excludes setpoint(s) {dropped} — "
+                f"sweeping {list(usable)}"
+            )
         dmm.reset()
         yield dmm, qr
     finally:
@@ -364,7 +399,7 @@ def test_the_dmm_agrees_with_the_qr10x_own_measurement(pair):
         pytest.skip("2-wire needs a null first — see the nulled test below")
 
     failures = []
-    for sp in SETPOINTS_OHM:
+    for sp in usable_setpoints(qr.get_safety_limit()):
         qr.set_resistance(sp)
         pv = qr.actual_resistance()
         reading = _read(dmm)
@@ -395,7 +430,7 @@ def test_the_dmm_agrees_with_the_qr10x_setpoint(pair):
         pytest.skip("2-wire needs a null first — see the nulled test below")
 
     failures = []
-    for sp in SETPOINTS_OHM:
+    for sp in usable_setpoints(qr.get_safety_limit()):
         qr.set_resistance(sp)
         reading = _read(dmm)
         # Twice the QR10x term: setting error and measurement error are
@@ -451,7 +486,7 @@ def test_the_null_sequence_recovers_2_wire_accuracy(pair):
         )
 
     failures = []
-    for sp in SETPOINTS_OHM:
+    for sp in usable_setpoints(qr.get_safety_limit()):
         qr.set_resistance(sp)
         pv = qr.actual_resistance()
         nulled = dmm.read_nulled()

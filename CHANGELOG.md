@@ -17,9 +17,18 @@ can accidentally energise. The failure mode to guard against is a
 plausible wrong number, and the driver is shaped around that.
 
 Speaks USB-TMC via pyvisa (LXI works too — pass a `TCPIP::` resource).
-49 MCP tools, full remote support, a simulator, and 144 tests. DC/AC
-volts and amps, 2- and 4-wire resistance, capacitance, frequency,
-period, continuity, diode, temperature.
+54 MCP tools, full remote support, a simulator, and 154 tests across
+three files: 118 driver (14 hardware-marked), 15 QR10x cross-validation
+(7 hardware-marked), and 21 remote-path. DC/AC volts and amps, 2- and
+4-wire resistance, capacitance, frequency, period, continuity, diode,
+temperature.
+
+**Validated on real hardware** — serial SDM46A0CA00021, firmware
+0.0.0.20, over USB-TMC from the Uno Q bench board: 13 passed / 1 skipped
+in the driver suite, 4 passed / 3 skipped in the QR10x
+cross-validation, 0 failed. Every skip is the same cause — the 4-wire
+sense leads are not physically attached, so the FRESistance paths are
+proven against the simulator only.
 
 Three quirks drove the API shape, all from the SDM4000A remote manual
 and all verified by hand against the extracted text rather than taken
@@ -34,12 +43,17 @@ on trust:
   return an un-nulled number when no null is active.
 - **Enabling `NULL:STATe` arms `NULL:VALue:AUTO`** (§7.4.2), which
   makes the instrument overwrite the offset with its own next reading.
-  Correct order is state-then-value, since writing a value disarms
-  AUTO (§7.4.3). The natural value-then-state order nulls by the wrong
-  number; a test pins that the naive ordering really does fail.
-- **The default resistance range is 2 kΩ, not autorange** (§7.4.5). A
-  100 Ω DUT lands there silently, a factor of ten on the
-  percent-of-range accuracy term.
+  Correct order is state-then-value; the natural value-then-state order
+  nulls by the wrong number, and a test pins that the naive ordering
+  really does fail. §7.4.3 promises that writing a value disarms AUTO —
+  on this unit it does not, so `null_now()` disarms it explicitly (see
+  *Discovered* below).
+- **The range readback is ambiguous.** §7.4.5's "default 2 kΩ" turned
+  out not to describe the reset state at all (see *Discovered* below);
+  what matters for the API is that `RANGe?` reports the same number
+  whether the range was pinned or merely selected by autorange, so
+  `get_autorange()` is required to interpret it. Accuracy work must pin
+  the range explicitly rather than trust a post-`CONFigure` readback.
 
 Model-family traps, since one manual covers the SDM4045A/4055A/4065A:
 the 4065A tops out at **1 MΩ** where the 4055A has 2 MΩ, and accepts
@@ -47,8 +61,8 @@ six NPLC values (100/10/1/0.1/0.01/0.001) where the 4055A accepts
 three. Both are validated against the 4065A column and the error
 message names the sibling model, because a constant taken from the
 wrong column produces a driver that works and reports plausible
-numbers. Resistance autozero is 4065A-only and defaults **off**
-(§7.4.7).
+numbers. Resistance autozero is 4065A-only and defaults **off** — but
+under a different SCPI node than §7.4.7 documents, see *Discovered*.
 
 The `9.9E37` overload sentinel raises `SDM4065AOverloadError` rather
 than being returned — it is a valid float and would otherwise
@@ -72,12 +86,14 @@ just to the driver's own VISA scan. The signature identifies the
 confirmed against the physical meter (`lsusb` on the bench board), not
 taken from the datasheet.
 
-Two hardware-marked test sets ship with it, both currently skipping:
+Two hardware-marked test sets ship with it, both now run against the
+physical meter:
 
-- `test_bench_siglent_sdm4065a.py` proves the three manual quirks on
-  silicon rather than against the simulator I wrote from the same
-  manual — a circularity worth closing — plus NPLC/range coercion,
-  autozero's OFF default, and the overload sentinel.
+- `test_bench_siglent_sdm4065a.py` proves the manual quirks on silicon
+  rather than against the simulator I wrote from the same manual — a
+  circularity worth closing, and closing it is what found the four
+  firmware/manual defects below — plus NPLC/range coercion, autozero's
+  OFF default, and the overload sentinel.
 - `test_cross_validate_sdm4065a_qr10x.py` measures one physical
   resistance with both instruments. Its tolerances are derived from the
   two datasheets in-file and pinned by hardware-free tests, and it is
@@ -85,8 +101,8 @@ Two hardware-marked test sets ship with it, both currently skipping:
   errors (units, scaling, swapped 2-/4-wire, a null with the wrong
   sign), while only the meter alone resolves the 38 mΩ offset.
 
-Running them is blocked on a deployment problem, not the drivers —
-see `KNOWN_LIMITATIONS.md` § F-6 and the new
+Running them needed a deployment fix first, not a driver one — see
+`KNOWN_LIMITATIONS.md` § F-6 and the new
 `deploy/udev/61-benchctrl-usbtmc.rules`. On a kernel with no `usbtmc`
 module, pyvisa-py drives the instrument over libusb and needs write
 access to `/dev/bus/usb/BBB/DDD`; without it the meter is *invisible*
@@ -95,6 +111,90 @@ descriptors it needs to build a resource name. `discover()` returns
 `[]` and the driver says "no SDM4065A found" — indistinguishable from
 an unplugged instrument. The rule covers both Rigols too, which had the
 same latent problem.
+
+#### Discovered
+
+Running the suite against silicon found **four defects in the SDM4065A
+firmware or its manual** that reading the manual could not have found.
+All four are written up as sendable vendor reports in
+[`docs/vendor-issues/`](docs/vendor-issues/SDM4065A-firmware-bug-reports-README.md),
+measured on serial SDM46A0CA00021, firmware 0.0.0.20. The two that
+change how any code must talk to this meter also have limitations
+entries: `KNOWN_LIMITATIONS.md` § F-7 (error queue) and § F-8 (the
+undefined-header wedge).
+
+Three of the four share one failure mode, which is why they were worth
+the effort to isolate: **the instrument keeps returning plausible
+numbers while a setting is not what the caller believes it is.**
+
+1. **`NULL:VALue` does not disarm `NULL:VALue:AUTO`**, though §7.4.3
+   says it does. So the instrument overwrites the offset with its next
+   reading and the null becomes a no-op that leaves every result
+   *looking* nulled. `null_now()` now disarms AUTO explicitly instead of
+   relying on the documented side effect.
+
+2. **§7.4.7's `AZ` autozero mnemonic does not exist.** Every spelling
+   (`RESistance:AZ`, `:AZ:STATe`, `SENSe:`-prefixed, `AZERo`) is
+   rejected with `-113` for *writes as well as queries*, on all four
+   functions. The node that works is **`ZERO:AUTO`**, which round-trips
+   correctly — so autozero is fully controllable and only the manual is
+   wrong. Finding this cost two power cycles, because *querying* an
+   undefined header returns nothing, the read times out, and the aborted
+   USB-TMC transfer strands the bulk endpoints. Neither USBTMC
+   `INITIATE_CLEAR` (which reports `STATUS_SUCCESS`) nor a libusb port
+   reset recovers it — only a front-panel power cycle. That wedge is
+   reproducible from *any* aborted read, including a legitimate slow
+   measurement that outruns a timeout, and is the most serious thing in
+   the four reports.
+
+3. **`*CLS` does not clear the error queue**, which IEEE 488.2 §10.3
+   requires. Entries survive `*CLS`, survive `*RST`, and one survived
+   closing and reopening the VISA session; only reading removes them.
+   Undrained, the queue fills and answers `-350 "Queue overflow"` to
+   everything, so an error check reports a stale failure from an
+   unrelated command. Worse, the queue can then latch into answering
+   `0,"No Error"` permanently — measured, it denied a deliberately bogus
+   header that `*ESR?` correctly flagged. `*ESR?` stayed accurate
+   throughout, so `command_error()` reads **`*ESR?` bit 5** as the
+   authoritative "was that rejected?" and `clear_status()` drains the
+   queue rather than trusting `*CLS`.
+
+4. **The documented default resistance range is not the reset state.**
+   §7.4.5 says 2 kΩ; measured, `*RST` and a bare `CONFigure:RESistance`
+   both leave autorange **on** with `RANGe?` reporting 200 Ω. The 2 kΩ
+   figure describes the `DEF` *parameter*, a different thing, and §7.4.6
+   separately documents autorange as defaulting ON — the two sections
+   contradict each other. Probing it also found a firmware
+   inconsistency: `RESistance:RANGe DEF` disables autoranging as
+   §7.4.5's own note promises, while `CONFigure:RESistance DEF` leaves it
+   on. `DEFAULT_RESISTANCE_RANGE` is therefore 200.0, paired with
+   `DEFAULT_RESISTANCE_AUTORANGE`, and the driver never sends `DEF`.
+
+The simulator models all four **as measured, not as documented** —
+including rejecting the `AZ` mnemonic and leaving the error queue dirty
+after `*CLS`. A simulator more standards-compliant than the instrument
+is the one kind of simulator bug a passing test cannot catch: the driver
+looks correct until it meets the hardware.
+
+#### Known issues
+
+- **4-wire resistance is simulator-verified only.** The FRESistance
+  paths have local tests, but the four hardware-marked 4-wire cases skip
+  because the sense leads are not attached. `KNOWN_LIMITATIONS.md` § H-5
+  still quotes the datasheet's 0.2 Ω lead-resistance figure rather than a
+  measured one for the same reason.
+- **The bench unit's error queue is currently latched silent** (defect 3
+  above). Measurements are unaffected and the suite handles it —
+  `test_hw_error_reporting_is_reachable` warns rather than fails, since a
+  silent queue is the instrument misbehaving and not the driver — but a
+  power cycle is needed to restore error-code reporting. `command_error()`
+  works either way.
+- **`*ESR?` gives no error code.** It reports *that* a command was
+  rejected, not which error it was. Diagnostics needing the code
+  (`-113` vs `-224` vs `-222`) still depend on the error queue.
+- **Autozero timing is not characterised.** The driver can set and read
+  the state, but the settling cost of an autozero cycle at each NPLC has
+  not been measured.
 
 ### `deploy/` — the agent as a systemd service
 

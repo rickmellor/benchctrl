@@ -67,7 +67,9 @@ mcp = [
 ]
 # `bench` instrument drivers (pyserial-only; already a base dep)
 bench = []
-# Future SCPI / VISA bench instruments (Rigol DL3031A etc.)
+# SCPI / VISA bench instruments: Rigol DL3031A, Rigol DP2031,
+# Siglent SDM4065A. Needs a VISA backend as well as pyvisa itself —
+# see docs/drivers.md § Installation.
 bench-visa = [
     "benchctrl[bench]",
     "pyvisa>=1.13",

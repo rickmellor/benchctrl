@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Optional, Union
+from typing import Optional
 
 log = logging.getLogger("benchctrl.drivers.siglent_sdm4065a.mcp_tools")
 
@@ -125,9 +125,46 @@ def sdm4065a_reset() -> dict:
 
 
 def sdm4065a_clear_status() -> dict:
-    """``*CLS`` — clear status registers and the error queue."""
-    _get_sdm4065a().clear_status()
-    return {"cleared": True}
+    """``*CLS`` — clear status registers, and read the error queue empty.
+
+    Both steps are needed: on this instrument ``*CLS`` does not actually empty
+    the error queue (nor does ``*RST``), so entries have to be read out. Left
+    undrained the queue fills and then answers "Queue overflow" to everything,
+    which makes an unrelated command look like it failed.
+
+    Call this after anything that may have queued an error, before relying on
+    ``sdm4065a_last_error``. ``discarded`` lists what was thrown away.
+    """
+    dmm = _get_sdm4065a()
+    # drain_errors first so the reply can say what was thrown away;
+    # clear_status() itself returns None (matching every other driver) and
+    # would drain silently.
+    discarded = _errors_as_dicts(dmm.drain_errors())
+    dmm.clear_status()
+    return {"cleared": True, "discarded": discarded}
+
+
+def sdm4065a_drain_errors(limit: int = 32) -> dict:
+    """Read the error queue empty and return every entry that was in it.
+
+    Use when ``sdm4065a_last_error`` reports something that looks stale, or
+    after deliberately sending a command that may be rejected. Unlike
+    ``sdm4065a_last_error`` (which pops one entry) this empties the queue.
+
+    A returned list of exactly ``limit`` entries means it stopped early rather
+    than reaching the end, so the queue may still hold more.
+    """
+    return {"errors": _errors_as_dicts(_get_sdm4065a().drain_errors(limit=limit))}
+
+
+def _errors_as_dicts(errors) -> list:
+    """``[(code, message)]`` -> ``[{"code": ..., "message": ...}]``.
+
+    The SDK returns tuples, which is right for Python callers. Tools return
+    named fields instead, matching ``sdm4065a_last_error`` — a bare pair would
+    leave a model guessing which element is the code.
+    """
+    return [{"code": code, "message": message} for code, message in errors]
 
 
 def sdm4065a_self_test() -> dict:
@@ -136,11 +173,50 @@ def sdm4065a_self_test() -> dict:
 
 
 def sdm4065a_last_error() -> dict:
-    """Read one entry from the SCPI error queue. ``{"code": 0}`` if clean."""
+    """Read one entry from the SCPI error queue. ``{"code": 0}`` if clean.
+
+    ``{"code": 0}`` does **not** prove the previous command was accepted: this
+    instrument's error queue can stop reporting altogether. Use
+    ``sdm4065a_command_error`` to ask whether a command was rejected.
+    """
     err = _get_sdm4065a().last_error()
     if err is None:
         return {"code": 0, "message": "No error"}
     return {"code": err[0], "message": err[1]}
+
+
+def sdm4065a_command_error() -> dict:
+    """Whether the instrument rejected a command — the reliable check.
+
+    Reads ``*ESR?`` bit 5 (Command Error) instead of the error queue, and
+    reports the whole register too. Prefer this to ``sdm4065a_last_error`` for
+    "did that work?", because the error queue on this unit is unreliable: it
+    does not get cleared by ``*CLS``, and once it has overflowed it can latch
+    into answering "No Error" to everything while ``*ESR?`` stays correct.
+
+    The register is read-destructive, so this reports errors since the last
+    call to it (or to ``sdm4065a_clear_status``) and then resets. Call
+    ``sdm4065a_clear_status`` first if you need the answer to be attributable
+    to one specific command. The trade-off is detail: this tells you a command
+    was rejected, not which error code — ``sdm4065a_last_error`` has the code
+    when the queue is behaving.
+    """
+    dmm = _get_sdm4065a()
+    status = dmm.standard_event_status()
+    return {
+        "command_error": bool(status & dmm.ESR_COMMAND_ERROR),
+        "esr": status,
+    }
+
+
+def sdm4065a_standard_event_status() -> dict:
+    """``*ESR?`` — the raw Standard Event Status Register, read-and-clear.
+
+    For callers that want bits other than Command Error (bit 5). See
+    ``sdm4065a_command_error`` for the common case; note that either tool
+    clears the register, so the two cannot both report the same event.
+    """
+    return {"esr": _get_sdm4065a().standard_event_status()}
 
 
 def sdm4065a_raise_if_error() -> dict:
@@ -352,6 +428,25 @@ def sdm4065a_abort() -> dict:
     return {"aborted": True}
 
 
+def sdm4065a_clear_device_buffers() -> dict:
+    """Try to unstick a USB connection after a timed-out read.
+
+    Sends the USB-TMC ``INITIATE_CLEAR`` request. Worth trying when a read has
+    timed out and every command since then fails, which on this instrument
+    means the aborted reply is still stranded in its USB endpoints.
+
+    ``cleared: false`` means it did not work. So, unfortunately, can
+    ``cleared: true`` — on firmware 0.0.0.20 the instrument reported the clear
+    successful while remaining unresponsive, and only a **front-panel power
+    cycle** recovered it. If commands still fail after this, ask the operator
+    to power-cycle the meter; there is nothing further to try remotely.
+
+    Returns ``cleared: false`` on a LAN session, where the request does not
+    apply.
+    """
+    return {"cleared": _get_sdm4065a().clear_device_buffers()}
+
+
 # --- accuracy-affecting settings -----------------------------------------
 
 
@@ -387,8 +482,24 @@ def sdm4065a_set_range(range_value: float, function: str = "RESistance") -> dict
 
 
 def sdm4065a_get_range(function: str = "RESistance") -> dict:
-    """The active range for a function."""
-    return {"range": _get_sdm4065a().get_range(function=function)}
+    """The active range for a function, and whether autorange picked it.
+
+    ``autorange: true`` means ``range`` is just whatever the instrument
+    happens to be on right now, and it will move with the input. Only with
+    ``autorange: false`` is the range a fixed property of the configuration —
+    which is what accuracy figures are quoted against, since the error budget
+    has a "% of range" term.
+    """
+    dmm = _get_sdm4065a()
+    return {
+        "range": dmm.get_range(function=function),
+        "autorange": dmm.get_autorange(function=function),
+    }
+
+
+def sdm4065a_get_autorange(function: str = "RESistance") -> dict:
+    """Whether autoranging is on for a function."""
+    return {"autorange": _get_sdm4065a().get_autorange(function=function)}
 
 
 def sdm4065a_set_autorange(enable: bool, function: str = "RESistance") -> dict:
@@ -411,7 +522,7 @@ def sdm4065a_set_autozero(enable: bool, function: str = "RESistance") -> dict:
 
 
 def sdm4065a_get_autozero(function: str = "RESistance") -> dict:
-    """Whether autozero is on for a function."""
+    """Whether autozero is on for a function, read back from the instrument."""
     return {"autozero": _get_sdm4065a().get_autozero(function=function)}
 
 
@@ -537,8 +648,11 @@ _TOOLS = (
     sdm4065a_info,
     sdm4065a_reset,
     sdm4065a_clear_status,
+    sdm4065a_drain_errors,
     sdm4065a_self_test,
     sdm4065a_last_error,
+    sdm4065a_command_error,
+    sdm4065a_standard_event_status,
     sdm4065a_raise_if_error,
     sdm4065a_set_function,
     sdm4065a_get_function,
@@ -564,10 +678,12 @@ _TOOLS = (
     sdm4065a_initiate,
     sdm4065a_fetch,
     sdm4065a_abort,
+    sdm4065a_clear_device_buffers,
     sdm4065a_set_nplc,
     sdm4065a_get_nplc,
     sdm4065a_set_range,
     sdm4065a_get_range,
+    sdm4065a_get_autorange,
     sdm4065a_set_autorange,
     sdm4065a_set_autozero,
     sdm4065a_get_autozero,

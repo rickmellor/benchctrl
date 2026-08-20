@@ -617,12 +617,18 @@ def test_sdm4065a_mcp_tools_cover_the_driver_surface():
     #                 is the single raw escape hatch, as for every other driver
     #   get_null_value/get_null_auto — folded into sdm4065a_get_null's dict,
     #                 which returns state, offset and auto together
+    #   get_autozero_cached — SDK-only by design: it returns the last
+    #                 commanded value without a round trip, which is useful
+    #                 inside a timed loop but would be a trap as a tool, since
+    #                 an agent cannot tell a cache from a measurement.
+    #                 sdm4065a_get_autozero reads the instrument instead.
     exempt = {
         "open",
         "query_float",
         "query_floats",
         "get_null_value",
         "get_null_auto",
+        "get_autozero_cached",
     }
     methods = {
         name

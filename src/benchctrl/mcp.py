@@ -331,11 +331,15 @@ from benchctrl.drivers.rigol_dp2031.mcp_tools import (
 # SDM4065A tools
 from benchctrl.drivers.siglent_sdm4065a.mcp_tools import (
     sdm4065a_abort,
+    sdm4065a_clear_device_buffers,
     sdm4065a_clear_status,
     sdm4065a_close,
+    sdm4065a_command_error,
+    sdm4065a_drain_errors,
     sdm4065a_configure_dc_voltage,
     sdm4065a_configure_resistance,
     sdm4065a_fetch,
+    sdm4065a_get_autorange,
     sdm4065a_get_autozero,
     sdm4065a_get_configuration,
     sdm4065a_get_function,
@@ -378,6 +382,7 @@ from benchctrl.drivers.siglent_sdm4065a.mcp_tools import (
     sdm4065a_set_range,
     sdm4065a_set_sample_count,
     sdm4065a_set_temperature_unit,
+    sdm4065a_standard_event_status,
     sdm4065a_write,
 )
 

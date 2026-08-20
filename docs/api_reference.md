@@ -15,7 +15,7 @@ This document is structured by sub-package:
 - [`benchctrl.sim` — simulators](simulation.md) (separate doc)
 - [`benchctrl.net` / `benchctrl.agent` — remote mode](remote.md) (separate doc)
 - [`benchctrl.agent.runs` — unattended runs](runs.md) (separate doc)
-- [`benchctrl.mcp` — Model Context Protocol server](mcp.md) (separate doc — 226 tools)
+- [`benchctrl.mcp` — Model Context Protocol server](mcp.md) (separate doc — 280 tools)
 
 Every driver lives under `benchctrl.drivers.<vendor_model>`; there is
 no top-level `SMU` class and no `benchctrl.bench` package — both were
@@ -683,7 +683,7 @@ format against the real device.
 ## `benchctrl.session` — the local/remote/sim seam
 
 One function decides, per device, what a driver singleton actually
-gets. Everything above it — the 226 MCP tools, the battery emulator,
+gets. Everything above it — the 280 MCP tools, the battery emulator,
 the scenario harness — is unaware.
 
 ```python

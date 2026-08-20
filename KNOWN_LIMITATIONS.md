@@ -92,8 +92,10 @@ Not yet bench-quantified on our unit — the figure is the datasheet's.
 `test_cross_validate_sdm4065a_qr10x.py::test_4_wire_beats_2_wire_by_
 about_the_lead_resistance` measures it (same resistance read both ways
 on the same leads, printing the difference in mΩ) and this entry gets
-the measured number once that has run. It is blocked on F-6, not on
-wiring.
+the measured number once that has run. It is now blocked on **wiring**
+only: F-6's udev rule is installed and the meter is reachable from the
+board, but the 4-wire sense leads are not attached, so every 4-wire
+hardware case skips.
 
 Note what the cross-validation *cannot* settle: the QR10x's ±0.05%
 spec dominates the meter's, so two-instrument agreement at 100 Ω is
@@ -328,10 +330,14 @@ Code reference: `src/benchctrl/bench/rigol_dl3031a.py` —
 
 ### F-5. SDM4065A command semantics that make the obvious call wrong
 From the SDM4000A remote manual, verified against the extracted text
-section by section rather than taken on trust. All four are handled by
-the driver; they are recorded here because each one silently produces
-a *plausible* wrong number, which is the hardest class of defect to
-notice on a meter.
+section by section rather than taken on trust, then checked against the
+instrument — which is how the last two turned out to be firmware or
+manual defects rather than merely surprising semantics. All four are
+handled by the driver; they are recorded here because each one silently
+produces a *plausible* wrong number, which is the hardest class of
+defect to notice on a meter. See also F-7 (error queue) and F-8 (the
+undefined-header wedge), which are failures of the instrument rather
+than traps in its command set.
 
 - **`MEASure:<fn>?` is `CONFigure` + `READ?` in one command**, and
   `CONFigure` resets that function's NPLC, null state, null value and
@@ -341,20 +347,34 @@ notice on a meter.
   offset with `READ?`, and `read_nulled()` raises rather than quietly
   returning an un-nulled number.
 - **Enabling `NULL:STATe` arms `NULL:VALue:AUTO`** (§7.4.2), so the
-  instrument overwrites the offset with its own next reading. Writing
-  a value disarms AUTO (§7.4.3), so the order must be state first,
-  value second. The natural value-then-state order nulls by the wrong
-  number.
-- **The default resistance range is 2 kΩ, not autorange** (§7.4.5).
-  A 100 Ω DUT lands there silently, costing a factor of ten on the
-  percent-of-range accuracy term.
+  instrument overwrites the offset with its own next reading. The state
+  must therefore go on *first* and the value second; the natural
+  value-then-state order nulls by the wrong number. §7.4.3 says writing
+  a value disarms AUTO — bench-measured on firmware 0.0.0.20, **it does
+  not**: after `STATe ON` then `VALue`, `NULL:VALue:AUTO?` still
+  answered `1`. So the null silently becomes a no-op that leaves every
+  result *looking* nulled. `null_now()` disarms AUTO explicitly rather
+  than relying on the documented side effect. Reported to Siglent;
+  `docs/vendor-issues/SDM4065A-firmware-bug-report-1-null-value-auto.md`.
+- **The documented default resistance range is wrong**, and the range
+  readback is ambiguous. §7.4.5 says "default 2 kΩ"; bench-measured on
+  firmware 0.0.0.20, `*RST` and a bare `CONFigure:RESistance` both
+  leave **autoranging on with `RANGe?` reporting 200 Ω**. Worse,
+  `RANGe?` returns the same number whether the range is pinned or
+  merely currently selected by autorange, so `RANGe:AUTO?` must be read
+  alongside it to know whether the range is stable. Accuracy work must
+  pin the range with an explicit numeric argument —
+  `CONFigure:RESistance DEF` selects 2 kΩ but leaves autoranging *on*,
+  where `RESistance:RANGe DEF` correctly turns it off. Reported to
+  Siglent; `docs/vendor-issues/SDM4065A-firmware-bug-report-4-range-defaults.md`.
 - **One manual covers the SDM4045A / 4055A / 4065A**, and the columns
   differ: the 4065A tops out at 1 MΩ where the 4055A has 2 MΩ, and
   accepts six NPLC values where the 4055A accepts three. Resistance
-  autozero is 4065A-only and defaults **off** (§7.4.7). A constant
-  taken from the wrong column yields a driver that works and reports
-  plausible numbers; both lists are validated against the 4065A
-  column and the rejection message names the sibling model.
+  autozero is 4065A-only and defaults **off** (§7.4.7) — though the
+  mnemonic §7.4.7 gives for it does not exist on the instrument, see
+  F-8. A constant taken from the wrong column yields a driver that
+  works and reports plausible numbers; both lists are validated against
+  the 4065A column and the rejection message names the sibling model.
 
 Also worth knowing, though not a limitation: Siglent documents SCPI
 headers **without** the leading root colon (`SYSTem:ERRor?` where
@@ -408,6 +428,91 @@ Code reference:
 `deploy/udev/61-benchctrl-usbtmc.rules`; `deploy/README.md` §
 "USB-TMC instruments on a kernel without `usbtmc`";
 `src/benchctrl/drivers/siglent_sdm4065a/driver.py` — `open`, `discover`.
+
+### F-7. SDM4065A `*CLS` does not clear the error queue, which can latch silent
+Bench-measured on serial SDM46A0CA00021, firmware 0.0.0.20.
+IEEE 488.2 § 10.3 requires `*CLS` to empty the error queue. On this
+unit it does not: queued entries survive `*CLS`, survive `*RST`, and
+one survived closing and reopening the VISA session. Only *reading*
+`SYSTem:ERRor?` removes an entry.
+
+Two consequences, in escalating order:
+
+1. Left undrained the queue fills and answers `-350 "Queue overflow"`
+   to everything, so an error check attributes a stale failure to
+   whichever command happened to be running.
+2. After an overflow the queue can **latch permanently silent** —
+   measured, it answered `0,"No Error"` to a deliberately bogus header
+   that `*ESR?` correctly flagged as a Command Error. The only tell is
+   a change in the reply's capitalisation (`No error` → `No Error`), so
+   nothing a caller can reasonably branch on. A front-panel power cycle
+   restores it.
+
+Affects: any error check on this meter. `last_error() is None` does
+**not** prove the previous command was accepted.
+
+Workaround, and what the driver does: read `*ESR?` bit 5 instead.
+`command_error()` is the authoritative "was that rejected?" — it stayed
+correct throughout, including while the queue was latched silent, and
+it is read-and-clear so it does not accumulate. `clear_status()` drains
+the queue by reading rather than trusting `*CLS`. The cost is detail:
+`*ESR?` reports *that* a command was rejected, not which error it was,
+so anything needing the code (`-113` vs `-224`) still depends on the
+queue.
+
+The bench unit is currently in the latched-silent state.
+`test_hw_error_reporting_is_reachable` warns rather than fails on it,
+deliberately: a silent queue is the instrument misbehaving, and failing
+there would mask the plumbing bug the test exists to catch.
+
+Reported to Siglent;
+`docs/vendor-issues/SDM4065A-firmware-bug-report-3-error-queue.md`.
+
+Code reference:
+`src/benchctrl/drivers/siglent_sdm4065a/driver.py` —
+`standard_event_status`, `command_error`, `last_error`, `clear_status`;
+`src/benchctrl/sim/sdm4065a.py` — `_on_cls`, `_on_error_query`,
+`error_queue_silent`.
+
+### F-8. Querying an undefined header on the SDM4065A wedges it until power cycle
+Bench-measured, and the most serious defect found on this meter.
+*Writing* an undefined header is harmless — it is rejected with `-113`
+and the meter carries on. *Querying* one produces **no response at
+all**: the read blocks to timeout, and the aborted USB-TMC transfer
+leaves the bulk endpoints stranded. Every subsequent operation times
+out, including `*IDN?`.
+
+Recovery is a front-panel power cycle. Nothing softer works:
+USBTMC `INITIATE_CLEAR` reports `STATUS_SUCCESS` while not actually
+clearing, and a libusb port reset does not help either.
+
+The trap is that this is not limited to typos. **Any** aborted read
+does it, including a perfectly legitimate slow measurement that outruns
+its timeout — 100 NPLC with `SAMPle:COUNt 5` takes 10.14 s under a 10 s
+default and wedges the meter reproducibly.
+
+How it was found: § 7.4.7 documents an `AZ` autozero mnemonic that
+**does not exist**. Every spelling (`RESistance:AZ`, `:AZ:STATe`,
+`SENSe:`-prefixed, `AZERo`) is rejected with `-113` for writes *as well
+as* queries, on all four functions. The node that actually works is
+`ZERO:AUTO`, which round-trips correctly — so autozero is fully
+controllable and only the manual is wrong. Probing the documented
+spelling cost two power cycles.
+
+Affects: any code that queries a header the meter may not implement,
+and any long integration that could outrun its timeout.
+
+Workaround: never *query* to probe for a header's existence — write it
+and check `command_error()` (F-7), which is safe. Size read timeouts
+from the actual integration time; the driver derives them from NPLC and
+sample count rather than using a fixed default.
+
+Reported to Siglent;
+`docs/vendor-issues/SDM4065A-firmware-bug-report-2-autozero-query.md`.
+
+Code reference:
+`src/benchctrl/drivers/siglent_sdm4065a/driver.py` — `set_autozero`,
+`get_autozero`, `reading_timeout_ms`, `_resize_timeout`.
 
 ## Harness
 

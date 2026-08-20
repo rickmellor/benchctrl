@@ -255,3 +255,28 @@ Rules learned the hard way:
 - **Privileged operations on a remote board are the operator's to run.**
   Ask; do not find a way around the prompt. A route that bypasses a gate
   is not the same as satisfying it.
+- **Probe for a header by *writing* it, never by querying it.** A write
+  the instrument does not recognise is rejected and life goes on. A
+  *query* it does not recognise may return nothing at all — the read
+  blocks to timeout, and on USB-TMC the aborted transfer can strand the
+  bulk endpoints so that every later operation times out too, `*IDN?`
+  included. That cost two power cycles of the SDM4065A while probing a
+  mnemonic its own manual documents (`KNOWN_LIMITATIONS.md` § F-8).
+  Corollary: **size read timeouts from the configured integration
+  time.** A legitimate slow measurement that outruns a fixed timeout
+  wedges the instrument by exactly the same mechanism.
+- **Do not trust `*CLS` to clear the error queue, or the error queue to
+  report errors.** Verify both against the instrument before building an
+  error check on them. On the SDM4065A `*CLS` clears neither the queue
+  nor anything else about it, and once overflowed the queue can latch
+  into answering `0,"No Error"` to everything — while `*ESR?` bit 5 stays
+  correct (§ F-7). Read `*ESR?` for *whether* a command was rejected and
+  the queue only for *which* error it was, draining it between checks so
+  a stale entry is not attributed to the wrong command.
+- **When the instrument and the manual disagree, model the
+  instrument.** Three of the four SDM4065A defects are cases where the
+  manual describes standards-compliant behaviour the firmware does not
+  implement. A simulator written from the manual is more coherent than
+  the hardware, which is the one class of simulator bug a passing test
+  cannot catch: the driver looks correct right up to the bench. Model as
+  measured and comment *why* the sim looks wrong.

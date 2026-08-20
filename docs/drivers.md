@@ -485,17 +485,25 @@ dmm.null_now(samples=3)         # then null, with leads shorted
 dmm.read_nulled()               # trigger, keeping all of the above
 ```
 
-**The default resistance range is 2 kΩ, not autorange** (§7.4.5 of the
-remote manual). A 100 Ω DUT lands on the 2 kΩ range silently, which
-costs a factor of ten on the percent-of-range accuracy term. Pass the
-range explicitly whenever accuracy matters.
+**The resistance range after a reset is not pinned.** §7.4.5 of the
+remote manual says the default is 2 kΩ; on firmware 0.0.0.20 `*RST`
+leaves autoranging *on* with `RANGe?` reporting 200 Ω, and
+`CONFigure:RESistance DEF` selects 2 kΩ but still leaves autoranging
+on where `RESistance:RANGe DEF` turns it off. Either way an unpinned
+range can cost a factor of ten on the percent-of-range accuracy term,
+and `RANGe?` alone cannot tell you whether the range is stable — read
+`RANGe:AUTO?` alongside it, which `get_autorange()` does. Pass the
+range explicitly whenever accuracy matters. Written up as
+[vendor issue 4](vendor-issues/SDM4065A-firmware-bug-report-4-range-defaults.md).
 
 **Enabling null arms automatic null-value selection.** Writing
 `NULL:STATe ON` sets `NULL:VALue:AUTO`, so the instrument overwrites
 your offset with its own next reading. The order must be state first,
-then value — writing a value disarms AUTO. `null_now()` sequences this
-correctly and returns the offset the instrument actually stored, read
-back rather than assumed.
+then value. §7.4.3 says writing a value disarms AUTO; on firmware
+0.0.0.20 it does not, so `null_now()` clears AUTO explicitly afterwards
+rather than assuming — [vendor issue 1](vendor-issues/SDM4065A-firmware-bug-report-1-null-value-auto.md).
+It returns the offset the instrument actually stored, read back rather
+than assumed.
 
 ### 2-wire vs 4-wire
 
@@ -521,9 +529,22 @@ export BENCHCTRL_SDM4065A_WIRING=4      # 4-wire: sense leads connected
 pytest -m hardware tests/test_cross_validate_sdm4065a_qr10x.py -q -s
 ```
 
-`WIRING=4` is the primary path; `=2` makes the tests null first and
-skip the comparisons that need 4-wire. `-s` surfaces the measured
-lead-and-contact resistance the lead test prints.
+`WIRING=4` is the primary path and the **default** if the variable is
+unset; `=2` makes the tests null first and skip the comparisons that
+need 4-wire. Declaring `=2` when that is the real wiring is the point —
+left at the default against 2-wire leads the comparisons would run and
+report lead resistance as instrument disagreement. `-s` surfaces the
+measured lead-and-contact resistance the lead test prints.
+
+**Hardware validation status.** Both suites have been run against the
+real meter. The driver suite is 13 passed / 1 skipped / 0 failed; the
+cross-validation is 4 passed / 3 skipped. 4-wire (`FRESistance`) is
+implemented and covered locally against the simulator, but the
+*hardware* 4-wire tests — including the lead-resistance measurement
+`KNOWN_LIMITATIONS § H-5` is waiting on — are the skips: the sense
+leads are not physically attached, the run therefore set `WIRING=2`,
+and those tests cannot produce the condition they check so they skip
+rather than pass vacuously.
 
 Be clear about what the pair proves. The QR10x's ±0.05% dominates the
 meter's ±(0.010% + 0.005%), so **agreement** between the two is
@@ -554,6 +575,32 @@ Both range and NPLC are validated against the 4065A column, and the
 rejection message names the sibling model so a wrong-model constant
 reads as a wrong model rather than a broken driver.
 
+### Bench-discovered firmware quirks
+
+Tested against firmware 0.0.0.20 on serial SDM46A0CA00021. Four
+findings are written up as reports ready to send to Siglent — see
+[`vendor-issues/`](vendor-issues/SDM4065A-firmware-bug-reports-README.md)
+for the transcripts, and `KNOWN_LIMITATIONS.md § F-5` for the
+driver-facing summary — plus § F-7 and § F-8, which carry the two that
+constrain how any code may talk to this meter. Three of the four
+present as good data rather than a visible fault, which is what makes
+them worth knowing:
+
+- `RESistance:NULL:VALue` does not disarm `NULL:VALue:AUTO` as §7.4.3
+  says it does, so a null silently becomes a no-op unless AUTO is
+  cleared explicitly. `null_now()` does.
+- **§7.4.7's autozero mnemonic `AZ` does not exist on the
+  instrument** — the working node is `ZERO:AUTO`. Worse, *querying* an
+  undefined header wedges the USB-TMC interface until the meter is
+  power-cycled from the front panel, so `RESistance:AZ?` is not a
+  harmless experiment. The driver uses `ZERO:AUTO` throughout.
+- `*CLS` does not clear the error queue, and an overflowed queue can
+  latch into reporting "No Error" permanently — hence `command_error()`
+  and `drain_errors()` above.
+- The documented default resistance range (2 kΩ) is not the reset
+  state, and `CONFigure:<fn> DEF` leaves autoranging on where
+  `RESistance:RANGe DEF` turns it off.
+
 ### Overload
 
 An out-of-range input returns `9.9E37`. The driver raises
@@ -580,18 +627,65 @@ protocol failure.
 
 | Subsystem | Methods |
 |---|---|
-| Identity / housekeeping | `info`, `reset`, `clear_status`, `self_test`, `last_error`, `raise_if_error` |
+| Identity / housekeeping | `info`, `is_connected`, `close`, `reset`, `clear_status`, `self_test` |
+| Error reporting | `last_error`, `raise_if_error`, `drain_errors`, `command_error`, `standard_event_status` |
 | Function select | `set_function`, `get_function` |
 | One-shot measurement | `measure_dc_voltage`, `measure_ac_voltage`, `measure_dc_current`, `measure_ac_current`, `measure_resistance`, `measure_resistance_4wire`, `measure_capacitance`, `measure_frequency`, `measure_period`, `measure_continuity`, `measure_diode`, `measure_temperature` |
 | Configure + trigger | `configure_resistance`, `configure_dc_voltage`, `get_configuration`, `read`, `read_nulled`, `initiate`, `fetch`, `abort`, `set_sample_count`, `get_sample_count` |
-| Accuracy controls | `set_nplc`, `get_nplc`, `set_range`, `get_range`, `set_autorange`, `set_autozero`, `get_autozero`, `reading_timeout_ms` |
+| Accuracy controls | `set_nplc`, `get_nplc`, `set_range`, `get_range`, `set_autorange`, `get_autorange`, `set_autozero`, `get_autozero`, `get_autozero_cached`, `reading_timeout_ms` |
 | Null ("Ref") | `null_now`, `set_null`, `get_null`, `set_null_value`, `get_null_value`, `set_null_auto`, `get_null_auto` |
 | Temperature | `set_temperature_unit`, `get_temperature_unit` |
+| Recovery | `clear_device_buffers` |
 | Escape hatch | `write`, `query`, `query_float`, `query_floats` |
 
 `read()` and `fetch()` always return `list[float]`, one entry per
 `sample_count`. A scalar return would silently keep only the first
 sample when a caller raised the count.
+
+Every function-scoped method (`set_nplc`, `set_range`, the whole null
+group, autozero) takes a keyword-only `function=` that defaults to
+`"RESistance"`, because the instrument keeps this state **per
+function** — a null armed on `RESistance` says nothing about
+`FRESistance`.
+
+### Error reporting, and why there are three ways to do it
+
+Firmware 0.0.0.20 makes the obvious check — read `SYSTem:ERRor?` — not
+trustworthy on its own: `*CLS` does not empty the queue, and an
+overflowed queue can latch into answering "No Error" permanently
+([vendor issue 3](vendor-issues/SDM4065A-firmware-bug-report-3-error-queue.md)).
+So the driver offers three, with different guarantees:
+
+| Method | Wire form | Use when |
+|---|---|---|
+| `command_error()` | `*ESR?` bit 5 | the question is "was that rejected?" — the reliable check; read-clear, so it cannot accumulate stale state |
+| `last_error()` / `raise_if_error()` | `SYSTem:ERRor?` | you need the numeric code, and the queue is known good |
+| `drain_errors(limit=32)` | `SYSTem:ERRor?` until clean | after deliberately sending something rejectable, and as the `*CLS` workaround. Bounded, so a queue that will not empty cannot hang a `finally` block |
+
+`clear_status()` writes `*CLS` **and** drains, because the write alone
+leaves entries behind on this firmware.
+
+`clear_device_buffers()` is the layer below: a USB-TMC `INITIATE_CLEAR`
+control transfer over endpoint 0, for when both bulk endpoints are
+timing out. Best-effort — it returns False rather than raising, and on
+this firmware a clear can report `STATUS_SUCCESS` while the SCPI parser
+stays stuck ([vendor issue 2](vendor-issues/SDM4065A-firmware-bug-report-2-autozero-query.md)).
+It is a no-op on a LAN session, which has no such request.
+
+### SDK-only methods
+
+Per the SDK ↔ MCP parity principle every public method has a matching
+tool, with six deliberate exemptions — grouped into four reasons below.
+They are named and justified in
+`test_sdm4065a_mcp_tools_cover_the_driver_surface` in
+`tests/test_mcp.py`, which is what keeps this list from drifting:
+
+| Method(s) | Why no tool |
+|---|---|
+| `open` | `sdm4065a_open` is the tool; the classmethod itself is internal |
+| `query_float`, `query_floats` | typed sugar over `query()`. `sdm4065a_query` is the single raw escape hatch, as for every other driver |
+| `get_null_value`, `get_null_auto` | folded into `sdm4065a_get_null`, which returns state, offset and auto together in one dict |
+| `get_autozero_cached` | SDK-only by design. It returns the last *commanded* value with no round trip, which is useful inside a timed loop but would be a trap as a tool: an agent cannot tell a cache from a measurement. `sdm4065a_get_autozero` asks the instrument instead |
 
 ### Long integrations and the VISA timeout
 
@@ -611,10 +705,11 @@ timeout that looks like a dead instrument.
 
 ### MCP tools
 
-49 tools, prefixed `sdm4065a_`. There is no confirmation-argument tool
+54 tools, prefixed `sdm4065a_`. There is no confirmation-argument tool
 here — nothing to arm. The tools that affect accuracy (range, NPLC,
 null) say so in their docstrings, which is what the model reads before
-calling them.
+calling them. See the SDK-only table above for the six methods that
+deliberately have no tool, and [`mcp.md`](mcp.md) for the inventory.
 
 ### Note on SCPI headers
 

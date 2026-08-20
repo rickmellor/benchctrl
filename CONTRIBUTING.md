@@ -43,8 +43,8 @@ via Zadig).
 The test suite is split by hardware requirement using pytest markers.
 
 ```bash
-pytest -m "not hardware" -q       # ~7 minutes, no device needed (956 tests)
-pytest -m hardware -q              # requires Arc Pro + companion instruments (152)
+pytest -m "not hardware" -q       # ~10 minutes, no device needed (1164 tests)
+pytest -m hardware -q              # requires Arc Pro + companion instruments (173)
 pytest -q                          # both
 ```
 

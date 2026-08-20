@@ -1,6 +1,6 @@
 # Remote mode
 
-Run the instruments on one machine and the agent on another. The 226 MCP
+Run the instruments on one machine and the agent on another. The 280 MCP
 tools are unchanged and cannot tell the difference.
 
 The motivating setup: an Arduino Uno Q sits at the bench holding the USB

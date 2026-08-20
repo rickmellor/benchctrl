@@ -77,7 +77,7 @@ naive ordering genuinely fails against it.
 
 `benchctrl.session` resolves each device to `local`, `remote` or `sim`
 independently, so you can simulate part of a bench and leave the rest
-real. Nothing above the seam changes — all 275 MCP tools are unaware.
+real. Nothing above the seam changes — all 280 MCP tools are unaware.
 
 ```bash
 # whole bench simulated

@@ -41,6 +41,7 @@ respect the terminal ratings printed on the instrument.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -62,6 +63,26 @@ OVERLOAD_SENTINEL = 9.9e37
 #: than ``==`` because the value survives a float round-trip through the
 #: instrument's ASCII formatting, and an exact comparison is fragile.
 _OVERLOAD_THRESHOLD = 9.0e37
+
+#: SCPI node for autozero — ``ZERO:AUTO``, **not** the ``AZ`` of §7.4.7.
+#:
+#: The manual documents ``[SENSe:]{RESistance|FRESistance}:AZ[:STATe]``. That
+#: mnemonic does not exist on this instrument. Bench-measured on firmware
+#: 0.0.0.20: every ``AZ`` spelling — ``RESistance:AZ``, ``:AZ:STATe``,
+#: ``SENSe:`` prefixed, ``AZERo`` — is rejected with ``-113,"Undefined
+#: header"``, for reads *and* writes, on all four functions. ``ZERO:AUTO``
+#: is accepted and round-trips correctly on all four.
+#:
+#: This matters beyond a spelling fix. A *query* of a nonexistent header gets
+#: no reply, so the read times out; the aborted USB-TMC transfer then strands
+#: the bulk endpoints (every later transfer fails with ``Errno 110`` while
+#: endpoint-0 control transfers keep working), and neither
+#: :py:meth:`SiglentSDM4065A.clear_device_buffers` nor a libusb port reset
+#: recovers it — it takes a front-panel power cycle. So following the manual
+#: here costs physical access to the bench. Hence a named constant: this is
+#: the one place a well-meaning reader might "correct" the code back to what
+#: §7.4.7 says.
+AUTOZERO_NODE = "ZERO:AUTO"
 
 
 # ---------------------------------------------------------------------------
@@ -161,10 +182,8 @@ class SDM4065AInfo:
 #: The 1M-vs-2M split is the trap: sending 2000000 here would be accepted by
 #: a laxer driver and then quantised by the instrument to something else.
 #:
-#: Note the instrument's own default is **2 kΩ**, not autorange (§7.4.5), and
-#: ``CONFigure`` resets to it. Measuring a 100 Ω DUT therefore lands on the
-#: 2 kΩ range unless the range is set explicitly — a 10x penalty on the
-#: "% of range" accuracy term, silently.
+#: §7.4.5 also claims the default is 2 kΩ. It is not the reset state — see
+#: :py:data:`DEFAULT_RESISTANCE_RANGE` for what was actually measured.
 RESISTANCE_RANGES: tuple[float, ...] = (
     200.0,
     2_000.0,
@@ -174,6 +193,33 @@ RESISTANCE_RANGES: tuple[float, ...] = (
     10_000_000.0,
     100_000_000.0,
 )
+
+#: What a bare ``CONFigure:RESistance`` (and ``*RST``) actually leaves behind:
+#: **autorange on**, with ``RESistance:RANGe?`` reporting 200 Ω.
+#:
+#: Bench-measured on firmware 0.0.0.20, because the manual is not usable here:
+#: after ``*RST`` or a bare ``CONFigure:RESistance``, ``RANGe:AUTO?`` answers
+#: ``1`` and ``RANGe?`` answers ``+2.00000000E+02``. An explicit
+#: ``CONFigure:RESistance 200`` turns autorange *off* and pins 200 Ω.
+#:
+#: So ``RANGe?`` alone cannot tell you how the instrument will behave — with
+#: autorange on it reports the range currently selected, which moves with the
+#: input. That is why the driver reads :py:meth:`SiglentSDM4065A.get_autorange`
+#: alongside it, and why accuracy work should pin the range explicitly rather
+#: than trust a post-``CONFigure`` readback: the number looks identical in both
+#: states, but only one of them is stable.
+#:
+#: Pin it with a *numeric* argument specifically. Bench-measured, the ``DEF``
+#: forms disagree with each other: ``RESistance:RANGe DEF`` selects 2 kΩ and
+#: turns autorange off (as §7.4.5's note promises), while
+#: ``CONFigure:RESistance DEF`` selects 2 kΩ and leaves autorange **on**.
+#: Reported as bug 4; the driver never sends ``DEF``.
+DEFAULT_RESISTANCE_RANGE = 200.0
+
+#: Whether autorange is on after ``*RST`` / a bare ``CONFigure`` — it is.
+#: Named alongside the range because the pair is the whole fact; the range
+#: value on its own is ambiguous (see above).
+DEFAULT_RESISTANCE_AUTORANGE = True
 
 #: DC voltage ranges, in volts (remote manual §5.7). The 1000 V range is
 #: DC-only; AC tops out at 750 V.
@@ -190,6 +236,13 @@ AC_VOLTAGE_RANGES: tuple[float, ...] = (0.2, 2.0, 20.0, 200.0, 750.0)
 #: had asked for an integration time it never got — and NPLC is exactly what
 #: the datasheet's noise adder is indexed on.
 NPLC_VALUES: tuple[float, ...] = (100.0, 10.0, 1.0, 0.1, 0.01, 0.001)
+
+#: USBTMC class-request codes (USBTMC spec Table 15) used by
+#: :py:meth:`SiglentSDM4065A.clear_device_buffers`. Hard-coded rather than
+#: imported from pyvisa-py, which does not export them.
+_TMC_INITIATE_CLEAR = 5
+_TMC_CHECK_CLEAR_STATUS = 6
+_TMC_STATUS_SUCCESS = 1
 DEFAULT_NPLC = 10.0
 
 #: ``[SENSe:]FUNCtion`` strings, mapped from friendly names to the SCPI form
@@ -299,6 +352,18 @@ class SiglentSDM4065A:
         self._rm = resource_manager
         self._info: Optional[SDM4065AInfo] = None
         self._closed = False
+        # Tracked so the VISA timeout can be resized whenever either factor
+        # changes — see :py:meth:`_resize_timeout`. Seeded with the
+        # instrument's own post-``*RST`` defaults (§7.4.1) rather than read
+        # back, so construction stays free of I/O.
+        self._nplc = 10.0
+        self._samples = 1
+        self._base_timeout_ms = self.DEFAULT_TIMEOUT_MS
+        # Shadow autozero state, because the readback query wedges this
+        # firmware — see :py:meth:`get_autozero`. Seeded with the documented
+        # post-``*RST`` defaults: OFF for resistance (§7.4.7), ON for DC
+        # voltage and current (§7.6.9, §7.2.9).
+        self._autozero = {"RES": False, "FRES": False, "VOLT": True, "CURR": True}
 
     # ------------------------------------------------------------------
     # Construction / teardown
@@ -352,12 +417,14 @@ class SiglentSDM4065A:
         inst.read_termination = read_termination
         inst.write_termination = write_termination
 
-        return cls(
+        dmm = cls(
             inst,
             resource_string=resource,
             owns_resource_manager=True,
             resource_manager=rm,
         )
+        dmm._base_timeout_ms = timeout_ms
+        return dmm
 
     def close(self) -> None:
         """Release the VISA session. Safe to call more than once."""
@@ -480,19 +547,121 @@ class SiglentSDM4065A:
         (manual §7.1, §7.4.1), so any configuration must follow, not precede.
         """
         self.write("*RST")
+        self._nplc = 10.0
+        self._samples = 1
+        self._resize_timeout()
+        self._autozero = {"RES": False, "FRES": False, "VOLT": True, "CURR": True}
 
     def clear_status(self) -> None:
-        """``*CLS`` — clear status registers and the error queue."""
+        """``*CLS`` — clear the status registers, then drain the error queue.
+
+        The ``*CLS`` write alone is not enough on this instrument. IEEE 488.2
+        requires ``*CLS`` to empty the error queue; firmware 0.0.0.20 does not.
+        Bench-measured: after queueing two ``-113`` errors, both are still
+        there after ``*CLS``, still there after ``*RST``, and one even survives
+        closing and reopening the VISA session. The only thing that removes an
+        entry is reading it.
+
+        Left undrained the queue reaches its depth and then answers ``-350
+        "Queue overflow"`` to everything, so a later check reports a stale
+        error from an unrelated command — which reads as the instrument
+        rejecting a command it actually accepted. So this reads entries out
+        until the queue answers "no error".
+
+        Bounded rather than looped-until-clean: a queue that never empties
+        would otherwise hang here, and this method is called in ``finally``
+        blocks where hanging is the worst outcome. Draining is best-effort by
+        design — see :py:meth:`drain_errors` for the count.
+        """
         self.write("*CLS")
+        self.drain_errors()
+
+    def drain_errors(self, limit: int = 32) -> list[tuple[int, str]]:
+        """Read the error queue empty and return what was in it.
+
+        Useful after deliberately sending something the instrument may reject,
+        and as the workaround for ``*CLS`` not clearing the queue (see
+        :py:meth:`clear_status`).
+
+        Stops after ``limit`` entries so a queue that refuses to empty cannot
+        hang the caller. The default comfortably exceeds this instrument's
+        queue depth; a full return list means it stopped early, not that the
+        queue is now clean.
+        """
+        drained: list[tuple[int, str]] = []
+        for _ in range(limit):
+            try:
+                err = self.last_error()
+            except SDM4065AError:
+                # A malformed reply mid-drain is not worth failing a cleanup
+                # path over; stop and report what was collected.
+                break
+            if err is None:
+                break
+            drained.append(err)
+        return drained
 
     def self_test(self) -> bool:
         """``*TST?`` — True when the instrument reports itself healthy."""
         return self.query("*TST?").strip().startswith("0")
 
+    #: Bit 5 of the Standard Event Status Register — Command Error (IEEE 488.2).
+    #:
+    #: Set when the instrument rejects a header it does not recognise. This is
+    #: the *reliable* error signal on firmware 0.0.0.20: see
+    #: :py:meth:`command_error` for why the error queue is not.
+    ESR_COMMAND_ERROR = 1 << 5
+
+    def standard_event_status(self) -> int:
+        """``*ESR?`` — read and clear the Standard Event Status Register.
+
+        Read-destructive, as IEEE 488.2 requires: bench-measured, a second read
+        immediately after the first returns 0. So a caller wanting to attribute
+        a bit to a specific command must clear first, send, then read — which is
+        what :py:meth:`command_error` does.
+
+        Unlike the error queue, this register *is* emptied by ``*CLS``.
+        """
+        raw = self.query("*ESR?")
+        try:
+            return int(raw.strip())
+        except ValueError:
+            raise SDM4065AError(f"unexpected *ESR? response: {raw!r}") from None
+
+    def command_error(self) -> bool:
+        """Whether the instrument flagged a Command Error since the last check.
+
+        Prefer this to :py:meth:`last_error` when the question is merely "did
+        that command get rejected?". The error queue on firmware 0.0.0.20 is
+        not dependable for it:
+
+        * ``*CLS`` does not empty the queue (see :py:meth:`clear_status`), so
+          an unread entry from an earlier command is reported against a later
+          one.
+        * Once the queue has overflowed it can latch into answering
+          ``0,"No Error"`` permanently. Bench-measured: after an overflow,
+          ``SYSTem:ERRor?`` reported no error immediately after a deliberately
+          bogus header, while ``*ESR?`` correctly returned 32 for the same
+          command. Only a power cycle restored the queue.
+
+        ``*ESR?`` stayed accurate throughout, and being a single read-clear
+        register it cannot accumulate stale state. The cost is detail: this
+        says a command was rejected, not which error code — use
+        :py:meth:`last_error` when the code itself matters and the queue is
+        known good.
+        """
+        return bool(self.standard_event_status() & self.ESR_COMMAND_ERROR)
+
     def last_error(self) -> Optional[tuple[int, str]]:
         """Pop one entry from the error queue, or None when it's empty.
 
-        The instrument answers ``0,"No error"`` when clear.
+        The instrument answers ``0,"No error"`` when clear — with the case of
+        "error" varying between firmware states, hence the code-only check
+        below rather than a string comparison.
+
+        On firmware 0.0.0.20 a None here does **not** prove the last command
+        was accepted; see :py:meth:`command_error` for the failure mode and the
+        alternative.
         """
         raw = self.query("SYSTem:ERRor?")
         parts = raw.split(",", 1)
@@ -699,6 +868,12 @@ class SiglentSDM4065A:
         head = "CONFigure:FRESistance" if four_wire else "CONFigure:RESistance"
         arg = _format_range(range_)
         self.write(head if arg is None else f"{head} {arg}")
+        # CONFigure resets this function's parameters, so the tracked copies
+        # must follow or they would report a configuration that is no longer
+        # loaded. Autozero's default is OFF for resistance (§7.4.7).
+        self._nplc = 10.0
+        self._resize_timeout()
+        self._autozero["FRES" if four_wire else "RES"] = False
 
     def configure_dc_voltage(
         self, range_: Optional[Union[float, str]] = None
@@ -708,6 +883,9 @@ class SiglentSDM4065A:
         arg = _format_range(range_)
         head = "CONFigure:VOLTage:DC"
         self.write(head if arg is None else f"{head} {arg}")
+        self._nplc = 10.0
+        self._resize_timeout()
+        self._autozero["VOLT"] = True      # §7.6.9: DC voltage defaults ON
 
     def get_configuration(self) -> str:
         """``CONF?`` — the present function, range and resolution.
@@ -723,6 +901,8 @@ class SiglentSDM4065A:
         if count < 1:
             raise SDM4065AValueError(f"sample count must be >= 1, got {count}")
         self.write(f"SAMPle:COUNt {int(count)}")
+        self._samples = int(count)
+        self._resize_timeout()
 
     def get_sample_count(self) -> int:
         """The configured ``SAMPle:COUNt``."""
@@ -774,25 +954,70 @@ class SiglentSDM4065A:
                 f"(The SDM4055A accepts only 10/1/0.01 — check the model.)"
             )
         self.write(f"{function}:NPLC {float(nplc):G}")
+        self._nplc = float(nplc)
+        self._resize_timeout()
 
     def get_nplc(self, *, function: str = "RESistance") -> float:
         """The configured integration time in power-line cycles."""
         return self.query_float(f"{function}:NPLC?")
 
     def set_autozero(self, enable: bool, *, function: str = "RESistance") -> None:
-        """Enable or disable autozero (``:AZ``) for ``function``.
+        """Enable or disable autozero for ``function``.
 
         Autozero makes the instrument measure and subtract its own internal
         offset around each reading, which removes offset drift at the cost of
-        roughly halving the reading rate. For resistance it is **SDM4065A-only
-        and defaults OFF** (§7.4.7) — worth knowing, because it means a
-        low-resistance measurement is *not* autozeroed unless you ask.
+        roughly halving the reading rate. For resistance it defaults **OFF**
+        (§7.4.7) — worth knowing, because it means a low-resistance
+        measurement is *not* autozeroed unless you ask.
+
+        Sends ``<function>:ZERO:AUTO``, **not** the ``:AZ`` of §7.4.7 — see
+        :py:data:`AUTOZERO_NODE` for why the manual cannot be followed here.
         """
-        self.write(f"{function}:AZ {'ON' if enable else 'OFF'}")
+        self.write(f"{function}:{AUTOZERO_NODE} {'ON' if enable else 'OFF'}")
+        self._autozero[self._az_key(function)] = bool(enable)
+
+    @staticmethod
+    def _az_key(function: str) -> str:
+        """Canonical key for autozero shadow state — ``FRES`` before ``RES``.
+
+        Ordering matters: ``"FRESistance".startswith("RES")`` is False but
+        ``"RES" in "FRESistance"`` is True, so a substring test would collapse
+        the two functions into one and 2-wire would inherit 4-wire's setting.
+        """
+        upper = function.upper()
+        for key in ("FRES", "RES", "VOLT", "CURR"):
+            if upper.startswith(key):
+                return key
+        return upper
 
     def get_autozero(self, *, function: str = "RESistance") -> bool:
-        """Whether autozero is on for ``function``."""
-        return self.query(f"{function}:AZ?").strip() in ("1", "ON")
+        """Whether autozero is on for ``function``, read back from the meter.
+
+        A real readback, via ``<function>:ZERO:AUTO?``. Bench-verified to
+        round-trip on all four functions (resistance, 4-wire resistance, DC
+        volts, DC current) on firmware 0.0.0.20.
+
+        Also refreshes the tracked copy that :py:meth:`get_autozero_cached`
+        returns, so the two cannot drift apart once this has been called.
+        """
+        result = self.query(f"{function}:{AUTOZERO_NODE}?").strip() in ("1", "ON")
+        self._autozero[self._az_key(function)] = result
+        return result
+
+    def get_autozero_cached(self, *, function: str = "RESistance") -> bool:
+        """Autozero state as last commanded, without touching the instrument.
+
+        Seeded from the documented post-``*RST`` defaults, updated by
+        :py:meth:`set_autozero`, and re-seeded by :py:meth:`reset` and the
+        ``configure_*`` methods. Exists for callers that must not add SCPI
+        traffic — e.g. inside a timed measurement loop — and for reporting
+        configuration alongside a reading without a round trip per field.
+
+        Prefer :py:meth:`get_autozero`, which asks the instrument. This value
+        is only a record of what was commanded, so it will disagree with the
+        instrument if the setting is changed from the front panel.
+        """
+        return self._autozero[self._az_key(function)]
 
     def set_autorange(self, enable: bool, *, function: str = "RESistance") -> None:
         """Enable or disable autoranging for ``function``.
@@ -810,8 +1035,24 @@ class SiglentSDM4065A:
             _validate_range(range_, RESISTANCE_RANGES, "resistance")
         self.write(f"{function}:RANGe {_format_range(range_)}")
 
+    def get_autorange(self, *, function: str = "RESistance") -> bool:
+        """Whether autoranging is on for ``function``.
+
+        Needed to interpret :py:meth:`get_range`, which returns the same number
+        whether the range was pinned or merely selected by autorange — see
+        :py:data:`DEFAULT_RESISTANCE_RANGE`. For accuracy work the distinction
+        is the point: only a pinned range keeps the "% of range" error term
+        fixed across readings.
+        """
+        return self.query(f"{function}:RANGe:AUTO?").strip() in ("1", "ON")
+
     def get_range(self, *, function: str = "RESistance") -> float:
-        """The active range for ``function``."""
+        """The active range for ``function``.
+
+        With autorange on this is whichever range the instrument has currently
+        selected, which moves with the input; pair it with
+        :py:meth:`get_autorange` before treating it as a configuration.
+        """
         return self.query_float(f"{function}:RANGe?")
 
     def set_null(
@@ -898,9 +1139,15 @@ class SiglentSDM4065A:
           method uses ``READ?``, which triggers without reconfiguring.
         * Enabling the null state arms ``NULL:VALue:AUTO`` (§7.4.2), which
           makes the instrument overwrite the offset with its own next
-          reading. So the state goes on *first*, then the explicit value,
-          which disarms AUTO (§7.4.3). The natural value-then-state order
-          silently nulls by the wrong number.
+          reading. So the state goes on *first*, then the explicit value.
+          The natural value-then-state order silently nulls by the wrong
+          number.
+        * §7.4.3 says writing a value disarms AUTO. **On firmware 0.0.0.20 it
+          does not** — bench-measured: after ``STATe ON`` then ``VALue``,
+          ``NULL:VALue:AUTO?`` still answered ``1``. So AUTO is turned off
+          explicitly afterwards rather than assumed. Without that the
+          instrument overwrites the offset with its next reading and the null
+          is a no-op that leaves every result *looking* nulled.
 
         Returns the offset actually stored, read back from the instrument
         rather than assumed, so a caller can log the number that is really
@@ -917,6 +1164,8 @@ class SiglentSDM4065A:
 
         self.set_null(True, function=function)
         self.set_null_value(offset, function=function)
+        # Not redundant with the value write — see the AUTO note above.
+        self.set_null_auto(False, function=function)
 
         stored = self.get_null_value(function=function)
         log.info(
@@ -971,6 +1220,125 @@ class SiglentSDM4065A:
         integration_s = (nplc / mains_hz) * max(1, samples)
         return int((integration_s * 2.0 + 2.0) * 1000)
 
+    def _resize_timeout(self) -> None:
+        """Widen the VISA timeout to cover the configured integration time.
+
+        Called from :py:meth:`set_nplc` and :py:meth:`set_sample_count`,
+        because a timeout that is too short for the *configured* measurement is
+        not a tuning problem — it is a wedged instrument. Aborting a ``READ?``
+        mid-integration leaves the reply queued in the device's bulk-IN
+        endpoint and stops it draining bulk-OUT, so every later transfer fails
+        (``Errno 110``) even though the USB link is fine and endpoint-0 control
+        transfers still succeed. Recovering needs
+        :py:meth:`clear_device_buffers`, and on this unit's firmware
+        (0.0.0.20) not even that was enough — it took a front-panel power
+        cycle.
+
+        Bench-measured on firmware 0.0.0.20, at the 100 NPLC the datasheet's
+        accuracy figures require (note [1]): one reading takes **2.09 s**, so
+        the 10 s default covers it — but **5 readings take 10.14 s**, which it
+        does not. A default that is *nearly* enough is the dangerous kind,
+        because the failure reads as an unreliable instrument rather than as a
+        configuration mistake.
+
+        Never shrinks below the timeout the session was opened with, so an
+        explicit ``timeout_ms`` stays a floor rather than being silently
+        overridden by a low-NPLC configuration.
+        """
+        needed = self.reading_timeout_ms(self._nplc, self._samples)
+        target = max(needed, self._base_timeout_ms)
+        try:
+            if self._inst.timeout != target:
+                self._inst.timeout = target
+                log.debug(
+                    "sdm4065a: timeout -> %d ms for NPLC %g x %d sample(s)",
+                    target,
+                    self._nplc,
+                    self._samples,
+                )
+        except Exception:
+            # A backend that won't accept a timeout change is not a reason to
+            # fail the configuration command that just succeeded.
+            log.debug("sdm4065a: could not resize the VISA timeout", exc_info=True)
+
+    def clear_device_buffers(self) -> bool:
+        """USBTMC ``INITIATE_CLEAR`` — flush a wedged endpoint pair.
+
+        The class-level recovery for an interrupted transfer: it tells the
+        device firmware to discard queued input and output. Control transfers
+        go over endpoint 0, which stays alive when both bulk endpoints are
+        timing out, so this can work when a plain read cannot.
+
+        Returns True when the device reported the clear complete. Best-effort
+        by design — returns False rather than raising, because this is what a
+        caller reaches for when things are *already* broken, and it is not a
+        guaranteed fix: on firmware 0.0.0.20 a clear succeeded at the USB
+        level (``STATUS_SUCCESS``) while the SCPI parser stayed stuck. Also a
+        no-op on non-USB sessions (LAN), which have no such request.
+        """
+        if self._closed or not self._resource.upper().startswith("USB"):
+            return False
+        try:
+            import usb.util  # noqa: PLC0415  (optional, USB-only path)
+
+            dev = self._inst.visalib.sessions[self._inst.session].interface.usb_dev
+            intf = dev.get_active_configuration()[(0, 0)].bInterfaceNumber
+            rtype = usb.util.build_request_type(
+                usb.util.CTRL_IN,
+                usb.util.CTRL_TYPE_CLASS,
+                usb.util.CTRL_RECIPIENT_INTERFACE,
+            )
+            if dev.ctrl_transfer(rtype, _TMC_INITIATE_CLEAR, 0, intf, 1,
+                                 timeout=3000)[0] != _TMC_STATUS_SUCCESS:
+                return False
+            for _ in range(10):
+                time.sleep(0.2)
+                status = dev.ctrl_transfer(
+                    rtype, _TMC_CHECK_CLEAR_STATUS, 0, intf, 2, timeout=3000
+                )
+                if status[0] == _TMC_STATUS_SUCCESS:
+                    return True
+            return False
+        except Exception:
+            log.debug("sdm4065a: USBTMC clear failed", exc_info=True)
+            return False
+
+
+def _is_sdm4065a_resource(resource: str) -> bool:
+    """True when a VISA resource string names an SDM4065A.
+
+    Parses the ``::``-separated fields rather than substring-matching the
+    whole string, because **VISA backends disagree on the radix**. For the
+    same physical meter:
+
+    * NI-VISA / Keysight IO:  ``USB0::0xF4EC::0x1220::SDM46A0CA00021::INSTR``
+    * pyvisa-py:              ``USB0::62700::4640::SDM46A0CA00021::0::INSTR``
+
+    62700 is 0xF4EC and 4640 is 0x1220 — the same numbers in decimal. An
+    earlier version of this function looked for the literal text ``F4EC``,
+    which meant the meter was visible to ``list_resources()`` and invisible
+    to this driver on exactly the boards that need pyvisa-py (no kernel
+    ``usbtmc`` module). Bench-verified on the Uno Q: the failure looked
+    identical to an unplugged instrument.
+
+    Substring matching is also wrong in principle — a serial number can
+    contain the digits of a VID, so it could match the wrong field.
+    """
+    parts = resource.split("::")
+    if len(parts) < 3 or not parts[0].upper().startswith("USB"):
+        return False
+
+    def as_int(token: str) -> Optional[int]:
+        token = token.strip()
+        try:
+            return int(token, 16) if token.lower().startswith("0x") else int(token)
+        except ValueError:
+            return None
+
+    return (
+        as_int(parts[1]) == SIGLENT_USB_VID and as_int(parts[2]) == SDM4065A_USB_PID
+    )
+
 
 def _autodiscover(rm) -> str:
     """Find exactly one SDM4065A among the VISA resources.
@@ -981,13 +1349,7 @@ def _autodiscover(rm) -> str:
     """
     resources = sorted(rm.list_resources())
     vid = f"{SIGLENT_USB_VID:#06x}".upper().replace("0X", "0x")
-    matches = [
-        r
-        for r in resources
-        if "USB" in r.upper()
-        and f"{SIGLENT_USB_VID:04X}" in r.upper()
-        and f"{SDM4065A_USB_PID:04X}" in r.upper()
-    ]
+    matches = [r for r in resources if _is_sdm4065a_resource(r)]
     if not matches:
         raise SDM4065AConnectionError(
             f"no SDM4065A found ({vid}:{SDM4065A_USB_PID:#06x}). VISA reported: "
@@ -1017,13 +1379,7 @@ def discover() -> list[str]:
     except Exception:
         return []
     try:
-        return [
-            r
-            for r in sorted(rm.list_resources())
-            if "USB" in r.upper()
-            and f"{SIGLENT_USB_VID:04X}" in r.upper()
-            and f"{SDM4065A_USB_PID:04X}" in r.upper()
-        ]
+        return [r for r in sorted(rm.list_resources()) if _is_sdm4065a_resource(r)]
     finally:
         try:
             rm.close()
