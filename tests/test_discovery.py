@@ -251,3 +251,87 @@ def test_format_inventory_is_readable(monkeypatch):
 
 def test_format_inventory_handles_empty():
     assert discovery.format_inventory([]) == "No instruments found."
+
+
+# --------------------------------------------------------------------------
+# Bridges the kernel never bound to a tty
+# --------------------------------------------------------------------------
+#
+# ``comports()`` enumerates ttys, so on a kernel without CONFIG_USB_SERIAL_CH341
+# a CH340 is invisible to scan_serial by construction — the QR10x reads as "not
+# plugged in" when it is plugged in and usable. scan_driverless_bridges covers
+# exactly that blind spot.
+
+
+class FakeUsbDevice:
+    """A pyusb device object, as far as the descriptor reads are concerned.
+
+    The mixedCase names are pyusb's own (they mirror the USB descriptor field
+    names), so they cannot be renamed to satisfy N815 without the fake ceasing
+    to stand in for the real thing.
+    """
+
+    iManufacturer = 1  # noqa: N815
+    iProduct = 2  # noqa: N815
+    iSerialNumber = 3  # noqa: N815
+
+
+def _patch_find_all(monkeypatch, devices):
+    from benchctrl.transports import ch341
+
+    monkeypatch.setattr(ch341.CH341Device, "find_all", classmethod(lambda cls: devices))
+
+
+def test_a_driverless_ch340_is_reported(monkeypatch):
+    _patch_ports(monkeypatch, [])
+    _patch_find_all(monkeypatch, [FakeUsbDevice()])
+
+    found = discovery.scan_driverless_bridges()
+
+    assert len(found) == 1
+    assert found[0].usb_id == "1a86:7523"
+    # "auto" is both the honest answer (no node exists yet) and the value to
+    # pass as port= to open it.
+    assert found[0].path == "auto"
+    assert found[0].confidence == UNKNOWN
+    assert "userspace" in found[0].note
+
+
+def test_a_kernel_bound_ch340_is_not_reported_twice(monkeypatch):
+    """scan_serial already has it; reporting it as driverless would be wrong."""
+    _patch_ports(monkeypatch, [FakePort("/dev/ttyUSB0", vid=0x1A86, pid=0x7523)])
+    _patch_find_all(monkeypatch, [FakeUsbDevice()])
+
+    assert discovery.scan_driverless_bridges() == []
+
+
+def test_an_unrelated_tty_does_not_suppress_a_driverless_ch340(monkeypatch):
+    """An FTDI cable elsewhere on the bus must not hide the CH340."""
+    _patch_ports(monkeypatch, [FakePort("/dev/ttyUSB0", vid=0x0403, pid=0x6001)])
+    _patch_find_all(monkeypatch, [FakeUsbDevice()])
+
+    assert len(discovery.scan_driverless_bridges()) == 1
+
+
+def test_no_usb_access_is_not_a_discovery_failure(monkeypatch):
+    """Missing pyusb or udev rule means no answer, not a crash."""
+    from benchctrl.exceptions import BenchConnectionError
+    from benchctrl.transports import ch341
+
+    def boom(cls):
+        raise BenchConnectionError("pyusb unavailable")
+
+    _patch_ports(monkeypatch, [])
+    monkeypatch.setattr(ch341.CH341Device, "find_all", classmethod(boom))
+
+    assert discovery.scan_driverless_bridges() == []
+
+
+def test_discover_includes_driverless_bridges(monkeypatch):
+    """The wiring, not just the scanner: discover() must call it."""
+    _patch_ports(monkeypatch, [])
+    _patch_find_all(monkeypatch, [FakeUsbDevice()])
+
+    found = discovery.discover(usbtmc=False, visa=False)
+
+    assert [d.path for d in found] == ["auto"]

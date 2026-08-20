@@ -304,7 +304,7 @@ error frames are detected in-band by the transport reader.
 
 `tests/` has two kinds of tests:
 
-- **Hardware-free** (default): **1164 tests**, running in ~10 minutes
+- **Hardware-free** (default): **1182 tests**, running in ~10 minutes
   with no device attached. Most drive `benchctrl.sim` simulators rather
   than mocks, so the transport, binary framing, session handshake and
   reader threads are all genuinely exercised — see

@@ -36,6 +36,37 @@ with QR10x.open("COM7") as qr:
     print(qr.actual_resistance())     # PV: what the device actually achieved
 ```
 
+### Which port — let it choose
+
+`QR10x.open()` takes a port, but on a host whose kernel lacks `ch341`
+(Arduino's Uno Q) the CH340 bridge binds no driver and there *is* no
+`/dev/ttyUSB*` to name. `benchctrl.transports.autoserial` decides for you:
+
+```python
+from benchctrl.drivers.eastwood_qr10x import QR10x
+from benchctrl.transports.autoserial import open_serial_driver
+
+qr = open_serial_driver(QR10x.open, port=None)   # or port="auto"
+```
+
+Precedence, fixed:
+
+| Condition | Transport |
+|---|---|
+| a port is named explicitly | that port, nothing probed |
+| a kernel tty exists for `1a86:7523` | that tty |
+| a CH340 enumerates with no tty | userspace CH341 driver → pty |
+
+The kernel driver wins where it exists: it is battle-tested, survives
+suspend/resume, and costs no Python thread. The userspace driver is a
+workaround, and a workaround should not win by default. The same config
+therefore works on desktop Linux and on the Uno Q, and a host that later
+gains a `ch341` module starts using it with no config change.
+
+A failed open on a kernel tty **raises rather than falling back** — see
+`KNOWN_LIMITATIONS § N-6`. The agent and the `qr10x_open` MCP tool both
+route through this, so `port` defaults to `"auto"` there too.
+
 ### Safety
 
 The QR10x has a built-in `RLIMIT` (safety minimum-resistance limit)

@@ -43,7 +43,7 @@ via Zadig).
 The test suite is split by hardware requirement using pytest markers.
 
 ```bash
-pytest -m "not hardware" -q       # ~10 minutes, no device needed (1164 tests)
+pytest -m "not hardware" -q       # ~10 minutes, no device needed (1182 tests)
 pytest -m hardware -q              # requires Arc Pro + companion instruments (173)
 pytest -q                          # both
 ```
@@ -294,6 +294,10 @@ benchctrl/
 │   │   ├── sdm4065a.py                  Siglent DMM, incl. its quirks
 │   │   ├── waveforms.py                 analytically-known signals
 │   │   └── factories.py                 production driver + simulator
+│   ├── transports/                      reaching a device the kernel can't
+│   │   ├── ch341.py                     userspace CH340 driver over libusb
+│   │   ├── ptybridge.py                 userspace device -> real pty
+│   │   └── autoserial.py                kernel driver first, userspace fallback
 │   ├── net/                             remote wire protocol
 │   │   ├── frames.py, codec.py          typed frames, allowlisted values
 │   │   ├── auth.py                      HMAC-SHA256 challenge-response

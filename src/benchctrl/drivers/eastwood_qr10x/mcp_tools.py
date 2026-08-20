@@ -34,11 +34,26 @@ def _get_qr10x() -> QR10x:
         return _qr10x
 
 
-def qr10x_open(port: str = "COM7", baudrate: int = 115200) -> dict:
+def _open_local(port: Optional[str] = None, baudrate: int = 115200) -> QR10x:
+    """Open a QR10x locally, letting autoserial pick the transport.
+
+    Not ``QR10x.open`` directly: on a kernel without ``ch341`` the adapter has
+    no tty and the port must come from the userspace bridge instead. Choosing
+    here rather than in the driver keeps that knowledge below the driver layer.
+    """
+    from benchctrl.transports.autoserial import open_serial_driver
+
+    return open_serial_driver(QR10x.open, port=port, baudrate=baudrate)
+
+
+def qr10x_open(port: str = "auto", baudrate: int = 115200) -> dict:
     """Open a connection to the Eastwood QR10x programmable resistor.
 
     The QR10x exposes a USB-Serial interface (CH340 chip) at 115200 8N1
     and accepts AT commands. Returns its identity info on success.
+
+    ``port`` defaults to ``"auto"``: use the kernel's tty for the CH340 if one
+    exists, else drive the chip from userspace. Name a port to force one.
 
     Only one connection at a time. Call ``qr10x_close()`` first if
     already open on a different port.
@@ -55,7 +70,7 @@ def qr10x_open(port: str = "COM7", baudrate: int = 115200) -> dict:
             }
         _qr10x = session.resolve(
             "eastwood_qr10x",
-            opener=QR10x.open,
+            opener=_open_local,
             open_kwargs={"port": port, "baudrate": baudrate},
         )
     return {"port": _qr10x.port, "info": _qr10x.info().to_dict()}

@@ -9,6 +9,72 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### Serial transport selection — kernel driver first
+
+`benchctrl.transports.autoserial` picks how to reach a CH340-based
+instrument instead of making the operator know which host they are on.
+The userspace CH341 driver shipped earlier as a workaround for kernels
+built without `CONFIG_USB_SERIAL_CH341`, but nothing chose between it and
+the kernel's own driver: `open_ch341_pty()` had exactly one caller in the
+repo, a manual verification script. Whoever wrote the config had to know
+whether to name `/dev/ttyUSB0` or start a bridge — so a config that worked
+on desktop Linux was wrong on the Uno Q and vice versa.
+
+Precedence is fixed: an explicitly named port wins and probes nothing, a
+kernel-bound tty for `1a86:7523` beats userspace, and the userspace driver
+runs only when the kernel bound nothing. The kernel driver wins where it
+exists because it is battle-tested, survives suspend/resume and costs no
+Python thread; ours is a workaround and should not win by default. A host
+that later gains a `ch341` module starts using it with no config change.
+
+A **failed** open does not trigger fallback. If a kernel tty exists and
+opening it fails, that raises: sliding to userspace would turn "another
+process holds the port" or "the cable is unplugged" into a different,
+working transport measuring something else — rule 4's silent fallback, at
+the transport layer. Transport is chosen by what the host *has*, never by
+what failed.
+
+Bridge lifetime is bound to the driver, so `registry.close()` and every
+existing teardown path release the USB claim without knowing a bridge
+exists. It is closed even if the driver's own `close()` raises — a driver
+that fails to close still has to give the chip back, or the next open
+finds it claimed by a dead handle.
+
+The agent's opener and the `qr10x_open` MCP tool both route through this,
+so remote and local behave identically and `port` now defaults to
+`"auto"` rather than `"COM7"`.
+
+#### Discovered
+
+**A driverless CH340 was invisible to discovery.** `discovery.scan_serial()`
+enumerates `list_ports.comports()`, which lists *ttys* — and the entire
+problem on a kernel without `ch341` is that no tty exists. So the QR10x was
+absent from the Uno Q's inventory, which reads as "not plugged in" when it
+is plugged in and working. `scan_driverless_bridges()` closes that blind
+spot, reporting the adapter with `path="auto"` (the honest answer: there is
+no node until the bridge creates a pty, and `"auto"` is also what to pass as
+`port`). It suppresses itself when the kernel *has* bound the adapter, so
+nothing is double-reported.
+
+**Verified on real hardware** — QR101A-1M-R1, serial 00000248, on the Uno Q
+bench board. The userspace branch is selected correctly, the driver reads
+its identity through it, and an open → close → reopen cycle succeeds, which
+is what proves the USB claim is released rather than leaked. Discovery
+reports the adapter where it previously reported nothing.
+
+#### Known issues
+
+- **The kernel-first branch is test-verified, not silicon-verified.** No
+  host on this bench has a kernel `ch341` to exercise it against: the Uno Q
+  is built without it, and WSL has no CH340 passed through. The precedence
+  logic is covered by `tests/test_autoserial.py`, including a mutation check
+  that each branch fails when inverted, but "kernel tty is preferred" has
+  not been observed on real hardware that has one.
+- **Only the CH340G (`1a86:7523`) is handled.** The CH9102 (`1a86:55d4`)
+  uses a different register layout, and other bridges (FTDI, CP210x,
+  PL2303) are untouched — they are only ever reachable through their kernel
+  drivers. `autoserial` is CH341-specific by name and scope.
+
 ### Siglent SDM4065A — 6½-digit bench DMM
 
 A fifth instrument, and the first *measurement-only* one: it sources

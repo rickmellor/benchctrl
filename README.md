@@ -21,7 +21,7 @@ slots in.
 | | |
 |---|---|
 | **Version** | 1.2.0 |
-| **Tests** | 1164 hardware-free + 173 hardware-marked |
+| **Tests** | 1182 hardware-free + 173 hardware-marked |
 | **MCP tools** | 280 |
 | **License** | MIT |
 | **Python** | 3.9 – 3.13 |
@@ -401,7 +401,7 @@ public method has a test, firmware bugs get documented in
 git clone https://github.com/rickmellor/benchctrl
 cd benchctrl
 pip install -e ".[dev,mcp,bench-visa,science]"
-pytest -m "not hardware"                 # 1164 tests, ~10 min, no device needed
+pytest -m "not hardware"                 # 1182 tests, ~10 min, no device needed
 pytest                                    # full suite (bench on USB)
 ```
 

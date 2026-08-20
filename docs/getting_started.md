@@ -15,7 +15,7 @@ For development:
 git clone https://github.com/rickmellor/benchctrl
 cd benchctrl
 pip install -e ".[dev,mcp,bench-visa,science]"
-pytest -m "not hardware" -q            # 1164 tests, no device needed
+pytest -m "not hardware" -q            # 1182 tests, no device needed
 ```
 
 ## No hardware yet?

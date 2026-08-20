@@ -211,8 +211,12 @@ def build_default_registry(
 
     def _qr(**kw):
         from benchctrl.drivers.eastwood_qr10x import QR10x
+        from benchctrl.transports.autoserial import open_serial_driver
 
-        return QR10x.open(**kw)
+        # Goes through autoserial rather than QR10x.open directly: the bench may
+        # or may not have a kernel ch341 driver, and the agent must not need a
+        # different config per board. An explicit configured port still wins.
+        return open_serial_driver(QR10x.open, **kw)
 
     def _dl(**kw):
         from benchctrl.drivers.rigol_dl3031a import RigolDL3031A
