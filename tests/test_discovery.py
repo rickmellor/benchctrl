@@ -167,7 +167,7 @@ def test_discover_dedupes_usbtmc_against_visa(monkeypatch):
     monkeypatch.setattr(
         discovery,
         "scan_visa",
-        lambda: [
+        lambda *a, **kw: [
             DiscoveredDevice(
                 path="USB0::0x1AB1::0x0E11::DL3D2323::INSTR",
                 transport="visa",
@@ -189,7 +189,7 @@ def test_inventory_shape(monkeypatch):
             FakePort("/dev/ttyUSB0", vid=0x1A86, pid=0x7523),
         ],
     )
-    monkeypatch.setattr(discovery, "scan_visa", lambda: [])
+    monkeypatch.setattr(discovery, "scan_visa", lambda *a, **kw: [])
     monkeypatch.setattr(discovery, "scan_usbtmc", lambda: [])
     inv = discovery.inventory()
     assert inv["count"] == 2
@@ -206,7 +206,7 @@ def test_find_for_filters(monkeypatch):
             FakePort("/dev/ttyUSB0", vid=0x1A86, pid=0x7523),
         ],
     )
-    monkeypatch.setattr(discovery, "scan_visa", lambda: [])
+    monkeypatch.setattr(discovery, "scan_visa", lambda *a, **kw: [])
     monkeypatch.setattr(discovery, "scan_usbtmc", lambda: [])
     assert [d.path for d in discovery.find_for("otii_arc")] == ["/dev/ttyACM0"]
     assert [d.path for d in discovery.unidentified()] == ["/dev/ttyUSB0"]
@@ -335,3 +335,296 @@ def test_discover_includes_driverless_bridges(monkeypatch):
     found = discovery.discover(usbtmc=False, visa=False)
 
     assert [d.path for d in found] == ["auto"]
+
+
+# --------------------------------------------------------------------------
+# visa_resource_for — the one place a VISA driver resolves its resource
+#
+# Each driver used to scan list_resources() itself and substring-match a hex
+# VID/PID. That made an attached instrument invisible to its own driver on any
+# board using pyvisa-py, which renders the ids in decimal. The SDM4065A was
+# fixed for this; the two Rigols kept the bug for another release, and it is
+# what made the bench panel report NOT SERVED for three connected instruments.
+# --------------------------------------------------------------------------
+
+#: The bench board's real resource strings, as pyvisa-py renders them. 6833 is
+#: 0x1AB1, 42152 is 0xA4A8, 3601 is 0x0E11, 62700 is 0xF4EC, 4640 is 0x1220.
+BOARD_RESOURCES = (
+    "ASRL/dev/ttyACM0::INSTR",
+    "ASRL/dev/ttyS0::INSTR",
+    "USB0::62700::4640::SDM46A0CA00021::0::INSTR",
+    "USB0::6833::3601::DL3D232300106::0::INSTR",
+    "USB0::6833::42152::DP2A243500269::0::INSTR",
+)
+
+
+def _patch_visa(monkeypatch, resources):
+    """Make discovery see exactly ``resources`` on the VISA bus, nothing else."""
+
+    class FakeRM:
+        def list_resources(self):
+            return tuple(resources)
+
+        def close(self):
+            pass
+
+    # Bind the real scanner before patching the name it lives under, or the
+    # replacement calls itself.
+    real_scan_visa = discovery.scan_visa
+    monkeypatch.setattr(
+        discovery, "scan_visa", lambda *a, **kw: real_scan_visa(FakeRM())
+    )
+    monkeypatch.setattr(
+        discovery, "_visa_resource_names", lambda *a, **kw: sorted(resources)
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("rigol_dp2031", "USB0::6833::42152::DP2A243500269::0::INSTR"),
+        ("rigol_dl3031a", "USB0::6833::3601::DL3D232300106::0::INSTR"),
+        ("siglent_sdm4065a", "USB0::62700::4640::SDM46A0CA00021::0::INSTR"),
+    ],
+)
+def test_a_decimal_resource_resolves_for_every_visa_instrument(
+    monkeypatch, key, expected
+):
+    """The bug, on the board's own resource strings.
+
+    Parametrised across all three deliberately: the DMM was fixed first and the
+    two Rigols were not, so a per-driver test is exactly what let this survive.
+    One test that must hold for every VISA instrument cannot be half-applied.
+    """
+    _patch_ports(monkeypatch, [])
+    _patch_visa(monkeypatch, BOARD_RESOURCES)
+
+    assert discovery.visa_resource_for(key) == expected
+
+
+def test_a_hex_resource_still_resolves(monkeypatch):
+    """The other common case: a laptop with NI-VISA installed."""
+    _patch_ports(monkeypatch, [])
+    _patch_visa(
+        monkeypatch,
+        ("USB0::0x1AB1::0xA4A8::DP2A243500269::INSTR",
+         "USB0::0x1ab1::0x0E11::DL3D232300106::INSTR"),
+    )
+
+    assert discovery.visa_resource_for("rigol_dp2031").endswith("DP2A243500269::INSTR")
+    assert discovery.visa_resource_for("rigol_dl3031a").endswith("DL3D232300106::INSTR")
+
+
+def test_two_rigols_are_told_apart_on_pid_alone(monkeypatch):
+    """The supply and the load share Rigol's VID and differ only by PID.
+
+    A matcher that checked the VID and stopped would return whichever came
+    first, and ramping a supply when you asked for a load is the worst outcome
+    on this list.
+    """
+    _patch_ports(monkeypatch, [])
+    _patch_visa(monkeypatch, BOARD_RESOURCES)
+
+    psu = discovery.visa_resource_for("rigol_dp2031")
+    load = discovery.visa_resource_for("rigol_dl3031a")
+    assert psu != load
+    assert "42152" in psu and "3601" in load
+
+
+def test_an_absent_instrument_raises_the_drivers_own_error(monkeypatch):
+    """A driver's public contract is its own exception type, not this module's.
+
+    Callers already catch RigolDP2031ConnectionError; centralising the lookup
+    must not quietly change what they have to catch.
+    """
+    from benchctrl.drivers.rigol_dp2031.driver import RigolDP2031ConnectionError
+
+    _patch_ports(monkeypatch, [])
+    _patch_visa(monkeypatch, ("USB0::62700::4640::SDM46A0CA00021::0::INSTR",))
+
+    with pytest.raises(RigolDP2031ConnectionError):
+        discovery.visa_resource_for(
+            "rigol_dp2031", error=RigolDP2031ConnectionError
+        )
+
+
+def test_the_error_names_what_visa_actually_reported(monkeypatch):
+    """The failure this replaced said "no DP2000 found" while listing the very
+    resource it had just rejected. Keeping the list in the message is what made
+    the bug findable at all, so it stays — an instrument that is present but
+    unmatched must not look identical to an unplugged one."""
+    _patch_ports(monkeypatch, [])
+    _patch_visa(monkeypatch, ("USB0::62700::4640::SDM46A0CA00021::0::INSTR",))
+
+    with pytest.raises(discovery.BenchConnectionError) as exc:
+        discovery.visa_resource_for("rigol_dp2031")
+    msg = str(exc.value)
+    assert "SDM46A0CA00021" in msg, "the operator cannot see what was rejected"
+    assert "0x1ab1" in msg.lower() and "0xa4a8" in msg.lower(), "what was sought"
+    assert "udev" in msg, "the usual cause on a board using pyvisa-py"
+
+
+def test_two_identical_instruments_are_never_picked_between(monkeypatch):
+    """Two supplies on one bench is rare; choosing one at random is not an
+    option. The caller must pass resource= and say which rail it means."""
+    _patch_ports(monkeypatch, [])
+    _patch_visa(
+        monkeypatch,
+        ("USB0::6833::42152::DP2A243500269::0::INSTR",
+         "USB0::6833::42152::DP2A999999999::0::INSTR"),
+    )
+
+    with pytest.raises(discovery.BenchConnectionError, match="several"):
+        discovery.visa_resource_for("rigol_dp2031")
+
+
+def test_a_serial_resource_is_never_returned_for_a_visa_instrument(monkeypatch):
+    """The Arc is on /dev/ttyACM0 and the lookup must not reach for it.
+
+    Serial and usbtmc scans are switched off in the lookup, so a bench where the
+    supply is unplugged cannot resolve to whatever else happens to be attached.
+    """
+    _patch_ports(
+        monkeypatch,
+        [FakePort("/dev/ttyACM0", vid=0x0FCE, pid=0xD1E6, product="Arc")],
+    )
+    _patch_visa(monkeypatch, ())
+
+    with pytest.raises(discovery.BenchConnectionError):
+        discovery.visa_resource_for("rigol_dp2031")
+    # And the Arc's own lookup is unaffected by the VISA bus being empty.
+    assert [d.path for d in discovery.find_for("otii_arc")] == ["/dev/ttyACM0"]
+
+
+@pytest.mark.parametrize(
+    ("module", "expected"),
+    [
+        ("benchctrl.drivers.rigol_dp2031.driver",
+         "USB0::6833::42152::DP2A243500269::0::INSTR"),
+        ("benchctrl.drivers.rigol_dl3031a.driver",
+         "USB0::6833::3601::DL3D232300106::0::INSTR"),
+        ("benchctrl.drivers.siglent_sdm4065a.driver",
+         "USB0::62700::4640::SDM46A0CA00021::0::INSTR"),
+    ],
+)
+def test_each_driver_actually_uses_the_shared_lookup(monkeypatch, module, expected):
+    """Through the driver's own entry point, not the helper it should call.
+
+    The tests above pass against a driver still carrying the old hex substring
+    matcher, because they exercise visa_resource_for() directly. That is exactly
+    the shape of the gap that let this bug survive a release: the lookup was
+    correct and two of the three drivers did not use it. This asserts the wiring
+    — revert any _autodiscover to its substring version and this fails.
+    """
+    import importlib
+
+    _patch_ports(monkeypatch, [])
+    _patch_visa(monkeypatch, BOARD_RESOURCES)
+    drv = importlib.import_module(module)
+
+    class FakeRM:
+        def list_resources(self):
+            return BOARD_RESOURCES
+
+        def close(self):
+            pass
+
+    assert drv._autodiscover(FakeRM()) == expected
+
+
+def test_a_kernel_usbtmc_node_is_not_returned_as_a_visa_resource(monkeypatch):
+    """Why the lookup switches the serial and usbtmc scans off.
+
+    ``/dev/usbtmc0`` is a real, correctly-identified DP2031 — but it is a
+    character device, not something ``rm.open_resource()`` can open. This
+    combination is reachable on the bench board: the kernel can bind usbtmc
+    while pyvisa-py still cannot read the descriptors for want of a udev rule.
+
+    Without the scan filters the lookup returns that path and the driver fails
+    deep inside pyvisa with a confusing error, instead of saying plainly that
+    no VISA resource for the supply was found. A test with an empty bus cannot
+    tell the two apart — this one can.
+    """
+    _patch_ports(monkeypatch, [])
+    _patch_visa(monkeypatch, ())
+    monkeypatch.setattr(
+        discovery,
+        "scan_usbtmc",
+        lambda: [
+            DiscoveredDevice(
+                path="/dev/usbtmc0",
+                transport="usbtmc",
+                device_key="rigol_dp2031",
+                vid=0x1AB1,
+                pid=0xA4A8,
+                confidence=EXACT,
+            )
+        ],
+    )
+
+    with pytest.raises(discovery.BenchConnectionError) as exc:
+        discovery.visa_resource_for("rigol_dp2031")
+    assert "/dev/usbtmc0" not in str(exc.value).split("VISA reported")[0]
+
+
+def test_a_borrowed_resource_manager_is_never_closed(monkeypatch):
+    """``pyvisa.ResourceManager()`` is a singleton, so closing "our own" closes
+    the caller's.
+
+    Introduced and caught in the same session: centralising the lookup made it
+    build its own manager and close it afterwards, which invalidated the handle
+    the driver was about to call ``open_resource`` on. Both Rigols then failed
+    with ``InvalidSession: Invalid session handle`` on the *correct* resource
+    string — a strictly worse failure than the one being fixed, because it looks
+    like broken hardware rather than a lookup miss. The DMM was unaffected only
+    because it already passed its manager through.
+    """
+    closed = []
+
+    class FakeRM:
+        def list_resources(self):
+            return BOARD_RESOURCES
+
+        def close(self):
+            closed.append(True)
+
+    rm = FakeRM()
+    _patch_ports(monkeypatch, [])
+    assert discovery.visa_resource_for("rigol_dp2031", resource_manager=rm)
+    assert not closed, "closed a ResourceManager it did not create"
+
+    # And on the failure path, which builds the resource list for the message.
+    with pytest.raises(discovery.BenchConnectionError):
+        discovery.visa_resource_for("eastwood_qr10x", resource_manager=rm)
+    assert not closed, "closed the caller's manager while formatting an error"
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "benchctrl.drivers.rigol_dp2031.driver",
+        "benchctrl.drivers.rigol_dl3031a.driver",
+        "benchctrl.drivers.siglent_sdm4065a.driver",
+    ],
+)
+def test_no_driver_closes_the_manager_it_was_handed(monkeypatch, module):
+    """The wiring half of the above, through each driver's own entry point.
+
+    ``_autodiscover`` is called with the manager ``open()`` is about to use, so a
+    driver that drops it on the floor gets an InvalidSession one line later.
+    """
+    import importlib
+
+    closed = []
+
+    class FakeRM:
+        def list_resources(self):
+            return BOARD_RESOURCES
+
+        def close(self):
+            closed.append(True)
+
+    _patch_ports(monkeypatch, [])
+    drv = importlib.import_module(module)
+    assert drv._autodiscover(FakeRM())
+    assert not closed, f"{module} closed the ResourceManager it was given"

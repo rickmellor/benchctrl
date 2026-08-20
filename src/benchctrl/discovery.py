@@ -398,6 +398,7 @@ def discover(
     serial: bool = True,
     usbtmc: bool = True,
     visa: bool = True,
+    resource_manager=None,
 ) -> list[DiscoveredDevice]:
     """Scan every enabled transport and return one merged inventory.
 
@@ -405,6 +406,11 @@ def discover(
     ``/dev/usbtmc0`` node it is bound to are the same instrument, and
     reporting both would make a bench look twice as populated as it is. The
     VISA form wins because that is what the driver needs to open it.
+
+    ``resource_manager`` is passed through to :py:func:`scan_visa`, which will
+    not close a manager it did not create. A caller that holds one must pass it:
+    ``pyvisa.ResourceManager()`` is a singleton, so closing a second handle
+    invalidates the first.
     """
     found: list[DiscoveredDevice] = []
     if serial:
@@ -412,7 +418,7 @@ def discover(
         # Bridges with no tty. Additive by construction: scan_serial only
         # reports ttys, and this only reports adapters that have none.
         found.extend(scan_driverless_bridges())
-    visa_devices = scan_visa() if visa else []
+    visa_devices = scan_visa(resource_manager) if visa else []
     if usbtmc:
         seen_usb = {(d.vid, d.pid, d.serial_number) for d in visa_devices}
         for dev in scan_usbtmc():
@@ -426,6 +432,97 @@ def discover(
 def find_for(device_key: str, **kwargs) -> list[DiscoveredDevice]:
     """Every discovered device belonging to ``device_key``."""
     return [d for d in discover(**kwargs) if d.device_key == device_key]
+
+
+def visa_resource_for(
+    device_key: str,
+    *,
+    error: type = BenchConnectionError,
+    resource_manager=None,
+) -> str:
+    """The one VISA resource string for ``device_key``, or raise.
+
+    The single place a VISA-based driver's ``open(resource=None)`` should get its
+    resource from. Each driver used to scan ``rm.list_resources()`` itself and
+    substring-match a hex VID/PID, which is wrong twice over:
+
+    * **Backends disagree on the radix.** The same DP2031 is
+      ``USB0::0x1AB1::0xA4A8::DP2A243500269::INSTR`` under NI-VISA and
+      ``USB0::6833::42152::DP2A243500269::0::INSTR`` under pyvisa-py. Looking for
+      the literal text ``0x1ab1`` finds nothing in the decimal form, so on
+      exactly the boards that need pyvisa-py (no kernel ``usbtmc`` module) the
+      instrument was listed by ``list_resources()`` and invisible to its own
+      driver. Bench-verified on the Uno Q, where the error names the very
+      resource string it just rejected.
+    * **Substring matching is wrong in principle.** A serial number can contain
+      the digits of a VID, so the match can land on the wrong field.
+
+    :py:func:`_visa_usb_ids` parses the ``::``-separated fields and accepts both
+    radixes, and going through :py:func:`find_for` means there is one signature
+    table rather than one per driver — which is what this module was introduced
+    to do.
+
+    Args:
+        device_key: which instrument to find.
+        error: exception class to raise, so a driver keeps its own error type in
+            its public contract instead of leaking this module's.
+        resource_manager: the caller's ResourceManager. **Pass it** if you hold
+            one. ``pyvisa.ResourceManager()`` is a *singleton* — a second call
+            returns the same object — so a scan that helpfully created "its own"
+            and closed it afterwards would close the caller's, and its next
+            ``open_resource`` fails with ``InvalidSession: Invalid session
+            handle``. Bench-verified on the Uno Q, where it turned a working
+            supply into an unopenable one while the DMM (which passes its manager
+            through) kept working.
+
+    Raises:
+        error: if none are found, or if several are — never a silent pick. Two
+            identical supplies on a bench is rare and choosing one at random is
+            how you ramp the wrong rail.
+    """
+    matches = [
+        d.path
+        for d in find_for(
+            device_key, serial=False, usbtmc=False, resource_manager=resource_manager
+        )
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    sig = next((s for s in SIGNATURES if s.device_key == device_key), None)
+    what = sig.label if sig else device_key
+    if not matches:
+        ids = f" (VID {sig.vid:#06x} / PID {sig.pid:#06x})" if sig else ""
+        raise error(
+            f"no {what}{ids} found. VISA reported: "
+            f"{_visa_resource_names(resource_manager)!r}. "
+            f"Check the USB cable, and that the VISA backend can see USB devices "
+            f"(pyvisa-py needs pyusb + libusb, and a udev rule to read the "
+            f"device's string descriptors)."
+        )
+    raise error(
+        f"several {what} devices found: {matches!r}. Pass resource= to choose."
+    )
+
+
+def _visa_resource_names(resource_manager=None) -> list[str]:
+    """Every VISA resource, for an error message. Never raises.
+
+    Only closes a manager it created itself — see
+    :py:func:`visa_resource_for` on why closing the caller's is destructive.
+    """
+    try:
+        import pyvisa
+
+        rm = resource_manager
+        if rm is not None:
+            return sorted(rm.list_resources())
+        rm = pyvisa.ResourceManager()
+        try:
+            return sorted(rm.list_resources())
+        finally:
+            rm.close()
+    except Exception as exc:  # noqa: BLE001 - decorating an error, not raising one
+        return [f"<VISA unavailable: {exc}>"]
 
 
 def unidentified(**kwargs) -> list[DiscoveredDevice]:

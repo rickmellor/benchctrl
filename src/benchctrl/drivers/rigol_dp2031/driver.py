@@ -2106,25 +2106,25 @@ def _parse_delay_ms(raw: str) -> int:
 
 
 def _autodiscover(rm) -> str:
-    """Scan VISA resources for a Rigol DP2000-family USB device.
+    """The VISA resource string for the one attached DP2000-family supply.
 
-    Returns the resource string if exactly one DP2000 is found. If
-    multiple are connected, raises with the candidate list so the
-    caller can pick explicitly.
+    Delegates to :py:func:`benchctrl.discovery.visa_resource_for`, which parses
+    the resource's ``::`` fields instead of substring-matching a hex VID/PID.
+    This function used to do the latter, and it made the supply **invisible to
+    its own driver** on any board using pyvisa-py: that backend renders the same
+    device as ``USB0::6833::42152::DP2A243500269::0::INSTR``, so a search for the
+    text ``0x1ab1`` found nothing and the error listed the very resource it had
+    just rejected. Bench-verified on the Uno Q. See that function for the full
+    reasoning; the identical bug was fixed in the SDM4065A driver first.
+
+    ``rm`` is passed through and must be: ``pyvisa.ResourceManager()`` is a
+    singleton, so a scan that made its own handle and closed it would close this
+    one, and the caller's next ``open_resource`` would fail with
+    ``InvalidSession``. That is not hypothetical — it is what happened on the
+    bench board between the two halves of this fix.
     """
-    resources = sorted(rm.list_resources())
-    vid = f"0x{RIGOL_USB_VID:04X}".lower()
-    pid = f"0x{DP2000_USB_PID:04X}".lower()
-    matches = [r for r in resources
-               if "usb" in r.lower() and vid in r.lower() and pid in r.lower()]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        raise RigolDP2031ConnectionError(
-            f"multiple Rigol DP2000 devices found — pass an explicit resource "
-            f"string. Candidates: {matches}"
-        )
-    raise RigolDP2031ConnectionError(
-        f"no Rigol DP2000 (VID 0x{RIGOL_USB_VID:04X} / PID 0x{DP2000_USB_PID:04X}) "
-        f"found in VISA resource list: {resources}"
+    from benchctrl import discovery
+
+    return discovery.visa_resource_for(
+        "rigol_dp2031", error=RigolDP2031ConnectionError, resource_manager=rm
     )
