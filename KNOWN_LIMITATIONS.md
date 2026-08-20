@@ -697,9 +697,27 @@ this board when it is plugged in and working.
 
 Verified end to end on real hardware: QR101A-1M-R1, serial 00000248 — opened,
 closed and reopened through the auto-selected userspace transport, the reopen
-proving the USB claim is released rather than leaked. The kernel-first branch is
-covered by `tests/test_autoserial.py` only; no host on this bench has a kernel
-`ch341` to exercise it on silicon.
+proving the USB claim is released rather than leaked.
+
+**Two validation gaps, both needing a host this bench doesn't have.** Neither
+is a known defect; they are untested paths, which is a different and lesser
+claim than "works". Tracked in [`ROADMAP.md`](ROADMAP.md) § *Revalidate serial
+transport selection on a desktop Linux host*, to be closed when we move back
+to big-iron Linux hosts.
+
+- **The kernel-first branch has never run on a host that has the module.** It
+  is covered by `tests/test_autoserial.py`, including a mutation check that
+  inverting the precedence fails a test, but the Uno Q is built without
+  `ch341` and WSL has no CH340 passed through. So "the kernel driver is
+  preferred where it exists" is asserted, not observed. The negative case
+  matters most: a kernel tty that fails to open must raise rather than
+  silently falling back to the userspace driver.
+- **`serial_number=` selection cannot work on our adapter.** This CH340G
+  reports `iSerialNumber=0` — no serial-number descriptor at all — so
+  `CH341Device.open(serial_number=...)` has nothing to match and `index=` is
+  the only way to choose. Other CH340 variants do carry one. Multi-adapter
+  selection is untested on hardware regardless: only one CH340 has ever been
+  attached here at a time.
 
 ## What's not in this list
 

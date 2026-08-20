@@ -66,6 +66,13 @@ def _kernel_ttys_for(vid: int, pid: int) -> list[str]:
     """Kernel-bound tty paths for a VID/PID, or [] if the kernel bound none.
 
     Empty is a normal answer, not an error: it is exactly the Uno Q case.
+
+    Validation gap: the non-empty branch has never been exercised on hardware.
+    No host on this bench has a kernel ``ch341`` (the Uno Q is built without
+    it; WSL passes no CH340 through), so "prefer the kernel tty" is pinned by
+    ``tests/test_autoserial.py`` and not yet observed on silicon. See
+    ``ROADMAP.md`` § *Revalidate serial transport selection on a desktop Linux
+    host* and ``KNOWN_LIMITATIONS`` § N-6.
     """
     try:
         import serial.tools.list_ports as list_ports
@@ -85,6 +92,12 @@ def resolve_ch341_port(
     baudrate: int = 115200,
 ) -> SerialTarget:
     """Decide how to reach a CH340, per this module's precedence.
+
+    ``serial_number`` only reaches the userspace path, and only helps if the
+    adapter actually publishes one — ours reports ``iSerialNumber=0``, i.e. no
+    descriptor, so nothing can match it and ``index=`` is the only way to pick
+    among several. Untested against multiple adapters on hardware; see
+    ``ROADMAP.md``.
 
     Raises:
         BenchConnectionError: if no CH340 is reachable either way. The message
