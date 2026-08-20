@@ -4,9 +4,11 @@ A read-only status display on the bench machine's own HDMI panel, plus
 the e-stop that will share it. Runs on the board next to the agent; the
 panel shows what the bench is doing without an operator opening a laptop.
 
-Status: **in progress.** The event bus underneath it has landed
-(`benchctrl.agent.eventbus`); the display itself is being built. See
-`ROADMAP.md`.
+Status: the read-only display **works and runs on the board**. The event
+bus underneath it (`benchctrl.agent.eventbus`), the observer session, and
+the FUI console are all in. What is outstanding is the **e-stop**: the
+button is ordered, and the design questions below are deliberately still
+open. See `ROADMAP.md` § *Hardware interlock for unattended runs*.
 
 ## The rule everything here follows
 
@@ -63,8 +65,9 @@ convention: **a producer never touches a socket.**
   │        │                                                      │
   │        │ EVT frames (droppable, shallow queue)                │
   │        ▼                                                      │
-  │  dashboard (own venv, Streamlit)                              │
-  │        │ serves :8501                                         │
+  │  benchctrl-fui (stdlib http.server, system python)            │
+  │    AgentFeed ─► BenchStatus ─► build_view() ─► /api/view      │
+  │        │ serves :8600                                        │
   │        ▼                                                      │
   │  chromium --kiosk ──► HDMI panel (card0-DP-1, DP altmode)     │
   │                                                               │
@@ -73,10 +76,15 @@ convention: **a producer never touches a socket.**
   └───────────────────────────────────────────────────────────────┘
 ```
 
-The dashboard is a **separate process in its own virtualenv**, not
-in-process with the agent. It therefore talks to the agent over
-`benchctrl.net` like any other client, which is what makes the read-path
-rules below protocol-level guarantees rather than in-process politeness.
+The display is a **separate process**, not in-process with the agent. It
+therefore talks to the agent over `benchctrl.net` like any other client,
+which is what makes the read-path rules below protocol-level guarantees
+rather than in-process politeness.
+
+It needs no virtualenv and no third-party packages: `http.server` plus three
+static files, run from `/usr/bin/python3`. That is not minimalism for its own
+sake — the board's root filesystem is ~10 G at 84% full, and the display it
+replaced cost 438 M of venv and ~130 M of RSS to render the same facts.
 
 ### Why event-driven and not polling
 
@@ -97,6 +105,33 @@ the unsafe state it is meant to report.
 
 So the dashboard subscribes to events and reads through a path that does
 not mark operator contact.
+
+#### Asking for the observer role is not having it
+
+`AgentFeed` connects with `observer=True`, but only the **agent** can enforce
+what that means — it is `agent/server.py` that skips `governor.touch()` for an
+observer session. A client that asks and is silently given an ordinary session
+gets exactly the hazard above, and every reading on the panel still looks
+perfectly current while it happens.
+
+The agent echoes the granted role back in its `WELCOME` specifically so a client
+can check, so `BenchStatus.apply_connected` checks it. A missing or false flag
+sets `observer_denied`, which:
+
+- takes the headline (`NOT OBSERVER`, severity `critical`) above `STALE` — a
+  stale view is a display problem, a held-open deadman is a bench problem;
+- makes the view **not** `trustworthy`, so readings render degraded;
+- puts `AGENT DENIED OBSERVER ROLE — DEADMAN MAY NOT FIRE` in the footer,
+  because "observer" is jargon and the consequence is not;
+- **latches**, like `unsafe_latch`. A later reconnect that happens to land on a
+  good agent says nothing about how long the deadman was held open.
+
+This is a downgrade detector, not a guarantee: against an older agent, or one
+whose observer branch regressed, it is the only warning available. A missing key
+is the realistic case — an agent predating the role would simply not mention it
+— which is why the check is `is not True` rather than a falsy test. Defaulting
+an absent safety flag to "fine" is how a check like this comes to pass while
+meaning nothing.
 
 ### Priority and shedding
 
@@ -131,7 +166,7 @@ Both will exist, and they are not redundant copies of each other.
 | | Physical button | On-screen button |
 |---|---|---|
 | Path | GPIO on the board → agent thread → `Governor.trip()` | touchscreen → dashboard → agent over the network |
-| Available when | always, including a dead X server, dead Streamlit, wedged panel | only when the whole display stack is healthy |
+| Available when | always, including a dead X server, dead display server, wedged panel | only when the whole display stack is healthy |
 | Authority | authoritative | convenience |
 | Arrives | ordered 2026-08-19 | with the touchscreen |
 
@@ -185,21 +220,79 @@ Measured on the Uno Q, not assumed:
 
 | | |
 |---|---|
-| `/` | 9.8 G, 80% full — **1.9 G free**, do not install here |
-| `/home/arduino` | separate ext4, **16.3 G free** — the venv goes here |
-| RAM | 3.6 G total, ~2.9 G available |
+| `/` | 9.8 G, 84% full — **1.6 G free**, do not install here |
+| `/home/arduino` | separate ext4, **16 G free** — put anything large here |
+| RAM | 3.6 G total, ~2.5 G available |
+| CPU | 4 cores; a status display gets a small fraction of one, see below |
 | Python | 3.13.5, `aarch64`, **no pip**, no `ensurepip`, `EXTERNALLY-MANAGED` |
-| Available | `apt` has `python3-pip` 25.1.1 and `python3-venv`; PyPI reachable |
 | Present | Chromium 142, Xorg, lightdm, xfce, `cairo`, `gi`, `pyserial`, `pyusb`, `pyvisa` |
-| Absent | `numpy`, `pandas`, `tkinter`, `PIL`, `streamlit` |
+| GPU | `/dev/dri/renderD128`; the kiosk runs `--enable-gpu-rasterization` |
 
-Every Streamlit dependency has a prebuilt `cp313` `aarch64` wheel
-(~104 MB download, ~250 MB installed); only `watchdog` lacks one, and it is
-optional. Because `/usr/lib/python3.13/EXTERNALLY-MANAGED` is present, this
-is a venv under `/home/arduino`, never a `--user` install.
+The FUI needs none of that beyond the stdlib, so `deploy/`'s pip-free story
+holds for the display as well as the agent: no venv, no wheels, nothing on
+`/`.
 
-This does mean the dashboard breaks `deploy/`'s pip-free story, which
-exists because the agent must install on a board with no pip at all. The
-split is intentional and worth stating: **the agent stays pip-free; the
-dashboard is opt-in and needs pip.** A board can run the agent with no
-display and no venv, exactly as today.
+### What the display is allowed to cost
+
+The rule from the outset was that the display must never be able to contend
+with benchctrl. That is a CPU budget, so it was measured rather than assumed —
+on the board, on the real panel, in the shipping `--enable-gpu-rasterization`
+configuration, by sampling `/proc/<pid>/stat` across the whole Chromium
+process tree.
+
+What the first version cost, and where it went:
+
+| | % of one core | % of the 4-core board |
+|---|---|---|
+| Chromium floor (`about:blank`) | 0.3–5.8 | 0.1–1.4 |
+| First FUI, as written | 138 | 34.6 |
+| …after the fixes below | 61–99 | 15–25 |
+
+The instructive part is what turned out **not** to matter. Stubbing out the
+hologram, the traces, the canvas glow and the background grid *together* moved
+it 176% → 147% of a core. Almost the entire cost was one element: a
+full-viewport `position: fixed` scanline sweeping the panel, at **48% of a
+core on its own** — more than every other animation combined. Shrinking it
+140px → 2px changed nothing; removing its glow changed nothing;
+`will-change` and `contain:strict` changed nothing. Only *not spanning the
+viewport* changed anything. A large fixed layer moving over live content is
+something this GPU will not composite cheaply, and no amount of tuning the
+element's appearance addresses that.
+
+Two mechanisms keep it in budget, both in `fui.js`/`fui.css`:
+
+- **The sweep is scoped to the hologram panel**, where it overlays static
+  chrome instead of the whole page.
+- **A frame governor** steps quality down (frame interval, canvas resolution,
+  glow) when frames run over budget, and back up only after a long quiet
+  stretch. Tiers are `FULL → HIGH → MED → LOW → MINIMAL`; the active tier is
+  displayed next to the frame rate in `SYSTEM.MGR`, so a coarsely-drawing
+  panel is a fact you can read off the panel rather than something to discover
+  with a profiler.
+
+The governor only ever degrades **decoration**. The data clock is a separate
+`setInterval` at `POLL_MS`, deliberately independent of the frame loop: a
+board too busy to draw a hologram must still update the numbers on schedule.
+The frame rate may collapse; the data rate may not.
+
+#### Two things the governor taught us
+
+**The first one was inert, and it looked fine.** It measured cost as time spent
+inside the draw calls, which is structurally always ~0 — canvas rasterisation
+happens off the main thread, so `performance.now()` around the drawing reported
+nothing while the process burned 130% of a core. The tiers, the thresholds and
+the comparison were all present and correct-looking, and the ladder never once
+engaged. It now measures **achieved-vs-requested frame interval** instead, which
+sees load on any thread. Both directions are exercised in
+`tests/test_dashboard_fui.py`, which runs the real `fui.js` under node against a
+synthetic clock, because this is a bug that reading the file cannot find.
+
+**Saturating the board does not make it step down** — and that is the correct
+behaviour, not a failure. Four busy loops on a 4-core board moved the frame
+interval from 100 ms to 102 ms and the tier never changed. The loop re-arms on a
+`setTimeout` at its tier's interval, so under contention it *yields* rather than
+competing for the CPU it was already declining to use. The data clock stayed
+alive throughout, which is the half that matters. Step-down exists for a display
+that is genuinely too expensive for its host, and it was confirmed on the board
+by making frames expensive directly: `MED → LOW → MINIMAL` in 10 s, and back up
+to `LOW` about 60 s after the cost was removed.

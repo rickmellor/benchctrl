@@ -7,10 +7,10 @@ reconnects on its own when the agent restarts.
 Why a thread and not the render loop
 ------------------------------------
 
-Streamlit reruns its script on a timer, so the naive design is "connect, read,
-render, exit". That would open a socket per rerun, and the agent would see a
-connection storm from the one client least entitled to bother it. Instead the
-feed runs once in a background thread and the render loop reads a snapshot.
+A display redraws on a timer, so the naive design is "connect, read, render,
+exit". That would open a socket per frame, and the agent would see a connection
+storm from the one client least entitled to bother it. Instead the feed runs
+once in a background thread and the renderer reads a snapshot.
 
 What makes this safe for the bench
 ----------------------------------

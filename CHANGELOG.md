@@ -9,6 +9,89 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### Read-only bench status display on the board's HDMI panel
+
+The board boots straight into a full-screen status console instead of an
+X login prompt it has no keyboard to answer. It shows what the bench is
+doing — armed instruments, run stage, recent events, staleness — and
+cannot command anything.
+
+Everything about it falls out of one requirement: **it must be impossible
+for the display to block or influence bench operation.** That ruled out
+the obvious designs, and it closed a hazard that was already live.
+
+`Governor.trip()` emitted its `safety_trip` event *before* driving
+instruments safe, and that event walked every session calling
+`sock.sendall()` synchronously, on the deadman thread, with no send
+timeout. One client that stopped reading — a wedged browser, an unplugged
+panel — could stall inside the governor and **delay disarming an armed
+instrument**. The `except Exception` guard did not help: it catches a sink
+that raises, and this is a sink that blocks. An always-on HDMI panel is
+the client most likely to wedge, so building on that fan-out would have
+turned a rare hazard into a routine one. `benchctrl.agent.eventbus` makes
+the fix structural — a producer calls `offer()` and never touches a
+socket — with per-subscriber bounded queues, priority *eviction* rather
+than queue-jumping (so order is never permuted), and drops announced
+in-band as `events_dropped` rather than silently swallowed.
+
+Polling was also out, and for a sharper reason: the agent calls
+`governor.touch()` on **every** inbound frame, so a panel polling once a
+second would pin `seconds_since_contact` near zero and the deadman could
+never fire. The display that exists to report an unsafe state would be
+causing it. So the feed holds an **observer** session, whose traffic does
+not count as operator contact, and `OBSERVER_METHODS` allowlists what it
+may call at all. `run.abort` is deliberately excluded.
+
+Asking for that role is not the same as having it, and only the agent can
+enforce it, so `BenchStatus` now checks the role the agent grants back in
+its `WELCOME`. A missing or false flag latches `NOT OBSERVER` (severity
+`critical`, above `STALE`), marks the view untrustworthy, and says
+`DEADMAN MAY NOT FIRE` in plain words — a downgrade detector against an
+older or regressed agent, where the readings look perfectly current while
+the deadman is held open.
+
+The display never shows a value it does not have. A slot shows a real
+reading or the literal `NO LINK`; the scope says `NO SIGNAL`; stale
+numbers are struck through rather than held on screen; inferred state is
+dashed; an unreachable server drops a curtain over everything. Decorative
+texture is synthetic and unmistakably so, and is kept out of the event
+log, which is bench truth.
+
+`benchctrl.dashboards.fui` renders it from `http.server` plus three static
+files on the system python — no venv, no third-party packages, nothing
+installed on the board's 84%-full root filesystem. The Streamlit panel it
+replaces is removed, along with `install-dashboard.sh`,
+`benchctrl-dashboard` and `board_render_check.py`; Streamlit remains an
+optional dependency for `applications/sensor_profiler`.
+
+Keeping the display cheap turned out to need measurement rather than
+instinct. On the board it cost 138% of a CPU core, and almost all of it
+was one CSS element: a full-viewport `position: fixed` scanline, 48% of a
+core on its own — more than the hologram, traces, glow, grid and polling
+combined. Shrinking it, removing its blur, `will-change` and
+`contain: strict` each changed nothing; only not spanning the viewport
+did. A frame governor backs that up by degrading frame interval, canvas
+resolution and glow under load, and it is measured as achieved-vs-
+requested frame interval because the first version timed the draw calls —
+a number that is structurally always zero, since canvas rasterisation is
+off-thread. It looked correct and did nothing. The governor only ever
+degrades decoration: the data clock is a separate timer, so the frame rate
+may collapse and the data rate may not.
+
+`deploy/install-fui.sh` installs the display; `deploy/install-kiosk.sh`
+makes the board boot into it via lightdm autologin. The kiosk installer
+removes the only local login on a keyboard-less board, so it refuses
+unless ssh is active and the display is already installed, configures
+lightdm through a drop-in so recovery is deleting one file, and has
+`--undo`. See `docs/dashboard.md`.
+
+The e-stop that will share this panel is **not** in this change. The
+button is ordered; the physical path deliberately bypasses the display,
+the network and the event bus, because a hardware interlock has to work
+when everything else is broken. Four design questions are recorded
+unanswered in `docs/dashboard.md`.
+
+
 ### Serial transport selection — kernel driver first
 
 `benchctrl.transports.autoserial` picks how to reach a CH340-based

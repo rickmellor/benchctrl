@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<!--
+  BENCH CONTROL CORE — the board's HDMI console.
+
+  Structure only. What is true comes from /api/view (built by
+  benchctrl.dashboards.fui.view, which is unit-tested); how it looks comes from
+  fui.css; the paint loop is fui.js.
+
+  Every element that shows bench data starts as "NO LINK" in the markup. If the
+  JS never runs, or the fetch never lands, the page shows nothing rather than a
+  reassuring skeleton — the failure mode of a status display has to be "obviously
+  broken", not "plausibly idle".
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BENCH CONTROL CORE</title>
+  <link rel="stylesheet" href="/fui.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div id="title-block">
+        <div id="core-title">BENCH CONTROL CORE</div>
+        <div id="net-status">LINK <span id="net-state" class="bad">NO LINK</span>
+          · AGENT <span id="agent-state" class="bad">NO LINK</span></div>
+      </div>
+      <pre class="datastream" id="ds-left"></pre>
+      <div id="header-spacer"></div>
+      <pre class="datastream" id="ds-right"></pre>
+      <div id="alerts">ALERTS: <span id="alert-count">–</span></div>
+    </header>
+
+    <!-- Left: system telemetry -->
+    <div id="left">
+      <section class="panel">
+        <div class="title"><span>SYSTEM.MGR</span><span class="val" id="sys-verdict">NO LINK</span></div>
+        <div class="body" id="sys-body">
+          <div class="kv"><span class="k">AGENT LINK</span><span class="v bad" id="sys-link">NO LINK</span></div>
+          <div class="kv"><span class="k">VIEW</span><span class="v bad" id="sys-view">UNKNOWN</span></div>
+          <div class="kv"><span class="k">SESSION</span><span class="v" id="sys-session">OBSERVER / RO</span></div>
+          <div class="kv"><span class="k">DROPPED EVT</span><span class="v" id="sys-dropped">–</span></div>
+          <div class="kv"><span class="k">RELINKS</span><span class="v" id="sys-relinks">–</span></div>
+          <div class="kv"><span class="k">PAINT</span><span class="v" id="sys-fps">–</span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="title"><span>STATE.MGR</span><span class="val" id="state-verdict">NO LINK</span></div>
+        <div class="body" id="state-body">
+          <div class="kv"><span class="k">HEADLINE</span><span class="v" id="state-headline">–</span></div>
+          <div class="kv"><span class="k">ARMED</span><span class="v" id="state-armed">–</span></div>
+          <div class="kv"><span class="k">RUNS</span><span class="v" id="state-runs">–</span></div>
+          <div class="kv"><span class="k">STAGE</span><span class="v" id="state-stage">–</span></div>
+        </div>
+      </section>
+
+      <section class="panel" style="flex:1 1 auto;">
+        <div class="title"><span>LOG.MGR</span><span class="val" id="log-verdict">IDLE</span></div>
+        <div class="body" id="log-body">
+          <pre id="log-noise"></pre>
+          <div id="log"><div class="empty">no events</div></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Centre: DUT hologram, flow, instrument detail -->
+    <div id="stage">
+      <div id="headline-wrap">
+        <div id="headline" class="sev-info starting">LINKING</div>
+      </div>
+      <div id="banner" class="hidden"></div>
+
+      <section class="panel" id="dut-panel">
+        <div class="title"><span>DEVICE UNDER TEST · HOLO PROJECTION</span><span class="val" id="dut-verdict">NO LINK</span></div>
+        <!-- The sweep lives inside this panel, not over the viewport. As a
+             full-page fixed layer it cost 48% of a CPU core on the board (see
+             #scan in fui.css); scoped here it composites for nearly nothing and
+             reads as the projector scanning the board. -->
+        <div class="body" id="dut-body"><canvas id="dut"></canvas><div id="scan"></div></div>
+      </section>
+
+      <section class="panel" id="flow-panel">
+        <div class="title"><span>TEST SEQUENCE</span><span class="val" id="flow-verdict">NO SEQUENCE</span></div>
+        <div class="body"><div id="flow"></div></div>
+      </section>
+
+      <div id="detail">
+        <section class="panel">
+          <div class="title"><span>DIGITAL MULTIMETER</span><span class="val" id="dmm-verdict">NO LINK</span></div>
+          <div class="body">
+            <div class="readout no-link" id="dmm-readout">NO LINK</div>
+            <!-- Says why the digits are absent rather than leaving a bare word
+                 that could be mistaken for a measurement mode. -->
+            <div class="readout-note" id="dmm-note">awaiting measurement channel</div>
+            <div class="mode-pills" id="dmm-pills"></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="title"><span>SUPPLY / LOAD</span><span class="val" id="psu-verdict">NO LINK</span></div>
+          <div class="body" id="trace-body"><canvas id="trace" class="trace"></canvas></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Right: instrument rail -->
+    <div id="right"></div>
+
+    <footer><div id="operation">LINKING TO BENCH CONTROL CORE…</div></footer>
+  </div>
+
+  <div id="dead">
+    <div class="big">DISPLAY OFFLINE</div>
+    <div class="sub" id="dead-why">cannot reach the dashboard server — nothing on screen is current</div>
+  </div>
+
+  <script src="/fui.js"></script>
+</body>
+</html>

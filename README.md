@@ -21,7 +21,7 @@ slots in.
 | | |
 |---|---|
 | **Version** | 1.2.0 |
-| **Tests** | 1276 hardware-free + 173 hardware-marked |
+| **Tests** | 1333 hardware-free + 173 hardware-marked |
 | **MCP tools** | 280 |
 | **License** | MIT |
 | **Python** | 3.9 – 3.13 |
@@ -351,6 +351,7 @@ More: [`docs/getting_started.md`](docs/getting_started.md).
 | [`docs/simulation.md`](docs/simulation.md) | Running the stack with no hardware attached |
 | [`docs/remote.md`](docs/remote.md) | Remote mode — instruments on one machine, agent on another |
 | [`docs/runs.md`](docs/runs.md) | Unattended runs: declarative specs, safety envelope, artifacts |
+| [`docs/dashboard.md`](docs/dashboard.md) | Read-only bench status display + the e-stop that will share it |
 | [`docs/output_formats.md`](docs/output_formats.md) | `.opensmu` / Parquet / CSV / JSON / numpy / pandas / matplotlib |
 | [`docs/otii_arc_protocol.md`](docs/otii_arc_protocol.md) | Arc USB wire protocol reference (reverse-engineered) |
 | [`docs/AGENTS.md`](docs/AGENTS.md) | Briefing for AI agents picking up the codebase |
@@ -401,7 +402,7 @@ public method has a test, firmware bugs get documented in
 git clone https://github.com/rickmellor/benchctrl
 cd benchctrl
 pip install -e ".[dev,mcp,bench-visa,science]"
-pytest -m "not hardware"                 # 1276 tests, ~10 min, no device needed
+pytest -m "not hardware"                 # 1333 tests, ~10 min, no device needed
 pytest                                    # full suite (bench on USB)
 ```
 

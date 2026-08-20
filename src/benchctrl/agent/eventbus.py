@@ -85,6 +85,19 @@ DISPLAY_MAX_QUEUE = 32
 #: How long a sender may block in one send before the subscriber is considered
 #: wedged and dropped. Bounds how long a dead peer keeps a thread alive; it is
 #: never on a producer's path, so this is a resource bound, not a safety one.
+#:
+#: NOT YET ENFORCED. It is stored on the subscriber and nothing reads it:
+#: :py:meth:`EventSubscriber._deliver` calls ``self._send(event)`` with no
+#: timeout, ``_send`` is an opaque callable so this module cannot set one, and
+#: ``FrameWriter.send`` sets a socket timeout for reads only. A sender thread can
+#: therefore block forever on a half-open TCP connection — a leaked thread, not a
+#: stalled bench, since producers only ever ``offer()``.
+#:
+#: Recorded rather than deleted because the bound is the right one; wiring it up
+#: means giving the writer a send timeout, which is a change to the shared net
+#: path. Flagged here so nobody reads this constant as a guarantee it is not —
+#: the same trap as the FUI's first frame governor, which measured a number that
+#: was always zero and looked entirely correct while doing nothing.
 DEFAULT_SEND_TIMEOUT_S = 5.0
 
 

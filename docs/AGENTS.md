@@ -104,6 +104,10 @@ benchctrl/
 │   │   ├── calculator.py               life calculator
 │   │   ├── profiler.py                 fresh-profile generator
 │   │   └── emulator.py                 100 Hz emulator loop
+│   ├── dashboards/                     read-only status display
+│   │   ├── feed.py                     observer session + event subscription
+│   │   ├── state.py                    BenchStatus snapshot (no renderer)
+│   │   └── fui/                        server.py, view.py, static/
 │   ├── sim/
 │   │   ├── base.py, loopback.py        SimDevice + pty pair
 │   │   ├── otii_arc.py, qr10x.py       per-instrument simulators
@@ -124,7 +128,7 @@ benchctrl/
 │       ├── blobs.py, recordings.py     chunked transfer
 │       ├── runs/                       spec.py, engine.py, rules.py, store.py
 │       └── llm/                        supervisor.py, tools.py, client.py
-├── tests/                              1276 hw-free + 173 hardware-marked
+├── tests/                              1333 hw-free + 173 hardware-marked
 ├── scenarios/                          harness + saved captures
 ├── applications/sensor_profiler/       DUT power profiling + Streamlit browser
 ├── examples/                           copy-paste-friendly scripts
@@ -267,7 +271,7 @@ Things that look wrong (would surprise a maintainer):
 ### Run the tests
 
 ```bash
-pytest -m "not hardware" -q              # 1276 hardware-free, ~10 min
+pytest -m "not hardware" -q              # 1333 hardware-free, ~10 min
 pytest -m hardware -q                     # 173 hardware-marked
 pytest -q                                  # all (needs the bench on USB)
 ```

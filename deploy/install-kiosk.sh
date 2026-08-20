@@ -4,11 +4,11 @@
 #     sudo ./install-kiosk.sh          # turn it on
 #     sudo ./install-kiosk.sh --undo   # back to the normal xfce greeter
 #
-# Run install-dashboard.sh first, and confirm the panel works, because after
-# this the board has no login prompt. With no keyboard attached, **ssh is the
-# only way back in.** The script refuses to proceed unless it can see that ssh
-# is actually running, since bricking the console on a keyboard-less board is a
-# one-way trip otherwise.
+# Run install-fui.sh first, and confirm the display works over an ssh tunnel,
+# because after this the board has no login prompt. With no keyboard attached,
+# **ssh is the only way back in.** The script refuses to proceed unless it can
+# see that ssh is actually running, since bricking the console on a
+# keyboard-less board is a one-way trip otherwise.
 
 set -eu
 
@@ -41,9 +41,9 @@ if ! systemctl is-active --quiet ssh && ! systemctl is-active --quiet sshd; then
     exit 1
 fi
 
-if [ ! -x /usr/local/bin/benchctrl-dashboard ]; then
-    echo "refusing: /usr/local/bin/benchctrl-dashboard is missing." >&2
-    echo "Run install-dashboard.sh first — otherwise this boots to a black" >&2
+if [ ! -x /usr/local/bin/benchctrl-fui ]; then
+    echo "refusing: /usr/local/bin/benchctrl-fui is missing." >&2
+    echo "Run install-fui.sh first — otherwise this boots to a black" >&2
     echo "screen with no login prompt." >&2
     exit 1
 fi
@@ -90,5 +90,5 @@ RECOVERY (there will be no login prompt on the panel):
   sudo systemctl restart lightdm
 
 Watch it come up:
-  journalctl -t benchctrl-kiosk -t benchctrl-dashboard -f
+  journalctl -t benchctrl-kiosk -t benchctrl-fui -f
 EOF

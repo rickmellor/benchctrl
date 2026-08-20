@@ -1,6 +1,6 @@
 """What the panel knows, folded from an event stream.
 
-Deliberately pure: no sockets, no Streamlit, no clock of its own beyond a
+Deliberately pure: no sockets, no renderer, no clock of its own beyond a
 monotonic ``now`` passed in. Everything the display renders is derived here, so
 the interesting behaviour — what happens on a gap, on a disconnect, on an event
 arriving out of nowhere — is unit-testable without a bench.
@@ -121,6 +121,9 @@ class BenchStatus:
     #: agent could not prove an output went off, and only a human can decide
     #: that is resolved.
     unsafe_latch: Optional[dict] = None
+    #: Set when the agent's WELCOME did not confirm the observer role we asked
+    #: for, and never cleared automatically — see :py:meth:`apply_connected`.
+    observer_denied: Optional[dict] = None
     agent_name: str = ""
     #: Monotonically increasing ``seq`` last seen. The event bus guarantees
     #: order is never permuted, so a decrease means a reconnect, not a bug.
@@ -145,7 +148,14 @@ class BenchStatus:
 
     @property
     def trustworthy(self) -> bool:
-        return self.connected and self.stale_reason is None
+        # observer_denied counts: the readings may be perfectly current, but a
+        # session that could be holding the deadman open is not a session this
+        # panel should be drawing in confident bright cyan.
+        return (
+            self.connected
+            and self.stale_reason is None
+            and self.observer_denied is None
+        )
 
     @property
     def starting(self) -> bool:
@@ -179,6 +189,11 @@ class BenchStatus:
             return "STARTING"
         if not self.connected:
             return "NO AGENT"
+        # Above STALE: a stale view is a display problem, but an unconfirmed
+        # observer role means this display may be holding the bench's deadman
+        # open. That is a hazard to the bench itself, and it outranks.
+        if self.observer_denied is not None:
+            return "NOT OBSERVER"
         if self.stale_reason is not None:
             return "STALE"
         if self.any_armed:
@@ -195,6 +210,9 @@ class BenchStatus:
             # Starting up is not a warning: nothing is known to be wrong yet.
             "STARTING": "info",
             "NO AGENT": "warn",
+            # critical, not warn: this one is about the bench being at risk
+            # rather than about the display being behind.
+            "NOT OBSERVER": "critical",
             "STALE": "warn",
             "ARMED": "alarm",
             "RECORDING": "info",
@@ -204,9 +222,31 @@ class BenchStatus:
     # --- transitions ----------------------------------------------------
 
     def apply_connected(self, welcome: dict, *, now: Optional[float] = None) -> None:
-        """A session came up. Clears staleness that a reconnect actually fixes."""
+        """A session came up. Clears staleness that a reconnect actually fixes.
+
+        Asking for the observer role is not the same as having it. The feed
+        connects with ``observer=True``, but only the *agent* can enforce what
+        that means, and this display cannot function safely without it: an
+        observer's frames do not call ``Governor.touch()``, and a session whose
+        frames DO would pin ``seconds_since_contact`` near zero and stop the
+        deadman from ever tripping. An always-on panel would then be the thing
+        keeping an armed output alive after the operator's real client died.
+
+        The agent echoes the role back specifically so a client can check
+        (``agent/server.py``: *"Echoed so a client can assert it got the role it
+        asked for"*), so check it. This is a downgrade detector, not a guarantee
+        — against an older agent, or one whose observer branch regressed, it is
+        the only warning available. It latches for the same reason
+        :py:attr:`unsafe_latch` does: a later reconnect that happens to succeed
+        says nothing about how long the deadman was held open.
+        """
         self.connected = True
         self.attempted = True
+        if welcome.get("observer") is not True:
+            self.observer_denied = {
+                "agent": str(welcome.get("agent", "")),
+                "got": welcome.get("observer"),
+            }
         self.agent_name = str(welcome.get("agent", ""))
         self.deadman_s = _as_float(welcome.get("deadman_s"))
         self.heartbeat_s = _as_float(welcome.get("heartbeat_s"))
@@ -401,6 +441,7 @@ class BenchStatus:
             "armed": self.armed_devices,
             "dropped_events": self.dropped_events,
             "unsafe": self.unsafe_latch is not None,
+            "observer_denied": self.observer_denied is not None,
             "devices": {
                 k: {"armed": d.armed, "label": d.label, "inferred": d.inferred}
                 for k, d in self.devices.items()

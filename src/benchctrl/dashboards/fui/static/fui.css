@@ -1,0 +1,534 @@
+/* BENCH CONTROL CORE — the look.
+ *
+ * Everything visual lives here so the JS stays about data. Theme is driven by
+ * CSS custom properties: one place to retune the glow for a different panel or
+ * a brighter room.
+ *
+ * Two rules that are not decoration:
+ *   - .no-link and .stale are visually *degraded*, never merely different. A
+ *     dead readout must look dead from across the bench, not just have a
+ *     slightly different hue than a live one.
+ *   - Alert colours are reserved. Cyan is "normal", amber/red mean act. Using
+ *     red for chrome would spend the one signal that has to stay expensive.
+ */
+
+:root {
+  --bg: #05080a;
+  --bg-panel: #080d10;
+  --grid: rgba(0, 229, 255, 0.045);
+
+  --cyan: #00e5ff;
+  --cyan-dim: #0a7f8c;
+  --cyan-faint: rgba(0, 229, 255, 0.28);
+  --teal: #2affc3;
+
+  --amber: #ffb300;
+  --red: #ff2b3d;
+
+  --ink: #7fe9f5;
+  --ink-dim: #3d7c85;
+  --chrome: #14343d;
+  --chrome-lit: #1d5563;
+
+  --glow: 0 0 6px var(--cyan), 0 0 18px rgba(0, 229, 255, 0.35);
+  --glow-soft: 0 0 4px rgba(0, 229, 255, 0.5);
+  --glow-red: 0 0 8px var(--red), 0 0 26px rgba(255, 43, 61, 0.45);
+  --glow-amber: 0 0 8px var(--amber), 0 0 24px rgba(255, 179, 0, 0.4);
+
+  --font: "Roboto Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;              /* kiosk: no scrollbars, ever */
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  /* No text selection or long-press menus: this is a panel, and one day a
+     touchscreen. A stray highlight on a kiosk never gets cleared. */
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: none;
+}
+
+/* The fine engineering grid, plus a vignette so the corners fall away.
+ *
+ * Both are full-viewport, never change, and the vignette sits ABOVE the
+ * canvases. `transform: translateZ(0)` gets each its own compositor layer so
+ * they are rasterised once and reused, instead of being re-blended over the
+ * whole panel on every canvas frame. On the board that difference is measured in
+ * whole percent of a CPU core, spent on a gradient that never moves. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 40px 40px, 40px 40px;
+  z-index: 0;
+  transform: translateZ(0);
+}
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.75) 100%);
+  z-index: 60;
+  transform: translateZ(0);
+}
+
+/* --- layout ------------------------------------------------------------- */
+
+#app {
+  position: relative;
+  z-index: 1;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  grid-template-columns: minmax(240px, 20vw) 1fr minmax(150px, 12vw);
+  grid-template-areas:
+    "head head head"
+    "left stage right"
+    "foot foot foot";
+  gap: 8px;
+  padding: 8px;
+}
+
+header { grid-area: head; }
+#left  { grid-area: left; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+#stage { grid-area: stage; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+#right { grid-area: right; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+footer { grid-area: foot; }
+
+/* --- panel chrome (the greebles) ---------------------------------------- */
+
+.panel {
+  position: relative;
+  background: linear-gradient(180deg, var(--bg-panel), #04070a);
+  border: 1px solid var(--chrome);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Corner notches: four small brackets, drawn with gradients rather than four
+   extra elements per panel — cheaper on a board GPU than 4x the DOM. */
+.panel::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--cyan-dim), var(--cyan-dim)) left  top    / 14px 1px no-repeat,
+    linear-gradient(var(--cyan-dim), var(--cyan-dim)) left  top    / 1px 14px no-repeat,
+    linear-gradient(var(--cyan-dim), var(--cyan-dim)) right top    / 14px 1px no-repeat,
+    linear-gradient(var(--cyan-dim), var(--cyan-dim)) right top    / 1px 14px no-repeat,
+    linear-gradient(var(--cyan-dim), var(--cyan-dim)) left  bottom / 14px 1px no-repeat,
+    linear-gradient(var(--cyan-dim), var(--cyan-dim)) left  bottom / 1px 14px no-repeat,
+    linear-gradient(var(--cyan-dim), var(--cyan-dim)) right bottom / 14px 1px no-repeat,
+    linear-gradient(var(--cyan-dim), var(--cyan-dim)) right bottom / 1px 14px no-repeat;
+}
+
+.panel > .title {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--cyan);
+  text-shadow: var(--glow-soft);
+  border-bottom: 1px solid var(--chrome);
+  background: rgba(0, 229, 255, 0.04);
+}
+.panel > .title .val { color: var(--teal); }
+.panel > .body { flex: 1 1 auto; min-height: 0; padding: 6px 8px; overflow: hidden; }
+
+/* --- header ------------------------------------------------------------- */
+
+header {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  border: 1px solid var(--chrome);
+  background: linear-gradient(180deg, rgba(0,229,255,0.06), transparent);
+  padding: 5px 10px;
+}
+#title-block { display: flex; flex-direction: column; justify-content: center; }
+#core-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--cyan);
+  text-shadow: var(--glow);
+  white-space: nowrap;
+}
+#net-status { font-size: 10px; color: var(--ink-dim); text-transform: uppercase; }
+#net-status .ok { color: var(--teal); }
+#net-status .bad { color: var(--red); text-shadow: var(--glow-red); }
+
+#header-spacer { flex: 1 1 auto; }
+
+#alerts {
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border: 1px solid var(--chrome-lit);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+/* Flashing is reserved for a nonzero count. A permanently blinking element is
+   just chrome; an operator stops seeing it. */
+#alerts.live {
+  color: var(--red);
+  border-color: var(--red);
+  text-shadow: var(--glow-red);
+  animation: alert-flash 1s steps(2, end) infinite;
+}
+@keyframes alert-flash { 50% { opacity: 0.25; } }
+
+/* The tiny data-stream texture either side of the title. Pure decoration —
+   6px type, non-numeric, and nobody can read it as a measurement. */
+.datastream {
+  width: 130px;
+  overflow: hidden;
+  font-size: 6px;
+  line-height: 1.5;
+  color: var(--cyan);
+  opacity: 0.35;
+  white-space: pre;
+  mask-image: linear-gradient(90deg, transparent, #000 30%, #000 70%, transparent);
+}
+
+/* --- headline ----------------------------------------------------------- */
+
+#headline-wrap {
+  flex: none;
+  border: 1px solid var(--chrome-lit);
+  text-align: center;
+  padding: 2px;
+  background: rgba(0, 229, 255, 0.03);
+}
+#headline {
+  font-size: clamp(2.5rem, 6.5vw, 6rem);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--cyan);
+  text-shadow: var(--glow);
+  /* Colour snaps hard on a state change rather than easing: a slow fade from
+     IDLE to ARMED means there is a moment where the screen is neither. */
+  transition: none;
+}
+#headline.sev-critical { color: var(--red);   text-shadow: var(--glow-red); }
+#headline.sev-alarm    { color: var(--amber); text-shadow: var(--glow-amber); }
+#headline.sev-warn     { color: var(--amber); text-shadow: var(--glow-amber); opacity: 0.92; }
+/* "Starting" pulses gently — the one state where the display is admitting it
+   does not know yet, and the only place a soft animation is honest. */
+#headline.sev-info.starting { animation: standby-pulse 1.6s ease-in-out infinite; }
+@keyframes standby-pulse { 50% { opacity: 0.45; } }
+
+#banner {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 13px;
+  text-transform: uppercase;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  text-shadow: var(--glow-amber);
+  background: rgba(255, 179, 0, 0.07);
+}
+#banner.critical {
+  border-color: var(--red);
+  color: var(--red);
+  text-shadow: var(--glow-red);
+  background: rgba(255, 43, 61, 0.1);
+}
+#banner.hidden { display: none; }
+
+/* --- left column -------------------------------------------------------- */
+
+.kv { display: flex; justify-content: space-between; font-size: 11px; padding: 1px 0; }
+.kv .k { color: var(--ink-dim); }
+.kv .v { color: var(--teal); }
+.kv .v.bad { color: var(--red); text-shadow: var(--glow-red); }
+.kv .v.warn { color: var(--amber); }
+
+/* Newest event at the top: on a wall panel nobody scrolls, so the most recent
+   thing has to be where the eye lands, not at the bottom of a tall pane. */
+#log { font-size: 10px; line-height: 1.45; position: relative; z-index: 1; }
+#log .row { display: flex; gap: 6px; white-space: nowrap; }
+#log .seq { color: var(--ink-dim); }
+#log .kind { color: var(--cyan); }
+#log .dev { color: var(--ink-dim); }
+#log .row.alarm .kind, #log .row.critical .kind { color: var(--red); text-shadow: var(--glow-red); }
+#log .empty { color: var(--ink-dim); font-size: 10px; }
+
+/* The synthetic background chatter behind the real log: deliberately behind,
+   dimmer, and non-numeric, so it reads as machine noise and not as bench data. */
+#log-noise {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-size: 6px;
+  line-height: 1.4;
+  color: var(--cyan);
+  opacity: 0.13;
+  overflow: hidden;
+  white-space: pre;
+  padding: 4px 6px;
+}
+
+/* --- centre stage ------------------------------------------------------- */
+
+#dut-panel { flex: 1 1 auto; }
+#dut-body { position: relative; padding: 0; }
+/* Own compositor layer: the repaint stays inside the canvas instead of
+   dirtying the panel chrome and the overlays above it every frame.
+   position/z-index so the sweep above it is not painted behind it. */
+#dut {
+  width: 100%; height: 100%; display: block;
+  position: relative; z-index: 1;
+  will-change: transform;
+}
+
+#flow-panel { flex: none; }
+#flow { display: flex; align-items: center; gap: 0; padding: 2px 0; }
+.stage-node {
+  flex: 1 1 0;
+  text-align: center;
+  padding: 5px 2px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid var(--chrome-lit);
+  color: var(--ink-dim);
+  background: rgba(0, 229, 255, 0.02);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stage-node.active {
+  color: var(--cyan);
+  border-color: var(--cyan);
+  text-shadow: var(--glow);
+  box-shadow: inset 0 0 12px rgba(0, 229, 255, 0.25), 0 0 10px rgba(0, 229, 255, 0.3);
+  animation: node-pulse 1.1s ease-in-out infinite;
+}
+@keyframes node-pulse {
+  50% { box-shadow: inset 0 0 20px rgba(0,229,255,0.45), 0 0 20px rgba(0,229,255,0.55); }
+}
+/* The connector between nodes: an arrow, so the sequence reads as a direction
+   and not as five unrelated boxes. */
+.stage-link {
+  flex: 0 0 22px;
+  height: 1px;
+  position: relative;
+  background: var(--chrome-lit);
+}
+.stage-link::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: -3px;
+  border-left: 5px solid var(--chrome-lit);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+}
+.stage-link.lit {
+  background: var(--cyan);
+  box-shadow: var(--glow-soft);
+}
+.stage-link.lit::after { border-left-color: var(--cyan); }
+
+/* --- instrument detail readouts ----------------------------------------- */
+
+#detail { flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+.readout {
+  font-size: clamp(1.4rem, 3.2vw, 2.8rem);
+  font-weight: 700;
+  line-height: 1.05;
+  color: var(--cyan);
+  text-shadow: var(--glow);
+  text-align: right;
+  white-space: nowrap;
+}
+.readout .unit { font-size: 0.42em; color: var(--ink-dim); margin-left: 0.35em; }
+
+/* Why there are no digits. Small, dim, and always present when the readout is
+   showing a state word rather than a measurement — so a big "IDLE" cannot be
+   read as a range or a mode. */
+.readout-note {
+  font-size: 8px;
+  text-align: right;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  opacity: 0.75;
+}
+.readout-note.hidden { visibility: hidden; }
+
+/* No data: dim, dashed, unmistakably not a number. The whole point — a
+   believable value beside an unplugged instrument is the hazard. */
+.readout.no-link {
+  color: var(--ink-dim);
+  text-shadow: none;
+  font-size: clamp(0.9rem, 1.6vw, 1.4rem);
+  opacity: 0.65;
+  letter-spacing: 0.2em;
+}
+/* Stale: struck through. A number the operator can still read but can see is
+   not current, rather than one silently held on screen. */
+.readout.stale {
+  color: var(--amber);
+  text-shadow: none;
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 179, 0, 0.7);
+  opacity: 0.8;
+}
+
+.trace { width: 100%; height: 100%; display: block; will-change: transform; }
+#trace-body, #scope-body { padding: 0; position: relative; }
+
+.mode-pills { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 4px; }
+.pill {
+  font-size: 9px;
+  padding: 1px 5px;
+  border: 1px solid var(--chrome-lit);
+  color: var(--ink-dim);
+  text-transform: uppercase;
+}
+.pill.on { color: var(--cyan); border-color: var(--cyan); text-shadow: var(--glow-soft); }
+
+/* --- right rail: instruments -------------------------------------------- */
+
+.slot {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 1px;
+  padding: 4px;
+  border: 1px solid var(--chrome);
+  background: rgba(0, 229, 255, 0.02);
+  text-align: center;
+}
+.slot .name { font-size: 12px; font-weight: 700; color: var(--ink-dim); }
+.slot .role { font-size: 7px; color: var(--ink-dim); opacity: 0.7; text-transform: uppercase; }
+.slot .state { font-size: 9px; letter-spacing: 0.1em; color: var(--ink-dim); }
+
+.slot.linked { border-color: var(--cyan-dim); background: rgba(0, 229, 255, 0.05); }
+.slot.linked .name { color: var(--cyan); text-shadow: var(--glow-soft); }
+.slot.linked .state { color: var(--teal); }
+
+/* Armed is the loudest thing a slot can be. Red, glowing, pulsing. */
+.slot.armed {
+  border-color: var(--red);
+  background: rgba(255, 43, 61, 0.12);
+  animation: node-pulse 1s ease-in-out infinite;
+}
+.slot.armed .name, .slot.armed .state { color: var(--red); text-shadow: var(--glow-red); }
+
+/* Unconfirmed: dashed border. We inferred this from an event and were never
+   told; it must not look like a confirmed reading. */
+.slot.inferred { border-style: dashed; }
+.slot.stale .state { color: var(--amber); text-decoration: line-through; }
+
+/* --- footer ------------------------------------------------------------- */
+
+footer {
+  border: 1px solid var(--chrome-lit);
+  background: linear-gradient(180deg, rgba(0,229,255,0.07), rgba(0,0,0,0.4));
+  overflow: hidden;
+  white-space: nowrap;
+  padding: 6px 0;
+}
+#operation {
+  font-size: clamp(0.9rem, 1.9vw, 1.6rem);
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--cyan);
+  text-shadow: var(--glow);
+  text-align: center;
+}
+#operation.critical { color: var(--red);   text-shadow: var(--glow-red); }
+#operation.alarm    { color: var(--amber); text-shadow: var(--glow-amber); }
+#operation.warn     { color: var(--amber); text-shadow: var(--glow-amber); }
+
+/* The connection-lost curtain. Not a subtle hint: if the page cannot reach its
+   own server, everything on screen is of unknown age and it says so over the
+   top of all of it. */
+#dead {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  background: rgba(5, 8, 10, 0.9);
+  color: var(--red);
+  text-shadow: var(--glow-red);
+}
+#dead.show { display: flex; }
+#dead .big { font-size: clamp(2rem, 5vw, 4rem); font-weight: 700; }
+#dead .sub { font-size: 13px; color: var(--amber); text-shadow: none; }
+
+/* Scanline sweep: slow, subtle, and purely atmospheric — and the single most
+ * expensive thing this page ever did.
+ *
+ * Measured on the board at 1440x900, with GPU rasterisation on. A full-width
+ * fixed element sweeping the viewport cost 48% of a CPU core: more than the
+ * hologram, the traces, the grid, the poll and every other animation combined.
+ * The interesting part is what did NOT fix it — each measured, not assumed:
+ *
+ *   140px band -> 2px line   no change   (it is not the area)
+ *   box-shadow glow removed  no change   (it is not the blur)
+ *   will-change / contain    no change   (it is not layer promotion)
+ *   removed entirely         -48% core   (it is the moving full-page layer)
+ *
+ * A viewport-spanning fixed layer travelling over live content is something this
+ * GPU will not composite cheaply, so it repaints a strip of the panel forever.
+ * The cure is to stop spanning the viewport: scoped inside the hologram panel,
+ * the sweep overlays static chrome in a small box, which composites for
+ * approximately nothing — and it reads better anyway, because it now looks like
+ * the projector scanning the board rather than a film artefact over the UI.
+ *
+ * The rule this encodes: on a bench controller the atmosphere does not get to
+ * outrank the instrument. When a decorative effect and the bench compete for the
+ * CPU, the effect gets redrawn. */
+#scan {
+  position: absolute;
+  left: 0; right: 0;
+  top: 0;
+  height: 3px;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(90deg,
+    transparent, rgba(42, 255, 195, 0.55) 15%, rgba(42, 255, 195, 0.55) 85%, transparent);
+  animation: scan-sweep 6s linear infinite;
+  will-change: transform;
+}
+@keyframes scan-sweep {
+  from { transform: translateY(0); }
+  to   { transform: translateY(calc(100% - 3px)); }
+}
+
+/* Respect the platform switch for reduced motion. On a wall panel this is
+   unlikely to be set, but a kiosk is not a reason to ignore it. */
+@media (prefers-reduced-motion: reduce) {
+  #scan, #alerts.live, .stage-node.active, .slot.armed, #headline.sev-info.starting {
+    animation: none;
+  }
+}

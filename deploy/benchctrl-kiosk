@@ -18,8 +18,14 @@ set -u
 
 log() { logger -t benchctrl-kiosk "$@"; }
 
-DASHBOARD=${BENCHCTRL_DASHBOARD_CMD:-/usr/local/bin/benchctrl-dashboard}
-PORT=${BENCHCTRL_DASHBOARD_HTTP_PORT:-8501}
+# The FUI is the display. There is no longer a choice of two: the Streamlit panel
+# this replaced has been removed from the tree. Running both meant a second
+# process holding a second port and ~130 MB of RSS behind a panel nobody was
+# looking at, and a switch between them was a way to be confused about which one
+# you were reading. The stale-reclamation loop below still knows the old process
+# names, because a board that has not been reimaged may still have one running.
+DASHBOARD=${BENCHCTRL_DASHBOARD_CMD:-/usr/local/bin/benchctrl-fui}
+PORT=${BENCHCTRL_FUI_PORT:-8600}
 URL="http://127.0.0.1:$PORT"
 
 log "starting kiosk session on ${DISPLAY:-<no DISPLAY>}"
@@ -39,17 +45,51 @@ command -v unclutter >/dev/null 2>&1 && unclutter -idle 1 &
 # wallpaper at the operator.
 command -v xsetroot >/dev/null 2>&1 && xsetroot -solid '#11151a'
 
+# Ask X for the panel's real geometry rather than hardcoding it, so a different
+# monitor does not letterbox the display. Falls back to the board's own panel
+# size if xrandr is absent or says something unparseable.
+GEOM=""
+if command -v xrandr >/dev/null 2>&1; then
+    GEOM=$(xrandr 2>/dev/null | sed -n 's/^ *\([0-9]\{3,\}\)x\([0-9]\{3,\}\) .*\*.*/\1,\2/p' | head -1)
+fi
+[ -n "$GEOM" ] || GEOM=1440,900
+log "panel geometry: $GEOM"
+
+# --- clear out any previous display ---------------------------------------
+# A dashboard left over from an earlier session — a Streamlit from before this
+# board ran the FUI, or an FUI whose session died without its trap firing — keeps
+# its port and its memory. On a 4-core board with ~2 GB of root filesystem that
+# is not a harmless leak: Streamlit alone is ~130 MB of RSS and a live HTTP
+# server, behind a panel nobody is reading.
+#
+# Matched via the bracket trick so the pattern cannot match this script's own
+# invocation, and via pkill -f because these are `python3 -m ...` command lines
+# with no distinguishing process name.
+#
+# Deliberately NOT a bare `streamlit run`: that would also kill
+# applications/sensor_profiler, which is a legitimate unrelated Streamlit app.
+# Reclaiming our own leftovers must not shoot a bystander.
+for stale in 'benchctrl.dashboards.fu[i].server' 'benchctrl.dashboards.pane[l]'; do
+    if pkill -f "$stale" 2>/dev/null; then
+        log "stopped a leftover dashboard matching $stale"
+    fi
+done
+# Give the port a moment to be released before binding it again, or the new
+# server exits with EADDRINUSE and the panel shows a browser error instead.
+sleep 1
+
 # --- the dashboard --------------------------------------------------------
 "$DASHBOARD" &
 dashboard_pid=$!
 
-# Kill the server when the session ends, or a logout leaves a stray Streamlit
+# Kill the server when the session ends, or a logout leaves a stray process
 # holding the port and the next login fails for a confusing reason.
 trap 'kill "$dashboard_pid" 2>/dev/null || true' EXIT HUP INT TERM
 
-# Wait for the port rather than sleeping a guessed number of seconds. Streamlit
-# on this board takes appreciably longer to import than on a laptop, and a
-# browser that opens too early shows its own error page and stays there.
+# Wait for the port rather than sleeping a guessed number of seconds. The FUI is
+# up almost immediately — it imports no third-party packages — but a browser that
+# opens even slightly too early shows its own error page and stays there, and on
+# a keyboard-less panel nobody can press reload.
 #
 # Pick a probe. /dev/tcp is deliberately not used: this is /bin/sh, where it is
 # a bash-ism that would silently never match and turn the wait into a 90 s
@@ -72,7 +112,7 @@ waited=0
 while [ "$waited" -lt 90 ]; do
     probe && break
     if ! kill -0 "$dashboard_pid" 2>/dev/null; then
-        log "dashboard exited before serving; see: journalctl -t benchctrl-dashboard"
+        log "dashboard exited before serving; see: journalctl -t benchctrl-fui"
         break
     fi
     sleep 1
@@ -100,8 +140,16 @@ firefox)
     # --incognito so a crashed session does not come back with a "restore
     # pages?" bubble covering the readout, which is exactly the kind of thing
     # nobody can dismiss without a mouse.
+    # --kiosk alone is not reliably fullscreen: it asks the window manager for
+    # it, and if xfwm is already managing a window (a leftover display, a second
+    # launch) the request can be ignored and the panel gets a ~1050x880 window
+    # with the layout squeezed into 73% of the screen. Observed on this board.
+    # --start-fullscreen and an explicit geometry make it not a request.
     exec "$BROWSER" \
         --kiosk \
+        --start-fullscreen \
+        --window-position=0,0 \
+        --window-size="$GEOM" \
         --incognito \
         --noerrdialogs \
         --disable-infobars \

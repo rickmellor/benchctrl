@@ -1,0 +1,71 @@
+#!/bin/sh
+# Serve the benchctrl FUI status display on localhost.
+#
+# The cinematic console (benchctrl.dashboards.fui). Needs no third-party
+# packages at all — stdlib http.server — so it runs straight from the system
+# python: no venv, no pip, and nothing installed on the board's tight root
+# filesystem.
+#
+# Runs as the desktop user from the kiosk session (see benchctrl-kiosk), or by
+# hand for debugging:
+#
+#     BENCHCTRL_TOKEN=... /usr/local/bin/benchctrl-fui
+#
+# Reads its agent token from /etc/benchctrl/agent.json — the same file the agent
+# uses — so there is one token on the board rather than a second copy to drift.
+
+set -eu
+
+PYTHON=${BENCHCTRL_FUI_PYTHON:-/usr/bin/python3}
+SRC_DIR=${BENCHCTRL_SRC_DIR:-/home/arduino/benchctrl-1.2.0/src}
+AGENT_CONF=${BENCHCTRL_AGENT_CONF:-/etc/benchctrl/agent.json}
+PORT=${BENCHCTRL_FUI_PORT:-8600}
+AGENT_PORT=${BENCHCTRL_DASHBOARD_PORT:-9737}
+
+log() { logger -t benchctrl-fui "$*"; echo "benchctrl-fui: $*" >&2; }
+
+if [ ! -x "$PYTHON" ]; then
+    log "no python at $PYTHON"
+    exit 1
+fi
+
+if [ ! -d "$SRC_DIR/benchctrl/dashboards/fui" ]; then
+    log "no fui package under $SRC_DIR — is the deployed tree up to date?"
+    exit 1
+fi
+
+# The token. Extracted with python rather than grep/sed because it is URL-safe
+# base64 and can contain characters that make naive parsing wrong.
+if [ -z "${BENCHCTRL_TOKEN:-}" ]; then
+    if [ -r "$AGENT_CONF" ]; then
+        BENCHCTRL_TOKEN=$("$PYTHON" - "$AGENT_CONF" <<'EOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        print(json.load(fh).get("token", ""))
+except Exception:
+    print("")
+EOF
+)
+    fi
+fi
+
+if [ -z "${BENCHCTRL_TOKEN:-}" ]; then
+    # Do not start a display that will only ever show an auth error. Failing
+    # loudly here puts one clear line in the journal instead of a screen that
+    # looks broken for an unexplained reason.
+    log "no token: set BENCHCTRL_TOKEN or make $AGENT_CONF readable by $(id -un)"
+    exit 1
+fi
+
+export BENCHCTRL_TOKEN
+export PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
+# --host 127.0.0.1 is a real constraint, not a default: this display is for the
+# attached panel. Binding it to 0.0.0.0 would publish a view of the bench — arm
+# state, instrument names — to anything on the network.
+exec "$PYTHON" -m benchctrl.dashboards.fui.server \
+    --host 127.0.0.1 \
+    --port "$PORT" \
+    --agent-host 127.0.0.1 \
+    --agent-port "$AGENT_PORT"

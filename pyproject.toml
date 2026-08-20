@@ -87,6 +87,14 @@ Repository = "https://github.com/rickmellor/benchctrl"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The FUI's page is three non-Python files, and setuptools ships only modules
+# unless told otherwise. Without this they are absent from a wheel and
+# FuiServer's STATIC_DIR (resolved from __file__) 404s the page it exists to
+# serve. An editable install and a git checkout both hide this completely, which
+# is exactly how it would reach a board.
+[tool.setuptools.package-data]
+"benchctrl.dashboards.fui" = ["static/*.html", "static/*.css", "static/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

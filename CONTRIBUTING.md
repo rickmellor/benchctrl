@@ -43,7 +43,7 @@ via Zadig).
 The test suite is split by hardware requirement using pytest markers.
 
 ```bash
-pytest -m "not hardware" -q       # ~10 minutes, no device needed (1276 tests)
+pytest -m "not hardware" -q       # ~10 minutes, no device needed (1333 tests)
 pytest -m hardware -q              # requires Arc Pro + companion instruments (173)
 pytest -q                          # both
 ```
@@ -267,7 +267,13 @@ benchctrl/
 │   │   ├── profiler.py                  generate fresh profile (any SMU)
 │   │   └── emulator.py                  act as a battery (any SMU)
 │   ├── analysis/                        v1.x placeholder
-│   ├── dashboards/                      v1.x placeholder
+│   ├── dashboards/                      read-only bench status display
+│   │   ├── feed.py                      AgentFeed — observer session + events
+│   │   ├── state.py                     BenchStatus — snapshot, no renderer
+│   │   └── fui/                         the cinematic console
+│   │       ├── server.py                stdlib http.server, /api/view
+│   │       ├── view.py                  snapshot -> view model (pure)
+│   │       └── static/                  index.html, fui.css, fui.js
 │   ├── drivers/
 │   │   ├── otii_arc/                    Qoitech Otii Arc / Arc Pro SMU
 │   │   │   ├── device.py                OtiiArc class

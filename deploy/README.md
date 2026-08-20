@@ -9,9 +9,16 @@ none of it; see [`docs/remote.md`](../docs/remote.md) for the client config.
 | [`install-agent.sh`](install-agent.sh) | the agent as a systemd service, disarming the bench on stop |
 | [`install-display-hotplug.sh`](install-display-hotplug.sh) | optional: makes HDMI-through-a-USB-C-hub work on an Uno Q |
 | [`verify-ch341-qr10x.sh`](verify-ch341-qr10x.sh) | required for a QR10x on a kernel without `ch341`: installs the udev rule, then proves the instrument end to end |
+| [`install-fui.sh`](install-fui.sh) | optional: the read-only HDMI status display (`benchctrl-fui`) |
+| [`install-kiosk.sh`](install-kiosk.sh) | optional: boots the board straight into that display, **no login prompt** — run `install-fui.sh` first |
 | [`udev/61-benchctrl-usbtmc.rules`](udev/61-benchctrl-usbtmc.rules) | required for USB-TMC instruments (SDM4065A, both Rigols) on a kernel without `usbtmc` |
 
-The three scripts are POSIX `sh`, root-only, and idempotent.
+The scripts are POSIX `sh`, root-only, and idempotent.
+
+`install-kiosk.sh` is the one with a way to hurt you: it removes the board's only
+local login. It refuses to run unless ssh is active and the display is already
+installed, and `--undo` (or deleting one lightdm drop-in) reverses it. See
+`docs/dashboard.md`.
 
 ## The agent service
 

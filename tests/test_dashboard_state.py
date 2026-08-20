@@ -667,3 +667,79 @@ def test_the_feed_requests_an_observer_session():
         "the dashboard opened a NORMAL session — its polling will now feed the "
         "deadman and an armed bench will never auto-disarm"
     )
+
+
+# --------------------------------------------------------------------------
+# Asking for the observer role is not the same as having it
+# --------------------------------------------------------------------------
+#
+# The test above proves we ASK. Only the agent can enforce what the role means,
+# and the agent echoes it back in WELCOME specifically so a client can check the
+# answer. These tests are about checking the answer, because the failure is
+# silent and its consequence is the hazard the whole display was designed
+# around: a session whose frames call Governor.touch() pins
+# seconds_since_contact near zero, and an armed output never auto-disarms.
+
+
+def test_an_agent_that_denies_the_observer_role_is_not_trusted():
+    """The panel is wrong about the bench in the most dangerous direction here:
+    its readings may be perfectly current while it silently holds the deadman
+    open. Current-looking data is exactly why this cannot be quiet."""
+    s = BenchStatus()
+    s.apply_connected({**WELCOME, "observer": False}, now=100.0)
+    s.apply_status(status_payload({"otii_arc": idle()}), now=100.0)
+
+    assert s.observer_denied is not None
+    assert s.headline == "NOT OBSERVER"
+    assert s.severity == "critical"
+    assert not s.trustworthy, "fresh data does not make a deadman-holding session safe"
+
+
+def test_an_agent_too_old_to_echo_the_role_is_also_not_trusted():
+    """A missing key is the realistic case, not an explicit False: an older agent
+    predating the observer role would simply not mention it. Defaulting a missing
+    safety flag to "fine" is how this check would come to pass while meaning
+    nothing."""
+    welcome = {k: v for k, v in WELCOME.items() if k != "observer"}
+    s = BenchStatus()
+    s.apply_connected(welcome, now=100.0)
+
+    assert s.observer_denied is not None
+    assert s.headline == "NOT OBSERVER"
+
+
+def test_a_confirmed_observer_role_says_nothing():
+    """The happy path must stay quiet, or the warning is noise on every boot."""
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    s.apply_status(status_payload({"otii_arc": idle()}), now=100.0)
+
+    assert s.observer_denied is None
+    assert s.headline == "IDLE"
+    assert s.trustworthy
+
+
+def test_a_denied_observer_role_outranks_staleness_but_not_unsafe():
+    """Ordering, worst-case first. A stale view is a display problem; a held-open
+    deadman is a bench problem and outranks it. An unconfirmed output still beats
+    both, because that one is already-happened rather than might-happen."""
+    s = BenchStatus()
+    s.apply_connected({**WELCOME, "observer": False}, now=100.0)
+    s.stale_reason = "no snapshot in a while"
+    assert s.headline == "NOT OBSERVER"
+
+    s.unsafe_latch = {"device": "otii_arc"}
+    assert s.headline == "UNSAFE"
+
+
+def test_the_denial_latches_across_a_reconnect():
+    """A reconnect that happens to land on a good agent says nothing about how
+    long the deadman was held open on the previous session. Same reasoning as
+    unsafe_latch: only a human can decide that is resolved."""
+    s = BenchStatus()
+    s.apply_connected({**WELCOME, "observer": False}, now=100.0)
+    s.apply_disconnected("link dropped")
+    s.apply_connected(WELCOME, now=200.0)
+
+    assert s.observer_denied is not None, "a good reconnect must not erase it"
+    assert s.headline == "NOT OBSERVER"

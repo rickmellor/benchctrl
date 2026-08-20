@@ -66,6 +66,15 @@ but nothing in software can guarantee an output goes off through a
 wedged driver. For genuinely unattended overnight runs that is not
 good enough.
 
+The software half has landed: `benchctrl.agent.eventbus` fans events out
+without a producer ever touching a socket, and the board's HDMI panel
+(`benchctrl.dashboards.fui`, `docs/dashboard.md`) reports bench state
+read-only. The **physical** interlock is what remains. An e-stop button
+was ordered 2026-08-19 to hang on the board's GPIO; `docs/dashboard.md`
+records the four design questions not yet guessed at — chiefly where the
+watcher lives so it fires while the agent is blocked in a pyvisa call,
+and whether a trip latches until an explicit reset.
+
 **Scope when picked up**:
 1. Drive a relay or contactor from the agent host's GPIO on the same
    deadman timer

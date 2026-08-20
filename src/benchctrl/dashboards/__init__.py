@@ -1,9 +1,14 @@
-"""Graphical dashboards. Intentionally empty in v1.0.
+"""Read-only status displays for a running bench.
 
-This package is a placeholder reserved for v1.x dashboard work —
-matplotlib live plots, web-based real-time visualisations, multi-pane
-oscilloscope-style UIs against ongoing recordings, etc.
+Nothing is exported at package level — importing this is a deliberate no-op, so
+that the agent never pulls a display's dependencies in by accident. Import the
+piece you want:
 
-Nothing is exported here yet — importing the package is intentionally
-a no-op. See ``README.md`` in this directory for the rationale.
+- :py:mod:`~benchctrl.dashboards.state` — what the panel knows, as pure data
+- :py:mod:`~benchctrl.dashboards.feed` — the observer session that fills it
+- :py:mod:`~benchctrl.dashboards.fui` — the board's HDMI console
+
+The rule all of them inherit, and the reason ``state`` is a separate pure
+module: **a display may never change what it displays, and may never influence
+the bench.** See ``docs/dashboard.md``.
 """
