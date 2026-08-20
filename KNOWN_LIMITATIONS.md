@@ -665,6 +665,18 @@ binds no driver and no `/dev/ttyUSB*` appears. `benchctrl.transports.ch341`
 drives the chip from userspace over libusb instead and exposes it as a pty, so
 the QR10x driver itself is unchanged.
 
+Which transport gets used is decided by `benchctrl.transports.autoserial`, not
+by the operator: an explicitly configured port wins, else a kernel-bound tty for
+the CH340 wins, and the userspace driver is used only when the kernel bound
+nothing. So the same config works on desktop Linux and on the Uno Q, and a host
+that later gains a `ch341` module silently starts using it. Pass `port="auto"`
+(or leave it unset) to get that; name a port to force one.
+
+A *failed* open on a kernel tty does not fall back to userspace — that would
+turn "another process holds the port" into a different working transport
+measuring something else. Transport is chosen by what the host has, never by
+what failed.
+
 The catch is permissions: libusb writes to `/dev/bus/usb/BBB/DDD`, which the
 kernel creates `root:root 0664`, so control transfers fail with `[Errno 13]
 Access denied` for a non-root user. Install
@@ -677,7 +689,17 @@ a prebuilt `ch341.ko` fails (`CONFIG_MODULE_FORCE_LOAD` off, vermagic mismatch),
 the 7.0.0 kernel package contains no `ch341.ko` either, and nothing can be
 compiled on-board (no toolchain, no headers for `6.16.7-g0dd6551ae96b`).
 
-Verified end to end on real hardware: QR101A-1M-R1, serial 00000248.
+Note that a driverless CH340 is invisible to `list_ports.comports()` by
+construction — it enumerates ttys, and the whole problem is that no tty exists.
+`discovery.scan_driverless_bridges()` covers that blind spot, reporting the
+adapter with `path="auto"`; without it the QR10x reads as "not plugged in" on
+this board when it is plugged in and working.
+
+Verified end to end on real hardware: QR101A-1M-R1, serial 00000248 — opened,
+closed and reopened through the auto-selected userspace transport, the reopen
+proving the USB claim is released rather than leaked. The kernel-first branch is
+covered by `tests/test_autoserial.py` only; no host on this bench has a kernel
+`ch341` to exercise it on silicon.
 
 ## What's not in this list
 

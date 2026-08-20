@@ -786,8 +786,15 @@ discovery.format_inventory(devices) -> str
 
 # individual transports, if you want just one
 discovery.scan_serial() / scan_usbtmc() / scan_visa(rm=None)
+discovery.scan_driverless_bridges()      # CH340s the kernel bound no tty for
 discovery.probe_serial_identity(path, timeout=1.0) -> str | None
 ```
+
+`scan_driverless_bridges()` exists because `scan_serial()` cannot see these:
+it enumerates `list_ports.comports()`, which lists ttys, and a kernel without
+`ch341` binds none. Such an adapter is reported with `path="auto"` — there is
+no device node until `transports.autoserial` creates a pty, and `"auto"` is
+also what to pass as `port` to open it.
 
 Each result carries a **confidence level**. Devices sitting behind
 generic USB-serial bridges (CH340, FTDI, CP210x) are never claimed

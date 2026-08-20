@@ -27,6 +27,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
+from benchctrl.exceptions import BenchConnectionError
+
 log = logging.getLogger("benchctrl.discovery")
 
 EXACT = "exact"
@@ -229,6 +231,86 @@ def scan_serial() -> list[DiscoveredDevice]:
     return found
 
 
+def scan_driverless_bridges() -> list[DiscoveredDevice]:
+    """CH340 adapters the kernel has *not* bound to a tty.
+
+    :py:func:`scan_serial` cannot see these by construction:
+    ``list_ports.comports()`` enumerates ttys, and the whole problem on a
+    kernel without ``CONFIG_USB_SERIAL_CH341`` is that no tty exists. Without
+    this scanner the QR10x is simply absent from the inventory on the Uno Q,
+    which reads as "not plugged in" when it is plugged in and usable.
+
+    The reported ``path`` is ``"auto"``, not a device node — there is no node
+    until :py:mod:`benchctrl.transports.autoserial` creates a pty, and that is
+    also the value to pass as ``port`` to open it.
+    """
+    try:
+        from benchctrl.transports.ch341 import CH340_PID, CH340_VID, CH341Device
+    except ImportError:  # pragma: no cover - pyusb is optional
+        return []
+
+    try:
+        import serial.tools.list_ports as list_ports
+
+        bound = any(
+            getattr(p, "vid", None) == CH340_VID and getattr(p, "pid", None) == CH340_PID
+            for p in list_ports.comports()
+        )
+    except ImportError:  # pragma: no cover - pyserial is a hard dependency
+        bound = False
+    if bound:
+        # The kernel has it; scan_serial already reported it, and reporting it
+        # again as driverless would be wrong as well as duplicated.
+        return []
+
+    try:
+        devices = CH341Device.find_all()
+    except BenchConnectionError:
+        # pyusb missing or no USB access — not a discovery failure, just no
+        # answer available from this scanner.
+        return []
+
+    found: list[DiscoveredDevice] = []
+    for dev in devices:
+        found.append(
+            DiscoveredDevice(
+                path="auto",
+                transport="serial",
+                device_key=None,
+                label=GENERIC_BRIDGES.get((CH340_VID, CH340_PID), "CH340 bridge"),
+                vid=CH340_VID,
+                pid=CH340_PID,
+                serial_number=_string_of_safe(dev, "iSerialNumber"),
+                description="CH340 with no kernel driver bound",
+                manufacturer=_string_of_safe(dev, "iManufacturer"),
+                product=_string_of_safe(dev, "iProduct"),
+                confidence=UNKNOWN,
+                note=(
+                    "no kernel ch341 driver, so no /dev/ttyUSB* — reachable via "
+                    "the userspace CH341 driver. Open with port='auto'. Identity "
+                    "cannot be inferred from VID/PID; probe to identify."
+                ),
+            )
+        )
+    return found
+
+
+def _string_of_safe(dev, index_attr: str) -> Optional[str]:
+    """A USB string descriptor by its index attribute, or None if unreadable.
+
+    Reading these needs write access to ``/dev/bus/usb/*`` (pyusb raises
+    ``ValueError: The device has no langid`` without it), which is precisely
+    what the udev rule grants. A device we cannot name is still worth
+    reporting, so this must not raise.
+    """
+    try:
+        import usb.util
+
+        return usb.util.get_string(dev, getattr(dev, index_attr))
+    except Exception:  # noqa: BLE001 - any failure means "unknown", not an error
+        return None
+
+
 def scan_usbtmc() -> list[DiscoveredDevice]:
     """Enumerate kernel USB-TMC nodes (``/dev/usbtmc*``).
 
@@ -327,6 +409,9 @@ def discover(
     found: list[DiscoveredDevice] = []
     if serial:
         found.extend(scan_serial())
+        # Bridges with no tty. Additive by construction: scan_serial only
+        # reports ttys, and this only reports adapters that have none.
+        found.extend(scan_driverless_bridges())
     visa_devices = scan_visa() if visa else []
     if usbtmc:
         seen_usb = {(d.vid, d.pid, d.serial_number) for d in visa_devices}
