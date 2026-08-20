@@ -27,6 +27,12 @@ from typing import Any, Optional
 
 from benchctrl.agent import dispatch
 from benchctrl.agent.blobs import CHUNK_BYTES, BlobStore
+from benchctrl.agent.eventbus import (
+    DEFAULT_MAX_QUEUE,
+    DISPLAY_MAX_QUEUE,
+    EventBus,
+    EventSubscriber,
+)
 from benchctrl.agent.recordings import PREVIEW_HZ, IteratorTable, RecordingTable
 from benchctrl.agent.registry import DeviceRegistry
 from benchctrl.agent.runs.engine import RunManager
@@ -48,12 +54,54 @@ def _json(payload: dict) -> bytes:
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
+#: Methods an observer session may call. Read-only by construction: every one
+#: of these only reports state, so an observer cannot change what it observes.
+#:
+#: Deliberately a strict allowlist rather than a denylist of mutating verbs. A
+#: new method added later defaults to *forbidden* for observers, which is the
+#: safe direction — the alternative silently grants access to every verb someone
+#: forgets to add to a blocklist. Same reasoning as the value-codec allowlist in
+#: ``net.codec``.
+OBSERVER_METHODS = frozenset(
+    {
+        "agent.hello",
+        "agent.devices",
+        "agent.status",
+        "agent.time",
+        "agent.discover",
+        "run.list",
+        "run.status",
+        "run.events",
+    }
+)
+
+
 class Session:
-    """Per-connection state."""
+    """Per-connection state.
+
+    ``observer`` sessions are read-only status consumers — the HDMI dashboard is
+    the motivating case. Two things make them different from a normal client,
+    and both are safety properties rather than conveniences:
+
+    1. **Their traffic does not count as operator contact.** ``_serve`` calls
+       ``governor.touch()`` on every inbound frame from a normal session, so a
+       polling observer would pin ``seconds_since_contact`` near zero and the
+       deadman could never trip. A status display must not be able to keep an
+       armed bench alive.
+    2. **They may only call** :py:data:`OBSERVER_METHODS`. No opening, no
+       claiming, no device calls.
+    """
 
     _ids = itertools.count(1)
 
-    def __init__(self, agent: "BenchAgent", sock: socket.socket, address) -> None:
+    def __init__(
+        self,
+        agent: "BenchAgent",
+        sock: socket.socket,
+        address,
+        *,
+        observer: bool = False,
+    ) -> None:
         self.agent = agent
         self.sock = sock
         self.address = address
@@ -61,6 +109,7 @@ class Session:
         self.reader = FrameReader(sock)
         self.writer = FrameWriter(sock)
         self.authenticated = False
+        self.observer = observer
         self.claims: set[str] = set()
         self.opened_at = time.monotonic()
         self._event_seq = itertools.count(1)
@@ -76,15 +125,19 @@ class Session:
         return device_key in self.claims
 
     def send_event(self, event: dict) -> None:
+        """Write one event frame. **Blocks** — only the sender thread calls it.
+
+        Called from this session's :py:class:`~benchctrl.agent.eventbus.EventSubscriber`
+        thread, never from a producer. ``sendall`` has no timeout, so calling
+        this from the governor's trip path is what used to let a stalled client
+        delay a disarm.
+        """
         payload = dict(event)
         payload.setdefault("seq", next(self._event_seq))
         payload.setdefault("ts_mono", round(time.monotonic(), 6))
         payload.setdefault("ts_utc", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         payload.setdefault("severity", "info")
-        try:
-            self.writer.send(FrameType.EVT, _json(payload))
-        except Exception:  # noqa: BLE001 - a dead client must not break the agent
-            pass
+        self.writer.send(FrameType.EVT, _json(payload))
 
 
 class BenchAgent:
@@ -115,6 +168,8 @@ class BenchAgent:
         self.runs = RunManager(runs_dir)
         self.llm_base_url = llm_base_url
         self.failures = authmod.FailureTracker()
+        # Built before the governor: the governor's event sink publishes onto it.
+        self.events = EventBus()
         self.governor = SafetyGovernor(
             deadman_s=deadman_s, on_event=self._broadcast_event
         )
@@ -164,14 +219,31 @@ class BenchAgent:
         self.workers.stop_all()
         self.registry.close_all()
         self.blobs.close()
+        # Last: the trip above emits events, and closing the bus first would
+        # discard the record of the agent driving the bench safe on the way out.
+        self.events.close(timeout=1.0)
 
     # --- sessions -------------------------------------------------------
 
     def register_session(self, session: Session) -> None:
         with self._lock:
             self._sessions[session.session_id] = session
+        # Each session gets its own bounded queue and sender thread, so its
+        # socket is never on a producer's critical path. An observer (the HDMI
+        # dashboard) gets a shallow, droppable queue: it wants current state,
+        # and falling behind must cost it freshness, never cost the bench.
+        self.events.subscribe(
+            EventSubscriber(
+                session.session_id,
+                session.send_event,
+                max_queue=DISPLAY_MAX_QUEUE if session.observer else DEFAULT_MAX_QUEUE,
+                droppable=session.observer,
+            )
+        )
 
     def drop_session(self, session: Session) -> None:
+        # Stop the sender thread first so it cannot write to a closing socket.
+        self.events.unsubscribe(session.session_id, timeout=0.5)
         with self._lock:
             self._sessions.pop(session.session_id, None)
             released = [d for d, s in self._claims.items() if s == session.session_id]
@@ -190,10 +262,14 @@ class BenchAgent:
             )
 
     def _broadcast_event(self, event: dict) -> None:
-        with self._lock:
-            sessions = list(self._sessions.values())
-        for session in sessions:
-            session.send_event(event)
+        """Fan out to every session without ever blocking the caller.
+
+        This is the governor's event sink, and ``Governor.trip()`` calls it
+        **before** driving instruments to a safe state, on the deadman thread.
+        It therefore must not touch a socket: it enqueues and returns. See
+        :py:mod:`benchctrl.agent.eventbus`.
+        """
+        self.events.publish(event)
 
     def claim(self, session: Session, device_key: str) -> dict:
         self.registry.entry(device_key)
@@ -282,6 +358,14 @@ class _Handler(socketserver.BaseRequestHandler):
             self._send_error(session, 0, PolicyError(version_error))
             return False
 
+        # A client may ask for the read-only observer role. Self-declared on
+        # purpose: it only ever *removes* capability, so there is nothing to gain
+        # by lying about it. Still token-authenticated below — an observer can
+        # read run history and the device inventory, which is not public.
+        if bool(hello.get("observer", False)):
+            session.observer = True
+            log.info("agent: %s is a read-only observer session", session.peer)
+
         if not agent.token:
             # No token configured: accept, but be loud about it. This is a
             # bench that anyone on the subnet can drive.
@@ -322,6 +406,9 @@ class _Handler(socketserver.BaseRequestHandler):
                 {
                     "session": session.session_id,
                     "agent": AGENT_NAME,
+                    # Echoed so a client can assert it got the role it asked
+                    # for rather than discovering it via a PolicyError later.
+                    "observer": session.observer,
                     "heartbeat_s": agent.heartbeat_s,
                     "deadman_s": agent.deadman_s,
                     "clock_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -344,7 +431,14 @@ class _Handler(socketserver.BaseRequestHandler):
             if frame is None:
                 return
             frame_type, payload = frame
-            agent.governor.touch()
+            # An observer's traffic must NOT count as operator contact. A status
+            # display polling every second would otherwise pin
+            # seconds_since_contact near zero, and should_trip() — which is
+            # `any_armed and seconds_since_contact > deadman_s` — could never
+            # fire. The bench would stay armed after the real client died,
+            # because the thing reporting on it kept it alive.
+            if not session.observer:
+                agent.governor.touch()
 
             if frame_type == FrameType.PING:
                 session.writer.send(FrameType.PONG)
@@ -393,6 +487,13 @@ class _Handler(socketserver.BaseRequestHandler):
 
     def _route(self, session: Session, method: str, p: dict):
         agent = self.agent
+
+        if session.observer and method not in OBSERVER_METHODS:
+            raise PolicyError(
+                f"{method!r} is not available to an observer session; observers "
+                f"are read-only status consumers and may call only: "
+                f"{', '.join(sorted(OBSERVER_METHODS))}"
+            )
 
         if method == "agent.hello":
             return {"agent": AGENT_NAME, "devices": agent.registry.describe()}, None

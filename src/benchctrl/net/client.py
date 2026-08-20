@@ -55,10 +55,24 @@ class _BlobTransfer:
 
 
 class RemoteClient:
-    """A connected session with one agent."""
+    """A connected session with one agent.
 
-    def __init__(self, endpoint: EndpointConfig) -> None:
+    ``observer=True`` asks the agent for a read-only status session. Two
+    consequences, both of which a status display wants:
+
+    - This client's traffic does **not** count as operator contact, so polling
+      cannot keep an armed bench alive by starving the deadman.
+    - Only the agent's read-only methods are permitted
+      (:py:data:`benchctrl.agent.server.OBSERVER_METHODS`); anything that opens,
+      claims, or drives a device raises ``PolicyError``.
+
+    Use it for anything whose job is to *watch* — the HDMI dashboard, a
+    monitoring script, a second pair of eyes on a long run.
+    """
+
+    def __init__(self, endpoint: EndpointConfig, *, observer: bool = False) -> None:
         self.endpoint = endpoint
+        self.observer = observer
         self._sock: Optional[socket.socket] = None
         self._reader: Optional[FrameReader] = None
         self._writer: Optional[FrameWriter] = None
@@ -120,6 +134,8 @@ class RemoteClient:
     def _handshake(self) -> None:
         assert self._reader and self._writer
         hello, nonce_c = authmod.build_hello()
+        if self.observer:
+            hello["observer"] = True
         self._writer.send(FrameType.HELLO, _json(hello))
 
         frame = self._reader.read_frame(timeout=self.endpoint.connect_timeout_s)
