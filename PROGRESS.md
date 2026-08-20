@@ -93,13 +93,17 @@ Driver-facing summary in `KNOWN_LIMITATIONS § F-5`, with the two that
 change how *any* code must talk to this meter broken out as § F-7 (the
 error queue) and § F-8 (the undefined-header wedge).
 
-Hardware status: run against the meter (firmware 0.0.0.20). Driver
-suite 13 passed / 1 skipped / 0 failed; QR10x cross-validation 4 passed
-/ 3 skipped. **The 4-wire hardware tests are the skips — the sense
-leads are not attached.** 4-wire is implemented and covered against the
-simulator, but it has not been validated on silicon, and that is also
-why `KNOWN_LIMITATIONS § H-5` still quotes the datasheet's 0.2 Ω rather
-than a measured lead resistance.
+Hardware status: run against the meter (firmware 0.0.0.20, serial
+SDM46A0CA00021) with the sense leads attached. Driver suite 13 passed /
+1 skipped / 0 failed; QR10x cross-validation 7 passed / 0 skipped.
+**4-wire is validated on silicon.** The lead-resistance test measured
+**78.9 mΩ** of 2-wire lead-and-contact error on our leads (2-wire
+100.12209 Ω, 4-wire 100.04321 Ω, QR10x PV 100.03800 Ω) — the 4-wire
+reading lands 5.2 mΩ from the QR10x's own measurement where the 2-wire
+reading is 84 mΩ away. `KNOWN_LIMITATIONS § H-5` now carries that
+measurement instead of the datasheet's 0.2 Ω, though the tolerance
+constant deliberately stays at the datasheet bound: lead resistance is
+a property of *these* cables, not of the meter.
 
 ## Verified measurements
 
@@ -118,6 +122,11 @@ the docs.
   pattern, saved in `scenarios/saved/`. Captures chemistry-specific
   behaviour (CR2032 collapse, CR123A pulse capability) and LiPo
   temperature dependency — ESR rises ~10× from +20 °C to −10 °C.
+- **SDM4065A lead resistance**: 78.9 mΩ of 2-wire lead-and-contact
+  error, from one 100 Ω QR10x setpoint read both ways on the same leads
+  (2-wire 100.12209 Ω, 4-wire 100.04321 Ω, QR10x PV 100.03800 Ω). This
+  is the number `KNOWN_LIMITATIONS § H-5` had been quoting the datasheet
+  for.
 - **Remote mode, end to end**: submitted a run, disconnected the host
   mid-flight, reconnected, and replayed exactly the missed event range.
 - **LLM supervisor does not gate the run**: a test asserts a 3-second
@@ -131,42 +140,14 @@ Ordered roughly by how much they'd change if picked up next.
    says plainly that a software deadman cannot guarantee an output
    goes off through a wedged driver. Overnight runs deserve a relay on
    the same timer. Scoped in `ROADMAP.md`.
-2. **SDM4065A 4-wire on hardware — attach the sense leads.** No longer
-   blocked on `KNOWN_LIMITATIONS` F-6: the udev rule is installed and
-   the meter is reachable, and both hardware sets have been run (13
-   passed / 1 skipped, and 4 passed / 3 skipped). What remains is
-   physical: 4-wire is proven against the simulator but not against
-   silicon.
-
-   All three cross-validation skips trace to `WIRING=2`. Two of them
-   (`test_the_dmm_agrees_with_the_qr10x_own_measurement`,
-   `test_the_dmm_agrees_with_the_qr10x_setpoint`) skip *inside* the
-   test, because an unnulled 2-wire read carries 0.2 Ω of lead error —
-   larger than the whole agreement budget, so the comparison could not
-   fail meaningfully. The third
-   (`test_4_wire_beats_2_wire_by_about_the_lead_resistance`) is
-   `skipif`-gated on the env var. Note the var **defaults to `4`**:
-   these skipped because the run set it to `2` to match the actual
-   wiring, not because it was unset.
-
-   To run once the leads are on:
-
-   ```bash
-   BENCHCTRL_SDM4065A=auto BENCHCTRL_QR10X_PORT=/dev/ttyUSB0 \
-     BENCHCTRL_SDM4065A_WIRING=4 pytest -m hardware \
-     tests/test_cross_validate_sdm4065a_qr10x.py -q -s
-   ```
-
-   `-s` matters: the lead-resistance test prints the measured mΩ that
-   H-5 is waiting for.
-3. **DP2031 as a source in the scenario harness.** The driver shipped
+2. **DP2031 as a source in the scenario harness.** The driver shipped
    in 1.1 but `scenarios/` still only models the load side, so
    cell-charging scenarios aren't expressible yet.
-4. **DL3031A LIST timing in Arc Pro high range** (§ F-2). Still
+3. **DL3031A LIST timing in Arc Pro high range** (§ F-2). Still
    unresolved; isolating it needs a scope on the trigger line.
-5. **Strict mypy.** `check_untyped_defs` is on, `--strict` is not. CI
+4. **Strict mypy.** `check_untyped_defs` is on, `--strict` is not. CI
    has mypy as `continue-on-error`. Mostly mechanical.
-6. **Multi-device coordination.** Now partly unblocked — `sim` makes
+5. **Multi-device coordination.** Now partly unblocked — `sim` makes
    the API designable without a second Arc, so what's left is
    validation rather than design. Cross-machine timebase is the
    genuinely hard part and may need a hardware trigger line.

@@ -142,7 +142,7 @@ connected to the output terminals unless the test says otherwise.
 | `test_bench_rigol_dl3031a.py` | DL3031A | SCPI round-trips, LIST playback, transient mode, battery discharge |
 | `test_bench_rigol_dp2031.py` | DP2031 | OVP trip + clear on CH3, multi-channel setpoint round-trip, tracking and pair state, `program_timer` + readback via the IEEE 488.2 block parser, screenshot BMP capture |
 | `test_bench_siglent_sdm4065a.py` | SDM4065A | the manual's quirks proven on silicon rather than against my own simulator: `CONFigure` resetting NPLC to 10 *and* re-enabling autorange, `NULL:STATe` arming `NULL:VALue:AUTO`, that writing a value does **not** disarm AUTO as §7.4.3 claims, that the two `DEF` forms disagree about autoranging, and that autozero answers to `ZERO:AUTO` rather than the manual's `AZ`. Plus all six 4065A NPLC values and every resistance range read back to catch silent coercion, the 2 MΩ range rejected as the sibling model's, the overload sentinel raising, and a 100 NPLC × 10-sample read finishing inside `reading_timeout_ms` |
-| `test_cross_validate_sdm4065a_qr10x.py` | SDM4065A **+** QR10x | the meter and the programmable resistance measuring the same physical ohms. Catches errors no single-instrument test can see — units, range scaling, swapped 2-/4-wire, a null with the wrong sign. Tolerances are derived from both datasheets in-file and pinned by hardware-free tests, and the file is explicit that this resolves *gross* errors only: the QR10x's ±0.05% dominates, so the agreement budget (~0.07 Ω at 100 Ω) is wider than the 38 mΩ offset the meter alone can see |
+| `test_cross_validate_sdm4065a_qr10x.py` | SDM4065A **+** QR10x | the meter and the programmable resistance measuring the same physical ohms. Catches errors no single-instrument test can see — units, range scaling, swapped 2-/4-wire, a null with the wrong sign. Tolerances are derived from both datasheets in-file and pinned by hardware-free tests, and the file is explicit that this resolves *gross* errors only: the QR10x's ±0.05% dominates, so the agreement budget (~0.07 Ω at 100 Ω) is wider than the 38 mΩ offset the meter alone can see. The lead-resistance test escapes that limit by differencing 2-wire against 4-wire on the *same* meter, which cancels the QR10x term — that is how it can report 78.9 mΩ meaningfully |
 | `test_mcp_hw.py` | bench | MCP tools against real devices |
 
 ### SDM4065A — last hardware run
@@ -153,25 +153,29 @@ The two SDM4065A sets have been run against the real meter (firmware
 | Set | Result |
 |---|---|
 | `test_bench_siglent_sdm4065a.py` | 13 passed / 1 skipped / 0 failed |
-| `test_cross_validate_sdm4065a_qr10x.py` | 4 passed / 3 skipped |
+| `test_cross_validate_sdm4065a_qr10x.py` | 7 passed / 0 skipped |
 
-Every skip is a test that cannot produce the condition it checks with
-the present wiring, and skips rather than passing vacuously. 4-wire
-(`FRESistance`) is implemented and covered against the simulator, but
-**the hardware 4-wire tests are skipped because the sense leads are not
-physically attached** — the run set `BENCHCTRL_SDM4065A_WIRING=2` to
-match. (The var defaults to `4`, so an unset environment would have
-*attempted* 4-wire against 2-wire leads and reported lead error as
-disagreement. Setting it honestly is what turns that into a skip.)
+The sense leads are attached, so the run set
+`BENCHCTRL_SDM4065A_WIRING=4` (also the default) and every
+cross-validation test ran. 4-wire (`FRESistance`) is now validated on
+silicon, not just against the simulator. The lead-resistance test
+printed the number `KNOWN_LIMITATIONS § H-5` was waiting for:
 
-That accounts for all three cross-validation skips. Two of them are
-the un-nulled 2-wire comparisons, which skip from inside the test: an
-un-nulled 2-wire read carries 0.2 Ω of lead error, wider than the whole
-agreement budget, so the comparison could not fail meaningfully. The
-third is the lead-resistance measurement, which is why
-`KNOWN_LIMITATIONS § H-5` still carries the datasheet's 0.2 Ω rather
-than a measured number. H-5 is no longer blocked on § F-6 (the udev
-rule is installed); it is blocked on the leads.
+```
+measured lead+contact resistance: 78.9 mΩ
+(2-wire 100.12209 Ω, 4-wire 100.04321 Ω, QR10x PV 100.03800 Ω)
+```
+
+The 4-wire reading lands 5.2 mΩ from the QR10x's own measurement where
+the 2-wire reading is 84 mΩ away. 78.9 mΩ is well inside the
+datasheet's 0.2 Ω bound, but it is still about 2x the 38 mΩ offset the
+cross-validation is trying to resolve — so the standing conclusion
+holds: an un-nulled 2-wire read cannot see that offset. The tolerance
+constant `TWO_WIRE_LEAD_OHM` deliberately stays at the datasheet's
+0.2 Ω; lead resistance is a property of *these* cables and contacts, not
+of the meter, and tightening the budget to our measurement would fail
+the suite for anyone with longer leads without indicating a driver
+defect.
 
 The driver suite's single skip is a different mechanism, and worth
 understanding because it is *self-balancing*. Two of its tests are
@@ -181,8 +185,12 @@ exact complements on the state of the input terminals:
 `test_hw_null_now_leaves_auto_disarmed_on_real_hardware` needs a
 **connected** one to null against. Whichever condition holds, exactly
 one of the two skips and the other runs — so 13 passed / 1 skipped is
-the expected shape with the 100 Ω DUT attached, not a coverage gap. Both
-skip messages name the input state, so the log says which case ran.
+the expected shape, not a coverage gap. With the 100 Ω DUT attached it
+was the *overload* test that skipped, saying so explicitly: `input read
+[100.121975] on the 200 Ω range rather than overloading — something is
+connected across the inputs, so this test cannot produce the condition
+it checks`. Both skip messages name the input state, so the log says
+which case ran.
 
 ## Deferred features — explicit no-op assertions
 

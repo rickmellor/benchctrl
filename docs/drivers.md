@@ -507,12 +507,15 @@ than assumed.
 
 ### 2-wire vs 4-wire
 
-2-wire resistance carries lead and contact resistance in series —
-about 0.2 Ω per the datasheet. At 100 Ω that is a 0.2 % error, which
-swamps anything the meter's own accuracy spec would contribute. Either
-use `measure_resistance_4wire()` with sense leads, or short the leads
-and `null_now()` first. For a 4½-digit reading of a 100 Ω part, 2-wire
-without a null is not a measurement.
+2-wire resistance carries lead and contact resistance in series — the
+datasheet bounds it at 0.2 Ω, and on this bench it measures **78.9 mΩ**
+(2-wire 100.12209 Ω vs 4-wire 100.04321 Ω on the same 100 Ω part). At
+100 Ω that is a 0.08 % error, ~5x the meter's own accuracy contribution
+of ±(0.010 % + 0.005 %). Either use
+`measure_resistance_4wire()` with sense leads, or short the leads and
+`null_now()` first. For a 4½-digit reading of a 100 Ω part, 2-wire
+without a null is not a measurement. Both paths are hardware-verified;
+see `KNOWN_LIMITATIONS § H-5`.
 
 ### Validating against a second instrument
 
@@ -537,21 +540,33 @@ report lead resistance as instrument disagreement. `-s` surfaces the
 measured lead-and-contact resistance the lead test prints.
 
 **Hardware validation status.** Both suites have been run against the
-real meter. The driver suite is 13 passed / 1 skipped / 0 failed; the
-cross-validation is 4 passed / 3 skipped. 4-wire (`FRESistance`) is
-implemented and covered locally against the simulator, but the
-*hardware* 4-wire tests — including the lead-resistance measurement
-`KNOWN_LIMITATIONS § H-5` is waiting on — are the skips: the sense
-leads are not physically attached, the run therefore set `WIRING=2`,
-and those tests cannot produce the condition they check so they skip
-rather than pass vacuously.
+real meter (firmware 0.0.0.20, serial SDM46A0CA00021) with the sense
+leads attached and `WIRING=4`. The driver suite is 13 passed / 1 skipped
+/ 0 failed; the cross-validation is 7 passed / 0 skipped, so 4-wire
+(`FRESistance`) is validated on silicon and not just against the
+simulator. The lead-resistance test measured **78.9 mΩ** of
+lead-and-contact error — inside the datasheet's 0.2 Ω bound, but still
+about 2x the 38 mΩ offset below, which is why an un-nulled 2-wire read
+cannot resolve it. `KNOWN_LIMITATIONS § H-5` carries the full numbers.
+The driver suite's remaining skip is its self-balancing pair: with a DUT
+across the inputs the deliberate-overload test cannot overload, so it
+skips and its complement (the null test) runs.
 
 Be clear about what the pair proves. The QR10x's ±0.05% dominates the
 meter's ±(0.010% + 0.005%), so **agreement** between the two is
 budgeted at roughly 0.07 Ω at 100 Ω — wider than the ~38 mΩ offset the
 QR101A-1M-R1 actually shows. The meter *alone* (0.02 Ω on the 200 Ω
 range) resolves that offset. So: use the pair to catch gross errors,
-and the meter to measure. The test file derives both budgets from the
+and the meter to measure.
+
+That ~0.07 Ω is also comparable to the 79 mΩ of lead error itself, which
+is why the lead-resistance test is written as a *difference of two
+readings from the same meter* rather than a comparison against the
+QR10x. Differencing 2-wire against 4-wire cancels the QR10x's ±0.05 %
+term entirely, so a 79 mΩ result is meaningful where a 79 mΩ
+*disagreement* between instruments would not be.
+
+The test file derives both budgets from the
 datasheets and pins them with hardware-free tests, so a tolerance
 cannot be quietly loosened.
 

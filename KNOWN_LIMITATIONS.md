@@ -73,36 +73,49 @@ input on for the whole list and changes only the LIST setpoints.
 
 Code reference: `scenarios/README.md` § "DL3031A switching latency".
 
-### H-5. SDM4065A 2-wire resistance carries ~0.2 Ω of lead error
+### H-5. SDM4065A 2-wire resistance carries ~79 mΩ of lead error on our leads
 Per the SDM4000A datasheet note [6], the 2-wire (`RESistance`)
 function's accuracy spec assumes lead and contact resistance has been
-nulled out; unnulled it contributes about **0.2 Ω** in series with the
-DUT. At 100 Ω that is a 0.2 % error — an order of magnitude larger
-than the meter's own accuracy contribution, and 5x larger than the
-38 mΩ offset the QR10x cross-validation is trying to resolve.
+nulled out; unnulled it contributes up to **0.2 Ω** in series with the
+DUT.
+
+**Bench-measured on our bench, 2026-08-19: 78.9 mΩ.** The same 100 Ω
+QR10x setpoint read both ways on the same leads — 2-wire 100.12209 Ω,
+4-wire 100.04321 Ω, against the QR10x's own PV of 100.03800 Ω. So the
+4-wire reading lands 5.2 mΩ from the QR10x's measurement while the
+2-wire reading is 84 mΩ away: 4-wire is doing exactly what it is for.
+
+79 mΩ is well inside the datasheet's 0.2 Ω, but it is still **2x the
+38 mΩ offset** the cross-validation is trying to resolve, so the
+conclusion is unchanged: an unnulled 2-wire reading cannot see that
+offset. At 100 Ω this is a 0.08 % error, an order of magnitude larger
+than the meter's own accuracy contribution.
 
 Affects: any 2-wire reading below a few hundred ohms.
 
 Workaround: use `measure_resistance_4wire()` with sense leads, or
 short the leads and call `null_now()` before measuring. For a
 4½-digit reading of a 100 Ω part, 2-wire without a null is not a
-measurement.
+measurement. Both paths are now hardware-verified.
 
-Not yet bench-quantified on our unit — the figure is the datasheet's.
-`test_cross_validate_sdm4065a_qr10x.py::test_4_wire_beats_2_wire_by_
-about_the_lead_resistance` measures it (same resistance read both ways
-on the same leads, printing the difference in mΩ) and this entry gets
-the measured number once that has run. It is now blocked on **wiring**
-only: F-6's udev rule is installed and the meter is reachable from the
-board, but the 4-wire sense leads are not attached, so every 4-wire
-hardware case skips.
+The 0.2 Ω figure is retained as the budget bound in
+`TWO_WIRE_LEAD_OHM`, deliberately: 78.9 mΩ is a property of *these*
+cables and contacts, not of the meter, and tightening the tolerance to
+it would fail the suite for anyone with longer leads without indicating
+any driver defect.
 
 Note what the cross-validation *cannot* settle: the QR10x's ±0.05%
 spec dominates the meter's, so two-instrument agreement at 100 Ω is
-budgeted at ~0.07 Ω — wider than the 0.2 Ω lead error but also wider
-than the 38 mΩ offset. The lead-resistance measurement works because
-it differences two readings from the *same* meter, cancelling the
-QR10x term entirely.
+budgeted at ~0.07 Ω — wider than the 38 mΩ offset, and comparable to
+the 79 mΩ of lead error itself. Two instruments agreeing therefore
+proves the absence of *gross* errors (units, scaling, swapped
+2-/4-wire, a null of the wrong sign) and nothing finer.
+
+The lead-resistance measurement escapes that limit because it
+differences two readings from the *same* meter on the *same* leads, so
+the QR10x term cancels entirely and 5 mΩ of resolution is meaningful.
+That is why 78.9 mΩ is a real number where a 0.07 Ω agreement is only
+a bound.
 
 Code reference:
 `src/benchctrl/drivers/siglent_sdm4065a/driver.py` —

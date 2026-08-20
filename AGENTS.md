@@ -30,9 +30,10 @@ real in this repo.
 - **"Accurate enough" is not an opinion.** Cross-validating two
   instruments needs an uncertainty budget from the datasheets, or the
   pass/fail threshold is a number somebody made up. 2-wire resistance
-  without a null carries ~0.2 Ω of lead error — 5x larger than the
-  38 mΩ offset the QR10x validation was trying to resolve. A test with a
-  guessed tolerance would have "passed" while measuring nothing.
+  without a null carries lead error the datasheet bounds at 0.2 Ω and
+  that measures 78.9 mΩ on this bench — still ~2x the 38 mΩ offset the
+  QR10x validation was trying to resolve. A test with a guessed
+  tolerance would have "passed" while measuring nothing.
 - **Idiomatic integration is not guessable from one example.** A driver
   can work perfectly locally and be invisible to `session.resolve()`,
   the remote proxy, and sim mode — five registries, all easy to miss.

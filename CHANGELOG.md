@@ -25,10 +25,31 @@ temperature.
 
 **Validated on real hardware** — serial SDM46A0CA00021, firmware
 0.0.0.20, over USB-TMC from the Uno Q bench board: 13 passed / 1 skipped
-in the driver suite, 4 passed / 3 skipped in the QR10x
-cross-validation, 0 failed. Every skip is the same cause — the 4-wire
-sense leads are not physically attached, so the FRESistance paths are
-proven against the simulator only.
+in the driver suite, **7 passed / 0 skipped** in the QR10x
+cross-validation, 0 failed. Both 2-wire and 4-wire paths are silicon-
+verified.
+
+The 4-wire path produced the measurement the docs had been quoting the
+datasheet for. One 100 Ω QR10x setpoint, read both ways on the same
+leads: 2-wire 100.12209 Ω, 4-wire 100.04321 Ω, against the QR10x's own
+PV of 100.03800 Ω. **Lead and contact resistance is 78.9 mΩ** on this
+bench — inside the datasheet's 0.2 Ω bound, but still 2x the 38 mΩ
+offset the cross-validation is trying to resolve, so the standing
+conclusion holds: an unnulled 2-wire reading cannot see that offset. The
+4-wire reading lands 5.2 mΩ from the QR10x's own measurement where the
+2-wire reading is 84 mΩ away.
+
+`TWO_WIRE_LEAD_OHM` deliberately stays at the datasheet's 0.2 Ω rather
+than being tightened to 78.9 mΩ. Lead resistance is a property of the
+cables and contacts, not of the meter, so a tolerance pinned to our
+bench would fail for anyone with longer leads without indicating a
+driver defect. The measurement is evidence; the bound stays a bound.
+
+The driver suite's remaining skip is structural, not a gap: the overload
+test needs an **open** input and the null test needs a **connected**
+one, so exactly one of the pair always skips. With the 100 Ω DUT
+attached it is the overload test; both skip messages name the input
+state so the log says which case ran.
 
 Three quirks drove the API shape, all from the SDM4000A remote manual
 and all verified by hand against the extracted text rather than taken
@@ -178,11 +199,6 @@ looks correct until it meets the hardware.
 
 #### Known issues
 
-- **4-wire resistance is simulator-verified only.** The FRESistance
-  paths have local tests, but the four hardware-marked 4-wire cases skip
-  because the sense leads are not attached. `KNOWN_LIMITATIONS.md` § H-5
-  still quotes the datasheet's 0.2 Ω lead-resistance figure rather than a
-  measured one for the same reason.
 - **The bench unit's error queue is currently latched silent** (defect 3
   above). Measurements are unaffected and the suite handles it —
   `test_hw_error_reporting_is_reachable` warns rather than fails, since a
@@ -195,6 +211,14 @@ looks correct until it meets the hardware.
 - **Autozero timing is not characterised.** The driver can set and read
   the state, but the settling cost of an autozero cycle at each NPLC has
   not been measured.
+- **Two-instrument agreement resolves gross errors only.** The QR10x's
+  ±0.05 % dominates the meter's accuracy, so the cross-validation budget
+  at 100 Ω is ~0.07 Ω — wider than the 38 mΩ offset and comparable to the
+  79 mΩ of lead error itself. It catches units, scaling, a swapped
+  2-/4-wire function and a null of the wrong sign; it cannot certify
+  either instrument. The lead-resistance measurement escapes this because
+  it differences two readings from the *same* meter, cancelling the QR10x
+  term entirely.
 
 ### `deploy/` — the agent as a systemd service
 
