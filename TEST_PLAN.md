@@ -12,7 +12,7 @@ tiers:
   when the device isn't present.
 
 ```bash
-pytest -m "not hardware"     # 1185 collected, ~10 min, no hardware
+pytest -m "not hardware"     # 1276 collected, ~10 min, no hardware
 pytest -m hardware           # 173, needs the bench
 pytest                       # both
 ```

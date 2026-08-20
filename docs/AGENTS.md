@@ -124,7 +124,7 @@ benchctrl/
 │       ├── blobs.py, recordings.py     chunked transfer
 │       ├── runs/                       spec.py, engine.py, rules.py, store.py
 │       └── llm/                        supervisor.py, tools.py, client.py
-├── tests/                              1185 hw-free + 173 hardware-marked
+├── tests/                              1276 hw-free + 173 hardware-marked
 ├── scenarios/                          harness + saved captures
 ├── applications/sensor_profiler/       DUT power profiling + Streamlit browser
 ├── examples/                           copy-paste-friendly scripts
@@ -267,7 +267,7 @@ Things that look wrong (would surprise a maintainer):
 ### Run the tests
 
 ```bash
-pytest -m "not hardware" -q              # 1185 hardware-free, ~10 min
+pytest -m "not hardware" -q              # 1276 hardware-free, ~10 min
 pytest -m hardware -q                     # 173 hardware-marked
 pytest -q                                  # all (needs the bench on USB)
 ```

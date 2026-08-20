@@ -1,0 +1,64 @@
+#!/bin/sh
+# Serve the benchctrl status dashboard on localhost.
+#
+# Runs as the desktop user from the kiosk session (see benchctrl-kiosk), or by
+# hand for debugging:
+#
+#     BENCHCTRL_TOKEN=... /usr/local/bin/benchctrl-dashboard
+#
+# Reads its agent token from /etc/benchctrl/agent.json — the same file the
+# agent uses — so there is one token on the board rather than a second copy to
+# drift out of sync.
+
+set -eu
+
+VENV=${BENCHCTRL_DASHBOARD_VENV:-/home/arduino/benchctrl-dashboard-venv}
+SRC_DIR=${BENCHCTRL_SRC_DIR:-/home/arduino/benchctrl-1.2.0/src}
+AGENT_CONF=${BENCHCTRL_AGENT_CONF:-/etc/benchctrl/agent.json}
+PORT=${BENCHCTRL_DASHBOARD_HTTP_PORT:-8501}
+
+log() { logger -t benchctrl-dashboard "$*"; echo "benchctrl-dashboard: $*" >&2; }
+
+if [ ! -x "$VENV/bin/streamlit" ]; then
+    log "no streamlit at $VENV/bin/streamlit — run install-dashboard.sh first"
+    exit 1
+fi
+
+# The token. Extracted with python rather than grep/sed because it is
+# URL-safe base64 and can contain characters that make naive parsing wrong.
+if [ -z "${BENCHCTRL_TOKEN:-}" ]; then
+    if [ -r "$AGENT_CONF" ]; then
+        BENCHCTRL_TOKEN=$("$VENV/bin/python" - "$AGENT_CONF" <<'EOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        print(json.load(fh).get("token", ""))
+except Exception:
+    print("")
+EOF
+)
+    fi
+fi
+
+if [ -z "${BENCHCTRL_TOKEN:-}" ]; then
+    # Do not start a panel that will only ever show an auth error. Failing
+    # loudly here puts one clear line in the journal instead of a screen that
+    # looks broken for an unexplained reason.
+    log "no token: set BENCHCTRL_TOKEN or make $AGENT_CONF readable by $(id -un)"
+    exit 1
+fi
+
+export BENCHCTRL_TOKEN
+export PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
+# --server.address=127.0.0.1 is a real constraint, not a default: the panel is
+# for the attached display. Binding it to 0.0.0.0 would publish a view of the
+# bench, and its token, to anything on the network.
+exec "$VENV/bin/streamlit" run \
+    "$SRC_DIR/benchctrl/dashboards/panel.py" \
+    --server.address=127.0.0.1 \
+    --server.port="$PORT" \
+    --server.headless=true \
+    --browser.gatherUsageStats=false \
+    --server.fileWatcherType=none \
+    --theme.base=dark

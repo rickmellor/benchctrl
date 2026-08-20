@@ -1,0 +1,115 @@
+#!/bin/sh
+# The kiosk X session: start the dashboard, then a fullscreen browser at it.
+#
+# Named as an xsession (see benchctrl-kiosk.desktop) and selected by lightdm's
+# autologin, so the board boots straight to the panel with no keyboard.
+#
+# Recovery, because this session has no menu, no terminal, and no way to log
+# out — the board has no keyboard attached:
+#
+#     ssh arduino@<board>
+#     sudo rm /etc/lightdm/lightdm.conf.d/90-benchctrl-kiosk.conf
+#     sudo systemctl restart lightdm      # back to the normal greeter
+#
+# That is why lightdm is configured with a drop-in rather than by editing
+# lightdm.conf: recovery is deleting one file, not un-editing a 6 KB config.
+
+set -u
+
+log() { logger -t benchctrl-kiosk "$@"; }
+
+DASHBOARD=${BENCHCTRL_DASHBOARD_CMD:-/usr/local/bin/benchctrl-dashboard}
+PORT=${BENCHCTRL_DASHBOARD_HTTP_PORT:-8501}
+URL="http://127.0.0.1:$PORT"
+
+log "starting kiosk session on ${DISPLAY:-<no DISPLAY>}"
+
+# --- screen hygiene -------------------------------------------------------
+# A status panel that blanks after 10 minutes is a panel that is off when you
+# walk up to the bench, which is the moment it had one job.
+xset s off || true
+xset s noblank || true
+xset -dpms || true
+# Park the pointer out of the way. No mouse is attached today, and a cursor
+# sitting in the middle of the readout is just noise.
+command -v unclutter >/dev/null 2>&1 && unclutter -idle 1 &
+
+# A plain background rather than whatever the desktop default is, so the moment
+# between X starting and the browser drawing does not flash a stranger's
+# wallpaper at the operator.
+command -v xsetroot >/dev/null 2>&1 && xsetroot -solid '#11151a'
+
+# --- the dashboard --------------------------------------------------------
+"$DASHBOARD" &
+dashboard_pid=$!
+
+# Kill the server when the session ends, or a logout leaves a stray Streamlit
+# holding the port and the next login fails for a confusing reason.
+trap 'kill "$dashboard_pid" 2>/dev/null || true' EXIT HUP INT TERM
+
+# Wait for the port rather than sleeping a guessed number of seconds. Streamlit
+# on this board takes appreciably longer to import than on a laptop, and a
+# browser that opens too early shows its own error page and stays there.
+#
+# Pick a probe. /dev/tcp is deliberately not used: this is /bin/sh, where it is
+# a bash-ism that would silently never match and turn the wait into a 90 s
+# stall on every boot.
+if command -v curl >/dev/null 2>&1; then
+    probe() { curl -fsS --max-time 2 "$URL" >/dev/null 2>&1; }
+elif command -v wget >/dev/null 2>&1; then
+    probe() { wget -q -T 2 -O /dev/null "$URL" >/dev/null 2>&1; }
+elif command -v nc >/dev/null 2>&1; then
+    probe() { nc -z 127.0.0.1 "$PORT" >/dev/null 2>&1; }
+else
+    # Nothing to probe with. Wait a flat interval rather than pretending to
+    # check, and say which it was — a browser opening too early is a visible
+    # error page, and the operator should know why.
+    log "no curl/wget/nc to probe with; waiting a fixed 20s instead"
+    probe() { [ "$waited" -ge 20 ]; }
+fi
+
+waited=0
+while [ "$waited" -lt 90 ]; do
+    probe && break
+    if ! kill -0 "$dashboard_pid" 2>/dev/null; then
+        log "dashboard exited before serving; see: journalctl -t benchctrl-dashboard"
+        break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+log "dashboard reachable after ${waited}s (or gave up)"
+
+# --- the browser ----------------------------------------------------------
+for candidate in chromium chromium-browser google-chrome firefox; do
+    command -v "$candidate" >/dev/null 2>&1 && BROWSER="$candidate" && break
+done
+
+if [ -z "${BROWSER:-}" ]; then
+    log "no browser found; leaving X up so ssh recovery is still possible"
+    # Do NOT exit: an exiting xsession makes lightdm loop, and with autologin
+    # on that is an unattended restart loop nobody can interrupt from the board.
+    exec sleep infinity
+fi
+
+case "$BROWSER" in
+firefox)
+    exec "$BROWSER" --kiosk "$URL"
+    ;;
+*)
+    # --incognito so a crashed session does not come back with a "restore
+    # pages?" bubble covering the readout, which is exactly the kind of thing
+    # nobody can dismiss without a mouse.
+    exec "$BROWSER" \
+        --kiosk \
+        --incognito \
+        --noerrdialogs \
+        --disable-infobars \
+        --disable-session-crashed-bubble \
+        --disable-features=TranslateUI \
+        --no-first-run \
+        --check-for-update-interval=31536000 \
+        --password-store=basic \
+        --app="$URL"
+    ;;
+esac

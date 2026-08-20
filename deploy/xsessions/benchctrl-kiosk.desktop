@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=benchctrl kiosk
+Comment=Fullscreen benchctrl status dashboard (no desktop, no menu)
+Exec=/usr/local/bin/benchctrl-kiosk
+TryExec=/usr/local/bin/benchctrl-kiosk
+Type=Application
+DesktopNames=benchctrl
