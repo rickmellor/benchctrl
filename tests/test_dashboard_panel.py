@@ -136,6 +136,52 @@ def test_a_trustworthy_view_draws_no_warning(live):
     assert st.kinds("warning") == []
 
 
+def test_the_first_frame_is_not_drawn_as_a_warning():
+    """What the board actually showed on boot, at the render layer.
+
+    The startup frame gets a caption, not a warning banner: a kiosk that opens
+    every boot with a yellow alert trains the operator to ignore yellow alerts,
+    which is expensive on the one boot where something is genuinely wrong.
+    """
+    st = draw(BenchStatus())
+    assert "STARTING" in st.kinds("markdown")[0]
+    assert COLOURS["info"] in st.kinds("markdown")[0]
+    assert st.kinds("warning") == [], "the startup frame drew an alarm banner"
+    assert any("connecting" in c for c in st.kinds("caption")), st.kinds("caption")
+
+
+def test_the_connecting_caption_never_appears_beside_a_real_warning():
+    """Reachable, and the one way the calm caption could reassure wrongly.
+
+    A ``safety_failed`` event arrives on the client's rx thread, which can beat
+    the feed's first status poll — so the model is still "starting" while
+    holding an unsafe latch. Drawing both would put "connecting to the agent…"
+    directly beneath an UNSAFE banner, which reads as "hang on, it's fine".
+    """
+    s = BenchStatus()
+    s.apply_event({"kind": "safety_failed", "device": "otii_arc"}, now=100.0)
+    assert s.starting, "the premise of this test stopped holding"
+    st = draw(s)
+    assert "UNSAFE" in st.kinds("markdown")[0]
+    assert st.kinds("warning"), "the unsafe reason was not drawn"
+    assert not any("connecting" in c for c in st.kinds("caption")), (
+        "the startup caption was drawn alongside a real warning"
+    )
+
+
+def test_a_failed_connection_is_still_drawn_as_a_warning():
+    """The complement, at the render layer: a real failure keeps its banner."""
+    s = BenchStatus()
+    s.apply_disconnected("cannot reach the agent: [Errno 111] refused")
+    st = draw(s)
+    assert "NO AGENT" in st.kinds("markdown")[0]
+    assert COLOURS["warn"] in st.kinds("markdown")[0]
+    warnings = st.kinds("warning")
+    assert warnings, "an unreachable agent drew no warning"
+    assert any("Errno 111" in w for w in warnings), warnings
+    assert not any("connecting" in c for c in st.kinds("caption"))
+
+
 def test_a_disconnected_panel_says_so(live):
     live.apply_disconnected("the agent closed the connection")
     st = draw(live)
@@ -197,7 +243,11 @@ def test_every_reachable_headline_has_a_colour(live):
     reached = {}
 
     empty = BenchStatus()
-    reached[empty.headline] = empty.severity  # NO AGENT
+    reached[empty.headline] = empty.severity  # STARTING
+
+    gone = BenchStatus()
+    gone.apply_disconnected("refused")
+    reached[gone.headline] = gone.severity  # NO AGENT
 
     reached[live.headline] = live.severity  # IDLE
 
@@ -223,6 +273,7 @@ def test_every_reachable_headline_has_a_colour(live):
     reached[unsafe.headline] = unsafe.severity  # UNSAFE
 
     assert set(reached) == {
+        "STARTING",
         "NO AGENT",
         "IDLE",
         "RECORDING",

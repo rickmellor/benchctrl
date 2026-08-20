@@ -54,6 +54,14 @@ SILENCE_HEARTBEATS = 3.0
 #: Fallback silence budget when the agent never told us its heartbeat.
 DEFAULT_SILENCE_S = 45.0
 
+#: How long the panel may show ``STARTING`` before it must admit there is no
+#: agent. The feed connects on a background thread, so the first frame is drawn
+#: before any attempt has finished and ``NO AGENT`` would be a guess rather than
+#: a fact. Past this budget the opposite is true: no attempt has completed in a
+#: length of time where one should have, and a screen still saying "starting" is
+#: the stale-but-plausible display this module exists to prevent.
+STARTUP_GRACE_S = 10.0
+
 
 @dataclass
 class DeviceView:
@@ -117,6 +125,13 @@ class BenchStatus:
     #: Monotonically increasing ``seq`` last seen. The event bus guarantees
     #: order is never permuted, so a decrease means a reconnect, not a bug.
     last_seq: Optional[int] = None
+    #: Whether any connection attempt has finished yet, either way. Separates
+    #: "I have not tried" from "I tried and there is no agent" — see
+    #: :py:attr:`headline`.
+    attempted: bool = False
+    #: When this model was built, for :py:meth:`expire_startup_grace`. Uses the
+    #: real clock by default and is settable, so tests do not have to sleep.
+    created_mono: float = field(default_factory=time.monotonic)
 
     # --- derived --------------------------------------------------------
 
@@ -133,6 +148,24 @@ class BenchStatus:
         return self.connected and self.stale_reason is None
 
     @property
+    def starting(self) -> bool:
+        """True only before the first connection attempt has finished.
+
+        ``NO AGENT`` is a claim about the bench; during startup it would be a
+        guess about ourselves. The feed connects on a background thread, so the
+        very first frame is drawn before any attempt has resolved — a panel that
+        shouts there is no agent in that window has cried wolf, and a display
+        that cries wolf on every boot is one an operator learns to ignore.
+
+        The window is bounded two ways: any finished attempt sets
+        :py:attr:`attempted` (so a real failure shows ``NO AGENT`` with its real
+        reason, usually within milliseconds on localhost), and
+        :py:meth:`expire_startup_grace` ends it after
+        :py:data:`STARTUP_GRACE_S` regardless.
+        """
+        return not self.attempted and not self.connected
+
+    @property
     def headline(self) -> str:
         """One word for the top of the screen, worst-case first.
 
@@ -142,6 +175,8 @@ class BenchStatus:
         """
         if self.unsafe_latch is not None:
             return "UNSAFE"
+        if self.starting:
+            return "STARTING"
         if not self.connected:
             return "NO AGENT"
         if self.stale_reason is not None:
@@ -157,6 +192,8 @@ class BenchStatus:
         """Severity of :py:attr:`headline`, for colouring."""
         return {
             "UNSAFE": "critical",
+            # Starting up is not a warning: nothing is known to be wrong yet.
+            "STARTING": "info",
             "NO AGENT": "warn",
             "STALE": "warn",
             "ARMED": "alarm",
@@ -169,6 +206,7 @@ class BenchStatus:
     def apply_connected(self, welcome: dict, *, now: Optional[float] = None) -> None:
         """A session came up. Clears staleness that a reconnect actually fixes."""
         self.connected = True
+        self.attempted = True
         self.agent_name = str(welcome.get("agent", ""))
         self.deadman_s = _as_float(welcome.get("deadman_s"))
         self.heartbeat_s = _as_float(welcome.get("heartbeat_s"))
@@ -189,9 +227,29 @@ class BenchStatus:
         as unconfirmed.
         """
         self.connected = False
+        # A finished attempt, however it finished, ends the startup grace: from
+        # here on the panel has a fact to report rather than an unknown.
+        self.attempted = True
         self.stale_reason = reason or "no session with the agent"
         for device in self.devices.values():
             device.inferred = True
+
+    def expire_startup_grace(self, *, now: Optional[float] = None) -> None:
+        """End the ``STARTING`` window once :py:data:`STARTUP_GRACE_S` has passed.
+
+        The backstop for a feed that never reports either way — a thread that
+        died before its first attempt, or a ``start()`` that was never called.
+        Without this, "starting" could stay on screen indefinitely, which is the
+        stale-but-plausible display the module header rules out.
+        """
+        if self.attempted:
+            return
+        if _mono(now) - self.created_mono >= STARTUP_GRACE_S:
+            self.attempted = True
+            self.stale_reason = (
+                f"no connection attempt has completed in {STARTUP_GRACE_S:.0f}s — "
+                f"is the dashboard feed running?"
+            )
 
     def apply_status(self, status: dict, *, now: Optional[float] = None) -> None:
         """Fold in an authoritative ``agent.status`` snapshot.
@@ -337,6 +395,7 @@ class BenchStatus:
             "headline": self.headline,
             "severity": self.severity,
             "connected": self.connected,
+            "starting": self.starting,
             "trustworthy": self.trustworthy,
             "stale_reason": self.stale_reason,
             "armed": self.armed_devices,

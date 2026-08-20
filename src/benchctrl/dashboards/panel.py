@@ -84,6 +84,10 @@ def render(st, snap: dict) -> None:
     # the second-most important thing on the screen.
     if snap["stale_reason"]:
         st.warning(f"⚠ {snap['stale_reason']}", icon="⚠️")
+    elif snap.get("starting"):
+        # A caption, not a warning: the first frame is drawn before the feed's
+        # thread has finished connecting, and nothing is known to be wrong yet.
+        st.caption("connecting to the agent…")
 
     armed = snap["armed"]
     if armed:

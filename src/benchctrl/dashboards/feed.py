@@ -201,6 +201,9 @@ class AgentFeed:
         reports staleness the moment it wakes up.
         """
         with self._lock:
+            # Bounds the STARTING window even if the feed thread never reports.
+            # Here rather than on a timer, for the same reason as check_silence.
+            self.status.expire_startup_grace()
             self.status.check_silence()
             data = self.status.to_dict()
             data["reconnects"] = self._reconnects

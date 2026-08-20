@@ -23,6 +23,7 @@ from benchctrl.dashboards.state import (
     DEFAULT_SILENCE_S,
     LOG_LIMIT,
     SILENCE_HEARTBEATS,
+    STARTUP_GRACE_S,
     BenchStatus,
 )
 
@@ -84,8 +85,100 @@ def live():
 def test_a_fresh_model_does_not_claim_to_be_idle():
     """Before anything is known, the panel must not look reassuring."""
     s = BenchStatus()
-    assert s.headline == "NO AGENT"
+    assert s.headline != "IDLE"
     assert not s.trustworthy
+
+
+# --------------------------------------------------------------------------
+# The startup window: "I have not tried" is not "there is no agent"
+# --------------------------------------------------------------------------
+
+
+def test_the_first_frame_says_starting_not_no_agent():
+    """Seen on the board: the boot screen's opening frame read ``NO AGENT``.
+
+    The feed connects on a background thread, so the first render happens
+    before any attempt has resolved. ``NO AGENT`` there is a guess about
+    ourselves dressed up as a fact about the bench, and a kiosk display that
+    cries wolf every boot is one an operator stops reading.
+    """
+    s = BenchStatus()
+    assert s.headline == "STARTING"
+    assert s.starting
+    assert s.severity == "info", "startup was drawn as a warning"
+    assert not s.trustworthy, "STARTING must not imply the view is current"
+
+
+def test_a_failed_attempt_still_says_no_agent():
+    """The half that must not weaken: a real failure is still reported as one.
+
+    This is the whole risk of the fix — buying a quiet first frame by making a
+    genuinely-absent agent look like a slow start would be a far worse bug than
+    the flicker it replaces.
+    """
+    s = BenchStatus()
+    s.apply_disconnected("cannot reach the agent: [Errno 111] refused")
+    assert s.headline == "NO AGENT"
+    assert not s.starting
+    assert s.severity == "warn"
+    assert "Errno 111" in s.stale_reason
+
+
+def test_a_connected_session_ends_the_startup_window():
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    assert not s.starting
+    assert s.attempted
+
+
+def test_a_drop_after_connecting_says_no_agent_not_starting(live):
+    """Once we have talked to the agent, losing it is never "starting"."""
+    live.apply_disconnected("the agent closed the connection")
+    assert live.headline == "NO AGENT"
+    assert not live.starting
+
+
+def test_the_startup_window_expires_rather_than_hanging_there():
+    """The backstop, for a feed thread that never reports either way.
+
+    Without it, a feed that was never started — or one whose thread died before
+    its first attempt — would leave "starting" on screen forever, which is the
+    stale-but-plausible display this module exists to prevent.
+    """
+    s = BenchStatus()
+    s.created_mono = 100.0
+    s.expire_startup_grace(now=100.0 + STARTUP_GRACE_S - 0.1)
+    assert s.headline == "STARTING", "the grace ended early"
+
+    s.expire_startup_grace(now=100.0 + STARTUP_GRACE_S)
+    assert s.headline == "NO AGENT"
+    assert "no connection attempt has completed" in s.stale_reason
+
+
+def test_expiring_the_grace_cannot_overwrite_a_real_reason():
+    """A recorded failure outranks the generic timeout message.
+
+    ``expire_startup_grace`` runs on every render, so a bug here would replace
+    "[Errno 111] refused" with "is the feed running?" — swapping the actionable
+    diagnosis for a vague one.
+    """
+    s = BenchStatus()
+    s.created_mono = 100.0
+    s.apply_disconnected("cannot reach the agent: [Errno 111] refused")
+    s.expire_startup_grace(now=100.0 + STARTUP_GRACE_S + 60.0)
+    assert "Errno 111" in s.stale_reason
+
+
+def test_an_unsafe_latch_outranks_the_startup_window():
+    """Nothing gets to look calm while an output is unproven.
+
+    Reachable in practice: a ``safety_failed`` event can arrive on the client's
+    rx thread before the feed's first status poll has landed.
+    """
+    s = BenchStatus()
+    s.apply_event({"kind": "safety_failed", "device": "otii_arc"}, now=100.0)
+    assert s.headline == "UNSAFE"
+    assert s.severity == "critical"
 
 
 def test_an_idle_bench_reads_idle(live):
@@ -440,6 +533,47 @@ def test_the_feed_reports_an_unreachable_agent_rather_than_a_blank_screen():
         snap = feed.snapshot()
     assert snap["headline"] == "NO AGENT"
     assert "cannot reach the agent" in snap["stale_reason"]
+
+
+def test_the_feed_says_starting_while_its_first_connect_is_still_in_flight():
+    """The board's real first frame: rendered before the thread has connected.
+
+    Blocks inside ``connect`` to hold the window open deterministically, rather
+    than racing a real socket for the few milliseconds it lasts on localhost.
+    """
+    release = threading.Event()
+
+    def slow_connect():
+        release.wait(timeout=5.0)
+        raise OSError("connection refused")
+
+    feed = AgentFeed(ENDPOINT, poll_s=0.05, connect=slow_connect)
+    try:
+        feed.start()
+        snap = feed.snapshot()
+        assert snap["headline"] == "STARTING", snap
+        assert snap["starting"]
+        assert not snap["trustworthy"]
+        # And the moment the attempt resolves, it tells the truth instead.
+        release.set()
+        assert _wait(lambda: feed.snapshot()["headline"] == "NO AGENT")
+    finally:
+        release.set()
+        feed.stop()
+
+
+def test_a_feed_that_never_starts_stops_claiming_to_be_starting():
+    """``snapshot()`` is what bounds the window, so it has to do the expiring.
+
+    A panel whose feed thread never ran would otherwise sit on "starting"
+    indefinitely — a calm screen with nothing behind it.
+    """
+    feed = AgentFeed(ENDPOINT, poll_s=0.05, connect=lambda: None)
+    # Never started. Backdate the model instead of sleeping out the grace.
+    feed.status.created_mono = time.monotonic() - (STARTUP_GRACE_S + 1.0)
+    snap = feed.snapshot()
+    assert snap["headline"] == "NO AGENT", snap
+    assert "no connection attempt has completed" in snap["stale_reason"]
 
 
 def test_the_feed_reconnects_after_the_session_drops():
