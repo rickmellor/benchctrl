@@ -40,12 +40,29 @@ missed every event that produced the current state. So the feed also polls
 lets :py:meth:`BenchStatus.apply_status` clear staleness. Polling is safe here
 *only* because this is an observer session; on a normal session it would starve
 the deadman.
+
+The bus inventory
+-----------------
+
+``agent.status`` reports what devices are *doing*, which is not the same as what
+is *attached*. The safety governor creates a device's state lazily — on the first
+call that could arm it — so on a freshly-started agent ``safety.devices`` is
+``{}``, and a panel driven from it alone shows NO LINK for an instrument that is
+plugged in and ready.
+
+``agent.discover`` answers the other question, so the feed polls it too, on a much
+slower clock (:py:data:`DEFAULT_INVENTORY_S`). It has to be a separate cadence
+rather than another field on the status poll: measured on the bench board it costs
+~1.65 s against ~5 ms for ``agent.status``, since identifying a USB-TMC instrument
+means reading its string descriptors over libusb. Both calls are in
+``OBSERVER_METHODS`` already, so none of this widens what a display may do.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 from benchctrl.config import EndpointConfig
@@ -57,6 +74,14 @@ log = logging.getLogger("benchctrl.dashboards.feed")
 #: carry the interesting transitions, and this only has to correct drift and
 #: establish state at startup.
 DEFAULT_POLL_S = 5.0
+
+#: How often to re-take the bus inventory (``agent.discover``). Two orders of
+#: magnitude slower than the status poll, and measured rather than guessed: on
+#: the bench board ``agent.discover`` takes ~1.65 s against ~5 ms for
+#: ``agent.status``, because identifying a USB-TMC instrument means reading its
+#: string descriptors over libusb. Instruments are also plugged in by hand on a
+#: timescale of minutes, so a fast scan would buy nothing for 300x the cost.
+DEFAULT_INVENTORY_S = 30.0
 
 #: Backoff bounds for reconnecting. Capped so a display left on overnight
 #: rejoins within a minute of the agent coming back, rather than an hour.
@@ -76,10 +101,12 @@ class AgentFeed:
         endpoint: EndpointConfig,
         *,
         poll_s: float = DEFAULT_POLL_S,
+        inventory_s: float = DEFAULT_INVENTORY_S,
         connect: Optional[Callable[[], object]] = None,
     ) -> None:
         self.endpoint = endpoint
         self.poll_s = poll_s
+        self.inventory_s = inventory_s
         self.status = BenchStatus()
         # Injectable so tests can drive the whole loop against a fake client;
         # the default builds a real observer session.
@@ -173,6 +200,11 @@ class AgentFeed:
         # dict work and cannot block.
         client.on_event = self._on_event
 
+        # Due immediately: until the first inventory lands, every slot's presence
+        # is unknown, and "unknown" is the one thing the rail cannot render as a
+        # fact. Monotonic deadline rather than a countdown, so a slow status poll
+        # does not push the inventory back indefinitely.
+        next_inventory = 0.0
         while not self._stop.is_set():
             if not getattr(client, "is_connected", False):
                 with self._lock:
@@ -181,8 +213,37 @@ class AgentFeed:
             snapshot = client.status()
             with self._lock:
                 self.status.apply_status(snapshot)
+
+            now = time.monotonic()
+            if now >= next_inventory:
+                # Deliberately inline on this thread rather than a second one.
+                # The agent handles one request at a time per session, so a
+                # parallel scan would not overlap with the status poll anyway —
+                # it would just make the ordering unpredictable and let two
+                # in-flight calls both hit the same session's writer.
+                self._take_inventory(client)
+                next_inventory = time.monotonic() + self.inventory_s
             if self._stop.wait(self.poll_s):
                 return
+
+    def _take_inventory(self, client) -> None:
+        """Re-scan the bus. Never fatal: a failed scan is missing data, not a
+        broken session.
+
+        A scan that raises leaves the previous inventory in place rather than
+        blanking it. That is the right way round for this one field: discovery
+        walks USB and can fail transiently under contention, and flapping a slot
+        between ATTACHED and NOT FOUND would make the rail unreadable. A scan
+        that stops succeeding for good is covered by the staleness machinery,
+        which already governs everything else on the panel.
+        """
+        try:
+            inventory = client.discover()
+        except Exception as exc:  # noqa: BLE001 - an optional enrichment, not the feed
+            log.info("dashboard: bus inventory failed (%s); keeping the last one", exc)
+            return
+        with self._lock:
+            self.status.apply_inventory(inventory)
 
     def _on_event(self, event: dict) -> None:
         try:

@@ -159,6 +159,92 @@ The panel's queue is deliberately shallow (`DISPLAY_MAX_QUEUE = 32` vs
 `DEFAULT_MAX_QUEUE = 256`). A display wants *current* state; a deep queue
 only means it renders history nobody is reading.
 
+### The instrument rail: three sources, one column
+
+The right-hand rail took the first version of this panel from "wrong" to "useful",
+and the bug is worth recording because it was not a plumbing failure. All five
+slots read `NO LINK` on the development board while **four instruments sat on the
+bus, powered and ready**.
+
+The cause: `SafetyGovernor.state_for()` creates a device's `ArmState` *lazily*, on
+the first call that could arm something. So `agent.status`'s `safety.devices` is
+`{}` on a perfectly healthy idle agent, and an idle bench and an empty bench are
+indistinguishable in that field. Nothing in the panel had asked whether the
+hardware existed — only what it was doing.
+
+Three independent facts, three sources, and blurring them is what produced the
+five-`NO_LINK` rail:
+
+| Question | Source | Cost |
+|---|---|---|
+| What is it *doing*? | `safety.devices` in `agent.status` | ~5 ms |
+| Does the agent *serve* it? | `registry.describe()`, rides along in `WELCOME` | free |
+| Is it *attached*? | `agent.discover` | ~1.65 s |
+
+That cost column is the whole reason discovery is a separate poll with its own
+cadence (`DEFAULT_INVENTORY_S = 30 s`) rather than riding the status loop.
+Measured on the board: `agent.discover` 1649/1650/1691/1754/1656 ms against
+`agent.status` at 105 ms cold then 5 ms warm — a factor of ~300, because
+identifying a USB-TMC instrument means reading its string descriptors over
+libusb. Both RPCs were already in `OBSERVER_METHODS`, so none of this widens what
+a display is permitted to do.
+
+A dark slot now says *which* dark it is, because the operator's next action
+differs for each. Precedence runs most-actionable-first, so a live arm state can
+never be displaced by a configuration detail:
+
+| State | Means | Next action |
+|---|---|---|
+| `OPEN FAILED` | the agent tried to open it and failed | read the error; usually a udev rule |
+| `NOT SERVED` | not in the agent's `--devices` list | fix the config |
+| `NO ID` | scanned, not found, but *unscannable* | nothing — see below |
+| `NOT FOUND` | scanned and genuinely not on the bus | plug it in |
+| `SCANNING` | nobody has looked yet | wait |
+| `STANDBY` | served, on the bus, not opened yet | nothing; this is a healthy bench |
+| `NO LINK` | no session, so none of the above is known | fix the link |
+
+Three distinctions in that table are doing real work:
+
+- **`NOT FOUND` vs `SCANNING`.** A measurement of absence and the absence of a
+  measurement look identical on a screen and are not the same fact. Collapsing
+  them makes the panel assert an empty bench for the first seconds after every
+  boot — the window an operator is most likely to be looking at it.
+- **`NOT FOUND` vs `NO ID`.** `eastwood_qr10x` is the one declared device key with
+  **no VID/PID signature** in `discovery.SIGNATURES`; it sits behind a generic
+  CH340 bridge whose USB ID says nothing about what is on the other end, and
+  `inventory()` never runs the serial probe that could tell. A scan therefore
+  *structurally cannot find it*, so `NOT FOUND` there would be a false negative
+  dressed as a measurement. It is also why the bus counter reads `N/4`, not
+  `N/5`: counting an unfindable instrument in the denominator would make a fully
+  populated bench read as incomplete forever. The undecidable set is read from
+  `discovery.SIGNATURES` per frame rather than hardcoded, so adding a signature
+  upgrades the slot automatically instead of leaving it saying "cannot tell"
+  after the thing that could tell arrived.
+- **`NOT SERVED` vs no device table at all.** An agent that never sent a table is
+  not an agent that sent one omitting the key. Without `registry_known`, every
+  slot reads `NOT SERVED` against an older agent and on the first frame.
+
+Staleness gets **opposite** treatments on purpose. On disconnect, arm state is
+kept and marked `inferred`; presence is dropped outright. A stale `ARMED`
+over-warns, which is the safe direction. A stale `ATTACHED` under-warns by
+asserting something about the physical bench that nobody has checked since the
+link died.
+
+Hardware the scan finds that no driver claims gets its own list below the rail —
+a fixed five-slot rail structurally cannot show it, and "something is plugged in
+that benchctrl cannot drive" is a real bench fact. On the development board that
+list is a CH340 bridge; an SDG1032X and a DS1000Z are physically attached but
+absent from it, because without a udev rule pyvisa-py cannot read their string
+descriptors and they are **invisible rather than unopenable** (see
+[`remote.md`](remote.md#usb-tmc-instruments-need-three-more-wheels-and-a-udev-rule)).
+That is also why the board's scan identifies four instruments with six attached.
+Only entries carrying a `usb_id` are listed, so the board's four `/dev/ttyS*`
+ports and VISA aliases do not inflate the bench.
+
+What the rail surfaced immediately on the real board is a genuine config gap the
+old five-`NO_LINK` version hid: three instruments identified on the bus at
+`exact` confidence that the agent does not serve.
+
 ## E-stop — two independent mechanisms
 
 Both will exist, and they are not redundant copies of each other.

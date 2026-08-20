@@ -471,14 +471,18 @@ def test_to_dict_reports_the_honest_headline(live):
 class FakeClient:
     """A RemoteClient stand-in that can be made to fail on demand."""
 
-    def __init__(self, *, fail_after=None, status=None, welcome=None):
+    def __init__(self, *, fail_after=None, status=None, welcome=None,
+                 inventory=None, discover_raises=None):
         self.welcome = welcome if welcome is not None else dict(WELCOME)
         self.is_connected = True
         self.on_event = None
         self.closed = False
         self.status_calls = 0
+        self.discover_calls = 0
         self._fail_after = fail_after
         self._status = status or status_payload({"otii_arc": idle()})
+        self._inventory = inventory if inventory is not None else {"devices": []}
+        self._discover_raises = discover_raises
 
     def status(self):
         self.status_calls += 1
@@ -486,6 +490,12 @@ class FakeClient:
             self.is_connected = False
             raise OSError("connection reset")
         return self._status
+
+    def discover(self):
+        self.discover_calls += 1
+        if self._discover_raises is not None:
+            raise self._discover_raises
+        return self._inventory
 
     def close(self):
         self.closed = True
@@ -635,6 +645,119 @@ def test_the_feed_thread_does_not_outlive_stop():
 
 def test_stopping_a_feed_that_never_started_is_harmless():
     AgentFeed(ENDPOINT, connect=lambda: FakeClient()).stop()
+
+
+# --------------------------------------------------------------------------
+# The bus inventory
+#
+# agent.status says what devices are DOING; agent.discover says what is
+# ATTACHED. They are separate polls because they cost two orders of magnitude
+# apart — measured on the bench board, ~1.65 s against ~5 ms, because
+# identifying a USB-TMC instrument means reading its string descriptors over
+# libusb.
+# --------------------------------------------------------------------------
+
+
+def test_the_feed_takes_an_inventory_and_folds_it_in():
+    client = FakeClient(
+        inventory={"devices": [{"device_key": "otii_arc", "confidence": "exact",
+                                "path": "/dev/ttyACM0"}]}
+    )
+    feed = AgentFeed(ENDPOINT, poll_s=0.05, inventory_s=0.05, connect=lambda: client)
+    with feed:
+        assert _wait(lambda: feed.snapshot()["inventory_taken"])
+    snap = feed.snapshot()
+    assert snap["slots"]["otii_arc"]["present"] is True
+    assert snap["slots"]["otii_arc"]["path"] == "/dev/ttyACM0"
+
+
+def test_the_first_inventory_is_taken_immediately_not_after_one_interval():
+    """Until a scan lands every slot's presence is unknown, and unknown is the
+    one thing the rail cannot render as a fact. Waiting a full interval would
+    leave the panel unable to describe the bench for the whole of it."""
+    client = FakeClient()
+    feed = AgentFeed(ENDPOINT, poll_s=0.05, inventory_s=3600.0, connect=lambda: client)
+    with feed:
+        # inventory_s is an hour, so anything arriving here came from the
+        # due-immediately path rather than the interval.
+        assert _wait(lambda: client.discover_calls >= 1)
+
+
+def test_the_inventory_is_polled_far_less_often_than_the_status():
+    """The cadence separation is the point: discover costs ~300x what status
+    costs, so folding it into the status poll would pace the whole panel at the
+    slowest thing it does."""
+    client = FakeClient()
+    feed = AgentFeed(ENDPOINT, poll_s=0.01, inventory_s=3600.0, connect=lambda: client)
+    with feed:
+        assert _wait(lambda: client.status_calls >= 8)
+    # One from the due-immediately path, and no more for an hour.
+    assert client.discover_calls == 1, (
+        f"discover ran {client.discover_calls}x against {client.status_calls} "
+        f"status polls — the expensive call is riding the fast clock"
+    )
+
+
+def test_a_failed_inventory_keeps_the_last_one_rather_than_blanking_it():
+    """Discovery walks USB and can fail transiently. Flapping a slot between
+    ATTACHED and NOT FOUND would make the rail unreadable, and the staleness
+    machinery already covers a scan that stops succeeding for good."""
+    client = FakeClient(
+        inventory={"devices": [{"device_key": "otii_arc", "confidence": "exact"}]}
+    )
+    feed = AgentFeed(ENDPOINT, poll_s=0.02, inventory_s=0.02, connect=lambda: client)
+    with feed:
+        assert _wait(lambda: feed.snapshot()["inventory_taken"])
+        client._discover_raises = OSError("usb busy")
+        before = client.discover_calls
+        assert _wait(lambda: client.discover_calls > before + 1)
+        snap = feed.snapshot()
+    assert snap["inventory_taken"], "a transient scan failure blanked the inventory"
+    assert snap["slots"]["otii_arc"]["present"] is True
+
+
+def test_a_failed_inventory_does_not_kill_the_session():
+    """An inventory is an enrichment. Losing it must not cost the panel the
+    status poll, which is what staleness and arm state depend on."""
+    client = FakeClient(discover_raises=OSError("no usb access"))
+    feed = AgentFeed(ENDPOINT, poll_s=0.02, inventory_s=0.02, connect=lambda: client)
+    with feed:
+        assert _wait(lambda: client.status_calls >= 3)
+        snap = feed.snapshot()
+    assert snap["connected"]
+    assert not snap["inventory_taken"]
+
+
+def test_a_feed_against_a_client_with_no_discover_still_runs():
+    """An older agent, or any client stub without the method. The status half
+    must be untouched by the absence of the inventory half.
+
+    Written as a class that genuinely lacks the attribute rather than a subclass
+    with ``discover = None``: the failure mode being pinned is an AttributeError
+    from the lookup, and a None attribute would instead test a TypeError from
+    calling it, which is a different (and unreachable) path.
+    """
+
+    class NoDiscover:
+        def __init__(self):
+            self.welcome = dict(WELCOME)
+            self.is_connected = True
+            self.on_event = None
+            self.status_calls = 0
+
+        def status(self):
+            self.status_calls += 1
+            return status_payload({"otii_arc": idle()})
+
+        def close(self):
+            self.is_connected = False
+
+    client = NoDiscover()
+    feed = AgentFeed(ENDPOINT, poll_s=0.02, inventory_s=0.02, connect=lambda: client)
+    with feed:
+        assert _wait(lambda: feed.snapshot()["connected"])
+        assert _wait(lambda: client.status_calls >= 3)
+    assert not feed.snapshot()["inventory_taken"]
 
 
 def test_the_feed_requests_an_observer_session():

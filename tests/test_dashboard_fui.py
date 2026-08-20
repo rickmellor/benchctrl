@@ -21,6 +21,7 @@ display is *allowed to claim* is decided in Python and asserted below.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 import shutil
@@ -36,9 +37,15 @@ from benchctrl.config import EndpointConfig
 from benchctrl.dashboards.feed import AgentFeed
 from benchctrl.dashboards.fui.server import FuiServer
 from benchctrl.dashboards.fui.view import (
+    ABSENT,
+    FAULT,
     INSTRUMENTS,
     NO_LINK,
+    NOT_SERVED,
     STAGES,
+    STANDBY,
+    UNDETERMINED,
+    UNSCANNED,
     build_view,
 )
 from benchctrl.dashboards.state import BenchStatus
@@ -170,6 +177,374 @@ def test_a_trustworthy_view_marks_nothing_stale(live):
     view = view_of(live)
     assert view["trustworthy"]
     assert not any(s["stale"] for s in view["instruments"])
+
+
+# --------------------------------------------------------------------------
+# Which dark a dark slot is
+#
+# NO LINK used to be the answer to every question a slot could not answer. On
+# the real board that meant all five slots read NO LINK while four instruments
+# sat on the bus, powered and ready — because the safety governor creates a
+# device's state lazily, so safety.devices is {} on a healthy idle agent.
+# --------------------------------------------------------------------------
+
+
+def test_a_served_instrument_on_the_bus_reads_standby_not_no_link(live):
+    """The state that motivated all of this.
+
+    An instrument the agent serves, found on the bus, with no arm state yet, is
+    the resting state of a *healthy* bench — devices open lazily on first use.
+    Reporting NO LINK for it is not a harmless understatement: it is the panel
+    saying the bench is unpopulated when it is fully populated.
+    """
+    live.apply_registry([{"key": "rigol_dp2031", "open": False}])
+    live.apply_inventory(
+        {"devices": [{"device_key": "rigol_dp2031", "confidence": "exact",
+                      "path": "USB0::6833::42152::DP2A243500269::0::INSTR"}]}
+    )
+    psu = slot(view_of(live), "rigol_dp2031")
+    assert psu["status"] == STANDBY
+    assert psu["present"] is True
+    assert psu["ready"] is True
+    # Still not "linked": that word is reserved for a device the agent is
+    # actually talking to, and the renderer's bright-cyan treatment with it.
+    assert not psu["linked"]
+    assert not psu["armed"]
+
+
+def test_scanned_and_absent_is_not_the_same_slot_as_never_scanned(live):
+    """The distinction that earns its keep.
+
+    A measurement of absence and the absence of a measurement look identical on
+    a screen and are not the same fact. Collapsing them makes the panel assert
+    an empty bench for the first seconds after every boot, before any scan has
+    completed — and that is the window an operator is most likely to be looking.
+    """
+    live.apply_registry([{"key": "rigol_dp2031", "open": False}])
+
+    unscanned = slot(view_of(live), "rigol_dp2031")
+    assert unscanned["status"] == UNSCANNED
+    assert unscanned["present"] is None, "presence was asserted before any scan"
+
+    # Now a scan lands and genuinely does not find it.
+    live.apply_inventory({"devices": []})
+    scanned = slot(view_of(live), "rigol_dp2031")
+    assert scanned["status"] == ABSENT
+    assert scanned["present"] is False
+    assert scanned["status"] != unscanned["status"]
+
+
+def test_an_instrument_the_agent_does_not_serve_says_so(live):
+    """A configuration fact, not a hardware one, and the operator's fix differs.
+
+    The board this was built against serves exactly one device key while five
+    are declared in the rail, so this is the common case rather than an edge.
+    """
+    live.apply_registry([{"key": "otii_arc", "open": True}])
+    live.apply_inventory({"devices": []})
+    dmm = slot(view_of(live), "siglent_sdm4065a")
+    assert dmm["status"] == NOT_SERVED
+    assert not dmm["served"]
+
+
+def test_hardware_present_that_nothing_will_drive_demands_attention(live):
+    """Served-and-absent is a bench with a cable to plug in. Present-and-unserved
+    is a bench with the hardware already there and a config gap — the operator
+    can fix that now, so it is flagged, while a plain absence is not."""
+    # rigol_dl3031a IS served, so it can be the served-but-absent complement;
+    # siglent_sdm4065a is not served but is on the bus.
+    live.apply_registry(
+        [{"key": "otii_arc", "open": True}, {"key": "rigol_dl3031a", "open": False}]
+    )
+    live.apply_inventory(
+        {"devices": [{"device_key": "siglent_sdm4065a", "confidence": "exact",
+                      "path": "USB0::62700::4640::SDM46A0CA00021::0::INSTR"}]}
+    )
+    view = view_of(live)
+    dmm = slot(view, "siglent_sdm4065a")
+    assert dmm["status"] == NOT_SERVED
+    assert dmm["present"] is True
+    assert dmm.get("attention"), "present-but-undrivable should be actionable"
+
+    # And the complement, so this asserts a distinction rather than a constant:
+    # served but genuinely absent is not an alert, it is a cable to plug in.
+    load = slot(view, "rigol_dl3031a")
+    assert load["status"] == ABSENT
+    assert not load.get("attention")
+
+    # The third leg: unserved AND absent is the quietest of the three. Without
+    # this the `attention` flag could be keyed on "not served" alone and pass.
+    psu = slot(view, "rigol_dp2031")
+    assert psu["status"] == NOT_SERVED
+    assert not psu.get("attention")
+
+
+def test_an_open_failure_outranks_every_other_dark_state(live):
+    """The only dark state an operator can usually act on, so it wins.
+
+    It also has to beat NOT_SERVED, and proving that needs a device carrying an
+    open error while NOT being in the current table — otherwise the served check
+    never runs on this input and moving FAULT below it changes nothing. That
+    combination is reachable: an agent restarted with a shorter --devices list
+    drops the key from its table while the recorded failure is still on the slot.
+    """
+    live.apply_registry(
+        [{"key": "rigol_dp2031", "open": False,
+          "open_error": "BenchConnectionError('no DP2031 found')"}]
+    )
+    live.apply_inventory({"devices": []})
+    psu = slot(view_of(live), "rigol_dp2031")
+    assert psu["status"] == FAULT
+    assert psu["attention"] is True
+    assert "DP2031" in psu["open_error"], "the agent's own message is the useful part"
+
+    # Now the agent stops serving it, keeping the recorded error. FAULT must
+    # still win: the failure is the actionable fact, and it is also the more
+    # specific one — the agent demonstrably tried.
+    live.apply_registry([{"key": "otii_arc", "open": True}])
+    live.slots["rigol_dp2031"].open_error = "BenchConnectionError('no DP2031 found')"
+    unserved = slot(view_of(live), "rigol_dp2031")
+    assert not unserved["served"], "premise: this slot is no longer in the table"
+    assert unserved["status"] == FAULT, (
+        "an open failure was displaced by a configuration detail"
+    )
+
+
+def test_arm_state_outranks_everything_including_a_fault(live):
+    """Precedence at the top end. A live output must never be displaced by a
+    configuration or open-failure detail, however actionable that detail is."""
+    live.apply_registry(
+        [{"key": "otii_arc", "open": True, "open_error": "stale error"}]
+    )
+    live.apply_status(status_payload({"otii_arc": dev(armed=True)}), now=101.0)
+    arc = slot(view_of(live), "otii_arc")
+    assert arc["status"] == "ARMED"
+    assert arc["armed"]
+    assert arc["linked"]
+
+
+def test_no_session_means_no_presence_claim_at_all(live):
+    """Presence is dropped on disconnect while arm state is kept-but-marked.
+
+    Opposite treatments on purpose: a stale ARMED over-warns, which is the safe
+    direction, but a stale ATTACHED under-warns by asserting something about the
+    physical bench that nobody has checked since the link died.
+    """
+    live.apply_registry([{"key": "rigol_dp2031", "open": False}])
+    live.apply_inventory(
+        {"devices": [{"device_key": "rigol_dp2031", "confidence": "exact"}]}
+    )
+    assert slot(view_of(live), "rigol_dp2031")["present"] is True
+
+    live.apply_disconnected("cable pulled")
+    psu = slot(view_of(live), "rigol_dp2031")
+    assert psu["status"] == NO_LINK
+    assert psu["present"] is None, "claimed presence with no session to back it"
+
+
+def test_an_agent_that_sends_no_device_table_is_not_reported_unserved():
+    """Not-knowing vs knowing, one level up from presence.
+
+    With no table at all, a key missing from the slots means nothing. Treating it
+    as NOT SERVED would make an older agent — or the first frame of any session —
+    render five confident claims about a bench nobody has asked about.
+    """
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)  # no "devices" key
+    assert not s.registry_known
+    for sl in view_of(s)["instruments"]:
+        assert sl["status"] == NO_LINK, sl
+
+
+def test_the_device_table_arrives_with_the_welcome_frame():
+    """It rides along in WELCOME, so which devices an agent serves is known from
+    the first frame — no extra round trip, and available while every other
+    readout is still dark."""
+    s = BenchStatus()
+    s.apply_connected(
+        {**WELCOME, "devices": [{"key": "otii_arc", "open": False}]}, now=100.0
+    )
+    assert s.registry_known
+    assert s.slots["otii_arc"].served
+    assert not s.slots["otii_arc"].opened
+
+
+def test_a_reconnect_does_not_carry_the_old_agents_device_table():
+    """An agent restarted with a different --devices list must not have the
+    previous one's configuration attributed to it."""
+    s = BenchStatus()
+    s.apply_connected(
+        {**WELCOME, "devices": [{"key": "siglent_sdm4065a", "open": True}]}, now=100.0
+    )
+    assert s.slots["siglent_sdm4065a"].served
+    s.apply_disconnected("agent restarted")
+    assert not s.registry_known
+    s.apply_connected({**WELCOME, "devices": [{"key": "otii_arc", "open": True}]}, now=101.0)
+    assert not s.slots["siglent_sdm4065a"].served
+    assert s.slots["otii_arc"].served
+
+
+def test_unclaimed_hardware_is_reported_because_the_rail_cannot_show_it(live):
+    """A fixed five-slot rail structurally cannot say "something is plugged in
+    that benchctrl cannot drive". On the development board that is a real pair of
+    instruments — an SDG1032X and a DS1000Z scope with no drivers yet.
+    """
+    live.apply_inventory(
+        {
+            "devices": [
+                {"device_key": None, "usb_id": "f4ec:1103", "label": "",
+                 "product": "SDG1032X", "path": "USB0::..."},
+                {"device_key": None, "usb_id": "1ab1:04ce",
+                 "label": "Rigol DS1xx4Z", "path": "USB0::..."},
+            ]
+        }
+    )
+    unclaimed = view_of(live)["unclaimed"]
+    assert {u["usb_id"] for u in unclaimed} == {"f4ec:1103", "1ab1:04ce"}
+    assert any("SDG1032X" in u["label"] for u in unclaimed)
+
+
+def test_unidentified_devices_without_a_usb_id_are_not_listed_as_hardware(live):
+    """The board's inventory is mostly noise: four /dev/ttyS* plus a VISA alias
+    for each. Listing those would make a two-instrument bench look like a
+    fourteen-instrument one, which is the same failure as inventing a reading.
+    """
+    live.apply_inventory(
+        {
+            "devices": [
+                {"device_key": None, "path": "/dev/ttyS0", "usb_id": None},
+                {"device_key": None, "path": "ASRL/dev/ttyS1::INSTR", "usb_id": None},
+                {"device_key": None, "path": "auto", "usb_id": "1a86:7523",
+                 "label": "CH340 USB-serial bridge"},
+            ]
+        }
+    )
+    unclaimed = view_of(live)["unclaimed"]
+    assert [u["usb_id"] for u in unclaimed] == ["1a86:7523"]
+
+
+def test_one_instrument_on_two_transports_is_listed_once(live):
+    """Discovery reports a CH340 with no tty and its VISA alias separately. They
+    are one piece of hardware, and counting it twice overstates the bench."""
+    live.apply_inventory(
+        {
+            "devices": [
+                {"device_key": None, "path": "auto", "usb_id": "1a86:7523",
+                 "label": "CH340 USB-serial bridge"},
+                {"device_key": None, "path": "ASRL/dev/ttyACM9::INSTR",
+                 "usb_id": "1a86:7523", "label": "CH340 USB-serial bridge"},
+            ]
+        }
+    )
+    assert len(view_of(live)["unclaimed"]) == 1
+
+
+def test_the_rail_summary_cannot_disagree_with_the_rail(live):
+    """The header counts are derived from the slots that were just built, not
+    recomputed from the snapshot — so there is no arithmetic that can drift out
+    of step with the column underneath it."""
+    live.apply_registry(
+        [{"key": "otii_arc", "open": True}, {"key": "rigol_dp2031", "open": False}]
+    )
+    live.apply_inventory(
+        {"devices": [{"device_key": "rigol_dp2031", "confidence": "exact"},
+                     {"device_key": "otii_arc", "confidence": "exact"}]}
+    )
+    view = view_of(live)
+    assert view["bench"]["linked"] == sum(1 for s in view["instruments"] if s["linked"])
+    assert view["bench"]["present"] == sum(
+        1 for s in view["instruments"] if s["present"] is True
+    )
+    assert view["bench"]["total"] == len(INSTRUMENTS)
+    assert view["bench"]["inventory_taken"] is True
+
+
+def test_a_scan_that_cannot_decide_does_not_report_an_absence(live):
+    """The one device a bus scan structurally cannot find.
+
+    ``eastwood_qr10x`` is the only declared key with no VID/PID signature — it
+    sits behind a generic CH340 bridge whose USB ID says nothing about what is on
+    the other end, and ``inventory()`` never runs the serial probe that could
+    tell. So "the scan completed and it was not in it" is not evidence of
+    absence, and NOT FOUND there would be a false negative dressed as a
+    measurement.
+
+    The PSU in the same empty scan *is* signatured, so it reads NOT FOUND. That
+    complement is the point: without it this passes on a view that reports NO ID
+    for everything absent, and the guard would be doing nothing.
+    """
+    live.apply_registry(
+        [{"key": "eastwood_qr10x", "open": False}, {"key": "rigol_dp2031", "open": False}]
+    )
+    live.apply_inventory({"devices": []})
+    view = view_of(live)
+
+    qr = slot(view, "eastwood_qr10x")
+    assert qr["status"] == UNDETERMINED
+    # The underlying fact is unchanged — the scan really did not find it. What
+    # differs is whether the panel is willing to call that an absence.
+    assert qr["present"] is False
+    assert not qr.get("attention"), "unknowable is not actionable"
+
+    assert slot(view, "rigol_dp2031")["status"] == ABSENT
+
+
+def test_giving_an_instrument_a_signature_upgrades_its_slot(live, monkeypatch):
+    """The undecidable set is read from discovery's own table, not listed here.
+
+    A hardcoded exception list would keep saying "cannot tell" after the thing
+    that could tell arrived. Adding a signature for the QR10x must therefore
+    turn its slot into a real present/absent answer with no edit to the view —
+    which is also why the table is re-read per frame rather than cached.
+    """
+    import benchctrl.discovery as discovery
+
+    live.apply_registry([{"key": "eastwood_qr10x", "open": False}])
+    live.apply_inventory({"devices": []})
+    assert slot(view_of(live), "eastwood_qr10x")["status"] == UNDETERMINED
+
+    added = dataclasses.replace(discovery.SIGNATURES[0], device_key="eastwood_qr10x")
+    monkeypatch.setattr(discovery, "SIGNATURES", (*discovery.SIGNATURES, added))
+    assert slot(view_of(live), "eastwood_qr10x")["status"] == ABSENT
+
+
+def test_the_bus_denominator_excludes_what_no_scan_can_find(live):
+    """"4/5 ON BUS" on a fully populated bench would read as a missing
+    instrument forever. The header counts against what a scan can speak to."""
+    view = view_of(live)
+    assert view["bench"]["total"] == len(INSTRUMENTS)
+    assert view["bench"]["scannable"] == len(INSTRUMENTS) - 1, (
+        "the QR10x has no signature, so it cannot be in the bus denominator"
+    )
+
+
+def test_a_heuristic_identification_is_carried_through_as_a_guess(live):
+    """The QR10x behind a CH340 is a guess, and the rail must be able to show it
+    as one. Discovery already grades confidence; dropping the grade here would
+    launder a heuristic match into a fact."""
+    live.apply_registry([{"key": "eastwood_qr10x", "open": False}])
+    live.apply_inventory(
+        {"devices": [{"device_key": "eastwood_qr10x", "confidence": "heuristic",
+                      "path": "auto"}]}
+    )
+    qr = slot(view_of(live), "eastwood_qr10x")
+    assert qr["present"] is True
+    assert qr["confidence"] == "heuristic"
+
+
+def test_a_view_built_from_a_snapshot_with_no_slots_still_renders():
+    """Forward/backward compatibility: build_view is called with whatever an
+    AgentFeed produced, and a snapshot predating these fields must degrade to
+    "unknown" rather than raising and blanking the entire panel."""
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    snap = s.to_dict()
+    del snap["slots"]
+    del snap["inventory_taken"]
+    del snap["registry_known"]
+    snap["reconnects"] = 0
+    view = build_view(snap, s)
+    assert [sl["status"] for sl in view["instruments"]] == [NO_LINK] * len(INSTRUMENTS)
 
 
 # --------------------------------------------------------------------------

@@ -105,7 +105,10 @@ body::after {
 header { grid-area: head; }
 #left  { grid-area: left; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
 #stage { grid-area: stage; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
-#right { grid-area: right; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+/* #rail owns the grid cell; #right is just the stack of slots inside it, so that
+   renderRail() can keep counting its own children to decide on a rebuild. */
+#rail  { grid-area: right; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+#right { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
 footer { grid-area: foot; }
 
 /* --- panel chrome (the greebles) ---------------------------------------- */
@@ -426,10 +429,37 @@ header {
 .slot .name { font-size: 12px; font-weight: 700; color: var(--ink-dim); }
 .slot .role { font-size: 7px; color: var(--ink-dim); opacity: 0.7; text-transform: uppercase; }
 .slot .state { font-size: 9px; letter-spacing: 0.1em; color: var(--ink-dim); }
+/* Where it is, or why it is dark. Deliberately the quietest text in the slot:
+   it is diagnostic detail, and it must not compete with the state above it.
+   Wraps rather than ellipsising — a truncated device path is no use at all. */
+.slot .detail {
+  font-size: 6.5px;
+  line-height: 1.25;
+  color: var(--ink-dim);
+  opacity: 0.65;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
 
 .slot.linked { border-color: var(--cyan-dim); background: rgba(0, 229, 255, 0.05); }
 .slot.linked .name { color: var(--cyan); text-shadow: var(--glow-soft); }
 .slot.linked .state { color: var(--teal); }
+
+/* On the bus, agent serves it, not yet opened. The ordinary resting state of a
+   healthy bench, so it reads as present-and-fine — brighter than a dark slot,
+   and clearly below `linked`, which is the only state backed by live contact.
+   No glow: glow on this rail means the agent is talking to the instrument. */
+.slot.ready { border-color: var(--chrome-lit); background: rgba(42, 255, 195, 0.03); }
+.slot.ready .name { color: var(--ink); }
+.slot.ready .state { color: var(--cyan-dim); }
+
+/* Actionable: an open failure, or hardware present that nothing will drive.
+   Amber, not red — red on this panel is reserved for an armed output, and an
+   unconfigurable instrument must never be able to shout as loudly as a live
+   rail. Static, because only armed states pulse. */
+.slot.attention { border-color: var(--amber); background: rgba(255, 179, 0, 0.06); }
+.slot.attention .name, .slot.attention .state { color: var(--amber); }
+.slot.attention .detail { color: var(--amber); opacity: 0.8; }
 
 /* Armed is the loudest thing a slot can be. Red, glowing, pulsing. */
 .slot.armed {
@@ -443,6 +473,49 @@ header {
    told; it must not look like a confirmed reading. */
 .slot.inferred { border-style: dashed; }
 .slot.stale .state { color: var(--amber); text-decoration: line-through; }
+
+/* --- rail header and the unclaimed list --------------------------------- */
+
+#rail-head {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 4px;
+  border-bottom: 1px solid var(--chrome-lit);
+  font-size: 8px;
+  letter-spacing: 0.14em;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+}
+#rail-count { color: var(--cyan); font-weight: 700; }
+#rail-count.bad { color: var(--ink-dim); font-weight: 400; }
+
+/* Instruments on the bus that no driver claims. Structurally outside the fixed
+   rail, because the rail's whole point is a geometry that does not reflow — but
+   "something is plugged in that benchctrl cannot drive" is still a bench fact
+   worth showing, so it gets its own quiet block below. */
+#unclaimed {
+  flex: none;
+  border: 1px dashed var(--chrome-lit);
+  padding: 3px 4px;
+  background: rgba(0, 229, 255, 0.02);
+}
+#unclaimed-head {
+  font-size: 6.5px;
+  letter-spacing: 0.12em;
+  color: var(--ink-dim);
+  opacity: 0.8;
+  margin-bottom: 2px;
+}
+#unclaimed .item {
+  font-size: 7px;
+  line-height: 1.3;
+  color: var(--ink-dim);
+  overflow-wrap: anywhere;
+}
+#unclaimed .item .id { color: var(--cyan-dim); }
 
 /* --- footer ------------------------------------------------------------- */
 

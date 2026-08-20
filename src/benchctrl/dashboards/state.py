@@ -89,6 +89,44 @@ class DeviceView:
 
 
 @dataclass
+class DeviceSlot:
+    """What is known about one instrument *before* it has any arm state.
+
+    Separate from :py:class:`DeviceView` because the two answer different
+    questions and are learned from different places. ``DeviceView`` is "what is
+    this device doing", folded from the safety governor's per-device states.
+    This is "does this device exist, and does the agent own it", which comes
+    from the WELCOME/``agent.devices`` table and from ``agent.discover``.
+
+    Keeping them apart matters because the governor creates a state lazily, on
+    the first call that could arm something. So on a freshly-started agent
+    ``safety.devices`` is ``{}`` — an idle bench and an empty bench are
+    indistinguishable there, and a rail driven from it alone reports ``NO LINK``
+    for an instrument that is plugged in, powered, and ready.
+    """
+
+    key: str
+    #: The agent lists this key in its registry, so it is a device the agent
+    #: would open on demand. Says nothing about the hardware being attached.
+    served: bool = False
+    #: The registry has the device object open right now.
+    opened: bool = False
+    #: Why the last open attempt failed, verbatim from the agent. Kept because
+    #: "the agent tried and could not" is a different fact from "not attached",
+    #: and an operator can act on the first one.
+    open_error: Optional[str] = None
+    #: Found on the bus by ``agent.discover``. None means no inventory has been
+    #: taken, which is NOT the same as "not attached" — see
+    #: :py:attr:`BenchStatus.inventory_taken`.
+    present: Optional[bool] = None
+    #: How sure discovery is: ``exact`` (VID/PID matched a driver signature) or
+    #: ``heuristic``/``unknown``. Never upgraded here.
+    confidence: Optional[str] = None
+    #: Where it was found — a tty path or a VISA resource string.
+    path: Optional[str] = None
+
+
+@dataclass
 class RunView:
     run_id: str
     name: str = ""
@@ -105,6 +143,28 @@ class BenchStatus:
     #: Why the view may not reflect reality; None when the view is trustworthy.
     stale_reason: Optional[str] = None
     devices: dict[str, DeviceView] = field(default_factory=dict)
+    #: Per-key presence/ownership, keyed the same as :py:attr:`devices` but with
+    #: a different lifetime: a slot persists across the governor forgetting a
+    #: device, because "the agent serves this" stays true while "it is armed"
+    #: stops being true.
+    slots: dict[str, DeviceSlot] = field(default_factory=dict)
+    #: True once an ``agent.discover`` inventory has been folded in. Until then
+    #: every slot's ``present`` is None and the panel must say "not scanned"
+    #: rather than "not attached" — the difference between not knowing and
+    #: knowing there is nothing there.
+    inventory_taken: bool = False
+    #: True once a device table has been folded in from WELCOME or
+    #: ``agent.devices``. The same not-knowing-vs-knowing split one level up: with
+    #: no table at all, a key missing from :py:attr:`slots` means nothing, whereas
+    #: with a table it means the agent will not drive that device. Without this
+    #: flag an agent too old to send the table would make every slot read
+    #: "NOT SERVED", which is a confident claim about a bench nobody asked.
+    registry_known: bool = False
+    #: Instruments discovery found that no driver claims, as
+    #: ``{"usb_id": ..., "label": ..., "path": ...}``. Shown because the useful
+    #: bench fact is often "something is plugged in that benchctrl cannot
+    #: drive", and a rail of five fixed slots structurally cannot say that.
+    unclaimed: list[dict] = field(default_factory=list)
     runs: dict[str, RunView] = field(default_factory=dict)
     log: list[dict] = field(default_factory=list)
     sticky: list[dict] = field(default_factory=list)
@@ -254,9 +314,143 @@ class BenchStatus:
         # guarantee is per-session. Forget it rather than reporting a bogus gap.
         self.last_seq = None
         self.last_event_mono = _mono(now)
+        # The registry table rides along in WELCOME, so which devices this agent
+        # serves is known from the first frame — no extra call, and available
+        # even while every other readout is still NO LINK.
+        self.apply_registry(welcome.get("devices"))
         # Connecting does NOT clear unsafe_latch: a fresh socket says nothing
         # about whether the output ever went off.
         self.stale_reason = "connected — waiting for the first status snapshot"
+
+    def apply_registry(self, described: object) -> None:
+        """Fold in the agent's device table (WELCOME, or ``agent.devices``).
+
+        Each entry is ``registry.DeviceEntry.to_dict()``: ``key``, ``open``, and
+        ``open_error`` when the last attempt failed.
+
+        A key the agent no longer serves has its ``served`` flag cleared rather
+        than the slot deleted, because discovery may still have found the
+        hardware — "attached but this agent will not drive it" is a real and
+        confusing bench state, and it is worth being able to show it.
+        """
+        if not isinstance(described, list):
+            # An older agent, or a malformed frame. Leaving the previous table in
+            # place would be worse than knowing nothing: it would attribute the
+            # last agent's devices to this session.
+            return
+        seen: set[str] = set()
+        for entry in described:
+            if not isinstance(entry, dict):
+                continue
+            key = entry.get("key")
+            if not isinstance(key, str) or not key:
+                continue
+            seen.add(key)
+            slot = self.slots.setdefault(key, DeviceSlot(key=key))
+            slot.served = True
+            slot.opened = bool(entry.get("open"))
+            error = entry.get("open_error")
+            slot.open_error = str(error) if error else None
+        for key, slot in self.slots.items():
+            if key not in seen:
+                slot.served = False
+                slot.opened = False
+        self.registry_known = True
+
+    def apply_inventory(self, inventory: object) -> None:
+        """Fold in an ``agent.discover`` result: what is physically on the bus.
+
+        This is the only source that can say an instrument is *attached*, and it
+        is deliberately a separate call from the status poll — on the bench board
+        it costs ~1.65 s against ~5 ms for ``agent.status``, because identifying
+        a USB-TMC instrument means reading its string descriptors over libusb.
+        Folding it into the fast poll would pace the whole panel at the slowest
+        thing it does.
+
+        Sets :py:attr:`inventory_taken`, which is what licenses the view to draw
+        the difference between "not attached" and "not scanned yet".
+        """
+        if not isinstance(inventory, dict):
+            return
+        devices = inventory.get("devices")
+        if not isinstance(devices, list):
+            return
+
+        found: dict[str, dict] = {}
+        unclaimed: list[dict] = []
+        for dev in devices:
+            if not isinstance(dev, dict):
+                continue
+            key = dev.get("device_key")
+            if isinstance(key, str) and key:
+                # First wins: discover() returns a sorted list, so this is
+                # deterministic, and a second copy of one instrument does not
+                # overwrite the identification of the first.
+                found.setdefault(key, dev)
+                continue
+            # Unidentified. Only worth reporting if it carries a USB ID — the
+            # board's four /dev/ttyS* and its own VISA aliases are neither
+            # instruments nor absences, and listing them would make a two-
+            # instrument bench look like a fourteen-instrument one.
+            usb_id = dev.get("usb_id")
+            if not usb_id:
+                continue
+            unclaimed.append(
+                {
+                    "usb_id": str(usb_id),
+                    "label": str(dev.get("label") or dev.get("product") or ""),
+                    "path": str(dev.get("path") or ""),
+                }
+            )
+
+        for key, dev in found.items():
+            slot = self.slots.setdefault(key, DeviceSlot(key=key))
+            slot.present = True
+            confidence = dev.get("confidence")
+            slot.confidence = str(confidence) if confidence else None
+            path = dev.get("path")
+            slot.path = str(path) if path else None
+        # Absence is only recorded for slots we already know about. Anything the
+        # scan did not find is present=False now — an authoritative negative,
+        # which is exactly what makes a dark slot mean "looked, not there".
+        for key, slot in self.slots.items():
+            if key not in found:
+                slot.present = False
+                slot.confidence = None
+                slot.path = None
+
+        # De-duplicated by USB ID: the same instrument can surface on more than
+        # one transport (a CH340 with no tty, plus its VISA alias).
+        by_id: dict[str, dict] = {}
+        for item in unclaimed:
+            by_id.setdefault(item["usb_id"], item)
+        self.unclaimed = [by_id[k] for k in sorted(by_id)]
+        self.inventory_taken = True
+
+    def forget_inventory(self, reason: str = "") -> None:
+        """Discard what only the live session could vouch for: the bus inventory
+        and the agent's device table.
+
+        Called on disconnect. A cable pulled while the panel was blind would
+        otherwise leave a slot claiming ATTACHED forever, and that claim is the
+        most dangerous kind — it is about the physical bench rather than about
+        the display. Reverting to None makes the panel say "not scanned", which
+        is true.
+
+        The slots themselves survive, so the keys stay stable across a reconnect
+        and the rail does not flicker; only the claims they carry are dropped.
+        """
+        self.inventory_taken = False
+        self.unclaimed = []
+        # The device table belongs to the session that sent it. A reconnect may
+        # land on an agent restarted with a different --devices list, so holding
+        # the old table would attribute the previous agent's configuration to the
+        # new one.
+        self.registry_known = False
+        for slot in self.slots.values():
+            slot.present = None
+            slot.confidence = None
+            slot.path = None
 
     def apply_disconnected(self, reason: str = "") -> None:
         """The session went away. No events can arrive, so nothing is current.
@@ -273,6 +467,12 @@ class BenchStatus:
         self.stale_reason = reason or "no session with the agent"
         for device in self.devices.values():
             device.inferred = True
+        # Arm state is kept-but-marked-inferred above, because the last known
+        # arm state is the safest available guess. Presence gets the opposite
+        # treatment and is dropped outright: a stale "ARMED" over-warns, while a
+        # stale "ATTACHED" under-warns by asserting something about the physical
+        # bench that nobody has checked since the link died.
+        self.forget_inventory()
 
     def expire_startup_grace(self, *, now: Optional[float] = None) -> None:
         """End the ``STARTING`` window once :py:data:`STARTUP_GRACE_S` has passed.
@@ -446,6 +646,20 @@ class BenchStatus:
                 k: {"armed": d.armed, "label": d.label, "inferred": d.inferred}
                 for k, d in self.devices.items()
             },
+            "slots": {
+                k: {
+                    "served": s.served,
+                    "opened": s.opened,
+                    "open_error": s.open_error,
+                    "present": s.present,
+                    "confidence": s.confidence,
+                    "path": s.path,
+                }
+                for k, s in self.slots.items()
+            },
+            "inventory_taken": self.inventory_taken,
+            "registry_known": self.registry_known,
+            "unclaimed": list(self.unclaimed),
             "runs": {k: r.state for k, r in self.runs.items()},
         }
 

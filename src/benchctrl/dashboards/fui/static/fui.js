@@ -393,6 +393,34 @@ function fitCanvas(canvas, res) {
  * painting once `alive` is false — see the curtain in applyLiveness(). */
 const M = { view: null, alive: false, misses: 0, frames: 0, fps: 0, lastFps: 0 };
 
+/* The second line of a slot: where it is, or why it is dark. Kept short enough
+ * to read at three metres, and only ever built from fields the view supplied —
+ * an empty string when there is nothing true to say, never a filler. */
+function slotDetail(inst) {
+  if (inst.open_error) {
+    // The agent's own message, trimmed. Its exact text is the useful part (a
+    // permission error and a missing cable read very differently), so it is
+    // shortened rather than replaced with a category.
+    return String(inst.open_error).replace(/^\w*Error\(?['"]?/, '').slice(0, 40);
+  }
+  if (inst.linked && inst.path) return inst.path;
+  if (inst.present === true) {
+    // A heuristic identification is a guess, and on this rail a guess must be
+    // visible as one — the QR10x behind a CH340 is the case that matters.
+    return (inst.confidence && inst.confidence !== 'exact')
+      ? `${inst.path || 'on bus'} · ${inst.confidence}`
+      : (inst.path || 'on bus');
+  }
+  if (!inst.served) return 'no driver configured';
+  // NO ID: the scan ran and came back without it, but this instrument has no USB
+  // signature to match, so the scan proves nothing either way. Say which it is,
+  // or the slot looks like an unexplained failure.
+  if (inst.present === false && inst.discoverable === false) {
+    return 'not identifiable by bus scan';
+  }
+  return '';
+}
+
 function renderRail(instruments) {
   const rail = $('right');
   // Build once, then update in place: rebuilding the rail every 500ms would
@@ -404,7 +432,8 @@ function renderRail(instruments) {
       el.className = 'slot';
       el.dataset.key = inst.key;
       el.innerHTML =
-        `<div class="name"></div><div class="role"></div><div class="state"></div>`;
+        `<div class="name"></div><div class="role"></div>`
+        + `<div class="state"></div><div class="detail"></div>`;
       rail.appendChild(el);
     }
   }
@@ -413,12 +442,73 @@ function renderRail(instruments) {
     el.querySelector('.name').textContent = inst.label;
     el.querySelector('.role').textContent = inst.role;
     el.querySelector('.state').textContent = inst.status;
+    // textContent, not innerHTML: this carries an agent-supplied error string
+    // and a discovered device path, neither of which this page composes.
+    el.querySelector('.detail').textContent = slotDetail(inst);
     el.className = 'slot'
       + (inst.linked ? ' linked' : '')
       + (inst.armed ? ' armed' : '')
       + (inst.inferred ? ' inferred' : '')
-      + (inst.stale ? ' stale' : '');
+      + (inst.stale ? ' stale' : '')
+      // Present-but-not-open. Dimmer than linked and brighter than absent: the
+      // hardware is there, which is worth seeing from across the bench.
+      + (inst.ready ? ' ready' : '')
+      // Something the operator can act on — an open failure, or hardware present
+      // that nothing is configured to drive.
+      + (inst.attention ? ' attention' : '');
   });
+}
+
+/* The one-line summary above the rail. Counts come from the view, which derives
+ * them from the same slots the rail renders, so the header cannot disagree with
+ * the column under it. */
+function renderRailHead(bench, connected) {
+  const el = $('rail-count');
+  if (!bench || !connected) {
+    el.textContent = 'NO LINK';
+    el.className = 'val bad';
+    return;
+  }
+  if (!bench.inventory_taken) {
+    // No scan has landed, so the bus population is unknown. Reporting "0 on bus"
+    // here would be an assertion nobody has checked.
+    el.textContent = `${bench.linked}/${bench.total} LINKED · SCANNING`;
+    el.className = 'val';
+    return;
+  }
+  // Denominator is what a scan can decide, not the slot count: one declared
+  // device has no VID/PID signature, so a full bench would otherwise read 4/5
+  // forever. Falls back to total for a view built before `scannable` existed.
+  const of = bench.scannable == null ? bench.total : bench.scannable;
+  el.textContent = `${bench.linked} LINKED · ${bench.present}/${of} ON BUS`;
+  el.className = 'val';
+}
+
+/* Hardware on the bus that no driver claims. Hidden entirely when there is none,
+ * rather than showing an empty box: a permanent "UNCLAIMED: none" is furniture,
+ * and this should only ever appear when it has something to say. */
+function renderUnclaimed(items) {
+  const box = $('unclaimed');
+  const list = $('unclaimed-list');
+  if (!items || !items.length) {
+    box.hidden = true;
+    list.textContent = '';
+    return;
+  }
+  box.hidden = false;
+  list.textContent = '';
+  for (const it of items) {
+    const row = document.createElement('div');
+    row.className = 'item';
+    const id = document.createElement('span');
+    id.className = 'id';
+    id.textContent = it.usb_id || '';
+    row.appendChild(id);
+    // Built by node rather than innerHTML: these strings are USB descriptors read
+    // off the bus, so they are device-supplied and never interpolated into markup.
+    row.appendChild(document.createTextNode(' ' + (it.label || 'unidentified')));
+    list.appendChild(row);
+  }
 }
 
 function renderFlow(stages) {
@@ -530,6 +620,8 @@ function render(v) {
   $('log-verdict').textContent = v.log.length ? 'ACTIVE' : 'IDLE';
   renderLog(v.log);
   renderRail(v.instruments);
+  renderRailHead(v.bench, v.connected);
+  renderUnclaimed(v.unclaimed);
   renderFlow(v.stages);
 
   // The DMM readout. There is no measurement in the observer status payload, so

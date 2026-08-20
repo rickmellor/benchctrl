@@ -104,8 +104,22 @@
       </div>
     </div>
 
-    <!-- Right: instrument rail -->
-    <div id="right"></div>
+    <!-- Right: instrument rail. The header and the unclaimed list sit outside
+         #right because renderRail() owns that element's children entirely and
+         counts them to decide whether to rebuild. -->
+    <div id="rail">
+      <div id="rail-head">
+        <span>INSTRUMENTS</span><span class="val" id="rail-count">NO LINK</span>
+      </div>
+      <div id="right"></div>
+      <!-- Hidden until discovery finds hardware no driver claims. Empty by
+           default rather than "none", which would be a claim the page cannot
+           make before the first scan lands. -->
+      <div id="unclaimed" hidden>
+        <div id="unclaimed-head">UNCLAIMED ON BUS</div>
+        <div id="unclaimed-list"></div>
+      </div>
+    </div>
 
     <footer><div id="operation">LINKING TO BENCH CONTROL CORE…</div></footer>
   </div>
