@@ -581,6 +581,18 @@ function slotClasses(inst, act) {
       // TOUCH_WINDOW_S, not RECENT_ACTION_S: the `.act` text may legitimately say
       // "6s ago" while the card must have stopped claiming to be the one in use.
       // A highlight is read across the bench as "this one, now".
+      //
+      // KNOWN GAP, measured on hardware: during a *run* this stays dark. Action
+      // events are emitted on the remote-call path in server.py, and the run
+      // engine drives the device in-process without going through it, so a run's
+      // reads produce none. Verified: 56/56 samples lit while a client drove the
+      // DMM directly, 1/83 during a run reading the same instrument every 200ms.
+      // `.inrun` covers that case — deliberately steady rather than a pulse, since
+      // enrollment lasts minutes — so the rail is not silent about a running test,
+      // but it cannot yet say *which* instrument a multi-device run is talking to
+      // at this instant. Closing it means emitting an action event from the
+      // engine's device path, which is on the bench's hot loop and needs the
+      // ActionCoalescer treatment; not done here rather than done cheaply.
       + (inst.busy || touchedNow(inst) ? ' touched' : '');
 }
 

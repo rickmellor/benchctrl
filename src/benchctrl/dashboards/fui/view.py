@@ -409,7 +409,10 @@ def _slot_state(
     Three independent facts arrive here and the slot must not blur them:
 
     - ``dev`` — the safety governor's entry, present only once the agent has
-      tracked arm state for this device. What it is *doing*.
+      tracked arm state for this device. What it is *doing* — but only when it is
+      doing something. Its resting label ("idle") is not a status word here and
+      never reaches ``status``; a bare entry means a handle was opened, which the
+      OPEN rung says without outranking a run.
     - ``slot`` — the registry/discovery entry. Whether the agent *serves* it and
       whether it is *on the bus*.
     - ``inventory_taken`` — whether anybody has looked at the bus yet.
@@ -517,10 +520,29 @@ def _slot_state(
         "recent": recent,
     }
 
-    # The governor knows about it, so it is open and being tracked: report what
-    # it is doing, using the label the state model already derived so the FUI
-    # cannot invent a status vocabulary that disagrees with it.
-    if dev is not None:
+    # The governor knows about it and it has a real arm state: report what it is
+    # doing, using the label the state model already derived so the FUI cannot
+    # invent a status vocabulary that disagrees with it. Top of the ladder because
+    # every label reachable here is a live output — a hazard, and the one thing
+    # nothing below may displace.
+    #
+    # The governor's *resting* label is excluded, and that exclusion is the point.
+    # ``DeviceView.label`` returns "idle" when nothing is armed, and publishing it
+    # here put the word IDLE at the top of the precedence ladder — above IN RUN and
+    # both forms of OPEN, and not in this module's vocabulary at all. The effect was
+    # R1's exact failure mode wearing a different word: measured on hardware, a
+    # governor-tracked DMM read IDLE for all 82 in-flight samples of a run that had
+    # declared it, with ``run`` attribution absent, because the ladder returned
+    # before it ever reached the enrollment rung. STANDBY was fixed and IDLE was
+    # not, since it enters two rungs higher.
+    #
+    # "The governor has a state object for this device" is not an activity report.
+    # The governor creates that object lazily on the first call that *could* arm
+    # something, so its existence says a handle was opened — which is what the
+    # rungs below already know how to say, and they can say it without outranking
+    # a run.
+    armed_now = bool(dev and (dev["armed"] or dev["label"].upper() != "IDLE"))
+    if dev is not None and armed_now:
         return {
             **base,
             "linked": True,
@@ -532,6 +554,11 @@ def _slot_state(
             "inferred": bool(dev["inferred"]),
             "stale": not trustworthy,
         }
+    # Nothing armed, but the governor tracking it is still evidence of an open
+    # session: it does not create state for a device it has never called. Carried
+    # down the ladder so the OPEN rung can use it, rather than short-circuiting
+    # here — the run and hazard rungs in between must get their chance first.
+    governor_open = dev is not None
 
     # Everything below is "no arm state", which used to be one undifferentiated
     # NO_LINK. None of these are measurements, so none of them are ever marked
@@ -545,15 +572,22 @@ def _slot_state(
         return {**dark, "status": NO_LINK}
     if open_error:
         return {**dark, "status": FAULT, "attention": True}
-    if not registry_known:
+    if not registry_known and not governor_open:
         # No device table has arrived, so "the agent does not serve this" is not
         # something anyone has been told. Falls through to NO_LINK rather than
         # guessing either way — this is the older-agent and first-frame case.
+        #
+        # A governor state object is exempt because it is *not* the absence of a
+        # report: the governor only creates one for a device it has called, so the
+        # agent has told us about this instrument by a route other than the device
+        # table. Both of these gates mean "nobody said", and here somebody did.
         return {**dark, "status": NO_LINK}
-    if not served:
+    if not served and not governor_open:
         # Attached but unowned is worth distinguishing from simply unconfigured:
         # the first is a config gap on a bench that has the hardware, and the
-        # operator's next move differs.
+        # operator's next move differs. Same exemption, same reason — an agent
+        # whose governor is driving a device plainly serves it, whatever a missing
+        # or lagging device table implies.
         return {**dark, "status": NOT_SERVED, "attention": bool(present)}
     if present is False and discoverable:
         # A scan that *can* see this device ran and did not find it. Ranked above
@@ -588,7 +622,7 @@ def _slot_state(
             "stale": not trustworthy,
             "run": enrolled_run,
         }
-    if opened:
+    if opened or governor_open:
         # The agent holds a live session to this instrument. STANDBY explicitly
         # means "on the bus, *not opened yet*", so reporting it here was false:
         # during a 4-wire sweep the DMM and QR10x both read STANDBY for the whole
@@ -607,12 +641,17 @@ def _slot_state(
         # open session is exactly the condition it is meant to mark — the agent is
         # talking to this device. It is not marked ``inferred``: an open session
         # is reported by the registry in the ``agent.devices`` table, not deduced.
+        #
+        # ``governor_open`` reaches here too, and is marked ``inferred`` when the
+        # registry has not also said ``opened``: a governor state object implies a
+        # handle rather than reporting one, which is exactly what that flag means
+        # everywhere else in this ladder.
         return {
             **base,
             "linked": True,
             "status": OPEN,
             "armed": False,
-            "inferred": False,
+            "inferred": not opened,
             "stale": not trustworthy,
         }
     if recent is not None or busy:

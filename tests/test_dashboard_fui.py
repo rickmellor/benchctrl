@@ -127,12 +127,21 @@ def test_every_declared_instrument_gets_a_slot_even_when_absent():
     assert [s["key"] for s in view["instruments"]] == [i["key"] for i in INSTRUMENTS]
 
 
-def test_a_reported_instrument_shows_the_state_model_s_own_label(live):
-    """The FUI must not invent a status vocabulary that disagrees with the model."""
+def test_a_reported_instrument_the_governor_tracks_reads_as_open(live):
+    """The FUI must not invent a status vocabulary that disagrees with the model —
+    and "IDLE" was never in either vocabulary.
+
+    The governor creates a device's state lazily, on the first call that could arm
+    something, so its bare existence means a handle was opened. That is what OPEN
+    says. It used to read IDLE, the governor's *resting* label published as a
+    status word from the top rung of the ladder, which put it above IN RUN and
+    made enrollment unreachable for every device the governor tracked.
+    """
     view = view_of(live)
     arc = slot(view, "otii_arc")
     assert arc["linked"]
-    assert arc["status"] == "IDLE"
+    assert arc["status"] == OPEN
+    assert arc["armed"] is False
     assert arc["status"] != NO_LINK
 
 
@@ -918,7 +927,7 @@ def test_a_malformed_busy_payload_costs_the_marker_and_nothing_else(live, worker
     dmm = slot(view, "siglent_sdm4065a")
     assert dmm["busy"] is None
     assert dmm["queued"] == 0
-    assert dmm["status"] == "IDLE", "a bad workers table cost the rail its arm state"
+    assert dmm["status"] == OPEN, "a bad workers table cost the rail its arm state"
 
 
 def test_a_snapshot_with_no_busy_fields_at_all_still_renders(live):
@@ -933,7 +942,7 @@ def test_a_snapshot_with_no_busy_fields_at_all_still_renders(live):
     arc = slot(build_view(snap, live), "otii_arc")
     assert arc["busy"] is None
     assert arc["queued"] == 0
-    assert arc["status"] == "IDLE"
+    assert arc["status"] == OPEN
 
 
 # --------------------------------------------------------------------------
@@ -1266,7 +1275,7 @@ def test_a_malformed_age_costs_the_marker_and_nothing_else(live, ages):
     snap["reconnects"] = 0
     dmm = slot(build_view(snap, live), "siglent_sdm4065a")
     assert dmm["recent"] is None
-    assert dmm["status"] == "IDLE", "a bad age cost the rail its arm state"
+    assert dmm["status"] == OPEN, "a bad age cost the rail its arm state"
 
 
 def test_an_age_with_no_action_name_still_reports_the_age(live):
@@ -1293,7 +1302,7 @@ def test_a_snapshot_with_no_activity_fields_at_all_still_renders(live):
     snap["reconnects"] = 0
     arc = slot(build_view(snap, live), "otii_arc")
     assert arc["recent"] is None
-    assert arc["status"] == "IDLE"
+    assert arc["status"] == OPEN
 
 
 def test_a_long_action_name_is_clipped_before_it_reaches_the_glass(live):
@@ -2580,7 +2589,7 @@ def test_the_feed_reaches_the_bench_through_the_server(server):
         deadline.wait(0.05)
     else:
         pytest.fail(f"the feed never reached the fake bench: {body}")
-    assert slot(body, "otii_arc")["status"] == "IDLE"
+    assert slot(body, "otii_arc")["status"] == OPEN
 
 
 # --------------------------------------------------------------------------
@@ -2649,6 +2658,159 @@ def test_an_arm_state_outranks_enrollment():
     )
     assert state["status"] == "ARMED"
     assert state["armed"] is True
+
+
+# --------------------------------------------------------------------------
+# The governor's resting label is not a status word
+#
+# R1 says never show STANDBY for a device in use. STANDBY was fixed; IDLE was
+# not, and it entered the ladder two rungs higher. ``DeviceView.label`` returns
+# "idle" when nothing is armed, the top rung published it verbatim, and so every
+# device the governor tracked was pinned to a word that outranked IN RUN, both
+# forms of OPEN, and every hazard rung below it.
+#
+# Measured on hardware before the fix: a DMM a live run had declared read IDLE
+# for all 82 in-flight samples, with no run attribution on the slot. These tests
+# are the ladder-level statement of that, so it cannot come back on a bench
+# nobody is watching.
+# --------------------------------------------------------------------------
+
+
+def test_the_governors_resting_label_does_not_outrank_a_run():
+    """The captured defect. A governor-tracked device a run declared reads IN RUN.
+
+    The governor creates state for a device on the first call that *could* arm
+    something, so a run driving an instrument guarantees this combination — which
+    is what made the old ordering not a corner case but the common one.
+    """
+    state = _slot_state(
+        {"label": "idle", "armed": False, "inferred": False},
+        {"served": True, "present": True, "opened": True},
+        **_LADDER,
+        enrolled_run="r7",
+    )
+    assert state["status"] == IN_RUN
+    assert state["run"] == "r7"
+    assert state["armed"] is False
+
+
+def test_the_governors_resting_label_is_never_shown_as_a_status_word():
+    """"IDLE" is not in this module's vocabulary, and a bare governor entry is not
+    an activity report — it is evidence of an open handle, which OPEN already says.
+    """
+    state = _slot_state(
+        {"label": "idle", "armed": False, "inferred": False},
+        {"served": True, "present": True, "opened": True},
+        **_LADDER,
+    )
+    assert state["status"] == OPEN
+    assert state["status"] != "IDLE"
+
+
+def test_a_governor_entry_alone_is_enough_to_report_an_open_session():
+    """No device table, no ``served`` flag — but the governor has called this
+    device, so the agent has told us about it by another route. Both of those gates
+    mean "nobody said"; here somebody did, and NO LINK would be false."""
+    state = _slot_state(
+        {"label": "idle", "armed": False, "inferred": False},
+        None,
+        trustworthy=True,
+        inventory_taken=False,
+        registry_known=False,
+        connected=True,
+    )
+    assert state["status"] == OPEN
+    assert state["linked"] is True
+    # Inferred, not confirmed: a governor entry implies the handle rather than
+    # reporting it, and the renderer draws that dashed.
+    assert state["inferred"] is True
+
+
+def test_a_registry_confirmed_open_session_is_not_marked_inferred():
+    """The other half of the pair above. When the device table *does* say opened,
+    the reading is reported rather than deduced and must not be drawn dashed."""
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": True},
+        **_LADDER,
+    )
+    assert state["status"] == OPEN
+    assert state["inferred"] is False
+
+
+def test_an_arm_state_still_outranks_everything_below_it():
+    """The exemption above must not have cost the hazard rung its precedence. Any
+    label that is not the resting one is a live output and stays at the top."""
+    for label in ("armed", "emulating", "recording"):
+        state = _slot_state(
+            {"label": label, "armed": label == "armed", "inferred": False},
+            {"served": True, "present": True, "opened": True},
+            **_LADDER,
+            enrolled_run="r7",
+        )
+        assert state["status"] == label.upper(), label
+        assert state["status"] != IN_RUN
+
+
+def test_an_armed_flag_is_believed_even_when_the_label_disagrees():
+    """``armed`` is checked in its own right, not inferred from the label.
+
+    :py:class:`DeviceView` derives one from the other, so on a self-consistent
+    payload the two halves of the check are redundant — which is exactly why this
+    test builds an inconsistent one. ``build_view`` is handed whatever an
+    ``AgentFeed`` produced, and every other guard in this ladder is tested against
+    a payload the state model would never emit for the same reason.
+
+    Of the two fields, ``armed`` is the one that must win: it is the hazard flag,
+    and a stale or wrong label must not be able to demote a live output to a run
+    marker. Reading the label alone would do exactly that.
+    """
+    state = _slot_state(
+        {"label": "idle", "armed": True, "inferred": False},
+        {"served": True, "present": True, "opened": True},
+        **_LADDER,
+        enrolled_run="r7",
+    )
+    assert state["armed"] is True
+    assert state["status"] != IN_RUN
+    assert state["status"] != OPEN
+
+
+def test_a_governor_entry_does_not_outrank_a_measured_absence():
+    """A cable pulled mid-run leaves the governor's state object behind. The scan
+    is the newer measurement and the actionable one, exactly as it is for a
+    registry-reported session."""
+    state = _slot_state(
+        {"label": "idle", "armed": False, "inferred": False},
+        {"served": True, "present": False, "opened": True},
+        **_LADDER,
+        discoverable=True,
+        enrolled_run="r7",
+    )
+    assert state["status"] == ABSENT
+
+
+def test_a_governor_entry_does_not_outrank_a_lost_session():
+    """Nothing is known on a dead link, including what the governor last held."""
+    state = _slot_state(
+        {"label": "idle", "armed": False, "inferred": False},
+        {"served": True, "present": True, "opened": True},
+        trustworthy=True,
+        inventory_taken=True,
+        registry_known=True,
+        connected=False,
+    )
+    assert state["status"] == NO_LINK
+
+
+def test_a_governor_entry_does_not_outrank_an_open_failure():
+    """An open that failed is the one thing here the operator can usually fix."""
+    state = _slot_state(
+        {"label": "idle", "armed": False, "inferred": False},
+        {"served": True, "present": True, "opened": False, "open_error": "busy"},
+        **_LADDER,
+    )
+    assert state["status"] == FAULT
 
 
 def test_a_measured_absence_outranks_enrollment():
