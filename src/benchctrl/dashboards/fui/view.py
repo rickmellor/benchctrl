@@ -32,6 +32,7 @@ A dark slot now says *which* dark it is, because the operator's next action
 differs for each and the states are learned from different places:
 
 ======================  ==================================================
+:py:data:`OPEN`         the agent holds a live session to it, nothing armed
 :py:data:`STANDBY`      on the bus, agent serves it, not opened yet — the
                         resting state of a healthy bench
 :py:data:`ABSENT`       discovery looked and it is not there
@@ -71,6 +72,12 @@ NO_LINK = "NO LINK"
 #: has not opened it. This is the ordinary resting state of a healthy bench —
 #: devices open lazily, on first use — so it must not look like a fault.
 STANDBY = "STANDBY"
+
+#: The agent holds a live session to the instrument but nothing is armed. Ranks
+#: between an arm state and :py:data:`STANDBY`: it is a stronger statement than
+#: "on the bus" (the agent has talked to it and is holding it) and a weaker one
+#: than any arm state, which is why it cannot displace ARMED.
+OPEN = "OPEN"
 
 #: Discovery looked and the instrument is not on the bus.
 ABSENT = "NOT FOUND"
@@ -232,6 +239,49 @@ _STAGE_FOR_STATE = {
 }
 
 
+#: How long after an action a slot still shows it. Chosen against the status
+#: poll (:py:data:`~benchctrl.dashboards.feed.DEFAULT_POLL_S`, 5 s) so the marker
+#: outlives the gap between polls: the whole point is to cover the window where
+#: ``busy_with`` samples idle because a ~200 ms call fell between two polls.
+#: Long enough to bridge that, short enough that nobody reads it as "now".
+RECENT_ACTION_S = 8.0
+
+
+def _recent_action(
+    key: str, ages: object, names: object, *, trustworthy: bool
+) -> Optional[dict]:
+    """What this device was last seen doing, and how long ago — or None.
+
+    The complement to :py:func:`_busy_method`, and deliberately a different claim.
+    ``busy`` says a call is in flight *at this instant* and comes from a 5 s poll;
+    this says a call *completed* N seconds ago and comes from action events, which
+    arrive as each call finishes. Only the second can see a bench driven by
+    ~200 ms calls: the poll almost never lands inside one, which is why a live
+    6-setpoint sweep left both instruments' rails looking untouched.
+
+    Carrying the age rather than a boolean is what keeps it honest. "Recently
+    active" with no number invites being read as "active", and this marker is
+    always about the past — so the renderer is given the seconds and shows them.
+
+    Withheld entirely when the view is not trustworthy, matching ``busy``: on a
+    stale view the last action could have been minutes ago with nothing arriving
+    to correct it, and an age computed against a frozen feed understates itself.
+    """
+    if not trustworthy or not isinstance(ages, dict):
+        return None
+    age = ages.get(key)
+    if not isinstance(age, (int, float)) or isinstance(age, bool):
+        return None
+    if age < 0 or age > RECENT_ACTION_S:
+        return None
+    name = ""
+    if isinstance(names, dict):
+        raw = names.get(key)
+        if isinstance(raw, str):
+            name = _clip(raw, _ACTION_CHARS)
+    return {"age_s": round(float(age), 1), "action": name}
+
+
 def _busy_method(key: str, busy: object) -> Optional[str]:
     """What ``key``'s worker thread is executing right now, named by method alone.
 
@@ -291,6 +341,7 @@ def _slot_state(
     discoverable: bool = True,
     busy: Optional[str] = None,
     queued: int = 0,
+    recent: Optional[dict] = None,
 ) -> dict:
     """One instrument rail slot.
 
@@ -303,9 +354,19 @@ def _slot_state(
     - ``inventory_taken`` — whether anybody has looked at the bus yet.
 
     Precedence runs from most actionable to least: a live arm state outranks
-    everything, then an open failure (the operator can fix it), then absence,
-    then not-yet-scanned, then standby. Getting this order wrong is how a rail
-    ends up reporting a configuration detail over an armed output.
+    everything, then an open failure (the operator can fix it), then a measured
+    absence, then an open session, then the two forms of not-yet-known, then
+    standby. Getting this order wrong is how a rail ends up reporting a
+    configuration detail over an armed output.
+
+    The one adjacent pair worth naming is absence over an open session. They can
+    contradict each other — ``opened`` says the agent got a handle at some point,
+    not that it has just proved the handle works, so a cable pulled mid-session
+    leaves it True against a dead file descriptor. A scan that looked and did not
+    find the device is both the newer measurement and the one the operator can
+    act on, so it wins. The same reasoning puts an open session *above*
+    UNDETERMINED and UNSCANNED, which are not measurements at all: nothing opens
+    a session to hardware that is absent.
 
     ``busy`` and ``queued`` — what this device's worker thread is executing at
     this instant — deliberately sit **outside** that ordering, as their own
@@ -344,6 +405,12 @@ def _slot_state(
         # where the last snapshot's ``busy_with`` is still on the snapshot and
         # would sit on the glass indefinitely with nothing arriving to correct it.
         busy, queued = None, 0
+        # Same reasoning: an age measured against a feed that stopped arriving
+        # understates itself, so "2 s ago" would sit on the glass while the real
+        # answer grew to minutes. _recent_action also refuses on an untrustworthy
+        # view; belt and braces, because this function is called directly by tests
+        # and by any future caller that does not go through build_view.
+        recent = None
 
     served = bool(slot and slot.get("served"))
     opened = bool(slot and slot.get("opened"))
@@ -378,6 +445,12 @@ def _slot_state(
         # the renderer prints as nothing.
         "busy": busy,
         "queued": queued,
+        # What this device was last seen doing, with its age. Sits beside ``busy``
+        # rather than inside it, and never displaces it: a slot that is genuinely
+        # mid-call shows the call, and this covers the gaps between polls. Like
+        # ``busy`` it is carried on every slot, including dark ones, where None
+        # draws as nothing rather than as a claim of inactivity.
+        "recent": recent,
     }
 
     # The governor knows about it, so it is open and being tracked: report what
@@ -418,13 +491,48 @@ def _slot_state(
         # the first is a config gap on a bench that has the hardware, and the
         # operator's next move differs.
         return {**dark, "status": NOT_SERVED, "attention": bool(present)}
-    if present is False and not discoverable:
-        # A scan ran and did not find it, but a scan structurally cannot find
-        # this one — no VID/PID signature exists, so "not found" is not a
-        # measurement of absence and must not be shown as one.
-        return {**dark, "status": UNDETERMINED}
-    if present is False:
+    if present is False and discoverable:
+        # A scan that *can* see this device ran and did not find it. Ranked above
+        # an open session on purpose, and it is the one place the two genuinely
+        # contradict each other: the registry reports a session the agent opened
+        # at some point, not one it has just proved works, so a cable pulled
+        # mid-session leaves ``opened`` True against a handle that is already
+        # dead. Between "the agent holds a handle" and "a scan looked and it is
+        # gone", the absence is both the newer measurement and the actionable
+        # one, so it takes the word.
         return {**dark, "status": ABSENT}
+    if opened:
+        # The agent holds a live session to this instrument. STANDBY explicitly
+        # means "on the bus, *not opened yet*", so reporting it here was false:
+        # during a 4-wire sweep the DMM and QR10x both read STANDBY for the whole
+        # test while the agent was driving them.
+        #
+        # Above the two remaining not-known rungs, because an open session is
+        # better evidence of presence than either of them has. UNDETERMINED and
+        # UNSCANNED both mean "no scan has answered this"; a session that opened
+        # answers it — nothing opens a handle to hardware that is not there. This
+        # ordering is what the QR10x needs: it sits behind a driverless CH340
+        # with no VID/PID, so no non-probing scan will *ever* confirm it, and
+        # ranked below UNDETERMINED it would read "cannot tell" for the whole of
+        # a test that was driving it.
+        #
+        # ``linked`` is what earns the renderer's bright-cyan treatment, and an
+        # open session is exactly the condition it is meant to mark — the agent is
+        # talking to this device. It is not marked ``inferred``: an open session
+        # is reported by the registry in the ``agent.devices`` table, not deduced.
+        return {
+            **base,
+            "linked": True,
+            "status": OPEN,
+            "armed": False,
+            "inferred": False,
+            "stale": not trustworthy,
+        }
+    if present is False:
+        # Not discoverable, so the scan's "not found" is not a measurement of
+        # absence and must not be shown as one — no VID/PID signature exists for
+        # a scan to match.
+        return {**dark, "status": UNDETERMINED}
     if present is None or not inventory_taken:
         return {**dark, "status": UNSCANNED}
     # Served, on the bus, no arm state: the resting state of a healthy bench,
@@ -483,6 +591,10 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
     # without them must cost the rail its activity markers rather than the panel.
     busy_devices = snap.get("busy_devices")
     queued_devices = snap.get("queued_devices")
+    # Last-observed activity per device, from action events rather than the status
+    # poll. Same defensive .get treatment for the same reason.
+    action_age = snap.get("action_age")
+    last_action = snap.get("last_action")
 
     discoverable = _discoverable_keys()
 
@@ -513,6 +625,9 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
                 discoverable=spec["key"] in discoverable,
                 busy=_busy_method(spec["key"], busy_devices),
                 queued=_queue_depth(spec["key"], queued_devices),
+                recent=_recent_action(
+                    spec["key"], action_age, last_action, trustworthy=trustworthy
+                ),
             )
         )
         slots.append(slot)
@@ -705,4 +820,14 @@ def _operation(snap: dict) -> str:
     running = [r for r, s in snap["runs"].items() if s == "running"]
     if running:
         return f"RUN IN PROGRESS: {running[0].upper()}"
+    # Reads the same ``busy`` the headline's ACTIVE rung reads, immediately below
+    # the run branch that mirrors RECORDING. Without this rung the footer had no
+    # notion of activity outside a *run*, so a bench driven by direct device calls
+    # — which is how the bench is used interactively, and how every demo runs —
+    # showed "BENCH IDLE" underneath a headline reading "ACTIVE". Two banners
+    # disagreeing about whether the bench is doing something is worse than either
+    # being wrong alone: it tells the operator the panel cannot be trusted.
+    if snap.get("busy"):
+        detail = snap.get("busy_summary") or ""
+        return f"BENCH ACTIVE: {detail.upper()}" if detail else "BENCH ACTIVE"
     return "SYSTEM READY / BENCH IDLE"

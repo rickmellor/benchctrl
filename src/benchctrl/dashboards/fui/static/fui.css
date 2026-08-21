@@ -558,6 +558,24 @@ header {
 }
 @keyframes act-pulse { 50% { opacity: 0.4; } }
 
+/* Recently active, NOT active. Deliberately still: no animation at all, because a
+   pulse is read from across the bench as "happening now" and this line is about a
+   call that has already finished. Dimmer than a live activity line and marked with
+   a trailing-trace glyph rather than the ▸ play marker, so the two are
+   distinguishable at a glance without reading the text.
+
+   This line is what makes a bench driven by short calls visibly busy: the status
+   poll runs every 5s and a device call takes ~200ms, so .working alone left the
+   rail looking idle through an entire sweep. */
+.slot.recent .act {
+  color: var(--teal);
+  opacity: 0.5;
+}
+.slot.recent .act::before {
+  content: '· ';
+  color: var(--cyan-dim);
+}
+
 /* Unconfirmed: dashed border. We inferred this from an event and were never
    told; it must not look like a confirmed reading. */
 .slot.inferred { border-style: dashed; }

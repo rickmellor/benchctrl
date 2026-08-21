@@ -42,10 +42,14 @@ from benchctrl.dashboards.fui.view import (
     INSTRUMENTS,
     NO_LINK,
     NOT_SERVED,
+    OPEN,
+    RECENT_ACTION_S,
     STAGES,
     STANDBY,
     UNDETERMINED,
     UNSCANNED,
+    _recent_action,
+    _slot_state,
     build_view,
 )
 from benchctrl.dashboards.state import BenchStatus
@@ -759,6 +763,12 @@ def test_an_idle_device_claims_no_activity_at_all(live):
 
     The complement of the test above: it proves ``busy`` tracks the workers table
     rather than being present whenever the slot is linked.
+
+    The status word here is ``OPEN``, not ``STANDBY``: the registry reports this
+    device open, and an open session is a stronger statement than "on the bus, not
+    opened yet". That is the point being made — the status reflects the *session*
+    while ``busy`` reflects the *worker*, so an open-but-idle device asserts the
+    first and withholds the second.
     """
     live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
     live.apply_inventory(
@@ -766,9 +776,11 @@ def test_an_idle_device_claims_no_activity_at_all(live):
     )
     live.apply_status(workers_payload(workers={}), now=101.0)
     dmm = slot(view_of(live), "siglent_sdm4065a")
-    assert dmm["status"] == STANDBY
+    assert dmm["status"] == OPEN
     assert dmm["busy"] is None
     assert dmm["queued"] == 0
+    # And no past-tense marker either: no action event has ever arrived for it.
+    assert dmm["recent"] is None
 
 
 def test_work_queued_behind_the_current_call_is_counted(live):
@@ -923,6 +935,388 @@ def test_a_snapshot_with_no_busy_fields_at_all_still_renders(live):
 
 
 # --------------------------------------------------------------------------
+# An open session is its own state, and outranks the not-knowing states
+#
+# On the real bench a 6-setpoint 4-wire resistance sweep ran for minutes with
+# the agent driving the DMM and the QR10x, and both rails read STANDBY for the
+# whole test — a word whose own definition is "not opened yet".
+# --------------------------------------------------------------------------
+
+
+def test_a_device_the_agent_has_open_does_not_read_standby(live):
+    """The reported bug, at its smallest.
+
+    STANDBY is defined as "on the bus, agent serves it, *not opened yet*", so
+    printing it over a live session is not vagueness, it is the wrong fact. The
+    operator reading it concludes nothing is talking to the instrument, which is
+    the opposite of what is happening.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_inventory(
+        {"devices": [{"device_key": "siglent_sdm4065a", "confidence": "exact"}]}
+    )
+    dmm = slot(view_of(live), "siglent_sdm4065a")
+    assert dmm["status"] == OPEN
+    assert dmm["opened"] is True
+    # ``linked`` is what earns the renderer's bright-cyan treatment, and "the
+    # agent is talking to this device" is exactly what it is meant to mark.
+    assert dmm["linked"] is True
+    # An open session is reported in the agent.devices table, not deduced from an
+    # event, so it must not be drawn dashed like a guess.
+    assert dmm["inferred"] is False
+
+
+def test_a_served_but_unopened_device_still_reads_standby(live):
+    """The other half of the same rung, pinned so the fix did not delete a state.
+
+    STANDBY is the resting state of a *healthy* bench — the registry opens devices
+    lazily on first use — and it was the answer to the previous round of this bug,
+    where all five slots read NO LINK on a fully populated bench. A change that
+    made every served device read OPEN would trade one wrong word for another.
+    """
+    live.apply_registry([{"key": "rigol_dp2031", "open": False}])
+    live.apply_inventory(
+        {"devices": [{"device_key": "rigol_dp2031", "confidence": "exact"}]}
+    )
+    psu = slot(view_of(live), "rigol_dp2031")
+    assert psu["status"] == STANDBY
+    assert psu["opened"] is False
+    assert psu["linked"] is False
+
+
+def test_an_open_session_outranks_a_scan_that_cannot_decide(live):
+    """The QR10x's case, and the reason this rung sits where it does.
+
+    The QR10x is behind a driverless CH340 with no VID/PID of its own, so it is
+    not ``discoverable``: no non-probing scan will *ever* confirm it, and the
+    periodic presence sweeps run ``probe=False`` deliberately so they cannot
+    write a stray command at a mid-measurement instrument. Ranked below
+    UNDETERMINED, an open session would therefore read "cannot tell" for the
+    entire duration of a test that was actively driving it — permanently, not
+    just briefly.
+
+    An open session is the stronger evidence in any case: UNDETERMINED means no
+    scan has answered the question, and nothing opens a handle to hardware that
+    is not there.
+    """
+    live.apply_registry([{"key": "qr10x", "open": True}])
+    # A scan that ran and did not find it, on a key discovery structurally cannot
+    # identify — which is what UNDETERMINED exists to say.
+    live.apply_inventory({"devices": []})
+    qr = slot(view_of(live), "qr10x")
+    assert qr["discoverable"] is False, "fixture no longer exercises the QR10x case"
+    assert qr["status"] == OPEN
+
+
+def test_an_open_session_outranks_a_bus_nobody_has_scanned(live):
+    """Same ordering, the first-frame case.
+
+    For the seconds between connecting and the first sweep landing, ``present`` is
+    None for everything. A device the agent already has open is not unknown during
+    that window, and this is the window an operator is most likely to be looking
+    at — right after opening the panel.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    dmm = slot(view_of(live), "siglent_sdm4065a")
+    assert dmm["present"] is None, "fixture no longer exercises the unscanned case"
+    assert dmm["status"] == OPEN
+
+
+def test_a_scan_that_found_nothing_outranks_a_session_the_agent_thinks_it_has(live):
+    """The one place these two facts genuinely contradict each other.
+
+    ``opened`` says the agent obtained a handle at some point, not that it has
+    just proved the handle works — pull the USB cable mid-session and it stays
+    True against a dead file descriptor, with nothing arriving to correct it. A
+    presence sweep that looked and did not find the device is both the newer
+    measurement and the one the operator can act on, so it takes the word.
+    Showing OPEN here would be the panel vouching for a cable that is on the
+    bench floor.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_inventory({"devices": []})
+    dmm = slot(view_of(live), "siglent_sdm4065a")
+    assert dmm["status"] == ABSENT
+    assert dmm["present"] is False
+    # Not linked: that word is reserved for a device the agent is demonstrably
+    # talking to, and a scan just said it is not there.
+    assert dmm["linked"] is False
+
+
+def test_an_arm_state_still_outranks_an_open_session(live):
+    """The safety ordering, re-pinned against the new rung.
+
+    Every device the governor tracks is open, so if OPEN could displace an arm
+    state it would displace it *always* rather than in some corner — the new rung
+    would silently blank the one word on the rail that is about a live output.
+    """
+    live.apply_registry([{"key": "otii_arc", "open": True}])
+    live.apply_status(status_payload({"otii_arc": dev(armed=True)}), now=101.0)
+    arc = slot(view_of(live), "otii_arc")
+    assert arc["status"] == "ARMED"
+    assert arc["armed"] is True
+
+
+def test_an_open_failure_still_outranks_an_open_session(live):
+    """A registry can report both — a device it is serving whose last open raised.
+
+    FAULT is the only dark state the operator can act on directly, and it carries
+    ``attention``. Losing it to OPEN would drop both the actionable word and the
+    alert count for a device that is not working.
+    """
+    live.apply_registry(
+        [
+            {
+                "key": "siglent_sdm4065a",
+                "open": True,
+                "open_error": "VI_ERROR_RSRC_NFOUND",
+            }
+        ]
+    )
+    dmm = slot(view_of(live), "siglent_sdm4065a")
+    assert dmm["status"] == FAULT
+    assert dmm["attention"] is True
+
+
+def test_a_dead_session_reports_no_open_state_either(live):
+    """No session, so ``opened`` is of unknown age like every other slot fact.
+
+    The registry table came from an agent that is now unreachable; a device it had
+    open may have been closed, unplugged, or the agent may have exited. NO LINK is
+    the only honest answer, and OPEN is a particularly bad one to leave glowing —
+    it is the rail's brightest state.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_disconnected("agent went away")
+    dmm = slot(view_of(live), "siglent_sdm4065a")
+    assert dmm["status"] == NO_LINK
+    assert dmm["linked"] is False
+
+
+# --------------------------------------------------------------------------
+# What a device was last seen doing
+#
+# ``busy_devices`` is sampled on the 5 s status poll while a device call takes
+# ~200 ms, so the poll almost never lands inside one: the live sweep above spent
+# minutes making calls and the rails showed no activity at any point. Action
+# events arrive as each call completes, which is the only signal that can see it.
+# --------------------------------------------------------------------------
+
+
+def action_event(key, method, *, ok=True):
+    """One ``action`` event, shaped as the agent publishes it."""
+    return {"kind": "action", "device": key, "method": method, "ok": ok}
+
+
+def test_a_recent_call_is_reported_with_its_age(live):
+    """The fix for the rails looking untouched through a live test.
+
+    Carrying the age rather than a boolean is what keeps it honest: "recently
+    active" with no number gets read as "active", and this marker is always about
+    the past.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_event(
+        action_event("siglent_sdm4065a", "siglent_sdm4065a.measure_resistance_4wire"),
+        now=101.0,
+    )
+    snap = live.to_dict()
+    snap["action_age"] = {"siglent_sdm4065a": 2.0}
+    snap["reconnects"] = 0
+    dmm = slot(build_view(snap, live), "siglent_sdm4065a")
+    assert dmm["recent"] == {"age_s": 2.0, "action": "measure_resistance_4wire"}
+
+
+def test_a_recent_call_never_displaces_the_call_in_flight(live):
+    """Two different claims, and the present tense must win the one line it gets.
+
+    ``busy`` says a call is executing at this instant; ``recent`` says one
+    finished N seconds ago. A slot that is genuinely mid-call must show the call,
+    not a completed one, or the marker would go backwards exactly when the bench
+    got busiest.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_status(
+        workers_payload(
+            workers={"siglent_sdm4065a": busy("siglent_sdm4065a.read_voltage")}
+        ),
+        now=101.0,
+    )
+    snap = live.to_dict()
+    snap["action_age"] = {"siglent_sdm4065a": 1.0}
+    snap["last_action"] = {"siglent_sdm4065a": "measure_resistance_4wire"}
+    snap["reconnects"] = 0
+    dmm = slot(build_view(snap, live), "siglent_sdm4065a")
+    assert dmm["busy"] == "read_voltage"
+    # Both facts are carried; which one the renderer prints is its business, and
+    # it prefers busy. Nothing is lost to make room.
+    assert dmm["recent"]["action"] == "measure_resistance_4wire"
+
+
+def test_an_action_older_than_the_window_is_dropped_entirely(live):
+    """The marker has to expire, and expire to *nothing* rather than to a big
+    number.
+
+    A rail that keeps showing "measure_resistance_4wire · 400s ago" is claiming
+    the last thing it knows about is still worth reading. The window is sized
+    against the 5 s status poll — long enough to bridge the gap that hid the
+    activity, short enough that nobody reads it as now.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    snap = live.to_dict()
+    snap["action_age"] = {"siglent_sdm4065a": RECENT_ACTION_S + 0.5}
+    snap["last_action"] = {"siglent_sdm4065a": "measure_resistance_4wire"}
+    snap["reconnects"] = 0
+    dmm = slot(build_view(snap, live), "siglent_sdm4065a")
+    assert dmm["recent"] is None
+
+
+def test_an_action_inside_the_window_survives_the_poll_gap(live):
+    """The complement, and the property the window exists for.
+
+    A marker that expired faster than the status poll would leave the same blind
+    gap it was added to cover, so the boundary is asserted from both sides.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    snap = live.to_dict()
+    snap["action_age"] = {"siglent_sdm4065a": RECENT_ACTION_S - 0.5}
+    snap["last_action"] = {"siglent_sdm4065a": "measure_resistance_4wire"}
+    snap["reconnects"] = 0
+    dmm = slot(build_view(snap, live), "siglent_sdm4065a")
+    assert dmm["recent"] is not None
+    assert dmm["recent"]["age_s"] == round(RECENT_ACTION_S - 0.5, 1)
+
+
+def test_staleness_is_refused_at_both_places_that_can_refuse_it():
+    """The activity marker's staleness rule is guarded twice, and this pins the
+    halves apart.
+
+    ``_slot_state`` blanks ``recent`` on an untrustworthy view and
+    ``_recent_action`` independently refuses to build one, which is deliberate:
+    ``_slot_state`` is called directly by tests and by anything that does not go
+    through ``build_view``, and ``_recent_action`` is the reusable half. Because
+    either guard alone satisfies a whole-view test, deleting one is invisible from
+    the outside — so each is exercised with an input only it sees.
+
+    What is at stake is the field that ages: an age computed against a feed that
+    stopped arriving understates itself, so "2 s ago" would sit frozen on the
+    glass while the true answer grew to minutes.
+    """
+    ages = {"siglent_sdm4065a": 1.0}
+    names = {"siglent_sdm4065a": "measure_resistance_4wire"}
+    # The lower guard, reached with no _slot_state above it to cover for it.
+    assert _recent_action("siglent_sdm4065a", ages, names, trustworthy=False) is None
+    assert _recent_action("siglent_sdm4065a", ages, names, trustworthy=True) is not None
+    # The upper guard, handed a marker that is already built and valid — so only
+    # _slot_state's own blanking can drop it.
+    built = _recent_action("siglent_sdm4065a", ages, names, trustworthy=True)
+    state = _slot_state(
+        None,
+        {"served": True, "opened": True, "present": True},
+        trustworthy=False,
+        inventory_taken=True,
+        registry_known=True,
+        connected=True,
+        recent=built,
+    )
+    assert state["recent"] is None
+
+
+def test_a_stale_view_reports_no_recent_activity(live):
+    """An age measured against a feed that stopped arriving understates itself.
+
+    "2 s ago" would sit frozen on the glass while the true answer grew to
+    minutes — worse than ``busy``, which at least has no stale form to be
+    mistaken for. Withheld for the same reason ``busy`` is.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_status(workers_payload(workers={}), now=101.0)
+    snap = live.to_dict()
+    snap["action_age"] = {"siglent_sdm4065a": 1.0}
+    snap["last_action"] = {"siglent_sdm4065a": "measure_resistance_4wire"}
+    snap["stale_reason"] = "no frames for 40 s"
+    snap["trustworthy"] = False
+    snap["reconnects"] = 0
+    dmm = slot(build_view(snap, live), "siglent_sdm4065a")
+    assert dmm["recent"] is None
+
+
+@pytest.mark.parametrize(
+    "ages",
+    [
+        "not-a-dict",
+        None,
+        {"siglent_sdm4065a": "2.0"},  # a string age is not a number
+        {"siglent_sdm4065a": None},
+        {"siglent_sdm4065a": True},  # bool: an int by isinstance, not an age
+        {"siglent_sdm4065a": -1.0},  # an action in the future is not an age
+    ],
+)
+def test_a_malformed_age_costs_the_marker_and_nothing_else(live, ages):
+    """Same rule as the workers table: this field crossed a process boundary from
+    an agent that may be a release ahead or behind, and a bad optional field must
+    not take the rail's arm state down with it."""
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_status(workers_payload({"siglent_sdm4065a": dev()}), now=101.0)
+    snap = live.to_dict()
+    snap["action_age"] = ages
+    snap["last_action"] = {"siglent_sdm4065a": "measure_resistance_4wire"}
+    snap["reconnects"] = 0
+    dmm = slot(build_view(snap, live), "siglent_sdm4065a")
+    assert dmm["recent"] is None
+    assert dmm["status"] == "IDLE", "a bad age cost the rail its arm state"
+
+
+def test_an_age_with_no_action_name_still_reports_the_age(live):
+    """The age is the load-bearing half. An older agent that stamps activity
+    without naming it should still light the rail, because "something happened 2 s
+    ago" is the fact that was missing."""
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    snap = live.to_dict()
+    snap["action_age"] = {"siglent_sdm4065a": 2.0}
+    snap["last_action"] = {}
+    snap["reconnects"] = 0
+    dmm = slot(build_view(snap, live), "siglent_sdm4065a")
+    assert dmm["recent"] == {"age_s": 2.0, "action": ""}
+
+
+def test_a_snapshot_with_no_activity_fields_at_all_still_renders(live):
+    """An agent, or a stored snapshot, predating these fields. Degrade to "nothing
+    said" rather than raising."""
+    live.apply_registry([{"key": "otii_arc", "open": True}])
+    live.apply_status(workers_payload({"otii_arc": dev()}), now=101.0)
+    snap = live.to_dict()
+    del snap["action_age"]
+    del snap["last_action"]
+    snap["reconnects"] = 0
+    arc = slot(build_view(snap, live), "otii_arc")
+    assert arc["recent"] is None
+    assert arc["status"] == "IDLE"
+
+
+def test_a_long_action_name_is_clipped_before_it_reaches_the_glass(live):
+    """A slot's activity line is its narrowest, and an unclipped method name
+    pushes the rail wide enough to break the layout at three metres."""
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    snap = live.to_dict()
+    snap["action_age"] = {"siglent_sdm4065a": 1.0}
+    snap["last_action"] = {"siglent_sdm4065a": "m" * 400}
+    snap["reconnects"] = 0
+    dmm = slot(build_view(snap, live), "siglent_sdm4065a")
+    assert len(dmm["recent"]["action"]) < 400
+
+
+def test_activity_is_carried_on_a_dark_slot_without_lighting_it(live):
+    """Every slot gets the field, including the ones nothing is reported for, so
+    the renderer never has to ask whether it is missing or empty. None draws as
+    nothing — not as "idle", which would be a claim."""
+    view = view_of(BenchStatus())
+    assert view["instruments"], "no slots to check"
+    assert all("recent" in s for s in view["instruments"])
+    assert all(s["recent"] is None for s in view["instruments"])
+
+
+# --------------------------------------------------------------------------
 # The footer banner
 # --------------------------------------------------------------------------
 
@@ -960,6 +1354,233 @@ def test_an_idle_linked_bench_is_allowed_to_say_ready(live):
     """The complement: a display that never says "ready" is as useless as one
     that always does."""
     assert "READY" in view_of(live)["operation"]
+
+
+def test_the_two_banners_cannot_disagree_about_whether_the_bench_is_busy(live):
+    """The reported bug, and the reason it is worth a test rather than a one-liner.
+
+    The headline had an ACTIVE rung and the footer did not, so the footer's notion
+    of activity was "a *run* is in progress" — and the bench is driven by direct
+    device calls interactively and in every demo, no run object involved. On the
+    real board the top read ACTIVE while the bottom read BENCH IDLE at the same
+    instant.
+
+    Two banners disagreeing is worse than either being wrong on its own: it tells
+    the operator the panel cannot be trusted, and there is no way to tell from the
+    glass which half to believe.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_status(
+        workers_payload(
+            workers={
+                "siglent_sdm4065a": busy("siglent_sdm4065a.measure_resistance_4wire")
+            }
+        ),
+        now=101.0,
+    )
+    view = view_of(live)
+    assert "ACTIVE" in view["headline"]
+    assert "ACTIVE" in view["operation"]
+    assert "IDLE" not in view["operation"]
+
+
+def test_both_banners_see_a_sweep_the_status_poll_keeps_missing(live):
+    """The deeper half of the report: "both usually said idle".
+
+    Making the two banners agree was not enough, because they agreed on the wrong
+    answer. Both read ``any_busy``, which came only from the ``workers`` table —
+    sampled every 5 s while a device call takes ~200 ms, so the poll lands inside
+    a call about 4% of the time. A bench being driven continuously therefore read
+    IDLE almost always and flickered ACTIVE for single frames.
+
+    Here the poll lands *between* calls, which is the overwhelmingly common case,
+    and the panel must still say the bench is working — that is what an operator
+    watching a running test needs the top of the screen to tell them.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_event(
+        action_event("siglent_sdm4065a", "siglent_sdm4065a.measure_resistance_4wire"),
+    )
+    # An empty workers table: no call in flight as of this poll.
+    live.apply_status(workers_payload(workers={}))
+    view = view_of(live)
+    assert view["headline"] == "ACTIVE"
+    assert "ACTIVE" in view["operation"]
+    assert "IDLE" not in view["operation"]
+
+
+def test_the_footer_names_the_finished_call_in_the_past_tense(live):
+    """"BENCH ACTIVE" with no detail is the failure this fallback exists for: the
+    ``workers`` table it would normally quote is empty, so without it the whole
+    sweep shows a bare word.
+
+    Tensed and aged deliberately. Quoting a completed call as though it were
+    running would have the footer assert an instant it cannot vouch for, which is
+    the one thing this panel is not allowed to do.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_event(
+        action_event("siglent_sdm4065a", "siglent_sdm4065a.measure_resistance_4wire"),
+    )
+    live.apply_status(workers_payload(workers={}))
+    operation = view_of(live)["operation"]
+    assert "MEASURE_RESISTANCE_4WIRE" in operation
+    assert "AGO" in operation, "a finished call was quoted as though it were running"
+
+
+def test_a_call_in_flight_is_named_ahead_of_a_finished_one(live):
+    """The present tense wins the line when there is one. The fallback must not
+    displace the sharper fact it exists to cover for the absence of."""
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_event(action_event("siglent_sdm4065a", "siglent_sdm4065a.read_voltage"))
+    live.apply_status(
+        workers_payload(
+            workers={
+                "siglent_sdm4065a": busy("siglent_sdm4065a.measure_resistance_4wire")
+            }
+        ),
+    )
+    operation = view_of(live)["operation"]
+    assert "MEASURE_RESISTANCE_4WIRE" in operation
+    assert "AGO" not in operation
+
+
+def test_a_bench_that_has_gone_quiet_is_allowed_to_read_idle_again(live):
+    """The activity window has to close, or the panel says ACTIVE forever after the
+    first call of the session and the word stops meaning anything.
+
+    This is the property that makes the window safe to widen: it is bounded, so
+    the cost of covering the poll gap is a few seconds of lag on the way down, not
+    a permanent claim.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_event(action_event("siglent_sdm4065a", "siglent_sdm4065a.read_voltage"))
+    live.apply_status(workers_payload(workers={}))
+    assert view_of(live)["headline"] == "ACTIVE"
+
+    # Age the stamps past the window rather than sleeping through it.
+    live.last_action_at = {
+        k: t - (BenchStatus.ACTIVITY_WINDOW_S + 1.0)
+        for k, t in live.last_action_at.items()
+    }
+    view = view_of(live)
+    assert view["headline"] == "IDLE"
+    assert "IDLE" in view["operation"]
+
+
+def test_one_still_working_instrument_keeps_the_bench_active(live):
+    """A bench is busy if *anything* on it is, so the window is measured from the
+    newest call and not the oldest.
+
+    Needs two devices with genuinely different ages to say anything: with one
+    device, or two stamped together, "newest" and "oldest" are the same number and
+    a panel reading either looks identical. The realistic shape is a sweep that has
+    moved on — the QR10x was set once several seconds ago and the DMM is still
+    reading it every couple of hundred milliseconds. Measuring from the oldest
+    would declare that bench idle while a measurement was in progress.
+    """
+    live.apply_registry(
+        [{"key": "siglent_sdm4065a", "open": True}, {"key": "qr10x", "open": True}]
+    )
+    live.apply_event(action_event("qr10x", "qr10x.set_resistance"))
+    live.apply_event(
+        action_event("siglent_sdm4065a", "siglent_sdm4065a.measure_resistance_4wire"),
+    )
+    live.apply_status(workers_payload(workers={}))
+    # The setpoint call has aged out of the window; the measurement has not.
+    stale_stamp = (
+        live.last_action_at["qr10x"] - BenchStatus.ACTIVITY_WINDOW_S - 1.0
+    )
+    live.last_action_at["qr10x"] = stale_stamp
+    view = view_of(live)
+    assert view["headline"] == "ACTIVE"
+    # And the footer names the one that is actually recent, not the stale one.
+    assert "MEASURE_RESISTANCE_4WIRE" in view["operation"]
+    assert "SET_RESISTANCE" not in view["operation"]
+
+
+def test_the_activity_window_is_wider_than_the_gap_it_covers():
+    """A window narrower than the status poll leaves the same blind spot it was
+    added to close — the panel would go IDLE between polls of a bench that never
+    stopped working, which is the original bug with extra code."""
+    from benchctrl.dashboards.feed import DEFAULT_POLL_S
+
+    assert BenchStatus.ACTIVITY_WINDOW_S > DEFAULT_POLL_S
+
+
+def test_the_footer_names_what_the_bench_is_doing(live):
+    """"BENCH ACTIVE" alone leaves the operator watching a screen that says
+    something is happening without saying what — the question they then have to
+    answer by walking to the instrument."""
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_status(
+        workers_payload(
+            workers={
+                "siglent_sdm4065a": busy("siglent_sdm4065a.measure_resistance_4wire")
+            }
+        ),
+        now=101.0,
+    )
+    operation = view_of(live)["operation"]
+    assert "MEASURE_RESISTANCE_4WIRE" in operation
+
+
+def test_a_run_in_progress_still_outranks_plain_activity(live):
+    """A run is the more specific fact and names something with a beginning and an
+    end, so it keeps the line. Both are true; the footer has one line."""
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_status(
+        workers_payload(
+            workers={"siglent_sdm4065a": busy("siglent_sdm4065a.read_voltage")}
+        ),
+        now=101.0,
+    )
+    live.apply_event(
+        {"kind": "run_started", "run": "sweep", "state": "running"}, now=101.0
+    )
+    operation = view_of(live)["operation"]
+    assert "RUN IN PROGRESS" in operation
+
+
+def test_an_armed_output_still_outranks_activity_in_the_footer(live):
+    """The safety ordering, and the same inversion the slot rail refuses.
+
+    A routine measurement must never displace a live output — and it would do so
+    constantly, because an armed bench is exactly the one making calls. The
+    footer's ladder has to match the headline's here or the two disagree again, in
+    the direction that matters most.
+    """
+    live.apply_status(
+        workers_payload(
+            {"otii_arc": dev(armed=True)},
+            workers={"otii_arc": busy("otii_arc.read_voltage")},
+        ),
+        now=101.0,
+    )
+    operation = view_of(live)["operation"]
+    assert "ARMED" in operation
+    assert "OUTPUT IS LIVE" in operation
+
+
+def test_a_stale_view_reports_staleness_rather_than_activity(live):
+    """``busy`` on a stale snapshot is a claim about this instant sourced from a
+    frame that stopped arriving. "BENCH ACTIVE" would be asserting the bench is
+    working right now on the strength of a reading nobody can vouch for, and the
+    operator's actual problem is the dead link."""
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_status(
+        workers_payload(
+            workers={"siglent_sdm4065a": busy("siglent_sdm4065a.read_voltage")}
+        ),
+        now=101.0,
+    )
+    snap = live.to_dict()
+    snap["stale_reason"] = "no frames for 40 s"
+    snap["trustworthy"] = False
+    snap["reconnects"] = 0
+    operation = build_view(snap, live)["operation"]
+    assert "STALE" in operation
+    assert "ACTIVE" not in operation
 
 
 # --------------------------------------------------------------------------
@@ -1455,6 +2076,123 @@ def test_reduced_motion_pins_the_tier_instead_of_governing_it():
     )
     assert r["pinned"] == TIERS_CHEAPEST
     assert r["after"] == TIERS_CHEAPEST, "reduced motion must not be governed away"
+
+
+# --------------------------------------------------------------------------
+# The activity line, run under node
+#
+# The view decides what may be claimed and is asserted above; this covers the one
+# step after it that Python cannot see. It matters here because the activity line
+# is the only readout on the rail whose *tense* is carried by the renderer: the
+# view hands over a number, and "3.2s ago" versus a bare "3.2" is the difference
+# between reporting the past and asserting the present.
+# --------------------------------------------------------------------------
+
+# slotActivity needs no DOM — it takes a slot dict and returns a string — so it
+# can be sliced out and run directly rather than shimmed a browser.
+_ACTIVITY_FN_START = "function slotActivity(inst) {"
+
+
+def activity_source() -> str:
+    """The real ``slotActivity`` alone, lifted out of the renderer.
+
+    Sliced from the shipped file rather than reimplemented, for the reason the
+    governor tests give: a second copy would pass while the file that runs in the
+    page was broken.
+    """
+    src = FUI_JS.read_text(encoding="utf-8")
+    start = src.find(_ACTIVITY_FN_START)
+    assert start >= 0, f"slotActivity moved in {FUI_JS.name}; this test slices on it"
+    # Balance braces from the function's opening one, so the slice ends at the
+    # function's own close rather than at whatever the next `}` happens to be.
+    depth = 0
+    for i in range(start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError("unbalanced braces slicing slotActivity")
+
+
+def run_activity(inst: dict) -> str:
+    harness = "\n".join(
+        [
+            activity_source(),
+            f"console.log(JSON.stringify(slotActivity({json.dumps(inst)})));",
+        ]
+    )
+    out = subprocess.run(
+        [NODE, "--input-type=module", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert out.returncode == 0, f"node failed:\n{out.stderr}"
+    return json.loads(out.stdout)
+
+
+@needs_node
+def test_the_renderer_shows_a_call_in_flight_with_no_age():
+    """A call that is running has no age to report — it has not finished. Printing
+    one would be arithmetic dressed as information."""
+    line = run_activity(
+        {"busy": "measure_resistance_4wire", "queued": 0, "recent": None}
+    )
+    assert "measure_resistance_4wire" in line
+    assert "ago" not in line
+
+
+@needs_node
+def test_the_renderer_marks_a_finished_call_as_past():
+    """The tense is the renderer's contribution and the whole point of the field.
+
+    A bare "measure_resistance_4wire" on the rail reads as running. The view
+    deliberately hands over the age so this line can say the call is over; dropping
+    the "ago" would turn an honest past-tense marker into a false present-tense
+    claim, which is the one thing this panel is not allowed to do.
+    """
+    line = run_activity(
+        {"busy": None, "queued": 0, "recent": {"age_s": 3.2, "action": "read_voltage"}}
+    )
+    assert "read_voltage" in line
+    assert "3.2" in line
+    assert "ago" in line
+
+
+@needs_node
+def test_the_renderer_prefers_the_call_in_flight_over_the_finished_one():
+    """Same precedence the view keeps, enforced at the last step too: the present
+    tense wins the one line the slot has for this."""
+    line = run_activity(
+        {
+            "busy": "measure_resistance_4wire",
+            "queued": 2,
+            "recent": {"age_s": 1.0, "action": "read_voltage"},
+        }
+    )
+    assert "measure_resistance_4wire" in line
+    assert "read_voltage" not in line
+    assert "+2" in line, "a waiting queue went unreported"
+
+
+@needs_node
+def test_the_renderer_draws_nothing_for_a_slot_with_no_activity():
+    """Empty, not "idle". A word there would be a claim the view never made, and
+    every dark slot carries these fields as None."""
+    assert run_activity({"busy": None, "queued": 0, "recent": None}) == ""
+
+
+@needs_node
+def test_the_renderer_survives_an_age_with_no_action_name():
+    """The age is the load-bearing half: "something happened 2s ago" is the fact
+    that was missing from the rail, and an older agent may not name it."""
+    line = run_activity(
+        {"busy": None, "queued": 0, "recent": {"age_s": 2.0, "action": ""}}
+    )
+    assert "2" in line
+    assert "ago" in line
 
 
 # --------------------------------------------------------------------------

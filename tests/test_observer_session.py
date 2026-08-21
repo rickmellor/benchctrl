@@ -1211,3 +1211,460 @@ def test_a_heartbeat_reports_arm_state_from_the_governor(bench):
     beats = [e for e in seen if e.get("kind") == "link"]
     assert beats, "no heartbeat arrived"
     assert beats[0]["armed"] == ["otii_arc"]
+
+
+# --------------------------------------------------------------------------
+# The presence sweep: the bench tells the panel what is on the bus
+# --------------------------------------------------------------------------
+#
+# The dashboard used to answer "are my instruments still there?" by calling
+# `agent.discover` on its own 30 s timer. That is the poll that killed a live
+# 4-wire resistance sweep two setpoints in — see `resource_manager`'s docstring.
+# The agent now sweeps on its own timer and pushes a `presence` event, so the
+# display never has a reason to touch the bus. These tests pin the decisions that
+# make that safe to run forever: it is gated on somebody actually watching, it is
+# never on the deadman thread, it never overlaps itself, it never probes, and one
+# failed scan does not silently end presence reporting for the life of the agent.
+
+
+def _stub_inventory(monkeypatch, by_key, *, delay=0.0, raises=None):
+    """Replace ``discovery.inventory`` and return the list of calls it received.
+
+    ``_presence_sweep`` imports ``benchctrl.discovery`` *inside* the function, so
+    patching the attribute on the module is enough — there is no module-scope
+    reference to shadow.
+    """
+    calls: list[dict] = []
+
+    def fake_inventory(**kwargs):
+        calls.append(kwargs)
+        if delay:
+            time.sleep(delay)
+        if raises is not None:
+            raise raises
+        return {"by_device_key": {k: [{}] for k in by_key}}
+
+    import benchctrl.discovery as discovery
+
+    monkeypatch.setattr(discovery, "inventory", fake_inventory)
+    return calls
+
+
+def _watch_bus(agent):
+    """Tee every event the agent *publishes* into a list.
+
+    The bus rather than a socket: see
+    ``test_no_presence_sweep_runs_when_nobody_is_watching`` for why that
+    distinction is what makes the gate provable.
+    """
+    published: list[dict] = []
+    real = agent.events.publish
+    agent.events.publish = (  # type: ignore[method-assign]
+        lambda event, _real=real: (published.append(event), _real(event))[1]
+    )
+    return published
+
+
+def _pretend_watched(agent, monkeypatch, count=1):
+    """Make the agent believe a dashboard is attached, without a socket.
+
+    Used by the tests that drive ``_maybe_start_presence_sweep`` directly: they
+    are about the timer, the overlap guard and the scan, not about how a session
+    gets into the table — ``test_the_agent_knows_whether_a_dashboard_is_listening``
+    already covers that, and a real observer would add its own polling traffic to
+    every assertion here.
+    """
+    monkeypatch.setattr(agent, "observer_count", lambda: count)
+
+
+def _await(predicate, *, timeout=3.0, interval=0.02):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
+
+
+def test_a_presence_sweep_reports_which_served_devices_are_on_the_bus(bench, monkeypatch):
+    """What the panel replaces its own bus poll with.
+
+    ``served`` is what this agent is configured for and ``present`` is the subset
+    it can actually see, so a missing instrument is a difference between two
+    lists the consumer already has rather than something it has to scan for. If
+    ``present`` were every device on the bus instead of the served subset, the
+    four lines an operator cares about would be buried under every stray tty on
+    a board with a USB hub.
+    """
+    from benchctrl.agent.server import PRESENCE_KIND
+
+    agent = bench.agent
+    # A stray device on the bus that this agent does not serve, and a served
+    # device that is absent: the two ways `present` can be wrong.
+    _stub_inventory(monkeypatch, ["otii_arc", "some_stray_ftdi"])
+    published = _watch_bus(agent)
+    _pretend_watched(agent, monkeypatch)
+
+    agent._maybe_start_presence_sweep()
+    assert _await(lambda: [e for e in published if e.get("kind") == PRESENCE_KIND]), (
+        "no presence event was published at all"
+    )
+
+    event = next(e for e in published if e.get("kind") == PRESENCE_KIND)
+    assert event["present"] == ["otii_arc"]
+    assert event["served"] == list(agent.registry.keys)
+    assert "some_stray_ftdi" not in event["present"], (
+        f"a device this agent does not serve was reported present: {event['present']}"
+    )
+    assert event["present"] == sorted(event["present"])
+    assert event["changed"] is False
+    assert event["first"] is True
+
+
+def test_no_presence_sweep_runs_when_nobody_is_watching(bench, monkeypatch):
+    """A bench with no dashboard never scans its own USB bus.
+
+    The scan costs ~1.5 s of USB enumeration on the bench board and shares that
+    bus with live instrument I/O, so paying it every 30 s forever for a display
+    nobody is looking at is real interference bought with nothing. Worse, the
+    thing the sweep exists to protect — the bus — is the thing it disturbs.
+
+    Watches the event BUS rather than a client socket, for the same reason
+    ``test_no_heartbeat_is_emitted_when_nobody_is_listening`` does: an observer
+    that connects late would not have received events published before it
+    attached even if the gate were deleted, so "the observer saw nothing" is
+    consistent with a working gate AND with no gate at all. The provable claim
+    is that the agent *published* nothing. The second half then attaches an
+    observer and shows sweeps appearing on the same bus with the same timer,
+    which is what tells the gate apart from a feature that never works.
+    """
+    from benchctrl.agent.server import PRESENCE_KIND
+
+    agent = bench.agent
+    calls = _stub_inventory(monkeypatch, ["otii_arc"])
+    published = _watch_bus(agent)
+
+    def sweeps():
+        return [e for e in published if e.get("kind") == PRESENCE_KIND]
+
+    assert agent.observer_count() == 0
+    # Well past several intervals of the *real* timer, driven by the real
+    # deadman thread: 0.3 * 6 = 1.8s, so an ungated agent has had multiple
+    # chances by the time this returns.
+    agent.start_deadman()
+    try:
+        interval = agent.heartbeat_s * 6.0
+        assert not _await(lambda: bool(sweeps()), timeout=interval * 1.5)
+        assert sweeps() == [], f"swept with nobody watching: {sweeps()}"
+        assert calls == [], f"the bus was enumerated with nobody watching: {calls}"
+
+        # And the gate is the only reason it was quiet: attach an observer and
+        # sweeps appear, same bus, same timer, same test.
+        obs = bench.connect(observer=True)
+        obs.on_event = lambda e: None
+        assert _await(lambda: bool(sweeps()), timeout=interval * 3), (
+            "no presence sweep after an observer attached — this test cannot "
+            "tell the observer gate from a sweep that never works"
+        )
+        assert calls, "a presence event was published without scanning the bus"
+    finally:
+        agent.shutdown()
+
+
+def test_skipping_a_sweep_still_stamps_the_clock(bench, monkeypatch):
+    """A dashboard connecting must not inherit an hour of unwatched backlog.
+
+    ``_last_presence_mono`` is stamped even on the skip, so "due" is measured
+    from the last time the question was *asked*, not the last time it was
+    answered. Without this, an agent left alone overnight would look permanently
+    overdue and the first frame after a display connects would fire a ~1.5 s USB
+    scan into whatever the bench was already doing — the display disrupting the
+    bench at exactly the moment somebody started watching it.
+    """
+    agent = bench.agent
+    calls = _stub_inventory(monkeypatch, ["otii_arc"])
+
+    assert agent.observer_count() == 0
+    assert agent._last_presence_mono is None, "fixture already swept"
+
+    before = time.monotonic()
+    agent._maybe_start_presence_sweep()
+    after = time.monotonic()
+
+    assert calls == [], "the gate did not hold"
+    assert agent._last_presence_mono is not None, (
+        "an unwatched bench left the presence clock unset, so the first sweep "
+        "after a dashboard connects will be judged overdue"
+    )
+    assert before <= agent._last_presence_mono <= after
+
+
+def test_a_slow_bus_scan_cannot_delay_the_deadman(bench, monkeypatch):
+    """The invariant the whole thread hand-off exists for.
+
+    The deadman thread's first duty is driving an abandoned armed bench safe
+    inside its window. It also runs the presence timer, so a sweep executed
+    inline would stall trip detection for the length of a USB enumeration —
+    every sweep, forever. On a bench with a slow hub that is seconds of an armed
+    output nobody is watching, which is the exact outcome the interlock exists
+    to prevent.
+
+    Deterministic rather than timing-flaky: the stub blocks for many multiples
+    of the 0.5 s deadman tick, so an inline sweep could not possibly trip inside
+    the deadline while a threaded one comfortably does.
+    """
+    agent = bench.agent
+    # 8s: longer than the deadman window, longer than the assertion deadline,
+    # and far longer than the 0.5s tick — an inline scan cannot beat this.
+    _stub_inventory(monkeypatch, ["otii_arc"], delay=8.0)
+    _pretend_watched(agent, monkeypatch)
+
+    agent.governor.state_for("otii_arc").output_armed = True
+
+    def tripped():
+        return any(
+            t["reason"] == "heartbeat_lost" for t in agent.governor.status()["trips"]
+        )
+
+    started = time.monotonic()
+    agent._maybe_start_presence_sweep()
+    handed_off = time.monotonic() - started
+    assert handed_off < 1.0, (
+        f"_maybe_start_presence_sweep blocked its caller for {handed_off:.2f}s — "
+        f"it is running the scan rather than handing it to a thread"
+    )
+    assert agent._presence_running, "the scan is not in flight; the test proves nothing"
+
+    agent.start_deadman()
+    try:
+        assert _await(tripped, timeout=agent.deadman_s * 5), (
+            f"an armed bench was not tripped while a bus scan was in flight "
+            f"(scan still running: {agent._presence_running}) — the deadman "
+            f"thread is blocked behind the presence sweep"
+        )
+        assert not agent.governor.any_armed
+    finally:
+        agent.shutdown()
+
+
+def test_a_second_sweep_does_not_start_while_one_is_in_flight(bench, monkeypatch):
+    """Otherwise slow bus + fixed timer = the monitoring becomes the outage.
+
+    If a scan takes longer than the interval — a slow hub, a device slow to
+    answer — an ungated timer starts another every tick, each one enumerating
+    the same bus, until presence checking is all the bus is doing and the
+    instruments it was watching stop answering. Bounded to one in flight, the
+    worst case is a stale answer.
+    """
+    agent = bench.agent
+    calls = _stub_inventory(monkeypatch, ["otii_arc"], delay=3.0)
+    _pretend_watched(agent, monkeypatch)
+
+    agent._maybe_start_presence_sweep()
+    assert _await(lambda: len(calls) == 1), "the first sweep never reached the bus"
+    assert agent._presence_running
+
+    # Clear the clock so the interval check cannot be the thing that refuses:
+    # the overlap flag has to be what stops these, on its own.
+    for _ in range(5):
+        agent._last_presence_mono = None
+        agent._maybe_start_presence_sweep()
+
+    assert len(calls) == 1, (
+        f"{len(calls)} concurrent scans piled onto the bus; only the overlap "
+        f"guard stands between a slow hub and a self-inflicted outage"
+    )
+
+
+def test_a_failed_scan_does_not_disable_presence_sweeps_forever(bench, monkeypatch):
+    """The subtle half: the ``finally`` matters more than the ``except``.
+
+    Swallowing the exception keeps a background courtesy from taking down the
+    agent, and that much is easy to see. But if the failing path skipped
+    clearing ``_presence_running``, the overlap guard would latch: one transient
+    scan error — a device unplugged mid-enumeration is enough — and the bench
+    would silently never report presence again for the life of the agent. The
+    panel would keep showing the last picture it had, indefinitely, with nothing
+    anywhere saying it had gone stale. That is worse than no presence reporting
+    at all, because it looks like it is working.
+    """
+    from benchctrl.agent.server import PRESENCE_KIND
+
+    agent = bench.agent
+    published = _watch_bus(agent)
+    _pretend_watched(agent, monkeypatch)
+
+    boom = _stub_inventory(monkeypatch, [], raises=RuntimeError("USB enumeration blew up"))
+    agent._maybe_start_presence_sweep()
+    assert _await(lambda: len(boom) == 1), "the failing scan never ran"
+    assert _await(lambda: not agent._presence_running), (
+        "_presence_running is still set after a failed scan — the overlap guard "
+        "has latched and presence sweeps are now disabled for good"
+    )
+    # The agent is still serving: a background courtesy that fails must not be
+    # able to take the bench down with it.
+    assert bench.connect(observer=True).status()["safety"] is not None
+
+    # And the next sweep genuinely runs, which is the property the flag protects.
+    ok = _stub_inventory(monkeypatch, ["otii_arc"])
+    agent._last_presence_mono = None
+    agent._maybe_start_presence_sweep()
+    assert _await(lambda: len(ok) == 1), (
+        "no sweep ran after an earlier one failed; presence reporting is dead"
+    )
+    assert _await(lambda: any(e.get("kind") == PRESENCE_KIND for e in published))
+
+
+def test_a_presence_sweep_never_writes_to_an_instrument(bench, monkeypatch):
+    """A safety property, not an efficiency one.
+
+    Probing writes ``AT+DEV.TYPE?`` at whatever sits behind a generic bridge, to
+    tell a QR10x from any other CH340. Done once from the CLI that is fine; done
+    on a repeating timer it is a periodic stray command landing at an instrument
+    that may be mid-measurement, forever. The consequence is accepted honestly:
+    a non-probing sweep can confirm the bridge and not the QR10x behind it, and
+    reports it undetermined rather than present.
+    """
+    agent = bench.agent
+    calls = _stub_inventory(monkeypatch, ["otii_arc"])
+    _pretend_watched(agent, monkeypatch)
+
+    agent._maybe_start_presence_sweep()
+    assert _await(lambda: bool(calls)), "the sweep never reached discovery.inventory"
+
+    assert calls[0].get("probe") is False, (
+        f"the presence sweep is probing on a timer: inventory({calls[0]!r})"
+    )
+    # And it hands over the agent's own long-lived manager rather than letting
+    # the scan build one: pyvisa's ResourceManager is a singleton, and a scan
+    # that made and closed its own would invalidate every open VISA session on
+    # the bench. That is the bug this whole push-instead-of-poll design replaced.
+    assert "resource_manager" in calls[0]
+    assert calls[0]["resource_manager"] is agent.resource_manager()
+
+
+def test_the_first_sweep_is_not_reported_as_a_change(bench, monkeypatch):
+    """Everything is new on the first frame and none of it is news.
+
+    ``changed`` drives the log and the ``warn`` grade. If the first sweep claimed
+    a change, every agent start would put "bus presence changed" on the panel
+    and in the log, and the one line that means an instrument actually fell off
+    the bus would be indistinguishable from routine startup noise. ``first`` is
+    what carries "this is the initial picture" instead.
+    """
+    from benchctrl.agent.server import (
+        PRESENCE_CHANGE_SEVERITY,
+        PRESENCE_KIND,
+        PRESENCE_SEVERITY,
+    )
+
+    agent = bench.agent
+    published = _watch_bus(agent)
+    _pretend_watched(agent, monkeypatch)
+    assert agent._last_presence_keys is None, "fixture has already swept"
+
+    _stub_inventory(monkeypatch, ["otii_arc"])
+    agent._maybe_start_presence_sweep()
+
+    def sweeps():
+        return [e for e in published if e.get("kind") == PRESENCE_KIND]
+
+    assert _await(lambda: bool(sweeps()))
+    first = sweeps()[0]
+    assert first["first"] is True
+    assert first["changed"] is False, (
+        "the first sweep claimed a change; every agent start would look like an "
+        "instrument had just appeared"
+    )
+    assert first["severity"] == PRESENCE_SEVERITY
+    assert PRESENCE_SEVERITY != PRESENCE_CHANGE_SEVERITY, (
+        "unchanged and changed sweeps are graded the same, so this test and the "
+        "one below cannot tell them apart"
+    )
+
+
+def test_an_unchanged_sweep_is_read_grade_and_a_change_outranks_it(bench, monkeypatch):
+    """Graded by news value, because the bus sheds by grade.
+
+    A sweep every 30 s forever is bookkeeping: read-grade, shed before anything
+    about the bench, never logged. An instrument leaving the bus mid-session is
+    the fact that explains a failed run twenty minutes later, so it has to
+    outrank the ordinary read traffic it competes with for the display's shallow
+    queue — otherwise the one presence event worth keeping is the one dropped.
+    """
+    from benchctrl.agent.eventbus import rank_of
+    from benchctrl.agent.server import (
+        PRESENCE_CHANGE_SEVERITY,
+        PRESENCE_KIND,
+        PRESENCE_SEVERITY,
+    )
+
+    agent = bench.agent
+    published = _watch_bus(agent)
+    _pretend_watched(agent, monkeypatch)
+
+    def sweeps():
+        return [e for e in published if e.get("kind") == PRESENCE_KIND]
+
+    # Sweep one: the initial picture, instrument present.
+    _stub_inventory(monkeypatch, ["otii_arc"])
+    agent._maybe_start_presence_sweep()
+    assert _await(lambda: len(sweeps()) == 1)
+
+    # Sweep two: same answer. Nothing happened, so nothing is news.
+    agent._last_presence_mono = None
+    agent._maybe_start_presence_sweep()
+    assert _await(lambda: len(sweeps()) == 2)
+
+    # Sweep three: the instrument is gone from the bus.
+    _stub_inventory(monkeypatch, [])
+    agent._last_presence_mono = None
+    agent._maybe_start_presence_sweep()
+    assert _await(lambda: len(sweeps()) == 3)
+
+    initial, unchanged, vanished = sweeps()[:3]
+    assert unchanged["changed"] is False
+    assert unchanged["present"] == initial["present"] == ["otii_arc"]
+    assert unchanged["severity"] == PRESENCE_SEVERITY
+    assert unchanged["first"] is False, "the second sweep still claims to be the first"
+
+    assert vanished["present"] == []
+    assert vanished["changed"] is True, (
+        "an instrument dropping off the bus was not reported as a change"
+    )
+    assert vanished["severity"] == PRESENCE_CHANGE_SEVERITY
+    assert rank_of(vanished) > rank_of(unchanged), (
+        f"a vanished instrument ({vanished['severity']}) does not outrank routine "
+        f"bookkeeping ({unchanged['severity']}), so it sheds with it"
+    )
+
+
+def test_a_presence_event_reaches_a_real_observer_over_the_wire(bench, monkeypatch):
+    """The delivery half, with nothing stubbed but the bus scan itself.
+
+    Every other test here drives ``_maybe_start_presence_sweep`` directly and
+    fakes ``observer_count``, which proves the decisions but not that the result
+    arrives. This one uses a real observer session, so the count comes from the
+    agent's own session table and the event crosses a socket — if presence were
+    published at a severity the display's shallow droppable queue sheds, or under
+    a kind the panel does not route, everything above would still pass and the
+    pane would still be blank.
+    """
+    from benchctrl.agent.server import PRESENCE_KIND
+
+    agent = bench.agent
+    _stub_inventory(monkeypatch, ["otii_arc"])
+    seen: list[dict] = []
+    obs = bench.connect(observer=True)
+    obs.on_event = seen.append
+    assert _await(lambda: agent.observer_count() == 1), "the observer never registered"
+
+    agent._maybe_start_presence_sweep()
+
+    assert _await(lambda: any(e.get("kind") == PRESENCE_KIND for e in list(seen))), (
+        f"no presence event reached the observer; got "
+        f"{sorted({e.get('kind') for e in list(seen)})}"
+    )
+    event = next(e for e in list(seen) if e.get("kind") == PRESENCE_KIND)
+    assert event["present"] == ["otii_arc"]
+    assert event["served"] == ["otii_arc"]

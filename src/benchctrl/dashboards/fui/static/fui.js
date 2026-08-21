@@ -447,7 +447,7 @@ function slotIdentity(inst) {
  * inside, and anything queued behind it.
  *
  * A separate line from .state on purpose. The status word is the slot's ranked
- * claim — ARMED, OPEN FAILED, STANDBY — and an armed output must keep it; the
+ * claim — ARMED, OPEN FAILED, OPEN, STANDBY — and an armed output must keep it; the
  * view carries `busy` as its own field for exactly that reason, so this line
  * adds to the status rather than competing with it.
  *
@@ -456,7 +456,22 @@ function slotIdentity(inst) {
  * rather than leaving a call frozen in flight. Not re-derived here — one place
  * decides, and it is the one CI can assert. */
 function slotActivity(inst) {
-  if (!inst.busy) return '';
+  if (!inst.busy) {
+    // Nothing in flight *as of the last poll*. That poll runs every 5s while a
+    // device call takes ~200ms, so it almost never lands inside one: driving a
+    // sweep of six setpoints left the DMM and the QR10x looking untouched for the
+    // whole test. `recent` comes from action events instead, which arrive as each
+    // call completes, so it sees calls the poll cannot.
+    //
+    // Phrased in the past tense and carrying its age, because that is what it is.
+    // The view drops it after RECENT_ACTION_S and withholds it on a stale view, so
+    // this cannot claim activity on a bench that has gone quiet or a feed that has
+    // stopped.
+    const r = inst.recent;
+    if (!r) return '';
+    const ago = `${r.age_s}s ago`;
+    return r.action ? `${String(r.action).slice(0, 30)} · ${ago}` : ago;
+  }
   const bits = [String(inst.busy).slice(0, 30)];
   // Queue depth only when something is actually waiting. "+0" is arithmetic, not
   // information, and the view already reports 0 for "nobody said".
@@ -516,11 +531,16 @@ function renderRail(instruments) {
       // Something the operator can act on — an open failure, or hardware present
       // that nothing is configured to drive.
       + (inst.attention ? ' attention' : '')
-      // Keyed on the line we actually drew, not on inst.busy: the class drives a
-      // pulse, and an animation running over a blank line is a slot that looks
-      // alive while saying nothing. Withheld and stale both resolve to '' above,
-      // so this cannot outlive the value it advertises.
-      + (act ? ' working' : '');
+      // Keyed on the line we actually drew AND on there being a live call, not on
+      // `act` alone: the class drives a pulse, and an animation running over a
+      // blank line is a slot that looks alive while saying nothing. `act` now also
+      // carries a past-tense "…3.2s ago" line, which must NOT pulse — a pulse is
+      // read across the bench as "happening now", and that is the one thing a
+      // completed action is not. Withheld and stale both resolve to '' above, so
+      // this cannot outlive the value it advertises.
+      + (act && inst.busy ? ' working' : '')
+      // Drawn as a fading trace instead: recently active, not active.
+      + (act && !inst.busy ? ' recent' : '');
   });
 }
 

@@ -54,6 +54,15 @@ STICKY_SEVERITIES = frozenset({"alarm", "critical"})
 #: logged — see :py:meth:`BenchStatus.apply_event`.
 LINK_KIND_NAME = "link"
 
+#: Kind for the bench's periodic presence sweep, matched as a literal for the same
+#: reason as the heartbeat above.
+#:
+#: Presence is the one fact on this panel that used to require the *display* to
+#: initiate a ~1.65 s USB scan. The bench now pushes it, so the dashboard learns
+#: that an instrument appeared or vanished without ever asking — and an unchanged
+#: sweep is treated as liveness, not as news.
+PRESENCE_KIND_NAME = "presence"
+
 #: Run states that mean work is in flight. Taken from
 #: :py:mod:`benchctrl.agent.runs.store` (``STATUS_PENDING``/``STATUS_RUNNING``)
 #: and matched to what ``fui/view.py`` already treats as in-flight for its
@@ -223,6 +232,16 @@ class BenchStatus:
     #: flight there, and a headline that flickered IDLE across that gap would be
     #: wrong for exactly as long as anyone was looking at it.
     queued_devices: dict[str, int] = field(default_factory=dict)
+    #: ``{device_key: monotonic}`` — when an action from this device last arrived,
+    #: and in :py:attr:`last_action_name` what it was.
+    #:
+    #: Fed by ``action`` events rather than by the status poll, which is the whole
+    #: point: a device call takes ~200 ms and the poll runs every 5 s, so
+    #: :py:attr:`busy_devices` misses almost every one. These two say "last seen
+    #: doing X, N seconds ago" — a statement about the past, which stays true as it
+    #: ages, unlike "busy now", which does not.
+    last_action_at: dict[str, float] = field(default_factory=dict)
+    last_action_name: dict[str, str] = field(default_factory=dict)
     log: list[dict] = field(default_factory=list)
     sticky: list[dict] = field(default_factory=list)
     #: Count of events the agent told us it dropped. Cumulative and shown, so a
@@ -247,6 +266,17 @@ class BenchStatus:
     #: are different claims, and the dashboard's own polling would satisfy the
     #: weaker one on its own.
     link_beats: int = 0
+    #: Bench-pushed presence sweeps received. Like :py:attr:`link_beats`, exposed
+    #: so the panel can show that the bench is confirming its hardware rather than
+    #: the display having to ask — the difference between a screen that is being
+    #: told and one that is guessing.
+    presence_sweeps: int = 0
+    #: When the last presence sweep landed. Separate from
+    #: :py:attr:`last_snapshot_mono` because a sweep answers a different question
+    #: (what is *attached*) on a much slower clock, so folding it into the general
+    #: freshness mark would make a stale bus inventory look as current as a 5 s
+    #: status poll.
+    last_presence_mono: Optional[float] = None
     seconds_since_contact: Optional[float] = None
     deadman_s: Optional[float] = None
     heartbeat_s: Optional[float] = None
@@ -295,15 +325,52 @@ class BenchStatus:
             k for k, r in self.runs.items() if r.state in IN_FLIGHT_RUN_STATES
         )
 
+    #: How long after its last completed call the bench still counts as busy.
+    #:
+    #: Sized against the status poll (``feed.DEFAULT_POLL_S``, 5 s) with margin,
+    #: for the reason below: the window has to be *wider* than the sampling gap it
+    #: is covering, or it leaves the same blind spot.
+    ACTIVITY_WINDOW_S = 8.0
+
     @property
     def any_busy(self) -> bool:
-        """True when the bench is executing or queueing work.
+        """True when the bench is executing, queueing, or has just finished work.
 
         A run in flight counts even with every worker momentarily idle: the run
         engine spends most of its time between device calls (settling, waiting
         out a dwell), and those gaps are not moments when the bench is free.
+
+        A call that *completed* within :py:attr:`ACTIVITY_WINDOW_S` counts too,
+        and that clause is the one that makes this property usable. The other
+        three terms all come from the ``workers`` table, which is **sampled** on
+        the 5 s status poll while a device call takes ~200 ms — so the poll lands
+        inside a call roughly 4% of the time. Measured on the bench: a six-setpoint
+        4-wire resistance sweep ran for minutes with two instruments being driven
+        continuously, and both the headline and the footer read IDLE for almost
+        all of it, flickering ACTIVE for one frame when a poll happened to land.
+
+        ``last_action_at`` is fed by ``action`` events instead, which arrive as
+        each call *completes*, so it sees the calls the poll cannot. Folding it in
+        here rather than at the two readouts is deliberate: the headline and the
+        footer are separate code paths that both consume this one property, and
+        the bug the operator actually reported was the two of them disagreeing.
+        One source cannot contradict itself.
+
+        The claim stays honest because it is deliberately not "a call is in flight
+        now" — it is "the bench is working", which a bench mid-sweep is during the
+        200 ms gaps between its calls. The per-device rails keep the sharper
+        distinction: they show ``busy`` for a call in flight and a past-tense
+        ``recent`` with its age for one that has finished, so nothing on the glass
+        claims an instant it cannot vouch for.
         """
-        return bool(self.busy_devices or self.queued_devices or self.running_runs)
+        if self.busy_devices or self.queued_devices or self.running_runs:
+            return True
+        if not self.last_action_at:
+            return False
+        # No argument, so this is always the panel's own clock — the same clock the
+        # stamps in last_action_at were taken from, never an agent's.
+        newest = max(self.last_action_at.values())
+        return (_mono(None) - newest) <= self.ACTIVITY_WINDOW_S
 
     @property
     def busy_summary(self) -> str:
@@ -313,6 +380,14 @@ class BenchStatus:
         who cannot see WHICH device is busy has to guess whether the panel means
         their run or someone else's. Names the device and method when they are
         known, because that is the difference between a status word and an answer.
+
+        Falls back to the most recent *completed* call, in the past tense and with
+        its age, when nothing is in flight as of the last poll. Without this the
+        footer says "BENCH ACTIVE" with no detail through a whole sweep, because
+        :py:attr:`any_busy`'s activity window is what made it active and the
+        ``workers`` table it would otherwise quote is empty. Tensed and aged
+        because that is what it is: quoting a finished call as though it were
+        running would be the panel asserting an instant it cannot vouch for.
         """
         parts = [f"{key}: {method}" for key, method in sorted(self.busy_devices.items())]
         parts += [
@@ -321,7 +396,15 @@ class BenchStatus:
             if key not in self.busy_devices
         ]
         parts += [f"run {run_id}" for run_id in self.running_runs]
-        return ", ".join(parts)
+        if parts:
+            return ", ".join(parts)
+        if not self.last_action_at:
+            return ""
+        key = max(self.last_action_at, key=lambda k: self.last_action_at[k])
+        age = max(0.0, _mono(None) - self.last_action_at[key])
+        name = self.last_action_name.get(key) or ""
+        what = f"{key}: {name}" if name else key
+        return f"{what} {age:.0f}s ago"
 
     @property
     def trustworthy(self) -> bool:
@@ -570,6 +653,47 @@ class BenchStatus:
         self.unclaimed = [by_id[k] for k in sorted(by_id)]
         self.inventory_taken = True
 
+    def apply_presence(self, event: object, *, now: Optional[float] = None) -> None:
+        """Fold in a bench-pushed presence sweep: what is on the bus right now.
+
+        The agent's answer to "are my instruments still there", arriving without
+        the panel having asked. Sets :py:attr:`inventory_taken`, because a sweep
+        *is* somebody having looked — before this, a panel that connected to an
+        already-running bench showed UNSCANNED until its own first inventory poll
+        completed.
+
+        Deliberately narrower than :py:meth:`apply_inventory`: it carries presence
+        only, not identity. A sweep runs with ``probe=False`` and reports device
+        keys, so it can say "the DMM is on the bus" but has nothing new to say
+        about its serial number. Identity is left exactly as the last full
+        inventory left it rather than being cleared — a sweep that blanked the
+        serial numbers every 30 s would make the rails flicker between naming a
+        specific instrument and naming none.
+
+        Absence is recorded only for keys the sweep actually considered
+        (``served``). A key the agent does not serve is not something this sweep
+        looked for, and marking it absent would be asserting a negative nobody
+        measured — the same not-knowing-vs-nothing rule
+        :py:class:`DeviceSlot` exists to keep.
+        """
+        if not isinstance(event, dict):
+            return
+        present = event.get("present")
+        served = event.get("served")
+        if not isinstance(present, list) or not isinstance(served, list):
+            # A malformed sweep costs the panel this update and nothing else. This
+            # runs on the feed's receive path, where raising would drop the session
+            # and blank the screen over a bad optional field.
+            return
+        present_keys = {k for k in present if isinstance(k, str)}
+        served_keys = [k for k in served if isinstance(k, str)]
+        for key in served_keys:
+            slot = self.slots.setdefault(key, DeviceSlot(key=key))
+            slot.present = key in present_keys
+        self.inventory_taken = True
+        self.presence_sweeps += 1
+        self.last_presence_mono = _mono(now)
+
     def forget_inventory(self, reason: str = "") -> None:
         """Discard what only the live session could vouch for: the bus inventory
         and the agent's device table.
@@ -644,6 +768,17 @@ class BenchStatus:
         # are arriving" on a session where, by definition, none can. The next
         # session counts its own from zero.
         self.link_beats = 0
+        # Same reasoning, same direction: a sweep count is a claim that the bench
+        # is actively confirming its hardware *to this session*. Carried across a
+        # disconnect it would say the bench is still checking in on a link where
+        # nothing can arrive.
+        self.presence_sweeps = 0
+        self.last_presence_mono = None
+        # Dropped with the busy readout for the same reason: "the DMM was reading
+        # 2 s ago" is a claim about a session that no longer exists, and on
+        # reconnect the ages would be measured from before the gap.
+        self.last_action_at = {}
+        self.last_action_name = {}
         # Arm state is kept-but-marked-inferred above, because the last known
         # arm state is the safest available guess. Presence gets the opposite
         # treatment and is dropped outright: a stale "ARMED" over-warns, while a
@@ -781,7 +916,20 @@ class BenchStatus:
                 self.heartbeat_s = hb
             return
 
-        if kind == "events_dropped":
+        if kind == PRESENCE_KIND_NAME:
+            # The bench telling us, unbidden, what it can see on the bus. This is
+            # the push half of "the UI never probes": presence used to be knowable
+            # only by the dashboard calling agent.discover on its own timer, which
+            # made the display the cause of a USB scan.
+            #
+            # Only a *changed* sweep is logged. An unchanged one is the bench
+            # saying "still four instruments" every 30 s, and at 24 visible rows
+            # that would evict real bench actions exactly as a logged heartbeat
+            # would — the same trap, from a second source.
+            self.apply_presence(event, now=stamp)
+            if not event.get("changed"):
+                return
+        elif kind == "events_dropped":
             # The agent is telling us our own view has holes. Believe it.
             count = event.get("count")
             self.dropped_events += int(count) if isinstance(count, int) else 1
@@ -837,6 +985,27 @@ class BenchStatus:
             # rule already tested in this suite, and a numeric field arriving from
             # another process is exactly where it gets tested for real.
             self.actions_seen += _as_count(event.get("count"))
+            # When this device was last *observed* doing something, and what.
+            #
+            # Not the same claim as ``busy_devices``, and deliberately a separate
+            # field: ``busy_devices`` comes from ``agent.status``'s worker table
+            # and means "a call is in flight at this instant", while this means "a
+            # call completed at this moment in the past". The distinction is what
+            # makes this safe to keep — it never says a call is running.
+            #
+            # It exists because ``busy_devices`` is *sampled* on the 5 s status
+            # poll while a real device call takes ~200 ms, so the poll essentially
+            # never lands inside one. Driving a 6-setpoint sweep left both
+            # instruments reading STANDBY for the entire test and the headline
+            # flickering ACTIVE only when a poll got lucky. Action events, by
+            # contrast, arrive as each call completes, so they see every call —
+            # they are the only source that can show a busy bench at this
+            # timescale.
+            key = str(event.get("device", ""))
+            if key:
+                action = event.get("action") or event.get("method") or ""
+                self.last_action_at[key] = stamp
+                self.last_action_name[key] = _strip_device_prefix(key, str(action))
             folded = event.get("folded")
             if isinstance(folded, int) and not isinstance(folded, bool) and folded >= 0:
                 # Cumulative on the agent side, so this is an assignment rather
@@ -916,6 +1085,14 @@ class BenchStatus:
 
     def to_dict(self) -> dict:
         """Flat snapshot, for logging and for tests to assert against."""
+        # Ages, not raw monotonics: a monotonic from another process's clock is
+        # meaningless to the renderer, and "3 s ago" is what the operator reads.
+        # Computed here so there is one clock reading for the whole snapshot and
+        # two rails cannot disagree about what "now" was.
+        stamp = _mono(None)
+        action_age = {
+            key: max(0.0, stamp - at) for key, at in self.last_action_at.items()
+        }
         return {
             "headline": self.headline,
             "severity": self.severity,
@@ -928,6 +1105,10 @@ class BenchStatus:
             "actions_seen": self.actions_seen,
             "actions_folded": self.actions_folded,
             "link_beats": self.link_beats,
+            "presence_sweeps": self.presence_sweeps,
+            # {device_key: seconds since its last action} and what that action was.
+            "action_age": action_age,
+            "last_action": dict(self.last_action_name),
             "unsafe": self.unsafe_latch is not None,
             "observer_denied": self.observer_denied is not None,
             "devices": {

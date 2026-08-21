@@ -151,6 +151,39 @@ LINK_SEVERITY = ACTION_SEVERITY_READ
 #: a three-beat budget means two may be lost or shed before the panel warns.
 LINK_INTERVAL_HEARTBEATS = 1.0
 
+#: Kind for the periodic presence sweep: which configured devices the bench can
+#: actually see on the bus right now.
+#:
+#: The bench pushes this rather than the dashboard polling for it. A display must
+#: never be the reason an instrument gets scanned — that is the same rule that
+#: keeps ``agent.discover`` off the panel's fast path — and presence is a fact
+#: about the *bench*, so the bench is what should notice it changing. A dashboard
+#: that opens mid-session gets the current picture from its own first inventory
+#: and every change after that arrives unbidden.
+PRESENCE_KIND = "presence"
+
+#: Severity for a presence sweep that found no change: bookkeeping, shed first,
+#: never logged. A sweep whose result *differs* from the last one is emitted at
+#: :py:data:`PRESENCE_CHANGE_SEVERITY` instead — an instrument appearing or
+#: vanishing is a real bench event and belongs in the log.
+PRESENCE_SEVERITY = ACTION_SEVERITY_READ
+
+#: Severity for a presence sweep whose result changed. ``warn`` rather than
+#: ``info`` because an instrument leaving the bus mid-session is the kind of thing
+#: that explains a failed run twenty minutes later, and because it must outrank
+#: the ordinary read traffic it competes with for space in the log.
+PRESENCE_CHANGE_SEVERITY = "warn"
+
+#: How often the bench re-checks which instruments are on the bus, as a multiple
+#: of ``heartbeat_s``. Much slower than the heartbeat: a scan enumerates USB and
+#: costs ~1.4-1.65 s on the bench board against ~24 us for a liveness check, so
+#: this is the one periodic task on the agent that is genuinely expensive.
+#:
+#: 6.0 against a 5 s heartbeat is a sweep every ~30 s, matching the cadence the
+#: dashboard's own inventory poll already used — so this replaces that work
+#: rather than adding to it.
+PRESENCE_INTERVAL_HEARTBEATS = 6.0
+
 #: How long one identical action signature keeps its line. A repeated read
 #: inside this window increments a count instead of emitting.
 ACTION_COALESCE_S = 0.5
@@ -834,6 +867,18 @@ class BenchAgent:
         # first due check on the deadman thread emits immediately rather than
         # making a freshly-connected dashboard wait out a full interval.
         self._last_link_mono: Optional[float] = None
+        # Presence sweeps. ``_last_presence_keys`` is None until the first sweep
+        # completes, which is what distinguishes "the bus changed" from "this is
+        # the first time anybody looked" — the latter is not a change and must not
+        # be reported as one.
+        self._last_presence_mono: Optional[float] = None
+        self._last_presence_keys: Optional[list[str]] = None
+        self._presence_running = False
+        # Guards ``_presence_running`` only. A separate lock from ``self._lock``
+        # for the same reason ``_rm_lock`` is separate: the session table is taken
+        # on every connect and disconnect, and a bus scan must not be able to
+        # stall those.
+        self._presence_lock = threading.Lock()
 
     # --- lifecycle ------------------------------------------------------
 
@@ -866,6 +911,17 @@ class BenchAgent:
                 self._maybe_emit_link()
             except Exception:  # pragma: no cover
                 log.exception("agent: link heartbeat raised")
+            # Kicked off from here but deliberately NOT run here: a bus scan
+            # enumerates USB and takes ~1.4-1.65 s on the bench board, and this
+            # thread's first duty is tripping an abandoned bench within its
+            # deadman window. Running the sweep inline would stall trip detection
+            # for the length of a scan, every sweep, forever — the one thing this
+            # loop must never do. ``_maybe_start_presence_sweep`` only checks a
+            # clock and hands off to a short-lived worker.
+            try:
+                self._maybe_start_presence_sweep()
+            except Exception:  # pragma: no cover
+                log.exception("agent: presence sweep raised")
 
     def _maybe_emit_link(self) -> None:
         """Emit a link heartbeat if one is due and anyone is listening.
@@ -911,6 +967,117 @@ class BenchAgent:
                 "observers": self.observer_count(),
             }
         )
+
+    def _maybe_start_presence_sweep(self) -> None:
+        """Start a bus presence sweep if one is due, on its own thread.
+
+        Cheap by construction: checks two clocks and a flag, then returns. The
+        scan itself runs in :py:meth:`_presence_sweep` on a short-lived worker so
+        the deadman loop is never held up by USB enumeration.
+
+        Gated on an observer being attached, exactly like the heartbeat. With no
+        dashboard connected there is nobody to inform, and a ~1.5 s USB scan every
+        30 s on a 2 GB board is not a cost to pay for nobody — it also competes
+        with instrument I/O on the same bus. ``_last_presence_mono`` is stamped
+        even when the sweep is skipped, so a dashboard connecting does not
+        immediately trigger a scan that was "overdue" from an unwatched hour.
+
+        ``_presence_running`` prevents overlap: on a bench where a scan takes
+        longer than the interval (a slow hub, a device that is slow to answer),
+        an ungated timer would pile scans onto each other until the bus was
+        saturated by presence checks — the failure mode where the monitoring
+        becomes the outage.
+        """
+        interval = self.heartbeat_s * PRESENCE_INTERVAL_HEARTBEATS
+        if interval <= 0:
+            return  # presence sweeps disabled by configuration
+        now = time.monotonic()
+        if (
+            self._last_presence_mono is not None
+            and now - self._last_presence_mono < interval
+        ):
+            return
+        if self.observer_count() <= 0:
+            self._last_presence_mono = now
+            return
+        with self._presence_lock:
+            if self._presence_running:
+                # Still working through the previous sweep. Not stamped: the next
+                # tick should reconsider promptly rather than wait out another
+                # full interval on top of an already-slow scan.
+                return
+            self._presence_running = True
+        self._last_presence_mono = now
+        threading.Thread(
+            target=self._presence_sweep, name="presence-sweep", daemon=True
+        ).start()
+
+    def _presence_sweep(self) -> None:
+        """Scan the bus and publish which configured devices are on it.
+
+        Runs on its own thread. Never raises: this is a background courtesy, and
+        a scan that failed must not take down the agent that was only trying to
+        be helpful about it.
+
+        Publishes on *every* sweep, not only on change, because a consumer needs
+        to know the answer is current — a panel that only hears about changes
+        cannot distinguish "still four instruments" from "nobody has looked since
+        boot". The severity is what differs: an unchanged sweep is read-grade
+        bookkeeping that gets shed first and never logged, while a change is
+        ``warn`` and belongs on the screen.
+
+        ``probe=False``. A presence sweep repeats forever, and probing writes
+        ``AT+DEV.TYPE?`` at whatever is behind a generic bridge; doing that on a
+        timer is how a periodic health check becomes a periodic stray command at
+        an instrument that may be mid-measurement. The consequence is honest and
+        deliberate: the QR10x sits behind a driverless CH340 with no VID/PID
+        identity, so a non-probing scan can confirm *the bridge* is present but
+        cannot confirm the QR10x itself. It is reported as undetermined rather
+        than present, which is the same distinction the panel already draws — an
+        absence of evidence must not render as evidence of absence.
+        """
+        try:
+            from benchctrl import discovery
+
+            found = discovery.inventory(
+                probe=False, resource_manager=self.resource_manager()
+            )
+            by_key = found.get("by_device_key") or {}
+            served = list(self.registry.keys)
+            # Only the keys this agent serves: a sweep is a statement about the
+            # configured bench, and reporting every stray tty as "present" would
+            # bury the four lines anybody cares about.
+            present = sorted(k for k in served if k in by_key)
+            changed = self._last_presence_keys is not None and (
+                self._last_presence_keys != present
+            )
+            first = self._last_presence_keys is None
+            self._last_presence_keys = present
+            self.events.publish(
+                {
+                    "kind": PRESENCE_KIND,
+                    "severity": (
+                        PRESENCE_CHANGE_SEVERITY if changed else PRESENCE_SEVERITY
+                    ),
+                    "present": present,
+                    "served": served,
+                    # So a consumer can tell a real change from its first frame,
+                    # where everything is "new" and none of it is news.
+                    "changed": bool(changed),
+                    "first": bool(first),
+                }
+            )
+            if changed:
+                log.warning(
+                    "agent: bus presence changed — now present: %s (of %s)",
+                    present,
+                    served,
+                )
+        except Exception:  # noqa: BLE001 - a background courtesy must not raise
+            log.warning("agent: presence sweep failed", exc_info=True)
+        finally:
+            with self._presence_lock:
+                self._presence_running = False
 
     def trip(self, reason: TripReason) -> dict:
         return self.governor.trip(

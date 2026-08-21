@@ -25,6 +25,7 @@ from benchctrl.dashboards.state import (
     SILENCE_HEARTBEATS,
     STARTUP_GRACE_S,
     BenchStatus,
+    DeviceSlot,
 )
 
 
@@ -1224,6 +1225,157 @@ def test_a_method_name_containing_a_dot_survives_the_prefix_strip(live):
 
 
 # --------------------------------------------------------------------------
+# What a device was last seen doing
+#
+# Reported from the bench: during a live 6-setpoint 4-wire resistance sweep the
+# sidebar read STANDBY for both instruments for the whole test. ``busy_devices``
+# is *sampled* on the 5s status poll while a device call takes ~200ms, so the
+# poll essentially never lands inside one. Action events arrive as each call
+# completes, so they see every call — and "last seen doing X, N seconds ago" is a
+# claim about the past, which stays true as it ages, unlike "busy now".
+# --------------------------------------------------------------------------
+
+
+def action(**overrides):
+    """One action event, shaped as the agent's ``build_action_event`` emits it."""
+    e = {
+        "kind": "action",
+        "severity": "debug",
+        "method": "device.call",
+        "action": "measure_resistance_4wire",
+        "device": "siglent_sdm4065a",
+        "ok": True,
+        "count": 1,
+        "detail": "→ 100.038",
+    }
+    e.update(overrides)
+    return e
+
+
+def test_an_action_event_records_what_that_device_was_last_seen_doing(live):
+    """Without this the rail had no source that could see a driven bench at all.
+
+    A 4-wire sweep is a few hundred ~200ms calls with nothing armed and no worker
+    busy at poll time, so every readout the panel had said "untouched" while an
+    operator watched the DMM's own display change.
+    """
+    live.apply_event(action(), now=101.0)
+    assert live.last_action_at == {"siglent_sdm4065a": 101.0}
+    assert live.last_action_name == {"siglent_sdm4065a": "measure_resistance_4wire"}
+
+    # Replaced rather than kept: the field is "last seen". A first-wins version
+    # would freeze on the opening call of a sweep and then age out mid-run, so the
+    # rail would go quiet while the bench was at its busiest.
+    live.apply_event(action(action="measure_resistance_2wire"), now=131.0)
+    assert live.last_action_at == {"siglent_sdm4065a": 131.0}
+    assert live.last_action_name["siglent_sdm4065a"] == "measure_resistance_2wire"
+
+
+def test_a_recorded_action_keeps_a_method_reached_through_a_sub_object(live):
+    """Naming the wrong call is worse than naming a long one.
+
+    The agent labels a job ``f"{key}.{method}"``, so the key has to come off — but
+    a driver method reached through a sub-object arrives as
+    ``rigol_dp2031.channel.set_current``, and ``rsplit(".")[-1]`` would put
+    ``set_current`` on the rail. The supply has one of those per channel, so the
+    shortened name names a call that is not the one that ran.
+
+    ``_strip_device_prefix`` itself is already pinned through ``busy_devices``
+    above; what this pins is that the *recording* path goes through it at all,
+    because ``last_action_name`` is a second, separately-written field feeding the
+    same row.
+    """
+    live.apply_event(
+        action(device="rigol_dp2031", action="rigol_dp2031.channel.set_current"),
+        now=101.0,
+    )
+    assert live.last_action_name == {"rigol_dp2031": "channel.set_current"}
+    assert live.to_dict()["last_action"] == {"rigol_dp2031": "channel.set_current"}
+
+
+def test_a_recorded_action_falls_back_to_the_method_when_there_is_no_action_name(live):
+    """Not every verb carries a device-level method: ``agent.open`` grades to an
+    empty ``action`` because there is no driver call inside it.
+
+    An open is exactly the event a slot's row wants to show — it is the moment
+    STANDBY becomes OPEN — and recording it as an empty string would draw a marker
+    that says something happened without saying what, which is the shape of
+    readout this panel exists to rule out.
+    """
+    live.apply_event(action(method="agent.open", action="", device="qr10x"), now=101.0)
+    assert live.last_action_name == {"qr10x": "agent.open"}
+
+
+def test_an_action_with_no_device_records_no_phantom_key(live):
+    """``agent.status``, run control and the folded-summary lines name no device.
+
+    The agent sends ``device: ""`` for those rather than omitting the field, so a
+    truthiness check is the only thing standing between them and a slot keyed on
+    the empty string — a nameless row aging up beside the real instruments.
+    """
+    live.apply_event(action(device="", action="agent.status"), now=101.0)
+    live.apply_event({"kind": "action", "severity": "debug", "count": 5}, now=102.0)
+
+    assert live.last_action_at == {}
+    assert live.last_action_name == {}
+    assert live.to_dict()["action_age"] == {}
+    # The events themselves still landed; only the per-device claim was withheld.
+    assert live.actions_seen == 6
+
+
+def test_to_dict_reports_action_ages_rather_than_another_processes_monotonics(live):
+    """A monotonic read on the bench board means nothing on the panel's clock.
+
+    The two processes have unrelated epochs, so shipping the raw stamp would have
+    the renderer subtract it from its own clock and print an age of days.
+    """
+    stamp = time.monotonic() - 3.0
+    live.apply_event(action(device="siglent_sdm4065a"), now=stamp)
+    live.apply_event(action(device="bench_qr10x"), now=stamp)
+
+    data = live.to_dict()
+    assert data["action_age"]["siglent_sdm4065a"] == pytest.approx(3.0, abs=0.5)
+    # Exactly equal, which is the assertion: one clock reading for the whole
+    # snapshot. A reading per key differs by nanoseconds, and two rails that
+    # disagree about what "now" was are two rails that can age their markers out
+    # on different frames while describing the same instant.
+    assert data["action_age"]["siglent_sdm4065a"] == data["action_age"]["bench_qr10x"]
+
+
+def test_an_action_age_is_never_reported_as_negative(live):
+    """An unclamped age costs the readout entirely, not just its number.
+
+    ``fui/view._recent_action`` withholds the marker for ``age < 0``, so a stamp
+    that lands ahead of the snapshot's clock reading would blank the very row this
+    field exists to fill. ``time.monotonic()`` cannot go backwards within a
+    process, so this is a guard rather than a live path — and a guard that cannot
+    be tested is the failure this module exists to prevent.
+    """
+    live.apply_event(action(), now=time.monotonic() + 5.0)
+    assert live.to_dict()["action_age"]["siglent_sdm4065a"] == 0.0
+
+
+def test_a_last_action_does_not_outlive_the_session_that_observed_it(live):
+    """"The DMM was reading 2s ago" is a claim about a session that is gone.
+
+    Kept across a disconnect the age would keep counting up against a feed that
+    stopped arriving, so the marker would sit there getting older on a link where
+    nothing can arrive to move it — and on reconnect it would be measured from
+    before the gap, dating an action to the wrong session entirely.
+    """
+    live.apply_event(action(), now=101.0)
+    assert live.last_action_name == {"siglent_sdm4065a": "measure_resistance_4wire"}
+
+    live.apply_disconnected("the agent closed the connection")
+
+    assert live.last_action_at == {}
+    assert live.last_action_name == {}
+    data = live.to_dict()
+    assert data["action_age"] == {}
+    assert data["last_action"] == {}
+
+
+# --------------------------------------------------------------------------
 # The link heartbeat: an idle bench must still prove it is alive
 # --------------------------------------------------------------------------
 
@@ -1354,3 +1506,191 @@ def test_a_timestamp_of_zero_is_a_real_mark(live):
     reason = s.check_silence(now=5.0 * SILENCE_HEARTBEATS + 1.0)
     assert reason is not None and "nothing from the agent" in reason
     assert s.headline == "STALE"
+
+
+# --------------------------------------------------------------------------
+# The bench-pushed presence sweep
+#
+# Presence used to be knowable only by the *display* calling agent.discover on
+# its own timer, which made the panel the cause of a ~1.65s USB scan. The bench
+# now pushes the answer, so an instrument appearing or vanishing arrives without
+# anyone asking — and a sweep is narrower than a full inventory on purpose: it
+# runs probe=False, so it can say the DMM is on the bus and has nothing new to
+# say about which DMM it is.
+# --------------------------------------------------------------------------
+
+
+def sweep(present=("siglent_sdm4065a",), served=("siglent_sdm4065a", "bench_qr10x"),
+          **overrides):
+    """One presence sweep, as ``_presence_sweep`` in the agent publishes it."""
+    e = {
+        "kind": "presence",
+        "severity": "debug",
+        "present": list(present),
+        "served": list(served),
+        "changed": False,
+        "first": False,
+    }
+    e.update(overrides)
+    return e
+
+
+def test_a_presence_sweep_marks_the_bus_without_the_panel_having_asked(live):
+    """The push half of "the display never probes".
+
+    A sweep also counts as somebody having looked, so ``inventory_taken`` is set:
+    before that, a panel connecting to a bench that had been running for hours
+    showed UNSCANNED on every row until its own first ~1.65s scan came back, which
+    is the one state the rail cannot render as a fact about the hardware.
+    """
+    live.apply_event(sweep(), now=101.0)
+
+    assert live.slots["siglent_sdm4065a"].present is True
+    assert live.slots["bench_qr10x"].present is False
+    assert live.inventory_taken, "a sweep is a scan; the rail still said UNSCANNED"
+
+
+def test_a_sweep_records_absence_only_for_the_keys_it_actually_looked_for(live):
+    """Marking an unconsidered key absent asserts a negative nobody measured.
+
+    A sweep reports the keys the agent serves. A key outside that list — one an
+    earlier session's device table left behind, or one only discovery has ever
+    seen — was not looked for, and ABSENT on its row would read as "a scan checked
+    and it is gone" when no scan checked. None keeps it at UNSCANNED, which is
+    true.
+    """
+    # Planted directly: a bare slot with no presence answer yet is exactly the
+    # state under test, and every public path that creates one also fills in a
+    # presence, which would mask the thing being asserted.
+    live.slots["rigol_dp2031"] = DeviceSlot(key="rigol_dp2031")
+    live.apply_event(sweep(), now=101.0)
+
+    assert live.slots["rigol_dp2031"].present is None, (
+        "a key the sweep never considered was reported as measured-absent"
+    )
+    # And the keys it did consider still got their answers, either way.
+    assert live.slots["siglent_sdm4065a"].present is True
+    assert live.slots["bench_qr10x"].present is False
+
+
+def test_a_sweep_does_not_blank_the_identity_a_full_inventory_learned(live):
+    """A sweep every 30s that cleared identity would make the rail flicker.
+
+    Sweeps run ``probe=False``, so they carry device keys and nothing else — they
+    have nothing new to say about a serial number. Clearing it anyway would leave
+    the row alternating between naming one specific box and naming none, on a
+    bench where nothing changed, and the serial is the only field that answers
+    whether the supply attached now is the one the last run was calibrated
+    against.
+    """
+    live.apply_inventory({"devices": [DISCOVERED_PSU]})
+    live.apply_event(
+        sweep(present=("rigol_dp2031",), served=("rigol_dp2031",)), now=101.0
+    )
+
+    psu = live.to_dict()["slots"]["rigol_dp2031"]
+    assert psu["present"] is True
+    assert psu["serial_number"] == "DP2A243500269", "a sweep blanked the serial number"
+    assert psu["label"] == "Rigol DP2000-series power supply"
+    assert psu["usb_id"] == "1ab1:a4a8"
+    assert psu["confidence"] == "exact"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        "presence",
+        {"kind": "presence"},
+        {"kind": "presence", "present": "siglent_sdm4065a", "served": []},
+        {"kind": "presence", "present": [], "served": "siglent_sdm4065a"},
+    ],
+)
+def test_a_malformed_sweep_costs_this_update_and_nothing_else(live, bad):
+    """``apply_presence`` runs on the feed's receive path.
+
+    Raising there drops the session and blanks the screen over a bad optional
+    field — and presence is exactly the field to arrive malformed, since the agent
+    sending it may be a release ahead or behind the panel. The previous scan's
+    answer is left standing rather than cleared, for the same reason a failed
+    ``agent.discover`` keeps the last one: flapping a row between ATTACHED and NOT
+    FOUND makes the rail unreadable.
+    """
+    live.apply_inventory({"devices": [DISCOVERED_PSU]})
+    live.apply_presence(bad, now=101.0)
+
+    psu = live.to_dict()["slots"]["rigol_dp2031"]
+    assert psu["present"] is True, "a malformed sweep threw away a real measurement"
+    assert psu["serial_number"] == "DP2A243500269"
+    assert live.presence_sweeps == 0, "a sweep that said nothing was counted anyway"
+    assert live.last_presence_mono is None
+
+
+def test_sweeps_are_counted_and_stamped_so_the_panel_can_prove_it_is_being_told(live):
+    """Not merely "presence is known": known *because the bench keeps saying so*.
+
+    The panel's own inventory poll would satisfy the weaker claim on its own, so
+    without a counter this whole mechanism could be absent and every presence
+    assertion would still pass. The stamp is kept apart from the general freshness
+    mark because a sweep answers a much slower question, and folding it in would
+    make a half-minute-old bus inventory look as current as a 5s status poll.
+    """
+    live.apply_event(sweep(), now=101.0)
+    live.apply_event(sweep(), now=131.0)
+
+    assert live.presence_sweeps == 2
+    assert live.last_presence_mono == 131.0
+    assert live.to_dict()["presence_sweeps"] == 2
+
+
+def test_an_unchanged_sweep_is_not_written_to_the_log(live):
+    """LOG.MGR shows 24 rows and belongs to the bench, not to its bookkeeping.
+
+    An unchanged sweep is the bench saying "still four instruments" every 30s.
+    Logged, it would evict every real bench action within about twelve minutes —
+    the same trap a logged heartbeat sets, arriving from a second source.
+    """
+    live.apply_event(action(), now=101.0)
+    for i in range(LOG_LIMIT * 3):
+        live.apply_event(sweep(), now=102.0 + i * 30.0)
+
+    assert [e.get("kind") for e in live.log] == ["action"]
+    assert live.presence_sweeps == LOG_LIMIT * 3, "the sweeps were dropped, not just unlogged"
+    assert not any(e.get("kind") == "presence" for e in live.sticky)
+
+
+def test_a_sweep_that_found_a_change_does_reach_the_log(live):
+    """The other half, and the reason the early return is conditional.
+
+    An instrument leaving the bus mid-session is a real bench event — the agent
+    grades it ``warn`` for exactly that reason — and it is the one an operator
+    needs to see in the log next to whatever failed right after it. Suppressing
+    every sweep to keep the log clean would silently discard it.
+    """
+    live.apply_event(sweep(present=(), changed=True, severity="warn"), now=101.0)
+
+    assert [e.get("kind") for e in live.log] == ["presence"]
+    assert live.slots["siglent_sdm4065a"].present is False
+    assert live.presence_sweeps == 1
+
+
+def test_sweep_bookkeeping_does_not_outlive_the_session_that_produced_it(live):
+    """A sweep count is a claim that the bench is confirming its hardware *to us*.
+
+    Carried across a disconnect it would say the bench is still checking in on a
+    link where nothing can arrive — and the presence it vouched for goes with it,
+    because a slot claiming ATTACHED after the cable was pulled while the panel
+    was blind is a stale claim about the physical bench rather than about the
+    display, which is the direction that gets someone hurt.
+    """
+    live.apply_event(sweep(), now=101.0)
+    assert live.presence_sweeps == 1
+
+    live.apply_disconnected("the agent closed the connection")
+
+    assert live.presence_sweeps == 0
+    assert live.last_presence_mono is None
+    assert live.to_dict()["presence_sweeps"] == 0
+    assert live.slots["siglent_sdm4065a"].present is None, (
+        "a slot still claims ATTACHED on a link nobody can see down"
+    )
