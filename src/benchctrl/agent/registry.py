@@ -173,6 +173,29 @@ class DeviceRegistry:
         with self._lock:
             return [e.to_dict() for e in self._entries.values()]
 
+    def sessions(self) -> dict[str, dict]:
+        """Which devices are open right now, and which failed to open.
+
+        A deliberately tiny sibling of :py:meth:`describe`, meant for the status
+        poll. ``describe`` carries each device's whole remote surface — every
+        method, property, and mutator name — which is the right payload once at
+        connect and far too much every 5 s.
+
+        This exists because "is it open" is the one fact on the device table that
+        *changes during a session*, and until now nothing reported it after
+        WELCOME. A dashboard therefore learned which devices were open exactly
+        once, at connect, when the answer is always "none of them" — so an
+        instrument the agent was actively driving still read as merely
+        configured. Open state is cheap to compute and changes often, so it
+        belongs on the frequent call; the surface is expensive and immutable, so
+        it stays on the one-off.
+        """
+        with self._lock:
+            return {
+                key: {"open": e.is_open, "open_error": e.open_error}
+                for key, e in self._entries.items()
+            }
+
 
 def build_default_registry(
     device_keys: Optional[list[str]] = None,

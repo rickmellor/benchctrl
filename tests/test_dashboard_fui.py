@@ -39,6 +39,7 @@ from benchctrl.dashboards.fui.server import FuiServer
 from benchctrl.dashboards.fui.view import (
     ABSENT,
     FAULT,
+    IN_RUN,
     INSTRUMENTS,
     NO_LINK,
     NOT_SERVED,
@@ -48,6 +49,7 @@ from benchctrl.dashboards.fui.view import (
     STANDBY,
     UNDETERMINED,
     UNSCANNED,
+    _enrolled_run,
     _recent_action,
     _slot_state,
     build_view,
@@ -1626,10 +1628,67 @@ def test_an_idle_bench_lights_no_stage(live):
     assert not any(s["active"] for s in view["stages"])
 
 
-def test_a_running_run_lights_exactly_one_stage(live):
-    live.apply_event({"kind": "run_started", "run_id": "r1"}, now=101.0)
-    active = [s["name"] for s in view_of(live)["stages"] if s["active"]]
-    assert len(active) == 1, active
+def test_a_run_that_reported_a_stage_lights_exactly_that_one(live):
+    """The bench says where it is, and the row shows it.
+
+    The whole point of the change these stages came from. Previously the lit node
+    was derived from run *status*, which has three interesting values and so could
+    never distinguish five stages: two nodes were unreachable and the third lit
+    ``ANALYSIS`` from the first setpoint onwards.
+    """
+    live.apply_event({"kind": "run_start", "run_id": "r1"}, now=101.0)
+    live.apply_event(
+        {"kind": "run_stage", "run_id": "r1", "stage": "EXECUTE"}, now=101.5
+    )
+    view = view_of(live)
+    assert [s["name"] for s in view["stages"] if s["active"]] == ["EXECUTE"]
+    # And the nodes it has already been through read as traversed, so the row is a
+    # progress track rather than one lit box in a row of dark ones.
+    assert [s["name"] for s in view["stages"] if s["done"]] == ["INIT", "PREPARE"]
+
+
+def test_a_running_run_that_reported_no_stage_lights_nothing(live):
+    """"A run is in flight" does not say which stage it is in.
+
+    The honest rendering of "the bench has not told us where it is" is no node,
+    which is why ``running`` maps to nothing. The old mapping's answer was
+    ``ANALYSIS`` for the entire run — a word that was wrong for almost the whole
+    time it was lit. Reached in practice by an older agent, or by a panel that
+    connected mid-run and missed the transition.
+    """
+    live.apply_event({"kind": "run_start", "run_id": "r1"}, now=101.0)
+    assert not any(s["active"] for s in view_of(live)["stages"])
+
+
+def test_a_reported_stage_outranks_the_state_derived_fallback(live):
+    """Where both could answer, the bench's report wins.
+
+    A ``pending`` run derives INIT, so a run that has reported EXECUTE while its
+    state still reads pending is the case that pins the precedence. A measurement
+    of where the run is beats an inference from its status.
+    """
+    live.apply_event({"kind": "run_start", "run_id": "r1"}, now=101.0)
+    live.apply_event(
+        {"kind": "run_stage", "run_id": "r1", "stage": "EXECUTE"}, now=101.5
+    )
+    live.runs["r1"].state = "pending"
+    assert [s["name"] for s in view_of(live)["stages"] if s["active"]] == ["EXECUTE"]
+
+
+def test_a_stage_this_build_cannot_place_is_named_rather_than_dropped(live):
+    """A newer agent naming a stage this row does not carry must not read as idle.
+
+    Showing NO SEQUENCE beside a run that is plainly in progress would say "no test
+    running", which is the class of lie this panel exists to avoid. The name is
+    passed through so the display can say it cannot place it.
+    """
+    live.apply_event({"kind": "run_start", "run_id": "r1"}, now=101.0)
+    live.apply_event(
+        {"kind": "run_stage", "run_id": "r1", "stage": "CALIBRATE"}, now=101.5
+    )
+    view = view_of(live)
+    assert not any(s["active"] for s in view["stages"])
+    assert view["stage_unknown"] == "CALIBRATE"
 
 
 def test_a_finished_run_lights_done(live):
@@ -1672,6 +1731,237 @@ def test_an_in_flight_run_outranks_a_finished_one():
     """What the bench is doing beats what it has done, regardless of order."""
     assert _lit({"early": "pending", "late": "finished"}) == ["INIT"]
     assert _lit({"late": "finished", "early": "pending"}) == ["INIT"]
+
+
+def _staged(runs: dict, stages) -> dict:
+    """The whole stage half of the view, for given ``runs`` and ``run_stages``.
+
+    Takes both maps as they arrive on the snapshot, so a test can build the
+    combinations a live model cannot easily be walked into — a stage for a run the
+    snapshot does not list, a ``run_stages`` that is not a dict at all — which is
+    exactly the shape an agent a release ahead or behind can send.
+    """
+    snap = BenchStatus().to_dict()
+    snap["reconnects"] = 0
+    snap["runs"] = runs
+    snap["run_stages"] = stages
+    view = build_view(snap)
+    return {
+        "active": [s["name"] for s in view["stages"] if s["active"]],
+        "done": [s["name"] for s in view["stages"] if s["done"]],
+        "unknown": view["stage_unknown"],
+    }
+
+
+def _dut_of(runs: dict, dut_map, names=None) -> dict:
+    """The DUT half of the view, for given ``runs`` and ``run_dut``.
+
+    Same reason :py:func:`_staged` takes its maps directly: the combinations that
+    matter here — a DUT for a run the snapshot does not list, no map at all — are
+    what an agent a release ahead or behind sends, and are awkward to walk a live
+    model into.
+    """
+    snap = BenchStatus().to_dict()
+    snap["reconnects"] = 0
+    snap["runs"] = runs
+    snap["run_dut"] = dut_map
+    snap["run_names"] = names if names is not None else {}
+    view = build_view(snap)
+    return {
+        "dut": view["dut"],
+        "dut_known": view["dut_known"],
+        "run_name": view["run_name"],
+    }
+
+
+def test_an_idle_bench_claims_no_dut():
+    """Nothing on this panel may assert a DUT that no run declared.
+
+    With no runs there is no headline run, so ``dut_known`` must be False and the
+    label reads NO RUN. A view that hardcoded it True would have an idle bench
+    showing UNSPECIFIED — a statement about a run that does not exist.
+    """
+    got = _dut_of({}, {})
+    assert got["dut_known"] is False
+    assert got["dut"] == ""
+
+
+def test_a_run_the_snapshot_lists_without_a_dut_entry_is_not_known():
+    """The mid-run-connect case, at the view layer.
+
+    ``run_dut`` omits runs whose ``run_start`` was never seen, so a run present in
+    ``runs`` and absent from ``run_dut`` is precisely "we were not told". It must
+    not be reported as a declared-empty DUT.
+    """
+    got = _dut_of({"r1": "running"}, {})
+    assert got["dut_known"] is False
+
+
+def test_a_declared_empty_dut_is_known_and_empty():
+    """The other side of the same distinction, which one flag has to carry.
+
+    Present in the map with an empty value means the run said nothing is named —
+    a fact about the spec, and the input that makes ``dut_known`` load-bearing
+    rather than decorative.
+    """
+    got = _dut_of({"r1": "running"}, {"r1": ""})
+    assert got["dut_known"] is True
+    assert got["dut"] == ""
+
+
+def test_the_dut_shown_belongs_to_the_run_the_sequence_row_is_about():
+    """The two must name the same run, or the panel is self-contradictory.
+
+    An in-flight run owns the row — the same rule ``_active_stage`` follows — so
+    with a finished run sorting first the DUT must still be the live run's. A
+    display pairing one run's DUT with another's stage would be worse than showing
+    neither, because both halves look authoritative.
+    """
+    runs = {"a-finished": "complete", "b-live": "running"}
+    got = _dut_of(runs, {"a-finished": "old-board", "b-live": "room-temp-sensor"})
+    assert got["dut"] == "room-temp-sensor"
+
+
+def test_the_run_name_comes_from_the_same_run_as_the_dut():
+    got = _dut_of(
+        {"a-finished": "complete", "b-live": "running"},
+        {"b-live": "room-temp-sensor"},
+        {"a-finished": "old-sweep", "b-live": "cr2032-assoc-24h"},
+    )
+    assert got["run_name"] == "cr2032-assoc-24h"
+
+
+def test_a_run_dut_payload_that_is_not_a_map_costs_the_panel_nothing_else():
+    """An older agent sends no such key at all; a confused one could send anything.
+
+    The rest of the frame must still build — this panel's job is to keep reporting
+    the bench through a partial or unexpected snapshot, not to go dark because one
+    field was the wrong type.
+    """
+    for bad in (None, "room-temp-sensor", ["r1"], 3):
+        got = _dut_of({"r1": "running"}, bad)
+        assert got["dut_known"] is False, bad
+        assert got["dut"] == "", bad
+
+
+def test_the_active_node_is_not_also_marked_done():
+    """A run *in* EXECUTE has not been through EXECUTE.
+
+    The done-track is a strictly-earlier-than test, and the off-by-one is not
+    cosmetic: a node drawn as both traversed and pulsing is the row saying the run
+    has finished the stage it is still in, which is the one thing an operator reads
+    this row to know. Pinned separately from the lit-node assertions because those
+    hold either way.
+    """
+    staged = _staged({"r1": "running"}, {"r1": "EXECUTE"})
+    assert staged["active"] == ["EXECUTE"]
+    assert staged["done"] == ["INIT", "PREPARE"]
+    assert "EXECUTE" not in staged["done"]
+
+
+def test_the_first_stage_has_nothing_behind_it():
+    """INIT active means an empty done-track, not a track containing INIT.
+
+    The boundary case of the comparison above, and the one where a ``<=`` reads as
+    plausible: with the run at the first node there is genuinely nothing traversed
+    yet, so any lit history is invented.
+    """
+    staged = _staged({"r1": "pending"}, {})
+    assert staged["active"] == ["INIT"]
+    assert staged["done"] == []
+
+
+def test_a_finished_runs_reported_stage_still_beats_the_derived_one():
+    """Reported-over-derived holds for a run that has stopped, too.
+
+    The precedence is tested for an in-flight run elsewhere; this is the other
+    branch of ``_active_stage``, and it is the branch that decides what the row
+    shows *after* a run. A run that failed in ANALYZE derives DONE from its status,
+    and DONE would say the sequence completed. Where the bench told us where it got
+    to, that is the more useful and the more honest node.
+    """
+    staged = _staged({"r1": "failed"}, {"r1": "ANALYZE"})
+    assert staged["active"] == ["ANALYZE"]
+
+
+def test_the_furthest_stage_any_stopped_run_reached_is_the_one_lit():
+    """With nothing in flight, the row shows how far the sequence actually got.
+
+    Position in :py:data:`STAGES` decides, not iteration order, so the answer is
+    the same whichever run the agent happens to list first — the same
+    order-independence the lit node needs everywhere else on this row.
+    """
+    runs = {"r1": "failed", "r2": "complete"}
+    assert _staged(runs, {"r1": "PREPARE", "r2": "ANALYZE"})["active"] == ["ANALYZE"]
+    assert _staged(runs, {"r2": "ANALYZE", "r1": "PREPARE"})["active"] == ["ANALYZE"]
+
+
+def test_a_stage_reported_for_a_run_the_snapshot_does_not_list_lights_nothing():
+    """``run_stages`` is keyed by run id and only speaks about runs that exist.
+
+    Reachable across the two maps drifting by one frame — a replayed stage for a run
+    trimmed from the model, or a snapshot stitched by an older feed. Lighting a node
+    from it would have the row claim a sequence is in progress beside a run list that
+    does not contain it, and an operator reading "EXECUTE" with nothing running has
+    no way to tell which of the two is lying.
+
+    Asserted twice: with no real runs at all, and beside a run the snapshot *does*
+    list. The second case is the one that bites — the row is derived from the run
+    map, so a stage key that leaked into the run set would be looked up in a table
+    it is not in, taking the frame with it.
+    """
+    assert _staged({}, {"ghost": "EXECUTE"})["active"] == []
+    staged = _staged({"r1": "complete"}, {"ghost": "EXECUTE"})
+    assert staged["active"] == ["DONE"]
+    assert staged["unknown"] is None
+
+
+def test_an_empty_stage_map_falls_back_to_the_derived_node():
+    """No bench has said anything, so the coarse mapping gets its say.
+
+    The older-agent and connected-mid-run case, which is the only reason the
+    derived fallback still exists. It must still work: a finished run with no
+    reported stage reads DONE rather than leaving the row dark.
+    """
+    assert _staged({"r1": "complete"}, {})["active"] == ["DONE"]
+
+
+@pytest.mark.parametrize("stages", [None, "EXECUTE", ["EXECUTE"], 7])
+def test_a_run_stages_payload_that_is_not_a_map_costs_the_row_nothing_else(stages):
+    """A malformed stage map degrades to the derived node, not to an exception.
+
+    Same defensive treatment as every other newer field on this snapshot: it
+    crossed a process boundary from an agent that may be a release behind — one
+    that sends no ``run_stages`` at all — and the row must lose its reported stage
+    rather than the panel losing its frame.
+    """
+    assert _staged({"r1": "complete"}, stages)["active"] == ["DONE"]
+
+
+def test_a_stopped_run_naming_a_stage_this_build_cannot_place_lights_nothing():
+    """An unplaceable name contributes nothing rather than being forced onto a node.
+
+    The row's nodes come from this build's :py:data:`STAGES` while the names come
+    off the wire, so a newer agent can report a stage that has no position here.
+    Guessing one — nearest, or last — would put a run somewhere it never said it
+    was; better a dark row than a confidently wrong node.
+    """
+    staged = _staged({"r1": "complete"}, {"r1": "CALIBRATE"})
+    assert staged["active"] == []
+    assert staged["done"] == []
+
+
+def test_a_placeable_stage_is_not_reported_as_unknown():
+    """``stage_unknown`` names only what the row cannot draw.
+
+    The negative half of the unknown-stage test: a field that always reported None
+    would silence a newer agent, and one that always reported the stage would have
+    the renderer print "cannot place EXECUTE" beside a lit EXECUTE node. Both maps
+    are asserted at once so the two halves cannot disagree.
+    """
+    staged = _staged({"r1": "running"}, {"r1": "EXECUTE"})
+    assert staged["active"] == ["EXECUTE"]
+    assert staged["unknown"] is None
 
 
 # --------------------------------------------------------------------------
@@ -1913,6 +2203,7 @@ def test_a_denied_observer_role_never_reads_system_ready():
 # how it is spelled.
 
 FUI_JS = pathlib.Path(fui_static.__file__).parent / "static" / "fui.js"
+FUI_CSS = pathlib.Path(fui_static.__file__).parent / "static" / "fui.css"
 
 # Everything below the governor needs a DOM. We want the governor alone, so cut
 # the file at the section marker rather than shimming a browser: a stub DOM rich
@@ -2290,3 +2581,837 @@ def test_the_feed_reaches_the_bench_through_the_server(server):
     else:
         pytest.fail(f"the feed never reached the fake bench: {body}")
     assert slot(body, "otii_arc")["status"] == "IDLE"
+
+
+# --------------------------------------------------------------------------
+# IN RUN: an instrument a live run declared, held for the run's whole duration
+#
+# The complaint these answer: "the instrument cards still show standby while the
+# device is in use", and the request that followed it — a run should identify the
+# instruments it will use and hold them as in-use for the duration of the test.
+#
+# Activity and enrollment are deliberately two mechanisms because they answer
+# two questions. A run's calls come in bursts: a supply set once at phase entry
+# and held through a ten-minute dwell is in use the whole time while making no
+# calls for all but 200 ms of it. Activity marks the instant; enrollment covers
+# the dwell. Neither alone is enough.
+# --------------------------------------------------------------------------
+
+
+def test_a_device_a_live_run_declared_reads_as_in_a_run():
+    """The headline property. A run that says it will drive this instrument makes
+    the card say so, for as long as the run lasts."""
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": True},
+        trustworthy=True,
+        inventory_taken=True,
+        registry_known=True,
+        connected=True,
+        enrolled_run="r7",
+    )
+    assert state["status"] == IN_RUN
+    assert state["run"] == "r7"
+    # Marked linked: something is actively driving it, which is exactly the
+    # condition the renderer's bright treatment is reserved for.
+    assert state["linked"] is True
+
+
+def test_enrollment_outranks_an_open_session():
+    """Both are true at once and they compete for one word, so the order matters.
+
+    OPEN says the agent holds a handle. IN RUN says something is using that handle
+    and will keep using it. The second is the stronger claim about the same device,
+    and it is the one an operator watching a test wants.
+    """
+    slot = {"served": True, "present": True, "opened": True}
+    common = dict(
+        trustworthy=True, inventory_taken=True, registry_known=True, connected=True
+    )
+    assert _slot_state(None, slot, **common)["status"] == OPEN
+    assert _slot_state(None, slot, **common, enrolled_run="r7")["status"] == IN_RUN
+
+
+def test_an_arm_state_outranks_enrollment():
+    """A live output outranks every claim about what should be happening.
+
+    The whole precedence ladder exists to stop a configuration detail displacing a
+    hazard, and enrollment is the newest thing that could have broken it.
+    """
+    state = _slot_state(
+        {"label": "armed", "armed": True, "inferred": False},
+        {"served": True, "present": True, "opened": True},
+        trustworthy=True,
+        inventory_taken=True,
+        registry_known=True,
+        connected=True,
+        enrolled_run="r7",
+    )
+    assert state["status"] == "ARMED"
+    assert state["armed"] is True
+
+
+def test_a_measured_absence_outranks_enrollment():
+    """A run declaring it will drive an instrument is a statement of intent. A scan
+    that looked and could not find the instrument is a measurement, and a
+    measurement outranks intent — the operator needs to know the thing is gone,
+    not that a run believes otherwise."""
+    state = _slot_state(
+        None,
+        {"served": True, "present": False, "opened": True},
+        trustworthy=True,
+        inventory_taken=True,
+        registry_known=True,
+        connected=True,
+        discoverable=True,
+        enrolled_run="r7",
+    )
+    assert state["status"] == ABSENT
+
+
+def test_an_open_failure_outranks_enrollment():
+    """An open that failed is something the operator can fix, and it means the run
+    is not driving this device whatever it declared."""
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": False, "open_error": "busy"},
+        trustworthy=True,
+        inventory_taken=True,
+        registry_known=True,
+        connected=True,
+        enrolled_run="r7",
+    )
+    assert state["status"] == FAULT
+
+
+def test_enrollment_claims_nothing_without_a_session():
+    """No session means every fact about this device is of unknown age, including
+    a run's claim on it. A run id from the last connected moment must not keep a
+    card lit after the link drops."""
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": True},
+        trustworthy=True,
+        inventory_taken=True,
+        registry_known=True,
+        connected=False,
+        enrolled_run="r7",
+    )
+    assert state["status"] == NO_LINK
+
+
+def test_an_enrolled_slot_on_a_stale_view_is_marked_stale_not_dropped():
+    """Deliberately different from the activity marker, which is withheld outright.
+
+    An activity line is an assertion about this instant and has no honest stale
+    form. Enrollment is not: "a run owned this device, and we have lost sight of
+    it" is both true and the single most useful thing a panel that has gone quiet
+    can say. So it survives staleness and is struck through instead.
+    """
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": True},
+        trustworthy=False,
+        inventory_taken=True,
+        registry_known=True,
+        connected=True,
+        enrolled_run="r7",
+    )
+    assert state["status"] == IN_RUN
+    assert state["stale"] is True
+
+
+def test_a_slot_no_run_declared_says_nothing_about_runs():
+    """Absence of enrollment is not a claim. A device nothing declared carries no
+    run field for the renderer to key a highlight off."""
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": True},
+        trustworthy=True,
+        inventory_taken=True,
+        registry_known=True,
+        connected=True,
+    )
+    assert state["status"] == OPEN
+    assert not state.get("run")
+
+
+# ---- _enrolled_run: a table that crossed a process boundary --------------
+
+
+def test_the_enrollment_table_names_the_run_that_holds_a_device():
+    assert _enrolled_run("dmm", {"dmm": "r7"}) == "r7"
+
+
+def test_a_device_no_run_holds_is_not_enrolled():
+    assert _enrolled_run("dmm", {"psu": "r7"}) is None
+
+
+def test_a_malformed_enrollment_table_costs_one_marker_not_the_render():
+    """This field arrives from an agent that may be a release ahead or behind, and
+    it is read inside the renderer. Anything unusable must yield None rather than
+    raise: the cost of a bad payload is this slot's IN RUN marker, never the panel.
+    """
+    assert _enrolled_run("dmm", None) is None
+    assert _enrolled_run("dmm", "r7") is None
+    assert _enrolled_run("dmm", []) is None
+    assert _enrolled_run("dmm", {"dmm": 7}) is None
+    assert _enrolled_run("dmm", {"dmm": None}) is None
+
+
+def test_a_blank_run_id_does_not_license_an_in_run_claim():
+    """A truthy id is what earns the IN RUN word, so an empty one must not.
+
+    "In a run I cannot name" is a worse readout than falling through to the
+    open-session rung, which is still true and still says the agent is talking to
+    the device.
+    """
+    assert _enrolled_run("dmm", {"dmm": ""}) is None
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": True},
+        trustworthy=True,
+        inventory_taken=True,
+        registry_known=True,
+        connected=True,
+        enrolled_run=_enrolled_run("dmm", {"dmm": ""}),
+    )
+    assert state["status"] == OPEN
+
+
+# ---- build_view: the whole path, from a real model to rail slots ----------
+
+
+def test_the_rail_shows_in_run_for_a_device_a_real_run_declared():
+    """End to end through the real model and the real view, using the event kind
+    the agent actually emits. The unit tests above all inject ``enrolled_run``
+    directly; this one proves ``build_view`` computes it from a run event."""
+    live = BenchStatus()
+    live.apply_connected(
+        {
+            "observer": True,
+            "agent": "bench",
+            "devices": [{"key": "siglent_sdm4065a", "open": False}],
+        },
+        now=100.0,
+    )
+    live.apply_status(
+        {
+            "safety": {},
+            "workers": {},
+            "devices": {"siglent_sdm4065a": {"open": True}},
+        },
+        now=101.0,
+    )
+    live.apply_event(
+        {
+            "kind": "run_start",
+            "run_id": "r7",
+            "name": "sweep",
+            "devices": ["siglent_sdm4065a"],
+        },
+        now=102.0,
+    )
+    view = build_view(live.to_dict(), live)
+    row = next(i for i in view["instruments"] if i["key"] == "siglent_sdm4065a")
+    assert row["status"] == IN_RUN
+    assert row["run"] == "r7"
+
+
+def test_the_rail_releases_a_device_when_its_run_ends():
+    """No explicit clearing anywhere: enrollment has exactly the lifetime of the
+    in-flight run that declared it, which is what stops a crashed run pinning an
+    instrument to IN RUN forever."""
+    live = BenchStatus()
+    live.apply_connected(
+        {
+            "observer": True,
+            "agent": "bench",
+            "devices": [{"key": "siglent_sdm4065a", "open": False}],
+        },
+        now=100.0,
+    )
+    live.apply_status(
+        {
+            "safety": {},
+            "workers": {},
+            "devices": {"siglent_sdm4065a": {"open": True}},
+        },
+        now=101.0,
+    )
+    live.apply_event(
+        {"kind": "run_start", "run_id": "r7", "devices": ["siglent_sdm4065a"]},
+        now=102.0,
+    )
+    live.apply_event({"kind": "run_end", "run_id": "r7", "status": "ok"}, now=103.0)
+    view = build_view(live.to_dict(), live)
+    row = next(i for i in view["instruments"] if i["key"] == "siglent_sdm4065a")
+    # Back to OPEN, not stuck on IN RUN and not fallen through to STANDBY: the
+    # session is still open, which is exactly what OPEN means.
+    assert row["status"] == OPEN
+    assert not row.get("run")
+
+
+def test_a_view_from_an_agent_that_declares_no_devices_still_renders():
+    """An older agent's run_start carries no device list. The rail must lose the
+    IN RUN marker and nothing else — the same defensive contract every other
+    cross-process field on this panel has."""
+    live = BenchStatus()
+    live.apply_connected(
+        {
+            "observer": True,
+            "agent": "bench",
+            "devices": [{"key": "siglent_sdm4065a", "open": False}],
+        },
+        now=100.0,
+    )
+    live.apply_status(
+        {
+            "safety": {},
+            "workers": {},
+            "devices": {"siglent_sdm4065a": {"open": True}},
+        },
+        now=101.0,
+    )
+    live.apply_event({"kind": "run_start", "run_id": "r7"}, now=102.0)
+    snap = live.to_dict()
+    assert snap["enrolled"] == {}
+    view = build_view(snap, live)
+    row = next(i for i in view["instruments"] if i["key"] == "siglent_sdm4065a")
+    assert row["status"] == OPEN
+
+
+def test_build_view_survives_a_snapshot_with_no_enrolled_key_at_all():
+    """``to_dict`` always emits the key, but ``build_view`` is also handed
+    snapshots by tests and by any future caller. A missing key must read as "no
+    enrollment", not raise inside the renderer."""
+    live = BenchStatus()
+    live.apply_connected(
+        {
+            "observer": True,
+            "agent": "bench",
+            "devices": [{"key": "siglent_sdm4065a", "open": False}],
+        },
+        now=100.0,
+    )
+    live.apply_status({"safety": {}, "workers": {}}, now=101.0)
+    snap = live.to_dict()
+    del snap["enrolled"]
+    view = build_view(snap, live)
+    row = next(i for i in view["instruments"] if i["key"] == "siglent_sdm4065a")
+    assert not row.get("run")
+
+
+def test_a_junk_enrolled_field_does_not_reach_the_slots():
+    """A malformed table costs the rail its IN RUN markers and nothing else.
+
+    Enforced in one place, ``_enrolled_run``, and this test says so deliberately.
+    ``build_view`` briefly normalised the field as well; a mutation deleting that
+    upstream guard killed no test, because no input reaches one check without
+    reaching the other. It was removed rather than pinned with a test that could
+    only pass — an untestable line that looks like a safety check is worse than no
+    line, because the next reader trusts it.
+    """
+    live = BenchStatus()
+    live.apply_connected(
+        {
+            "observer": True,
+            "agent": "bench",
+            "devices": [{"key": "siglent_sdm4065a", "open": False}],
+        },
+        now=100.0,
+    )
+    live.apply_status({"safety": {}, "workers": {}}, now=101.0)
+    snap = live.to_dict()
+    snap["enrolled"] = "r7"
+    view = build_view(snap, live)
+    row = next(i for i in view["instruments"] if i["key"] == "siglent_sdm4065a")
+    assert not row.get("run")
+
+
+# --------------------------------------------------------------------------
+# OPEN inferred from activity: the seam between two feeds at different rates
+#
+# Measured on the board, not theorised. After the confirmed-OPEN rung landed, a
+# 195 s sweep still showed the DMM reading STANDBY for the first ~4 s of traffic
+# while its activity line was already updating — because activity arrives on the
+# event stream in milliseconds and ``opened`` arrives on the 5 s status poll. Ten
+# samples out of 170, and exactly the reported symptom: a card showing standby
+# for a device in use, with "some text on the card updating".
+#
+# A device cannot execute a call without an open handle, so during that window the
+# panel already holds proof the device is open — it just has not been *told*. The
+# rung reports OPEN and marks it ``inferred`` (drawn dashed), which is what that
+# flag means everywhere else here: deduced from an event, not reported.
+# --------------------------------------------------------------------------
+
+_LADDER = dict(
+    trustworthy=True, inventory_taken=True, registry_known=True, connected=True
+)
+
+
+def test_a_device_that_just_answered_a_call_is_not_shown_as_standby():
+    """The captured defect, at the sample that exhibited it.
+
+    The DMM at t=17.3 s of the sweep: served, on the bus, activity 0.5 s old, and
+    ``opened`` still False because no status poll had landed yet. It read STANDBY.
+    """
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": False, "confidence": "exact"},
+        **_LADDER,
+        recent={"action": "measure_resistance_4wire", "age_s": 0.5},
+    )
+    assert state["status"] == OPEN
+    # Dashed, not solid: this is deduced from an event, and the seam should be
+    # visible as a slightly-less-confirmed OPEN rather than papered over.
+    assert state["inferred"] is True
+    assert state["linked"] is True
+
+
+def test_an_undiscoverable_device_in_use_is_not_shown_as_unidentifiable():
+    """The QR10x's version of the same window, which its own rung cannot cover.
+
+    It sits behind a driverless CH340 with no VID/PID, so ``present`` is False and
+    ``discoverable`` is False — no scan will ever confirm it. During the sweep that
+    was driving it, it read NO ID. A completed call answers the presence question
+    that UNDETERMINED says nobody has answered.
+    """
+    state = _slot_state(
+        None,
+        {"served": True, "present": False, "opened": False},
+        **_LADDER,
+        discoverable=False,
+        recent={"action": "set_resistance", "age_s": 0.0},
+    )
+    assert state["status"] == OPEN
+    assert state["inferred"] is True
+
+
+def test_a_quiet_device_still_reads_standby():
+    """The rung must not make every served device read OPEN.
+
+    STANDBY is the honest resting state of a healthy bench — the registry opens
+    devices lazily, so "on the bus, not opened yet" is a real and common condition.
+    A rung that fired without evidence would trade one wrong word for another.
+    """
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": False, "confidence": "exact"},
+        **_LADDER,
+        recent=None,
+    )
+    assert state["status"] == STANDBY
+
+
+def test_being_busy_is_evidence_enough_on_its_own():
+    """``busy`` means a call is in flight right now — strictly stronger evidence
+    than ``recent``, which only says one completed. Either alone suffices."""
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": False, "confidence": "exact"},
+        **_LADDER,
+        busy="measure_resistance_4wire",
+    )
+    assert state["status"] == OPEN
+    assert state["inferred"] is True
+
+
+def test_a_confirmed_open_session_is_not_marked_inferred():
+    """Both rungs say OPEN, so the distinction lives entirely in ``inferred``.
+
+    One poll after the seam closes, the confirmed rung must supersede the deduced
+    one — otherwise the card would stay dashed for the whole session and the flag
+    would stop meaning anything.
+    """
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": True},
+        **_LADDER,
+        recent={"action": "measure_resistance_4wire", "age_s": 0.5},
+    )
+    assert state["status"] == OPEN
+    assert state["inferred"] is False
+
+
+def test_a_measured_absence_outranks_activity():
+    """A scan that looked and could not find the device keeps the word.
+
+    The safety ordering: activity is evidence about the recent past, ABSENT is a
+    current measurement the operator can act on. A device whose cable was pulled
+    mid-sweep has both — a few-seconds-old call and a scan that no longer sees it —
+    and the actionable one must win.
+    """
+    state = _slot_state(
+        None,
+        {"served": True, "present": False, "opened": False, "confidence": "exact"},
+        **_LADDER,
+        discoverable=True,
+        recent={"action": "measure_resistance_4wire", "age_s": 0.5},
+    )
+    assert state["status"] == ABSENT
+
+
+def test_enrollment_outranks_activity_inferred_from_a_call():
+    """IN RUN is the stronger claim and stays above both forms of OPEN."""
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": False},
+        **_LADDER,
+        recent={"action": "measure_resistance_4wire", "age_s": 0.5},
+        enrolled_run="r7",
+    )
+    assert state["status"] == IN_RUN
+
+
+def test_an_untrustworthy_view_cannot_infer_an_open_session():
+    """A stale view must not manufacture an open session out of an old event.
+
+    ``busy`` and ``recent`` are both dropped at the top of the ladder when the view
+    cannot be trusted, so this rung has nothing to fire on — which is the point:
+    the age of an event measured against a feed that stopped arriving understates
+    itself, so "0.5 s ago" would sit on the glass while the truth grew to minutes.
+    """
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": False, "confidence": "exact"},
+        trustworthy=False,
+        inventory_taken=True,
+        registry_known=True,
+        connected=True,
+        busy="measure_resistance_4wire",
+        recent={"action": "measure_resistance_4wire", "age_s": 0.5},
+    )
+    assert state["status"] == STANDBY
+
+
+def test_activity_cannot_conjure_a_link_that_does_not_exist():
+    """Without a session, nothing below the connection rung may be asserted.
+
+    A view holding a last-known activity marker from before a disconnect must not
+    use it to claim the agent is talking to hardware.
+    """
+    state = _slot_state(
+        None,
+        {"served": True, "present": True, "opened": False},
+        trustworthy=True,
+        inventory_taken=True,
+        registry_known=True,
+        connected=False,
+        recent={"action": "measure_resistance_4wire", "age_s": 0.5},
+    )
+    assert state["status"] == NO_LINK
+    assert state["linked"] is False
+
+
+# --------------------------------------------------------------------------
+# The renderer's class vocabulary: which card is highlighted, and when
+#
+# "when an operation is being performed on a device its instrument card should be
+# highlighted so we can see which device is being acted on at that moment."
+#
+# The class assembly is sliced out of the shipped file and run in node, for the
+# reason the other JS tests here give: a reimplementation would pass while the
+# file the page actually loads was broken.
+# --------------------------------------------------------------------------
+
+_CLASSES_FN_START = "function slotClasses(inst, act) {"
+_TOUCHED_FN_START = "function touchedNow(inst) {"
+
+
+def _slice_fn(src: str, start_marker: str) -> str:
+    """One brace-balanced function, lifted from the shipped renderer."""
+    start = src.find(start_marker)
+    assert start >= 0, (
+        f"{start_marker!r} moved in {FUI_JS.name}; this test slices on it"
+    )
+    depth = 0
+    for i in range(start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError(f"unbalanced braces slicing {start_marker!r}")
+
+
+def classes_source() -> str:
+    """``slotClasses`` and everything it calls, plus the window constant."""
+    src = FUI_JS.read_text(encoding="utf-8")
+    # The constant is sliced by name rather than hardcoded: a test that carried its
+    # own 2.5 would keep passing after someone retuned the real one.
+    const_line = next(
+        line for line in src.splitlines() if line.startswith("const TOUCH_WINDOW_S")
+    )
+    return "\n".join(
+        [
+            const_line,
+            _slice_fn(src, _TOUCHED_FN_START),
+            _slice_fn(src, _CLASSES_FN_START),
+        ]
+    )
+
+
+def run_classes(inst: dict, act: str = "") -> list[str]:
+    harness = "\n".join(
+        [
+            classes_source(),
+            f"console.log(JSON.stringify(slotClasses({json.dumps(inst)},"
+            f" {json.dumps(act)})));",
+        ]
+    )
+    out = subprocess.run(
+        [NODE, "--input-type=module", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert out.returncode == 0, f"node failed:\n{out.stderr}"
+    return json.loads(out.stdout).split()
+
+
+def js_touch_window() -> float:
+    """The renderer's own TOUCH_WINDOW_S, read from the shipped file."""
+    src = FUI_JS.read_text(encoding="utf-8")
+    line = next(ln for ln in src.splitlines() if ln.startswith("const TOUCH_WINDOW_S"))
+    return float(line.split("=")[1].strip().rstrip(";"))
+
+
+@needs_node
+def test_the_card_being_acted_on_right_now_is_highlighted():
+    """The request, directly: the operator must be able to see which device is
+    being driven at this moment."""
+    got = run_classes(
+        {"recent": {"age_s": 0.4, "action": "measure_resistance_4wire"}},
+        "measure_resistance_4wire · 0.4s ago",
+    )
+    assert "touched" in got
+
+
+@needs_node
+def test_a_call_caught_in_flight_highlights_the_card():
+    """``busy`` is the strongest evidence available — a call is inside the driver
+    at this instant — so it highlights regardless of any action age."""
+    got = run_classes({"busy": "measure_resistance_4wire", "recent": None}, "measure…")
+    assert "touched" in got
+
+
+@needs_node
+def test_the_highlight_lets_go_sooner_than_the_activity_line_does():
+    """The two windows are deliberately different, and this is the pair that proves
+    it.
+
+    The ``.act`` text may honestly say "6s ago" — that is a true report of the
+    past. The highlight may not still be on, because a glow is read across the
+    bench as "this one, now". An age inside the view's RECENT_ACTION_S but outside
+    the renderer's TOUCH_WINDOW_S must produce a line and no highlight.
+    """
+    stale_age = js_touch_window() + 1.0
+    assert stale_age < RECENT_ACTION_S, (
+        "this test needs an age the view still reports but the renderer no longer "
+        "highlights; the two windows have been retuned into agreement"
+    )
+    got = run_classes(
+        {"recent": {"age_s": stale_age, "action": "read_voltage"}},
+        f"read_voltage · {stale_age}s ago",
+    )
+    assert "touched" not in got
+    # The past-tense line is still drawn — this is not a claim being suppressed,
+    # only a highlight expiring.
+    assert "recent" in got
+
+
+@needs_node
+def test_an_untouched_card_is_not_highlighted():
+    got = run_classes({"recent": None, "busy": None}, "")
+    assert "touched" not in got
+    assert "working" not in got
+
+
+@needs_node
+def test_a_stale_view_cannot_highlight_a_card():
+    """The view withholds ``recent`` entirely when it does not trust itself, so
+    there is nothing for the highlight to key off. Asserted here as well as in the
+    view because this is where the glow is actually drawn: a highlight surviving a
+    dead feed is a card claiming to be in use on a bench nobody can see."""
+    got = run_classes({"recent": None, "busy": None, "stale": True}, "")
+    assert "touched" not in got
+    assert "stale" in got
+
+
+@needs_node
+def test_a_card_with_a_malformed_age_is_not_highlighted():
+    """The age crossed a process boundary. Anything non-numeric must read as "no
+    claim", never as fresh — the direction that matters, since a truthy-but-junk
+    age would light the card permanently."""
+    for bad in (None, "0.4", {}, []):
+        got = run_classes({"recent": {"age_s": bad, "action": "read"}}, "read")
+        assert "touched" not in got, f"age_s={bad!r} lit the card"
+
+
+@needs_node
+def test_an_enrolled_card_wears_the_run_class_for_the_whole_run():
+    """Steady state, not a pulse: enrollment lasts minutes, and the class must not
+    depend on there being an activity line to accompany it."""
+    got = run_classes({"run": "r7", "recent": None, "busy": None}, "")
+    assert "inrun" in got
+    # And with no traffic at all, it is emphatically not claiming to be mid-call.
+    assert "touched" not in got
+    assert "working" not in got
+
+
+@needs_node
+def test_a_card_can_be_in_a_run_and_being_driven_at_once():
+    """The two mechanisms are orthogonal and both must show. This is the state a
+    run actually spends its time in: enrolled throughout, driven in bursts."""
+    got = run_classes(
+        {"run": "r7", "recent": {"age_s": 0.2, "action": "read_voltage"}},
+        "read_voltage · 0.2s ago",
+    )
+    assert "inrun" in got
+    assert "touched" in got
+
+
+@needs_node
+def test_a_card_with_no_run_does_not_wear_the_run_class():
+    got = run_classes({"run": None, "recent": None}, "")
+    assert "inrun" not in got
+
+
+@needs_node
+def test_an_armed_card_being_driven_still_reads_as_armed():
+    """A live output must never be repainted as routine. Both classes are present
+    and the CSS pins the colour red for the pair; this asserts the renderer at
+    least hands both over, so the stylesheet's guard has something to act on."""
+    got = run_classes(
+        {"armed": True, "recent": {"age_s": 0.2, "action": "read_current"}},
+        "read_current · 0.2s ago",
+    )
+    assert "armed" in got
+    assert "touched" in got
+
+
+def test_the_stylesheet_pins_red_for_an_armed_card_that_is_being_driven():
+    """The one place source order could silently break a safety property.
+
+    ``.slot.touched`` sits after ``.slot.armed`` in the file, and both have the
+    same specificity, so without an explicit pair rule the cascade would hand the
+    border of an armed-and-being-measured slot to the cyan highlight. Asserted
+    against the shipped stylesheet rather than trusted to review, because the
+    failure mode is invisible until an output is live.
+    """
+    css = FUI_CSS.read_text(encoding="utf-8")
+    assert ".slot.armed.touched" in css, (
+        "an armed slot that is also being driven has no pinned colour; "
+        ".slot.touched later in the file will repaint a live output cyan"
+    )
+    block = css.split(".slot.armed.touched", 1)[1]
+    block = block[: block.find("}")]
+    assert "--red" in block, "the armed+touched pair must re-assert red, not cyan"
+
+
+# The sequence row's class vocabulary, and the DUT label
+#
+# Both are decision tables sliced out of the shipped file for the same reason
+# ``slotClasses`` is: a reimplementation here would pass while the file the page
+# actually loads was broken.
+# --------------------------------------------------------------------------
+
+_STAGE_FN_START = "function stageClasses(s) {"
+_DUT_FN_START = "function dutLabel(v) {"
+
+
+def _run_js(fn_start: str, call: str):
+    """One sliced function from the renderer, invoked in node."""
+    src = FUI_JS.read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            _slice_fn(src, fn_start),
+            f"console.log(JSON.stringify({call}));",
+        ]
+    )
+    out = subprocess.run(
+        [NODE, "--input-type=module", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert out.returncode == 0, f"node failed:\n{out.stderr}"
+    return json.loads(out.stdout)
+
+
+def run_stage_classes(stage: dict) -> list[str]:
+    return _run_js(
+        _STAGE_FN_START, f"stageClasses({json.dumps(stage)})"
+    ).split()
+
+
+def run_dut_label(view: dict) -> str:
+    return _run_js(_DUT_FN_START, f"dutLabel({json.dumps(view)})")
+
+
+@needs_node
+def test_the_stage_the_run_is_in_is_the_one_that_pulses():
+    got = run_stage_classes({"name": "EXECUTE", "active": True, "done": False})
+    assert "active" in got
+
+
+@needs_node
+def test_a_stage_already_passed_reads_as_traversed_not_current():
+    """The two must be distinguishable, or the row is five lit boxes saying
+    nothing about where the run has got to."""
+    got = run_stage_classes({"name": "INIT", "active": False, "done": True})
+    assert "done" in got
+    assert "active" not in got
+
+
+@needs_node
+def test_a_stage_not_yet_reached_wears_neither_class():
+    got = run_stage_classes({"name": "ANALYZE", "active": False, "done": False})
+    assert got == ["stage-node"]
+
+
+@needs_node
+def test_active_wins_over_done_on_the_same_node():
+    """Reachable whenever the builder marks the current node done as well, and the
+    two classes animate differently. Only one can win, and it must be the one that
+    says "now" — a node showing where the run *is* must not be dimmed to the
+    colour that means "already been here"."""
+    got = run_stage_classes({"name": "EXECUTE", "active": True, "done": True})
+    assert "active" in got
+    assert "done" not in got
+
+
+@needs_node
+def test_the_dut_panel_names_what_the_run_is_testing_on():
+    """The panel has been titled DEVICE UNDER TEST since it was written without
+    ever being told what the device under test was."""
+    got = run_dut_label(
+        {"connected": True, "dut_known": True, "dut": "room-temp-sensor"}
+    )
+    assert got == "room-temp-sensor"
+
+
+@needs_node
+def test_a_run_that_declared_no_dut_says_so_rather_than_inventing_one():
+    """``RunSpec.dut`` defaults to ``""``, so "the author did not say" is a real
+    and common state. It must be legible as such: a blank would read as a display
+    fault, and a placeholder would read as a DUT that exists."""
+    got = run_dut_label({"connected": True, "dut_known": True, "dut": ""})
+    assert got == "UNSPECIFIED"
+
+
+@needs_node
+def test_no_run_is_distinct_from_a_run_that_named_nothing():
+    """The two are different facts and the operator acts differently on them.
+    Collapsing them would let an idle bench look like a misconfigured run."""
+    assert run_dut_label({"connected": True, "dut_known": False, "dut": ""}) == "NO RUN"
+
+
+@needs_node
+def test_an_unreachable_bench_claims_no_dut_at_all():
+    """Nothing on this panel may outlive the link. Without a bench the DUT is not
+    unspecified — it is unknown, which is what NO LINK says everywhere else."""
+    got = run_dut_label({"connected": False, "dut_known": True, "dut": "cr2032-cell"})
+    assert got == "NO LINK"

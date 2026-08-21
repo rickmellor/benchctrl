@@ -208,6 +208,43 @@ def test_multi_phase_run_completes(device, tmp_path):
     assert kinds.count("phase_end") == 6
 
 
+def test_run_start_declares_the_devices_the_run_will_drive(device, tmp_path):
+    """``run_start`` names its cast up front, so a panel can enrol them.
+
+    This is the agent half of a cross-process contract, and it is asserted here
+    rather than only in the dashboard's tests on purpose: a display cannot learn
+    which instruments a run owns by watching traffic, because a device only
+    reveals its involvement by being *called*. A supply set once at phase entry
+    and held through a ten-minute dwell is in use for the whole of it while
+    looking idle for all but 200 ms.
+
+    The declared key must equal ``spec.device`` — the name the registry, the
+    governor, and the panel's own rails are all keyed by. A run declaring its
+    device under any other spelling would enrol an instrument nobody can see.
+    """
+    engine = _run(_spec(), device, tmp_path)
+    start = next(e for e in engine.store.events_since(0) if e["kind"] == "run_start")
+
+    declared = start["data"]["devices"]
+    # A list even though a run currently drives exactly one device: the shape has
+    # to survive the first run that coordinates a supply and a load, and a bare
+    # string would be silently iterable as characters.
+    assert isinstance(declared, list)
+    assert declared == [engine.spec.device]
+
+
+def test_run_start_declares_whichever_device_the_spec_names(device, tmp_path):
+    """The declaration follows the spec rather than being a fixed string.
+
+    Without this, a hard-coded ``["otii_arc"]`` would satisfy every other
+    assertion in this file — the simulated bench device is an Arc — while
+    enrolling the wrong instrument on every other bench.
+    """
+    engine = _run(_spec(device="rigol_dp2031"), device, tmp_path)
+    start = next(e for e in engine.store.events_since(0) if e["kind"] == "run_start")
+    assert start["data"]["devices"] == ["rigol_dp2031"]
+
+
 def test_run_leaves_the_device_idle(device, tmp_path):
     _run(_spec(), device, tmp_path)
     assert device._sim.params[0x09] == 0, "output left enabled after the run"
@@ -372,6 +409,362 @@ def test_metrics_are_recorded_per_channel(device, tmp_path):
     window = engine.store.metric_window("mv", 3600)
     assert window, "no metrics recorded"
     assert all("mean" in row for row in window)
+
+
+# --------------------------------------------------------------------------
+# Sequence stages — the bench reports where the run is
+# --------------------------------------------------------------------------
+#
+# The panel's "Test Sequence" row used to be inferred from a run's coarse status
+# field: every ``running`` run mapped onto one node, so two of the five could
+# never light and the lit one claimed "analysing" from the first setpoint. These
+# tests pin the replacement — the engine emitting real transitions — because a
+# sequence that is merely plausible is indistinguishable from one that is true.
+
+
+def _stages(engine) -> list[str]:
+    """The stage names this run announced, in order."""
+    return [
+        e["data"]["stage"]
+        for e in engine.store.events_since(0)
+        if e["kind"] == "run_stage"
+    ]
+
+
+def test_a_run_walks_INIT_through_its_phases_to_DONE(device, tmp_path):
+    """The whole sequence, on a run whose phases span two stages.
+
+    ``record=False`` keeps chunks out of it so ANALYZE — which reports the
+    manifest work, not a phase — has its own test rather than muddying this one.
+    INIT has to arrive before any phase because it means "the engine is up and
+    nothing is energised yet", and DONE has to be last because it means the
+    opposite.
+    """
+    spec = _spec(
+        sampling=Sampling(channels=("mv",), chunk_s=60, metric_period_s=0.2,
+                          record=False),
+        phases=(
+            Phase(name="settle", mode="idle", duration_s=1.0),
+            Phase(name="soak", mode="cv",
+                  setpoints={"voltage_V": 3.0}, duration_s=1.0),
+        ),
+    )
+    engine = _run(spec, device, tmp_path)
+    assert engine.status == store_mod.STATUS_COMPLETE
+    assert _stages(engine) == ["INIT", "PREPARE", "EXECUTE", "DONE"]
+
+
+def test_the_first_stage_lands_between_run_start_and_the_first_phase(device, tmp_path):
+    """INIT is ordered against the events either side of it, not just present.
+
+    After ``run_start``, so a consumer learns the run exists before it hears where
+    the run is — a stage event for an unknown run is unroutable. Before
+    ``phase_start``, because a sequence whose starting node arrives after the run
+    has already entered a phase has nothing truthful to draw in between.
+    """
+    engine = _run(_spec(), device, tmp_path)
+    kinds = [e["kind"] for e in engine.store.events_since(0)]
+    assert kinds.index("run_start") < kinds.index("run_stage")
+    assert kinds.index("run_stage") < kinds.index("phase_start")
+
+
+def test_consecutive_phases_sharing_a_stage_announce_it_once(device, tmp_path):
+    """Every ``run_stage`` event is a real transition, never a heartbeat.
+
+    Six ``cv`` phases all derive EXECUTE. Re-announcing it per phase would leave a
+    consumer unable to tell "the run advanced" from "the run is still going",
+    which is the distinction the whole event exists to carry — and would make a
+    dropped transition undetectable in a stream of repeats.
+    """
+    spec = _spec(
+        sampling=Sampling(channels=("mv",), chunk_s=60, metric_period_s=0.2,
+                          record=False),
+        phases=tuple(
+            Phase(name=f"p{i}", mode="cv", setpoints={"voltage_V": 1.0 + i * 0.5},
+                  duration_s=1.0)
+            for i in range(6)
+        ),
+    )
+    engine = _run(spec, device, tmp_path)
+    assert _stages(engine) == ["INIT", "EXECUTE", "DONE"]
+
+
+def test_a_trailing_settle_phase_does_not_walk_the_sequence_back(device, tmp_path):
+    """``[idle, cv, idle]`` must not return to PREPARE — a real regression.
+
+    The third phase derives PREPARE from its mode, and emitting it would un-light
+    every node the run had already been through, reading as "the test restarted"
+    on a run that is simply cooling down. A trailing settle is part of the
+    measurement body as far as the sequence is concerned.
+    """
+    spec = _spec(
+        sampling=Sampling(channels=("mv",), chunk_s=60, metric_period_s=0.2,
+                          record=False),
+        phases=(
+            Phase(name="pre", mode="idle", duration_s=1.0),
+            Phase(name="measure", mode="cv",
+                  setpoints={"voltage_V": 3.0}, duration_s=1.0),
+            Phase(name="post", mode="idle", duration_s=1.0),
+        ),
+    )
+    engine = _run(spec, device, tmp_path)
+    assert _stages(engine) == ["INIT", "PREPARE", "EXECUTE", "DONE"]
+    assert engine.store.phases()[2]["status"] == store_mod.STATUS_COMPLETE
+
+
+def test_each_transition_names_the_stage_it_came_from(device, tmp_path):
+    """``from`` makes a dropped transition detectable.
+
+    With only ``to``, a consumer that missed an event cannot tell it missed one —
+    a jump straight to DONE looks identical to a run that never had a middle. The
+    chain is asserted end to end, and the first ``from`` is empty because nothing
+    preceded INIT. ``index`` is checked against ``STAGES`` so a consumer can order
+    stages without hardcoding the vocabulary.
+    """
+    from benchctrl.agent.runs.spec import STAGES
+
+    spec = _spec(
+        sampling=Sampling(channels=("mv",), chunk_s=60, metric_period_s=0.2,
+                          record=False),
+        phases=(
+            Phase(name="settle", mode="idle", duration_s=1.0),
+            Phase(name="soak", mode="cv",
+                  setpoints={"voltage_V": 3.0}, duration_s=1.0),
+        ),
+    )
+    engine = _run(spec, device, tmp_path)
+    events = [
+        e["data"] for e in engine.store.events_since(0) if e["kind"] == "run_stage"
+    ]
+    assert [d["from"] for d in events] == [""] + [d["stage"] for d in events[:-1]]
+    assert [d["index"] for d in events] == [STAGES.index(d["stage"]) for d in events]
+
+
+def test_analysis_is_reported_only_when_there_was_data_to_hash(device, tmp_path):
+    """ANALYZE reports the manifest work, which is real only if chunks exist.
+
+    Hashing every recorded chunk is the slowest thing the engine does on a long
+    run and the one part where it works on the *data* rather than the DUT. On a
+    run that recorded nothing there is no such work, and lighting a node for a few
+    microseconds of bookkeeping would be the same decoration the old renderer was.
+    Both halves are asserted together: a build that always emitted it, and one
+    that never did, each satisfy exactly one of them.
+    """
+    recording = _spec(
+        sampling=Sampling(channels=("mv",), chunk_s=10, metric_period_s=0.05),
+        phases=(Phase(name="capture", mode="cv",
+                      setpoints={"voltage_V": 3.0}, duration_s=60.0),),
+    )
+    engine = _run(recording, device, tmp_path)
+    assert engine.store.chunks(), "fixture wrote no chunks"
+    assert _stages(engine) == ["INIT", "EXECUTE", "ANALYZE", "DONE"]
+
+    dry = _spec(
+        sampling=Sampling(channels=("mv",), chunk_s=60, metric_period_s=0.2,
+                          record=False),
+        phases=(Phase(name="watch", mode="cv",
+                      setpoints={"voltage_V": 3.0}, duration_s=1.0),),
+    )
+    engine = _run(dry, device, tmp_path)
+    assert not engine.store.chunks()
+    assert "ANALYZE" not in _stages(engine)
+
+
+def test_the_manifest_is_written_while_ANALYZE_is_on_the_glass(device, tmp_path):
+    """The stage has to precede the work it describes, not follow it.
+
+    Announced after the hashing finished, the node would light for zero duration
+    on exactly the runs where the wait is longest — an operator watching a bench
+    grind through an hour of chunks would see nothing happening. The manifest's
+    own ``event_count`` is the proof: it counts events at the moment it is
+    written, so it includes the ANALYZE transition and excludes only DONE and
+    ``run_end``, which are emitted after it by design.
+    """
+    spec = _spec(
+        sampling=Sampling(channels=("mv",), chunk_s=10, metric_period_s=0.05),
+        phases=(Phase(name="capture", mode="cv",
+                      setpoints={"voltage_V": 3.0}, duration_s=60.0),),
+    )
+    engine = _run(spec, device, tmp_path)
+    manifest = json.loads((engine.store.run_dir / "manifest.json").read_text())
+    total = len(engine.store.events_since(0))
+    assert _stages(engine)[-2:] == ["ANALYZE", "DONE"]
+    assert manifest["event_count"] == total - 2
+
+
+def test_a_store_that_cannot_count_chunks_still_reports_DONE(device, tmp_path):
+    """Losing a node is cosmetic; losing DONE strands the display mid-flow.
+
+    A run aborted hard can reach ``_finish`` with a store that will not answer.
+    The degradation has to be one-way: no ANALYZE, but DONE regardless, because a
+    finished run stuck showing EXECUTE reads as a test still in progress on a
+    bench nobody is watching.
+    """
+    spec = _spec(
+        sampling=Sampling(channels=("mv",), chunk_s=10, metric_period_s=0.05),
+        phases=(Phase(name="capture", mode="cv",
+                      setpoints={"voltage_V": 3.0}, duration_s=60.0),),
+    )
+    engine = RunEngine(spec, device, runs_dir=tmp_path, clock_scale=0.02)
+
+    def _broken() -> int:
+        raise RuntimeError("database is closed")
+
+    engine.store.next_chunk_index = _broken
+    engine.start()
+    assert engine.join(timeout=60), "run did not finish"
+    stages = _stages(engine)
+    assert "ANALYZE" not in stages
+    assert stages[-1] == "DONE"
+    assert [e["kind"] for e in engine.store.events_since(0)][-1] == "run_end"
+
+
+def test_DONE_is_reported_on_an_aborted_run(device, tmp_path):
+    """An operator abort is a terminal path, so the sequence must terminate.
+
+    Without this the display would hold EXECUTE forever on a run that stopped
+    minutes ago — the failure mode is not a missing node but a stale one, which
+    reads as truth.
+    """
+    spec = _spec(
+        safety=Safety(max_voltage_V=4.0, max_current_A=0.5, max_duration_s=100_000),
+        phases=(Phase(name="long", mode="cv",
+                      setpoints={"voltage_V": 3.0}, duration_s=10_000.0),),
+    )
+    engine = RunEngine(spec, device, runs_dir=tmp_path, clock_scale=0.02)
+    engine.start()
+    time.sleep(0.5)
+    engine.abort("operator changed their mind")
+    assert engine.join(timeout=30)
+    assert engine.status == store_mod.STATUS_ABORTED
+    assert _stages(engine)[-1] == "DONE"
+
+
+def test_DONE_is_reported_on_a_safety_stop(device, tmp_path):
+    """The path where a stranded sequence would be most misleading.
+
+    A safe stop is the one outcome where an operator most needs to know the bench
+    has stopped: the rail is down and the run is over. The old inference could not
+    express that at all, since it only ever mapped ``running``.
+    """
+    device._sim.waveforms["mv"] = _Fixed(9.0)
+    spec = _spec(
+        phases=(Phase(name="overvolt", mode="cv",
+                      setpoints={"voltage_V": 3.0}, duration_s=30.0),),
+    )
+    engine = _run(spec, device, tmp_path)
+    assert engine.status == store_mod.STATUS_SAFE_STOPPED
+    assert _stages(engine)[-1] == "DONE"
+
+
+def test_DONE_is_reported_when_the_run_raises(device, tmp_path):
+    """The error path routes through ``_finish`` too, or it would strand as well.
+
+    Raised from ``_apply_setpoints`` because that is inside the engine's own
+    ``try`` and is where a real device fault lands — the last gate before the
+    output is energised.
+    """
+    engine = RunEngine(_spec(), device, runs_dir=tmp_path, clock_scale=0.02)
+
+    def _explode(phase):
+        raise RuntimeError("supply refused the setpoint")
+
+    engine._apply_setpoints = _explode
+    engine.start()
+    assert engine.join(timeout=30)
+    assert engine.status == store_mod.STATUS_ERRORED
+    kinds = [e["kind"] for e in engine.store.events_since(0)]
+    assert "run_error" in kinds
+    assert _stages(engine)[-1] == "DONE"
+
+
+def test_a_phases_stage_is_announced_before_its_output_is_energised(tmp_path):
+    """The stage must be on the glass *while* the rail comes up, not after.
+
+    The window matters because that is when an operator is looking: a supply
+    coming up under a display still showing the previous stage is the moment the
+    sequence is least trustworthy. Asserted against the first device call of the
+    phase rather than ``set_output`` alone, since the current limit and voltage
+    are committed before the output is enabled.
+
+    Uses a recording stand-in for the device so device calls and run events land
+    on one ordered list — the real driver's ordering is not observable from the
+    event log alone.
+    """
+    timeline: list[str] = []
+
+    class _Recorder:
+        """Enough of a supply for ``_apply_setpoints``; records the order."""
+
+        def set_current_limit(self, amps):
+            timeline.append("set_current_limit")
+
+        def set_current_limit_enabled(self, on):
+            timeline.append("set_current_limit_enabled")
+
+        def set_voltage(self, volts):
+            timeline.append("set_voltage")
+
+        def set_power_regulation(self, mode):
+            timeline.append("set_power_regulation")
+
+        def set_output(self, on):
+            timeline.append(f"set_output={on}")
+
+    spec = _spec(
+        sampling=Sampling(channels=("mv",), chunk_s=60, metric_period_s=0.2,
+                          record=False),
+        phases=(Phase(name="soak", mode="cv",
+                      setpoints={"voltage_V": 3.0, "current_limit_A": 0.1},
+                      duration_s=1.0),),
+    )
+    engine = RunEngine(
+        spec,
+        _Recorder(),
+        runs_dir=tmp_path,
+        clock_scale=0.02,
+        on_event=lambda e: (
+            timeline.append(f"stage:{e['data']['stage']}")
+            if e["kind"] == "run_stage"
+            else None
+        ),
+    )
+    engine.start()
+    assert engine.join(timeout=30), "run did not finish"
+
+    first_device_call = next(
+        i for i, mark in enumerate(timeline) if mark.startswith("set_")
+    )
+    assert timeline.index("stage:EXECUTE") < first_device_call
+
+
+def test_an_unorderable_stage_is_emitted_rather_than_dropped(device, tmp_path):
+    """A stage outside the vocabulary must not be silently swallowed.
+
+    A contract test on ``_emit_stage``, not a reachability test: nothing in the
+    spec can produce such a stage today, because ``Phase`` validates against
+    ``PHASE_STAGES``. It is asserted anyway because the ordering guard is written
+    in terms of ``STAGES.index``, which raises rather than returning a sentinel —
+    so the *reason* an unknown stage survives is one caught exception, and a
+    future stage name added on one side of the wire before the other would
+    otherwise vanish. Silently dropping transitions is the exact failure this
+    whole change exists to remove; the display already renders an unplaceable
+    stage as unplaceable.
+    """
+    engine = RunEngine(_spec(), device, runs_dir=tmp_path)
+    engine._emit_stage("EXECUTE")
+    engine._emit_stage("CALIBRATE")
+    engine._emit_stage("DONE")
+
+    events = [
+        e["data"] for e in engine.store.events_since(0) if e["kind"] == "run_stage"
+    ]
+    assert [d["stage"] for d in events] == ["EXECUTE", "CALIBRATE", "DONE"]
+    # ``-1`` rather than an omitted key: a consumer must be able to tell "cannot
+    # be ordered" from "position 0", which would sort it before INIT.
+    assert events[1]["index"] == -1
+    # And it does not become the floor for what follows: DONE is still emitted.
+    assert events[2]["from"] == "CALIBRATE"
 
 
 # --------------------------------------------------------------------------

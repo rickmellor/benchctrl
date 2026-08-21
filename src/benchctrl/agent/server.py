@@ -1609,6 +1609,14 @@ class _Handler(socketserver.BaseRequestHandler):
                 "workers": agent.workers.stats(),
                 "blobs": agent.blobs.stats(),
                 "recordings": agent.recordings.describe(),
+                # Which devices are open, per poll. The registry's full
+                # ``describe()`` rides in WELCOME once, but open state is the one
+                # part of it that changes while a session runs, and a consumer
+                # that only ever saw the WELCOME copy believed nothing was ever
+                # open — an instrument under active use reported as merely
+                # configured. Deliberately ``sessions()`` and not ``describe()``:
+                # see that method for why the surface does not belong here.
+                "devices": agent.registry.sessions(),
             }, None
         if method == "agent.time":
             return {"utc": time.time(), "mono": time.monotonic()}, None

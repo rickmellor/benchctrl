@@ -33,7 +33,7 @@ from benchctrl.agent.runs.rules import (
     SAFETY_OFFSET,
     RuleEngine,
 )
-from benchctrl.agent.runs.spec import Phase, RunSpec
+from benchctrl.agent.runs.spec import STAGES, Phase, RunSpec
 from benchctrl.agent.runs.store import RunStore, new_run_id
 from benchctrl.exceptions import BenchValueError
 
@@ -80,6 +80,12 @@ class RunEngine:
         self._recording = None
         self._chunk_started = 0.0
         self._llm = None
+        #: The sequence stage last emitted. Held so a transition is emitted only
+        #: when the stage actually changes: several consecutive phases commonly
+        #: share one stage, and re-announcing EXECUTE for each of them would turn
+        #: a state change into a heartbeat, leaving a consumer unable to tell
+        #: "the run advanced" from "the run is still going".
+        self._stage = ""
         self.status = store_mod.STATUS_PENDING
 
     # --- lifecycle ------------------------------------------------------
@@ -126,7 +132,43 @@ class RunEngine:
     def _run(self) -> None:
         self.status = store_mod.STATUS_RUNNING
         self.store.set_status(store_mod.STATUS_RUNNING)
-        self._emit("run_start", payload={"spec_sha256": self.spec.sha256})
+        # ``devices`` names every instrument this run will touch, declared up
+        # front. A status display cannot otherwise learn it: a device only reveals
+        # its involvement by being *called*, so a supply that is set once at phase
+        # entry and then held looks idle for the rest of the run. Enrolling the
+        # whole cast at the start is what lets a panel say "this instrument is
+        # committed to a run" for the run's full duration instead of blinking it
+        # on for the 200 ms of each call.
+        #
+        # A list even though a run currently drives exactly one device: the spec
+        # already models the DUT separately, phases carry per-device setpoints,
+        # and the panel's contract should not have to change the first time a run
+        # coordinates a supply and a load. One name today, in the shape that
+        # survives the second.
+        # ``run_name``, not ``name``: ``phase_start`` below already sends ``name``
+        # for the phase, so the two nouns would share a key and a consumer folding
+        # ``name`` across a run's events could not keep both. Distinct keys, so a
+        # panel can say what is running and where it has got to at the same time.
+        #
+        # ``dut`` is what the run is testing *on*, and a bare label is the whole of
+        # the spec's identity for it — free text, empty when the author did not
+        # say. Sent even when empty: "this run declared nothing" is a fact about
+        # the run, and a consumer that could not tell it from "no run at all" would
+        # have to guess which of the two to show.
+        self._emit(
+            "run_start",
+            payload={
+                "spec_sha256": self.spec.sha256,
+                "devices": [self.spec.device],
+                "run_name": self.spec.name,
+                "dut": self.spec.dut,
+            },
+        )
+        # INIT before the first phase, so the sequence has a truthful starting
+        # node: the engine is up and nothing is energised yet. Emitted after
+        # run_start so a consumer learns the run exists before it hears where the
+        # run is.
+        self._emit_stage("INIT")
         started = time.monotonic()
 
         try:
@@ -163,6 +205,9 @@ class RunEngine:
             phase_idx=idx,
             payload={"name": phase.name, "mode": phase.mode, "setpoints": phase.setpoints},
         )
+        # Before the setpoints, not after: the stage must be on the glass while
+        # the output is being energised, not once it already is.
+        self._emit_stage(phase.sequence_stage)
         self.rules.reset_range(EXIT_OFFSET, len(phase.exit))
         self._advance_request = ""
 
@@ -461,6 +506,66 @@ class RunEngine:
             except Exception:  # noqa: BLE001
                 log.debug("run event sink raised", exc_info=True)
 
+    def _chunks_written(self) -> bool:
+        """Whether this run persisted any recording chunk.
+
+        Wrapped so a store that cannot answer — a closed database on an aborted
+        run, most likely — degrades to "no analysis stage" rather than taking down
+        the terminal transitions with it. Losing a node is cosmetic; losing DONE
+        would leave the sequence lit mid-flow on a finished run.
+        """
+        try:
+            return self.store.next_chunk_index() > 0
+        except Exception:  # noqa: BLE001
+            log.debug("could not count chunks for the sequence stage", exc_info=True)
+            return False
+
+    def _emit_stage(self, stage: str) -> None:
+        """Announce a sequence-stage transition, if this is one.
+
+        The bench reporting where the run *is*, rather than a display inferring it
+        from run status. That inference was the defect this replaces: the panel
+        mapped every ``running`` run onto a single node, so two of its five stages
+        could never light at all and the lit one claimed "analysing" from the first
+        setpoint onwards.
+
+        Silent when the stage has not changed, so every event this emits is a real
+        transition. The payload carries ``from`` as well as ``to`` because a
+        consumer that missed an event can tell it missed one — with only ``to``, a
+        dropped transition is indistinguishable from a run that never made it.
+        ``index`` lets a consumer order stages without hardcoding the vocabulary.
+        """
+        if stage == self._stage:
+            return
+        # A sequence only ever moves forward. A run whose phases are
+        # ``[idle, cv, idle]`` derives PREPARE, EXECUTE, PREPARE — and emitting
+        # that last one would walk the display back to PREPARE after the test had
+        # started, reading as "the run restarted" and un-lighting everything it had
+        # already been through. A trailing settle phase is part of EXECUTE as far
+        # as the sequence is concerned: the run is still in its measurement body.
+        #
+        # Enforced here rather than in the display so every consumer sees the same
+        # monotonic stream, and so the invariant is stated once at the source
+        # instead of re-derived by anything that reads these events.
+        try:
+            if STAGES.index(stage) < STAGES.index(self._stage or STAGES[0]):
+                return
+        except ValueError:
+            # A stage outside the vocabulary cannot be ordered against the current
+            # one. Emitted rather than dropped: a consumer that cannot place it can
+            # say so, and silently swallowing a transition is the failure mode this
+            # whole change exists to remove.
+            pass
+        previous, self._stage = self._stage, stage
+        self._emit(
+            "run_stage",
+            payload={
+                "stage": stage,
+                "from": previous,
+                "index": STAGES.index(stage) if stage in STAGES else -1,
+            },
+        )
+
     def _notify_llm(self, trigger: str, phase_idx: int) -> None:
         if self._llm is None:
             return
@@ -474,9 +579,39 @@ class RunEngine:
         self._idle_device()
         self.status = status
         self.store.set_status(status, stop_reason=reason)
+        # ANALYZE covers the work below, not a phase: ``write_manifest`` hashes
+        # every recorded chunk, which on a long run is the slowest thing the engine
+        # does and the one part where the bench is working on the *data* rather
+        # than the DUT. Emitting it here is what makes the stage a real report — no
+        # phase reaches ANALYZE unless its author says so, and a node that could
+        # only ever light on a hand-annotated spec would be back to being
+        # decoration.
+        #
+        # It goes *before* the manifest, not after. A stage names work that is
+        # about to happen, and hashing an hour of chunks is exactly the wait an
+        # operator needs to see accounted for; announced afterwards the node would
+        # light for zero duration on precisely the runs where it matters most.
+        # ``_end_chunk`` above has already flushed the final chunk, so the gate
+        # sees the true count from either position.
+        #
+        # Skipped when nothing was recorded: hashing no chunks is not an analysis
+        # step, and lighting a node for a few microseconds of bookkeeping would be
+        # the cinematic lie rather than a measurement. ``next_chunk_index`` is the
+        # store's own count of what it holds, and is 0 exactly when no chunk was
+        # ever written — including on an ``idle``-only run, which records nothing.
+        # DONE only after the output is idled, and before ``run_end``. Emitting it
+        # earlier would light the terminal node while the device was still being
+        # brought down; emitting it after ``run_end`` would let a consumer that
+        # drops the run on ``run_end`` never see it. Reached on *every* terminal
+        # path — including safe-stop and error — because a sequence that stops
+        # mid-flow on an aborted run leaves EXECUTE lit forever, which reads as a
+        # test still in progress.
         severity = "critical" if status == store_mod.STATUS_SAFE_STOPPED else "info"
-        self._emit("run_end", severity=severity, payload={"status": status, "reason": reason})
+        if self._chunks_written():
+            self._emit_stage("ANALYZE")
         self.store.write_manifest()
+        self._emit_stage("DONE")
+        self._emit("run_end", severity=severity, payload={"status": status, "reason": reason})
         log.info("run %s finished: %s (%s)", self.run_id, status, reason)
 
     # --- reporting ------------------------------------------------------

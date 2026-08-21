@@ -343,6 +343,15 @@ header {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* A stage the run has already passed. Dimmer than the active node and brighter
+   than an untouched one, so the row reads as a progress track: where the run has
+   been, where it is, where it has yet to go. Deliberately un-animated — the pulse
+   is what marks "now", and a second moving thing would compete with it. */
+.stage-node.done {
+  color: var(--cyan-dim);
+  border-color: var(--cyan-dim);
+  background: rgba(0, 229, 255, 0.06);
+}
 .stage-node.active {
   color: var(--cyan);
   border-color: var(--cyan);
@@ -575,6 +584,61 @@ header {
   content: '· ';
   color: var(--cyan-dim);
 }
+
+/* Enrolled in a live run: this instrument is committed to a test for its whole
+   duration. A steady teal edge, not an animation — the state lasts minutes and a
+   thing that pulses for ten minutes stops being read as information. Left of
+   .touched in specificity on purpose: a card can be both, and "in a run, being
+   driven right now" should look like the run state plus the highlight rather than
+   a third colour nobody has learned. */
+.slot.inrun {
+  border-color: var(--teal);
+  background: rgba(42, 255, 195, 0.06);
+}
+.slot.inrun .state { color: var(--teal); text-shadow: var(--glow-soft); }
+/* No .slot.armed.inrun guard, unlike .armed.touched below: _slot_state returns at
+   the arm-state rung before it can reach IN_RUN, so a slot is never both. If that
+   precedence ever changes, this pair needs the same treatment — an armed output
+   must not be repainted teal by a rule that happens to sit later in the file. */
+/* A left edge is the one decoration on this card that nothing else uses, so "part
+   of the running test" is legible at a glance down the rail without reading a
+   word of it. */
+.slot.inrun { border-left: 2px solid var(--teal); }
+
+/* THE device being acted on at this moment. The brightest non-alarm state on the
+   rail, because the question it answers — "which instrument is it talking to
+   right now" — is the one an operator asks while watching a test run.
+
+   A visible lift rather than a colour swap: the card keeps whatever state colour
+   it earned (linked, ready, inrun, even armed) and gains a glow and a brighter
+   border on top. Overwriting the colour would mean a card being driven could no
+   longer be read for what it *is*, which is the more important fact of the two.
+
+   Cyan, never amber or red: those two are reserved for states needing action, and
+   a measurement in progress needs nothing from anybody. Held for TOUCH_WINDOW_S
+   (2.5s) after the last completed call, so it tracks a burst of reads as one
+   steady glow instead of flickering per call. */
+.slot.touched {
+  border-color: var(--cyan);
+  box-shadow: var(--glow-soft), inset 0 0 12px rgba(0, 229, 255, 0.07);
+}
+.slot.touched .name { color: var(--cyan); text-shadow: var(--glow); }
+
+/* An armed slot that is also being driven keeps its red. Both rules have the same
+   specificity and this file's cascade would otherwise hand the border to whichever
+   came last — which is .touched, so a live output being measured would have gone
+   cyan. Re-asserting red here rather than reordering the file, because source
+   order is a fragile place to encode a safety property: someone moving a block
+   should not be able to make an armed output look routine. The glow is kept, so
+   the "being driven now" signal survives; only the colour is pinned. */
+.slot.armed.touched {
+  border-color: var(--red);
+  box-shadow: var(--glow-red), inset 0 0 12px rgba(255, 43, 61, 0.1);
+}
+.slot.armed.touched .name { color: var(--red); text-shadow: var(--glow-red); }
+/* Deliberately no animation on the box. .slot.armed owns the box-level pulse, and
+   a second pulsing box on the same rail would make a live output just another
+   animated row — the one confusion this panel must never create. */
 
 /* Unconfirmed: dashed border. We inferred this from an event and were never
    told; it must not look like a confirmed reading. */

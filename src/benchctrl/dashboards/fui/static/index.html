@@ -73,6 +73,11 @@
       <div id="banner" class="hidden"></div>
 
       <section class="panel" id="dut-panel">
+        <!-- The projection is decoration and is allowed to be; the DUT *name*
+             beside it is a readout and is not. It shows what the running run
+             declared it is testing on, or says plainly that nothing declared it.
+             The panel had carried this title since it was written without ever
+             being told what the device under test was. -->
         <div class="title"><span>DEVICE UNDER TEST · HOLO PROJECTION</span><span class="val" id="dut-verdict">NO LINK</span></div>
         <!-- The sweep lives inside this panel, not over the viewport. As a
              full-page fixed layer it cost 48% of a CPU core on the board (see

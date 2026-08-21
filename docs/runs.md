@@ -105,6 +105,46 @@ for an hour.
 | `cc` | constant current from `setpoints.current_A` |
 | `emulator` | battery emulation from `emulator.profile` |
 
+## Test sequence stages
+
+A phase may declare which stage of the test it belongs to, and the bench emits a
+`run_stage` event when a run moves between them:
+
+    INIT → PREPARE → EXECUTE → ANALYZE → DONE
+
+`INIT` and `DONE` are the engine's own brackets and a phase cannot claim either —
+a phase reporting `DONE` while still driving the output is the one thing a
+sequence display must never show. `ANALYZE` is emitted by the engine at the end,
+just before it writes the manifest — hashing every chunk is the longest wait on a
+long run, so the node has to be lit for it rather than after it — and skipped
+when the run recorded nothing.
+
+A phase that declares no stage gets one derived from its mode (`idle` →
+`PREPARE`, everything else → `EXECUTE`), so specs written before stages existed
+still report a truthful sequence. The derived value is *not* written into
+`spec.json`: baking it in would make a spec's `sha256` depend on the release that
+submitted it.
+
+Stages are monotonic. A phase list of `[idle, cv, idle]` derives PREPARE,
+EXECUTE, PREPARE, and the engine drops that last transition rather than walk a
+display backwards — which would read as the run restarting.
+
+## What the run says about itself
+
+`name` is required and `dut` is a free-text label, empty by default. Both travel
+on `run_start`, so a status display can say what is running and what it is
+running against:
+
+| Field | On the wire | Empty means |
+|---|---|---|
+| `name` | `run_start.run_name` | — (required) |
+| `dut` | `run_start.dut` | the author did not say |
+
+`run_name` rather than `name` because `phase_start` already uses `name` for the
+phase, and a consumer folding one key cannot keep both nouns. `dut` is sent even
+when empty: "this run declared nothing" is a fact about the run, and a display
+that could not tell it from "no run at all" would have to guess which to show.
+
 `emulator` phases never record. The emulator's 100 Hz control loop and the
 recording reader thread contend for the same transport and deadlock within
 about 100 ms (`KNOWN_LIMITATIONS` A-1). Moving both to the bench moves the

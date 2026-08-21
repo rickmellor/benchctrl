@@ -22,6 +22,39 @@ from benchctrl.exceptions import BenchValueError
 
 SCHEMA_VERSION = 1
 
+#: The stages of a test sequence, in order. A run moves through these and the
+#: bench *emits* each transition, so a status display reports where the run
+#: actually is rather than inferring it.
+#:
+#: This vocabulary lives in the spec module because a spec is what assigns phases
+#: to stages, and because both the engine that emits transitions and the panel
+#: that draws them need the same list without either importing the other. Five
+#: names, fixed and ordered, rather than a free-text label per phase: the panel
+#: draws a fixed row of nodes, and a run that could invent its own stage names
+#: would either overflow that row or force it to reflow mid-run.
+#:
+#: ``INIT`` and ``DONE`` bracket the run and are not assignable to a phase — they
+#: mark "the engine has started and nothing is energised yet" and "the run is
+#: over". The three in between are where a phase can sit.
+STAGES = ("INIT", "PREPARE", "EXECUTE", "ANALYZE", "DONE")
+
+#: The stages a phase may declare. ``INIT``/``DONE`` are the engine's own
+#: brackets: a phase claiming them could light ``DONE`` while still driving the
+#: output, which is the one lie this display must not tell.
+PHASE_STAGES = ("PREPARE", "EXECUTE", "ANALYZE")
+
+#: The stage a phase gets when it does not say. Chosen by what the mode *does*
+#: rather than defaulting everything to ``EXECUTE``: an ``idle`` phase energises
+#: nothing, so it is setup or settling, not the test proper. This is what lets
+#: existing specs — none of which carry a stage — still drive a truthful
+#: sequence.
+_STAGE_BY_MODE = {
+    "idle": "PREPARE",
+    "cv": "EXECUTE",
+    "cc": "EXECUTE",
+    "emulator": "EXECUTE",
+}
+
 #: Phase modes. ``emulator`` and any recording are mutually exclusive at the
 #: device level — see the note on A-1 in :py:class:`Phase`.
 MODES = ("idle", "cv", "cc", "emulator")
@@ -228,6 +261,11 @@ class Phase:
     duration_s: float = 0.0
     exit: tuple[Condition, ...] = ()
     emulator: dict = field(default_factory=dict)
+    #: Which sequence stage this phase belongs to. Empty means "derive it from
+    #: the mode" — see :py:data:`_STAGE_BY_MODE`. A spec author sets this when
+    #: the mode is not enough: a `cv` phase that only settles a rail before the
+    #: real measurement is PREPARE, not EXECUTE, and only the author knows that.
+    stage: str = ""
 
     def __post_init__(self) -> None:
         _as_float(self, "duration_s")
@@ -235,6 +273,14 @@ class Phase:
         _require(
             self.mode in MODES, f"phase {self.name!r}: unknown mode {self.mode!r}"
         )
+        if self.stage:
+            object.__setattr__(self, "stage", self.stage.upper())
+            _require(
+                self.stage in PHASE_STAGES,
+                f"phase {self.name!r}: stage {self.stage!r} is not one of "
+                f"{list(PHASE_STAGES)} — INIT and DONE are the engine's own "
+                f"brackets and cannot be claimed by a phase",
+            )
         _require(
             self.duration_s > 0 or self.exit,
             f"phase {self.name!r} has neither a duration nor an exit condition — "
@@ -258,6 +304,17 @@ class Phase:
         """
         return self.mode != "emulator"
 
+    @property
+    def sequence_stage(self) -> str:
+        """The stage this phase reports, declared or derived.
+
+        Always one of :py:data:`PHASE_STAGES`, so the engine can emit a stage for
+        every phase without checking whether the author supplied one. The fallback
+        goes through the mode rather than a flat constant so that specs written
+        before stages existed still produce a sequence that moves.
+        """
+        return self.stage or _STAGE_BY_MODE.get(self.mode, "EXECUTE")
+
     def to_dict(self) -> dict:
         d = {
             "name": self.name,
@@ -268,6 +325,11 @@ class Phase:
         }
         if self.emulator:
             d["emulator"] = dict(self.emulator)
+        # Only when declared. Writing the derived value here would bake this
+        # release's mode mapping into every spec's sha256, so a later change to
+        # the defaults would look like the spec itself had changed.
+        if self.stage:
+            d["stage"] = self.stage
         return d
 
     @classmethod
@@ -279,6 +341,7 @@ class Phase:
             duration_s=float(d.get("duration_s", 0.0)),
             exit=tuple(Condition.from_dict(c) for c in d.get("exit", ())),
             emulator=dict(d.get("emulator", {})),
+            stage=str(d.get("stage", "")),
         )
 
 

@@ -1694,3 +1694,273 @@ def test_sweep_bookkeeping_does_not_outlive_the_session_that_produced_it(live):
     assert live.slots["siglent_sdm4065a"].present is None, (
         "a slot still claims ATTACHED on a link nobody can see down"
     )
+
+
+# --------------------------------------------------------------------------
+# Which devices are open, on the fast poll
+#
+# Measured on the bench: a 195s 4-wire resistance sweep left both instruments
+# reading STANDBY — the word for "configured, not opened yet" — in all 170
+# samples of the panel, while the agent was driving them. ``DeviceSlot.opened``
+# had exactly one writer, ``apply_registry``, reached from exactly one place:
+# the WELCOME frame at connect, where the honest answer is always "nothing is
+# open yet". ``agent.status`` carried no device table at all, so nothing ever
+# revised that answer and every instrument card fell through to STANDBY for the
+# whole session.
+#
+# The poll now carries ``registry.sessions()`` and ``_apply_sessions`` folds it.
+# These go through the public ``apply_status`` rather than calling the folder
+# directly, because the defect was never in the folding — there was no folding —
+# but in what the poll was asked to carry, and only the caller can show that.
+# --------------------------------------------------------------------------
+
+
+def status_with_open_state(open_state, safety=None, **kwargs):
+    """An ``agent.status`` snapshot carrying the registry's open-state table.
+
+    ``{key: {"open": bool, "open_error": str|None}}``, as
+    ``DeviceRegistry.sessions()`` renders it. Asserted against the agent's real
+    output in ``test_remote_protocol.py``: a payload this suite invents for
+    itself is the one shape that cannot prove the two processes agree about the
+    vocabulary, which is the class of bug that produced this whole section.
+
+    ``status_payload`` deliberately does not grow a ``devices`` key of its own.
+    Its absence is the older-agent case, so the tests below need to be able to
+    send a poll that has none.
+    """
+    payload = status_payload(safety or {"otii_arc": idle()}, **kwargs)
+    payload["devices"] = open_state
+    return payload
+
+
+def test_a_poll_that_reports_a_device_open_makes_its_slot_read_opened(live):
+    """The regression itself: this is the frame that never used to arrive.
+
+    The panel learned open state exactly once, from WELCOME, when the answer is
+    always "none of them" — so an instrument the agent had held open for three
+    minutes still read as merely configured. The fold has to happen on the poll,
+    because the poll is the only thing that arrives while a session is running.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": False}])
+    assert not live.slots["siglent_sdm4065a"].opened, (
+        "premise: at connect nothing is open, which is why WELCOME cannot be "
+        "the only source for this flag"
+    )
+
+    live.apply_status(
+        status_with_open_state({"siglent_sdm4065a": {"open": True}}), now=101.0
+    )
+
+    assert live.slots["siglent_sdm4065a"].opened, (
+        "the agent reported this instrument open on the status poll and the rail "
+        "still said 'configured, not opened'"
+    )
+
+
+def test_a_device_that_closes_goes_back_to_not_opened(live):
+    """The flag has to fall as well as rise, or it is a latch.
+
+    ``agent.close`` and a run's teardown both close devices mid-session. A slot
+    stuck on OPEN afterwards claims the agent holds a handle to an instrument it
+    has let go of, which is the same wrong-direction claim as a stale ATTACHED:
+    it reads as "something is using this, leave it alone".
+    """
+    live.apply_status(
+        status_with_open_state({"otii_arc": {"open": True}}), now=101.0
+    )
+    assert live.slots["otii_arc"].opened, "premise: it was open on the first poll"
+
+    live.apply_status(
+        status_with_open_state({"otii_arc": {"open": False}}), now=102.0
+    )
+
+    assert not live.slots["otii_arc"].opened, "the open flag latched rather than fell"
+
+
+def test_a_slot_absent_from_the_open_state_table_is_marked_closed(live):
+    """A table that lists the agent's devices reports a closed one by absence.
+
+    An agent restarted with a shorter ``--devices`` list, or a key this panel
+    only ever learned from discovery, is not open — and the slot survives the
+    registry forgetting it, so something has to say so. Left alone it would keep
+    the last OPEN it was ever told about, indefinitely, with nothing able to
+    correct it.
+    """
+    live.apply_status(
+        status_with_open_state({"siglent_sdm4065a": {"open": True}}), now=101.0
+    )
+    assert live.slots["siglent_sdm4065a"].opened, "premise: it was open once"
+
+    live.apply_status(
+        status_with_open_state({"otii_arc": {"open": True}}), now=102.0
+    )
+
+    assert not live.slots["siglent_sdm4065a"].opened, (
+        "a device the agent no longer lists still claims an open session"
+    )
+    # The device the table did list still gets its answer, so the loop above is
+    # clearing on absence rather than clearing everything.
+    assert live.slots["otii_arc"].opened
+
+
+def test_an_agent_that_reports_no_open_state_leaves_the_flag_alone(live):
+    """Absent is not empty, and the two must be told apart.
+
+    An agent a release behind sends no ``devices`` key at all. Reading that as
+    "nothing is open" would put the panel straight back in the state this
+    section exists to fix — every card at STANDBY through a live test — except
+    now with a folder in place that looks like it is working.
+
+    The second half is the pair that proves the early return does real work: the
+    same poll *with* the table and the device missing from it must clear. One
+    assertion without the other passes against a folder that either never
+    clears or always clears.
+    """
+    live.apply_status(
+        status_with_open_state({"siglent_sdm4065a": {"open": True}}), now=101.0
+    )
+    assert live.slots["siglent_sdm4065a"].opened, "premise: an agent told us it was open"
+
+    live.apply_status(status_payload({"otii_arc": idle()}), now=102.0)
+
+    assert live.slots["siglent_sdm4065a"].opened, (
+        "a poll that said nothing about open state was read as saying nothing "
+        "is open"
+    )
+
+    live.apply_status(
+        status_with_open_state({"otii_arc": {"open": False}}), now=103.0
+    )
+
+    assert not live.slots["siglent_sdm4065a"].opened, (
+        "an agent that does report open state, and did not list this device, was "
+        "not believed"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        "siglent_sdm4065a",
+        # The shape ``agent.devices`` returns — a list of described entries. The
+        # near-miss worth covering, because it is the other real payload in this
+        # codebase keyed by the same device names.
+        [{"key": "siglent_sdm4065a", "open": True}],
+        {"siglent_sdm4065a": True},
+        # A non-string key, with an error string attached so the poisoned slot
+        # would survive into the rail rather than being skipped by it. See the
+        # last assertion for why that is not merely untidy.
+        {5: {"open": True, "open_error": "boom"}},
+    ],
+)
+def test_a_malformed_open_state_table_costs_the_poll_nothing_else(live, bad):
+    """This folder runs inside the poll that also clears staleness.
+
+    Raising here would take the arm state and the staleness clear down with it —
+    trading one missing word for a screen that is blank or, worse, frozen on the
+    last good frame while claiming to be current. Same rule as the workers table
+    and the presence sweep, and the same reason: the agent sending this may be a
+    release ahead of the panel reading it.
+    """
+    live.check_silence(now=200.0)
+    assert live.stale_reason is not None, "premise: the view is stale going in"
+
+    live.apply_status(
+        status_with_open_state(bad, safety={"otii_arc": armed()}), now=201.0
+    )
+
+    assert live.stale_reason is None, (
+        "a malformed optional field cost the panel its staleness clear"
+    )
+    assert live.armed_devices == ["otii_arc"], (
+        "a malformed optional field cost the panel its arm state"
+    )
+    # Not tidiness: the slot table is keyed by device name for the *renderer*,
+    # and a non-string key gets no further than ``_label_for``, which does a
+    # substring test on it — ``fui.view._rail_specs`` raises
+    # ``TypeError: argument of type 'int' is not iterable`` and takes the whole
+    # frame with it. Not raising here only to hand the renderer something it
+    # cannot draw would move the blank screen one layer down rather than
+    # preventing it, which is the failure this whole method is defensive about.
+    assert all(isinstance(key, str) for key in live.slots), (
+        f"a malformed key entered the slot table the renderer walks: "
+        f"{sorted(map(repr, live.slots))}"
+    )
+
+
+def test_an_open_error_is_folded_and_cleared_rather_than_stringified(live):
+    """"The agent tried and could not" is a fact an operator can act on.
+
+    It also has to go away when it stops being true. The FUI ranks a recorded
+    ``open_error`` above almost everything and reads it as truthy, so ``"None"``
+    — the string, which is what an unconditional ``str()`` produces — would pin
+    that row to FAULT for the rest of the session and print the word None as the
+    reason.
+    """
+    live.apply_status(
+        status_with_open_state(
+            {
+                "rigol_dp2031": {
+                    "open": False,
+                    "open_error": "BenchConnectionError('no DP2031 found')",
+                }
+            }
+        ),
+        now=101.0,
+    )
+    psu = live.slots["rigol_dp2031"]
+    assert psu.open_error is not None and "no DP2031 found" in psu.open_error, (
+        "the agent's own message is the useful part and it did not survive"
+    )
+
+    live.apply_status(
+        status_with_open_state({"rigol_dp2031": {"open": True, "open_error": None}}),
+        now=102.0,
+    )
+
+    assert live.slots["rigol_dp2031"].open_error is None, (
+        "a resolved open error is still on the rail, possibly as the string 'None'"
+    )
+    assert live.to_dict()["slots"]["rigol_dp2031"]["open_error"] is None
+
+
+def test_folding_open_state_does_not_touch_which_devices_the_agent_serves(live):
+    """``served`` is ``apply_registry``'s claim, from an authoritative list.
+
+    A device missing from this table is very likely one the agent no longer
+    serves — but "likely" is the whole problem. Withdrawing NOT SERVED from a
+    status field would let a truncated or unfamiliar poll payload rewrite the
+    bench's configuration on screen, and NOT SERVED is the word that sends an
+    operator to edit ``agent.json``.
+    """
+    live.apply_registry(
+        [
+            {"key": "otii_arc", "open": False},
+            {"key": "siglent_sdm4065a", "open": False},
+        ]
+    )
+
+    live.apply_status(
+        status_with_open_state({"otii_arc": {"open": True}}), now=101.0
+    )
+
+    dmm = live.slots["siglent_sdm4065a"]
+    assert dmm.served, (
+        "the status poll withdrew a claim only the device table may make"
+    )
+    assert not dmm.opened, "premise: the poll did not list it, so it is closed"
+
+    # And the other direction: being named by the poll does not make a device
+    # served either. The QR10x below is one the registry has never listed.
+    live.apply_status(
+        status_with_open_state(
+            {"otii_arc": {"open": True}, "eastwood_qr10x": {"open": True}}
+        ),
+        now=102.0,
+    )
+
+    assert live.slots["eastwood_qr10x"].opened
+    assert not live.slots["eastwood_qr10x"].served, (
+        "a status field promoted a device into the agent's served list"
+    )

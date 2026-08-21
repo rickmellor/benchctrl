@@ -475,6 +475,183 @@ def test_agent_status_reports_workers_and_safety(bench, arc):
     status = bench.client.status()
     assert "safety" in status
     assert "otii_arc" in status["workers"]
+    # And which devices are open. Carried on the poll rather than only in
+    # WELCOME because it is the one part of the device table that *changes*
+    # while a session runs — see the section below for the panel that read
+    # STANDBY through a whole test without it.
+    assert status["devices"]["otii_arc"]["open"] is True
+
+
+# --------------------------------------------------------------------------
+# Which devices are open, on the fast poll
+#
+# ``describe()`` rides in WELCOME once and carries each device's whole remote
+# surface: every method, property and mutator name. Open state is the only part
+# of that table that changes during a session, and until ``sessions()`` existed
+# nothing reported it after connect — so a consumer learned which devices were
+# open exactly once, at the moment the answer is always "none of them". Measured
+# on the bench: a 195s resistance sweep left both instruments reading STANDBY
+# ("configured, not opened") for all of it while the agent drove them.
+# --------------------------------------------------------------------------
+
+
+class _Openable:
+    """A device object cheap enough to open and close in a unit test."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_the_open_state_table_tracks_a_device_through_open_and_close():
+    """Both directions, because a flag that only rises is a latch.
+
+    A registered-but-unopened device is the state a fresh agent is entirely in —
+    devices open lazily so a powered-off Rigol does not stop the Arc being
+    served — and a closed one is where ``agent.close`` and a run's teardown leave
+    it. A consumer that saw only the rise would claim the agent holds a handle to
+    an instrument it has let go of.
+    """
+    registry = DeviceRegistry()
+    registry.register("otii_arc", lambda **kw: _Openable())
+
+    assert registry.sessions() == {"otii_arc": {"open": False, "open_error": None}}
+
+    registry.open("otii_arc")
+    assert registry.sessions()["otii_arc"]["open"] is True
+
+    registry.close("otii_arc")
+    assert registry.sessions()["otii_arc"]["open"] is False, (
+        "a closed device still reports an open session"
+    )
+
+
+def test_the_open_state_table_does_not_carry_the_method_surface(bench):
+    """The reason this is not just ``describe()`` on the poll.
+
+    The surface is expensive and immutable: it is introspected once per open and
+    never changes, and for the Arc alone it is dozens of method and property
+    names. Sending it every 5s would pay for the whole allowlist to learn one
+    boolean. Asserted by size as well as by key, so a future field that smuggles
+    the surface back in under another name still fails here.
+    """
+    described = bench.agent.registry.describe()
+    sessions = bench.agent.registry.sessions()
+
+    assert set(sessions) == {"otii_arc"}
+    assert set(sessions["otii_arc"]) == {"open", "open_error"}
+    assert "methods" not in sessions["otii_arc"]
+
+    surface = next(d for d in described if d["key"] == "otii_arc")
+    assert surface["methods"], "premise: the described form does carry the surface"
+    assert len(repr(sessions)) < len(repr(described)) / 4, (
+        "the poll's device table is not meaningfully smaller than the WELCOME one"
+    )
+
+
+def test_a_device_that_failed_to_open_reports_why_on_the_poll():
+    """"The agent tried and could not" is a different fact from "not attached".
+
+    An operator can act on the first one, and the poll is where they will see it:
+    the failure usually happens on first use, minutes after WELCOME went past. The
+    agent's own message is the useful part, so it is carried verbatim rather than
+    reduced to a flag.
+    """
+    registry = DeviceRegistry()
+
+    def _refuse(**kwargs):
+        raise BenchValueError("no DP2031 found on any VISA resource")
+
+    registry.register("rigol_dp2031", _refuse)
+    with pytest.raises(BenchValueError):
+        registry.open("rigol_dp2031")
+
+    entry = registry.sessions()["rigol_dp2031"]
+    assert entry["open"] is False
+    assert "no DP2031 found" in entry["open_error"], (
+        "the reason the open failed did not reach the status poll"
+    )
+
+
+@pytest.fixture()
+def lazy_bench():
+    """An agent that has *not* opened its device yet, and a connected client.
+
+    Deliberately not the ``bench`` fixture: that one calls ``register_open``, so
+    its WELCOME already reports the Arc open and a panel built from it could not
+    tell a working fold from no fold at all. Lazy registration is also what the
+    board actually runs — ``build_default_registry`` only declares openers, so an
+    instrument that is powered off does not stop the others being served, and
+    "open" genuinely starts False and changes mid-session.
+    """
+    from benchctrl.drivers.otii_arc import OtiiArc
+
+    sim = SimulatedOtiiArc()
+    sim.start()
+
+    registry = DeviceRegistry()
+    registry.register("otii_arc", OtiiArc.open, open_kwargs={"port": sim.port})
+    agent = BenchAgent(registry, token=TOKEN, deadman_s=2.0, heartbeat_s=0.5)
+    server = AgentServer(agent, host="127.0.0.1", port=0).start()
+
+    endpoint = EndpointConfig(
+        host="127.0.0.1", port=server.port, token=TOKEN, heartbeat_s=0.5, deadman_s=2.0
+    )
+    client = RemoteClient(endpoint).connect()
+    try:
+        yield type(
+            "LazyBench",
+            (),
+            {"sim": sim, "agent": agent, "server": server, "client": client},
+        )
+    finally:
+        try:
+            client.close()
+        finally:
+            server.stop()
+            registry.close_all()
+            sim.close()
+
+
+def test_the_agents_own_status_makes_the_dashboard_read_the_device_open(lazy_bench):
+    """The two processes, wired together, on the payload the agent really sends.
+
+    This is the assertion the defect could not survive and its unit tests could.
+    The panel folded a device table it invented for itself in one place and the
+    agent published one from another, and nothing checked the two were keyed the
+    same — the same shape as ``run_started`` versus ``run_start``, where the
+    dashboard's tests passed happily for a run readout that stayed empty through
+    every real run.
+
+    So: a real agent, a real ``agent.status`` over a real socket, into the real
+    state model, asserting the flag the instrument card is drawn from. The device
+    is opened *after* the panel folded WELCOME, which is the whole scenario — the
+    old panel had no source that could learn about it.
+    """
+    from benchctrl.dashboards.state import BenchStatus
+
+    client = lazy_bench.client
+    panel = BenchStatus()
+    panel.apply_connected(client.welcome)
+    assert not panel.slots["otii_arc"].opened, (
+        "premise: nothing is open at connect, so WELCOME cannot be the source"
+    )
+
+    # A poll before anything is open must agree, or the assertion below would
+    # pass against a fold that simply says True.
+    panel.apply_status(client.status())
+    assert not panel.slots["otii_arc"].opened
+
+    client.attach("otii_arc")
+    panel.apply_status(client.status())
+
+    assert panel.slots["otii_arc"].opened, (
+        "the agent reported this device open and the panel still read it as "
+        "merely configured"
+    )
+    assert panel.to_dict()["slots"]["otii_arc"]["opened"] is True
 
 
 # --------------------------------------------------------------------------

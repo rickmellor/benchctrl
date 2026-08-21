@@ -32,6 +32,8 @@ A dark slot now says *which* dark it is, because the operator's next action
 differs for each and the states are learned from different places:
 
 ======================  ==================================================
+:py:data:`IN_RUN`       a live run declared it would drive this instrument,
+                        so it is in use for the run's whole duration
 :py:data:`OPEN`         the agent holds a live session to it, nothing armed
 :py:data:`STANDBY`      on the bus, agent serves it, not opened yet — the
                         resting state of a healthy bench
@@ -78,6 +80,15 @@ STANDBY = "STANDBY"
 #: "on the bus" (the agent has talked to it and is holding it) and a weaker one
 #: than any arm state, which is why it cannot displace ARMED.
 OPEN = "OPEN"
+
+#: A run in flight declared this instrument as one it would drive.
+#:
+#: Outranks :py:data:`OPEN` because it is the stronger claim about the same
+#: device — an open session says a handle exists, this says something is using it
+#: and will keep using it. It holds for the run's full duration, which is the
+#: point: a run's calls come in bursts, so a slot that only lit up while a call
+#: was in flight read as idle through every dwell of a test that owned it.
+IN_RUN = "IN RUN"
 
 #: Discovery looked and the instrument is not on the bus.
 ABSENT = "NOT FOUND"
@@ -201,9 +212,23 @@ def _rail_specs(slots: dict) -> list[dict]:
         )
     return specs
 
-#: Test-sequence stages for the centre flowchart. Names match the run states the
-#: agent emits; ``INIT`` and ``DONE`` bracket them.
-STAGES: tuple[str, ...] = ("INIT", "PSU RAMP", "LOAD SET", "ANALYSIS", "DONE")
+#: Test-sequence stages for the centre flowchart, in order.
+#:
+#: These are the stages the *bench* emits (``run_stage`` events from
+#: :py:class:`~benchctrl.agent.runs.engine.RunEngine`), so this row reports where
+#: a run is rather than deriving it. Duplicated as literals rather than imported
+#: from ``benchctrl.agent.runs.spec`` for the reason ``state.py`` gives at length:
+#: the dashboard talks to a *remote* agent over a wire protocol and must build
+#: where the agent is not importable. :py:func:`_active_stage` therefore treats an
+#: arriving name it does not recognise as a name it cannot place, rather than
+#: assuming this tuple is authoritative.
+#:
+#: The previous vocabulary — ``PSU RAMP``, ``LOAD SET``, ``ANALYSIS`` — was the
+#: renderer's own invention, mapped from a run's coarse status. Two of those five
+#: nodes had nothing that could ever select them, and the one that did lit
+#: ``ANALYSIS`` from the first setpoint onwards, so the row was mostly scenery
+#: with a pulse that carried one bit: a run exists.
+STAGES: tuple[str, ...] = ("INIT", "PREPARE", "EXECUTE", "ANALYZE", "DONE")
 
 
 def _discoverable_keys() -> frozenset[str]:
@@ -225,17 +250,31 @@ def _discoverable_keys() -> frozenset[str]:
         s.device_key for s in discovery.SIGNATURES if s.device_key
     )
 
-#: Maps a run state to the stage that should be pulsing. Anything unrecognised
-#: leaves no stage active rather than guessing, so an unknown state reads as
-#: "not one of ours" instead of lighting the wrong node.
+#: Fallback stage for a run whose bench never sent a ``run_stage`` event, mapped
+#: from the coarse run state. Used *only* when nothing was reported.
+#:
+#: This used to be the only mechanism, and it is why the sequence row was
+#: decoration: a status field with three interesting values cannot express five
+#: stages, so most of them were unreachable. It survives for the two cases where a
+#: reported stage genuinely is not available — an older agent, and a panel that
+#: connected mid-run and missed the transition — and it is deliberately coarse
+#: there: only the brackets, never a claim about the middle of a run.
+#:
+#: ``running`` maps to nothing on purpose. "A run is in flight" does not say which
+#: stage it is in, and the old mapping's answer (``ANALYSIS``) was wrong for
+#: almost the entire time it was lit. No node lit is the honest rendering of "the
+#: bench has not told us where it is".
 _STAGE_FOR_STATE = {
     "pending": "INIT",
     "starting": "INIT",
-    "running": "ANALYSIS",
     "finished": "DONE",
+    "complete": "DONE",
     "passed": "DONE",
     "failed": "DONE",
     "aborted": "DONE",
+    "errored": "DONE",
+    "error": "DONE",
+    "safe_stopped": "DONE",
 }
 
 
@@ -280,6 +319,27 @@ def _recent_action(
         if isinstance(raw, str):
             name = _clip(raw, _ACTION_CHARS)
     return {"age_s": round(float(age), 1), "action": name}
+
+
+def _enrolled_run(key: str, enrolled: object) -> Optional[str]:
+    """The id of the in-flight run that declared ``key``, or None.
+
+    Same defensive shape as :py:func:`_busy_method` and for the same reason: this
+    crossed a process boundary from an agent that may be a release ahead or
+    behind, and a malformed table must cost this one slot its IN RUN marker rather
+    than raise inside the renderer.
+
+    An empty or non-string run id yields None. A truthy id is what licenses the
+    slot to claim it is in a run, so a blank one must not — "in a run I cannot
+    name" is a worse readout than falling through to the open-session rung, which
+    is still true and still says the agent is talking to the device.
+    """
+    if not isinstance(enrolled, dict):
+        return None
+    raw = enrolled.get(key)
+    if not isinstance(raw, str) or not raw:
+        return None
+    return raw
 
 
 def _busy_method(key: str, busy: object) -> Optional[str]:
@@ -342,6 +402,7 @@ def _slot_state(
     busy: Optional[str] = None,
     queued: int = 0,
     recent: Optional[dict] = None,
+    enrolled_run: Optional[str] = None,
 ) -> dict:
     """One instrument rail slot.
 
@@ -355,7 +416,8 @@ def _slot_state(
 
     Precedence runs from most actionable to least: a live arm state outranks
     everything, then an open failure (the operator can fix it), then a measured
-    absence, then an open session, then the two forms of not-yet-known, then
+    absence, then enrollment in a live run, then an open session, then an open
+    session *inferred from activity*, then the two forms of not-yet-known, then
     standby. Getting this order wrong is how a rail ends up reporting a
     configuration detail over an armed output.
 
@@ -366,7 +428,9 @@ def _slot_state(
     find the device is both the newer measurement and the one the operator can
     act on, so it wins. The same reasoning puts an open session *above*
     UNDETERMINED and UNSCANNED, which are not measurements at all: nothing opens
-    a session to hardware that is absent.
+    a session to hardware that is absent. It also keeps IN_RUN below a measured
+    absence: a run declaring it will drive an instrument is a statement about
+    intent, and a scan that cannot find the instrument outranks intent.
 
     ``busy`` and ``queued`` — what this device's worker thread is executing at
     this instant — deliberately sit **outside** that ordering, as their own
@@ -501,6 +565,29 @@ def _slot_state(
         # gone", the absence is both the newer measurement and the actionable
         # one, so it takes the word.
         return {**dark, "status": ABSENT}
+    if enrolled_run:
+        # A live run declared it would drive this instrument, so it is in use for
+        # the run's whole duration — including the dwells. Ranked above OPEN
+        # because it is the stronger claim about the same device: OPEN says the
+        # agent holds a handle, IN RUN says something is actively using it and
+        # will keep using it. Ranked below the hazard rungs above for the usual
+        # reason — being enrolled in a run is not a reason to distrust the screen,
+        # and a measured absence still outranks any claim about what should be
+        # happening.
+        #
+        # This exists because enrollment and activity answer different questions.
+        # A supply set once at phase entry and held through a ten-minute dwell is
+        # in use the whole time while making no calls for all but 200 ms of it, so
+        # activity alone leaves it looking idle during a test that is driving it.
+        return {
+            **base,
+            "linked": True,
+            "status": IN_RUN,
+            "armed": False,
+            "inferred": False,
+            "stale": not trustworthy,
+            "run": enrolled_run,
+        }
     if opened:
         # The agent holds a live session to this instrument. STANDBY explicitly
         # means "on the bus, *not opened yet*", so reporting it here was false:
@@ -528,6 +615,43 @@ def _slot_state(
             "inferred": False,
             "stale": not trustworthy,
         }
+    if recent is not None or busy:
+        # The device is executing a call, or just did. It cannot do that without
+        # an open handle, so it is open — we have simply not been *told* yet.
+        #
+        # This rung closes a seam between two feeds running at different rates.
+        # Activity arrives on the event stream, within milliseconds of the call;
+        # ``opened`` arrives on the 5 s ``agent.status`` poll. For up to one poll
+        # interval after a device's first call, the card therefore had live
+        # activity text and a status word of STANDBY — measured on hardware as a
+        # 10-sample window at the start of a sweep, and precisely the complaint
+        # that a card "still shows standby while the device is in use" with "some
+        # text on the card updating".
+        #
+        # Reported as OPEN and flagged ``inferred``, which is what that flag
+        # already means here: worked out from an event rather than reported by the
+        # registry. The renderer draws it dashed, so the seam is visible as a
+        # slightly-less-confirmed OPEN rather than papered over — and one poll
+        # later the rung above supersedes it with the confirmed form.
+        #
+        # Placed directly below OPEN as the weaker sibling of the same claim, and
+        # above the two not-known rungs for OPEN's own reason: a completed call
+        # answers the presence question that UNDETERMINED and UNSCANNED say
+        # nobody has answered. Left *below* ABSENT so a scan that looked and
+        # cannot find the device still takes the word; that pairing is unreachable
+        # for the QR10x, which is undiscoverable and so was reading NO ID during
+        # the sweep that was driving it.
+        #
+        # ``busy`` and ``recent`` are both cleared above when the view is not
+        # trustworthy, so this rung cannot fire off a stale snapshot.
+        return {
+            **base,
+            "linked": True,
+            "status": OPEN,
+            "armed": False,
+            "inferred": True,
+            "stale": not trustworthy,
+        }
     if present is False:
         # Not discoverable, so the scan's "not found" is not a measurement of
         # absence and must not be shown as one — no VID/PID signature exists for
@@ -540,31 +664,69 @@ def _slot_state(
     return {**dark, "status": STANDBY, "ready": True}
 
 
-def _active_stage(runs: dict) -> Optional[str]:
+def _active_stage(runs: dict, stages: Optional[dict] = None) -> Optional[str]:
     """Which flowchart node pulses, if any.
 
-    Only a *running* run drives the flow. A finished one lights ``DONE``; no
-    runs at all leaves every node dim, because an idle bench is genuinely not
-    part-way through a sequence and pretending otherwise is the cinematic lie
-    this module refuses.
+    Prefers what the bench *reported* — ``stages`` is ``{run_id: stage}``, folded
+    from ``run_stage`` events — and falls back to deriving one from the run state
+    only for a run that reported nothing. No runs at all leaves every node dim,
+    because an idle bench is genuinely not part-way through a sequence and
+    pretending otherwise is the cinematic lie this module refuses.
+
+    The preference order is the whole point of the change: a reported stage is a
+    measurement of where the run is, and a stage derived from run status is a guess
+    that could only ever name the brackets. Where both exist the report wins, so a
+    run in EXECUTE is not overwritten by "well, its state is running".
     """
     if not runs:
         return None
+    stages = stages if isinstance(stages, dict) else {}
     # Deterministic order, because dict order here is the agent's iteration
     # order and the runs list beside this flowchart is sorted. With two runs in
     # different states the old fallback took whichever happened to be last, so
     # {finished, unknown-state} lit DONE or nothing depending on nothing
     # meaningful — and the lit node could disagree with the list next to it.
-    states = [runs[k] for k in sorted(runs)]
-    for state in states:
-        if state in ("running", "starting", "pending"):
-            return _STAGE_FOR_STATE.get(state)
-    # No run is in flight, so light the furthest stage any run actually reached.
-    # An unrecognised state contributes nothing rather than being guessed at.
-    reached = [_STAGE_FOR_STATE[s] for s in states if s in _STAGE_FOR_STATE]
+    keys = sorted(runs)
+    # An in-flight run owns the row: it is the one thing on this panel a person is
+    # watching progress. Its *reported* stage first; only if it never reported one
+    # does the coarse mapping get a say, and for a plain ``running`` state that
+    # mapping deliberately has no answer.
+    for key in keys:
+        if runs[key] in ("running", "starting", "pending"):
+            reported = stages.get(key)
+            if isinstance(reported, str) and reported:
+                return reported
+            return _STAGE_FOR_STATE.get(runs[key])
+    # Nothing in flight, so light the furthest stage any run actually reached —
+    # reported where reported, derived otherwise. A name this row does not carry
+    # contributes nothing rather than being forced onto a node: `stages` comes off
+    # the wire from an agent that may know stages this build does not.
+    reached = [
+        stage
+        for key in keys
+        for stage in (stages.get(key) or _STAGE_FOR_STATE.get(runs[key]),)
+        if stage in STAGES
+    ]
     if not reached:
         return None
     return max(reached, key=STAGES.index)
+
+
+def _headline_run(runs: dict) -> Optional[str]:
+    """Which run the centre of the panel is about, if any.
+
+    The same choice :py:func:`_active_stage` makes — an in-flight run first, then
+    the lowest-keyed of what remains — factored out because the DUT label and the
+    sequence row must agree. A panel naming one run's DUT beside another run's
+    stage would be worse than naming neither.
+    """
+    if not runs:
+        return None
+    keys = sorted(runs)
+    for key in keys:
+        if runs[key] in ("running", "starting", "pending"):
+            return key
+    return keys[0]
 
 
 def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
@@ -595,6 +757,18 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
     # poll. Same defensive .get treatment for the same reason.
     action_age = snap.get("action_age")
     last_action = snap.get("last_action")
+    # {device_key: run_id} for instruments a live run declared. Passed through
+    # unvalidated and checked per-slot in _enrolled_run, exactly as busy_devices
+    # and queued_devices are: an older agent declares no devices, and the rail must
+    # lose the IN RUN marker rather than the whole slot.
+    #
+    # Deliberately NOT normalised to {} here. That guard was written and then
+    # removed: _enrolled_run's own isinstance check already rejects every non-dict,
+    # so a second one upstream is unreachable — a mutation deleting it killed no
+    # test, because no input exists that reaches one guard and not the other. An
+    # untestable line that looks like a safety check is worse than no line, since
+    # the next reader trusts it.
+    enrolled = snap.get("enrolled")
 
     discoverable = _discoverable_keys()
 
@@ -628,6 +802,12 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
                 recent=_recent_action(
                     spec["key"], action_age, last_action, trustworthy=trustworthy
                 ),
+                # Not gated on trustworthiness here: unlike an activity marker,
+                # enrollment is not a claim about this instant. _slot_state marks
+                # the slot stale and the renderer strikes it through, which is a
+                # readable "a run owned this, and we have lost sight of it" —
+                # the state most worth showing on a panel that has gone quiet.
+                enrolled_run=_enrolled_run(spec["key"], enrolled),
             )
         )
         slots.append(slot)
@@ -643,6 +823,19 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
         alerts += 1
     if snap.get("observer_denied"):
         alerts += 1
+
+    # Once, not once per node: the row below asks about it five times, and this is
+    # rebuilt on every frame.
+    active_stage = _active_stage(snap["runs"], snap.get("run_stages"))
+    # The run the centre of the panel is about, and the two maps keyed by run id.
+    # Guarded with isinstance for the reason every other map off the wire is: a
+    # snapshot from an older agent carries neither key, and one from a newer or
+    # confused one could carry something that is not a dict at all.
+    headline_run = _headline_run(snap["runs"])
+    dut_map = snap.get("run_dut")
+    dut_map = dut_map if isinstance(dut_map, dict) else {}
+    name_map = snap.get("run_names")
+    name_map = name_map if isinstance(name_map, dict) else {}
 
     return {
         "headline": snap["headline"],
@@ -675,9 +868,33 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
         # it is an SDG1032X and a DS1000Z scope with no drivers yet.
         "unclaimed": list(snap.get("unclaimed") or ()),
         "stages": [
-            {"name": name, "active": name == _active_stage(snap["runs"])}
+            {
+                "name": name,
+                "active": name == active_stage,
+                # Whether the run has already been through this node, so the row
+                # reads as a progress track rather than a single lit box. Derived
+                # from position, which is why STAGES is ordered.
+                "done": (
+                    active_stage in STAGES
+                    and STAGES.index(name) < STAGES.index(active_stage)
+                ),
+            }
             for name in STAGES
         ],
+        # A name the bench reported that this build's STAGES does not carry. Passed
+        # through rather than dropped: a newer agent naming a stage we cannot place
+        # on the row is worth saying out loud, and the alternative is a row that
+        # silently shows nothing while a run is plainly in progress.
+        "stage_unknown": (
+            active_stage if active_stage and active_stage not in STAGES else None
+        ),
+        # What the headline run is testing on, and what it is called. Both empty
+        # strings when unknown, with ``dut_known`` carrying the distinction the
+        # label turns on: a run that declared no DUT reads UNSPECIFIED, no run at
+        # all reads NO RUN, and neither may be shown as a DUT that exists.
+        "dut": str(dut_map.get(headline_run) or "") if headline_run else "",
+        "dut_known": headline_run in dut_map,
+        "run_name": str(name_map.get(headline_run) or "") if headline_run else "",
         "runs": [{"id": k, "state": v} for k, v in sorted(snap["runs"].items())],
         "dropped_events": int(snap["dropped_events"]),
         "reconnects": int(snap.get("reconnects", 0)),

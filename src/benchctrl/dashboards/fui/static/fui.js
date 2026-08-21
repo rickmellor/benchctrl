@@ -455,6 +455,24 @@ function slotIdentity(inst) {
  * lands: the view withholds `busy` on a stale or dead session, so this goes blank
  * rather than leaving a call frozen in flight. Not re-derived here — one place
  * decides, and it is the one CI can assert. */
+// How recently a device must have been touched for its card to be highlighted as
+// the one in use. Much shorter than the view's RECENT_ACTION_S (8s, sized to
+// bridge the 5s status poll) because these two answer different questions: the
+// `.act` line reports "last seen doing something, 6s ago", which stays true and
+// useful, while the highlight asserts "this is the instrument being driven right
+// now". A run's reads land every few hundred ms, so 2.5s spans the gaps between
+// them without letting the glow outlive the traffic.
+const TOUCH_WINDOW_S = 2.5;
+
+function touchedNow(inst) {
+  const r = inst.recent;
+  // The view withholds `recent` entirely on a stale view and drops it past its own
+  // window, so absence here already means "no claim to make" — this only has to
+  // decide whether a real, fresh stamp is fresh *enough*.
+  if (!r || typeof r.age_s !== 'number') return false;
+  return r.age_s <= TOUCH_WINDOW_S;
+}
+
 function slotActivity(inst) {
   if (!inst.busy) {
     // Nothing in flight *as of the last poll*. That poll runs every 5s while a
@@ -489,7 +507,7 @@ function renderRail(instruments) {
   // for a scope and a length check sees nothing, leaving every row's dataset.key
   // pointing at the instrument that used to be there. The visible text would
   // update and the key underneath would lie.
-  const wanted = instruments.map((i) => i.key).join(' ');
+  const wanted = instruments.map((i) => i.key).join(' ');
   if (rail.dataset.keys !== wanted) {
     rail.dataset.keys = wanted;
     rail.innerHTML = '';
@@ -520,7 +538,16 @@ function renderRail(instruments) {
     // textContent, not innerHTML: this carries an agent-supplied error string
     // and a discovered device path, neither of which this page composes.
     el.querySelector('.detail').textContent = slotDetail(inst);
-    el.className = 'slot'
+    el.className = slotClasses(inst, act);
+  });
+}
+
+/* Which state classes a rail slot wears. A pure function of the slot and the
+ * activity line, for the same reason slotActivity is one: this is where the
+ * panel's visual vocabulary is decided, and a decision table that needs a DOM to
+ * exercise is a decision table nobody tests. */
+function slotClasses(inst, act) {
+  return 'slot'
       + (inst.linked ? ' linked' : '')
       + (inst.armed ? ' armed' : '')
       + (inst.inferred ? ' inferred' : '')
@@ -540,8 +567,21 @@ function renderRail(instruments) {
       // this cannot outlive the value it advertises.
       + (act && inst.busy ? ' working' : '')
       // Drawn as a fading trace instead: recently active, not active.
-      + (act && !inst.busy ? ' recent' : '');
-  });
+      + (act && !inst.busy ? ' recent' : '')
+      // Enrolled in a live run: held for the run's whole duration, dwells
+      // included, so it is a steady state rather than a pulse.
+      + (inst.run ? ' inrun' : '')
+      // The device being acted on *at this moment* — the whole-card highlight, as
+      // opposed to the `.act` line's text. Driven off `recent.age_s` rather than
+      // `busy` because `busy` is sampled on the 5s status poll while a call takes
+      // ~200ms, so it misses all but ~4% of calls; action events arrive as each
+      // call completes and see every one. `busy` still counts when present, since
+      // a call caught in flight is the strongest possible evidence.
+      //
+      // TOUCH_WINDOW_S, not RECENT_ACTION_S: the `.act` text may legitimately say
+      // "6s ago" while the card must have stopped claiming to be the one in use.
+      // A highlight is read across the bench as "this one, now".
+      + (inst.busy || touchedNow(inst) ? ' touched' : '');
 }
 
 /* The one-line summary above the rail. Counts come from the view, which derives
@@ -604,7 +644,21 @@ function renderUnclaimed(items) {
   }
 }
 
-function renderFlow(stages) {
+// The class for one sequence node. Extracted as a pure function for the same
+// reason slotClasses is: this is a decision table, and one that needs a DOM to
+// exercise is one nobody tests.
+//
+// `done` and `active` are mutually exclusive by construction upstream — a stage
+// cannot be both before and at the active one — but the order here pins which
+// wins if that ever stops holding, and `active` is the one an operator is
+// watching.
+function stageClasses(s) {
+  if (s.active) return 'stage-node active';
+  if (s.done) return 'stage-node done';
+  return 'stage-node';
+}
+
+function renderFlow(stages, unknown) {
   const flow = $('flow');
   if (flow.childElementCount !== stages.length * 2 - 1) {
     flow.innerHTML = '';
@@ -623,7 +677,7 @@ function renderFlow(stages) {
   stages.forEach((s, i) => {
     const node = flow.children[i * 2];
     node.textContent = s.name;
-    node.className = 'stage-node' + (s.active ? ' active' : '');
+    node.className = stageClasses(s);
     if (s.active) activeIdx = i;
   });
   // Light the links *up to* the active node: the flow of power/data so far.
@@ -631,7 +685,12 @@ function renderFlow(stages) {
     const link = flow.children[i * 2 - 1];
     link.className = 'stage-link' + (activeIdx >= i ? ' lit' : '');
   }
-  $('flow-verdict').textContent = activeIdx >= 0 ? stages[activeIdx].name : 'NO SEQUENCE';
+  // The bench named a stage this build cannot place on the row. Say so, rather
+  // than showing NO SEQUENCE beside a run that is plainly in progress — the
+  // reading would be "no test running", which is the lie this panel avoids.
+  $('flow-verdict').textContent = activeIdx >= 0
+    ? stages[activeIdx].name
+    : (unknown ? unknown + ' (?)' : 'NO SEQUENCE');
 }
 
 function renderLog(log) {
@@ -745,7 +804,7 @@ function render(v) {
   renderRail(v.instruments);
   renderRailHead(v.bench, v.connected);
   renderUnclaimed(v.unclaimed);
-  renderFlow(v.stages);
+  renderFlow(v.stages, v.stage_unknown);
 
   // The DMM readout. There is no measurement in the observer status payload, so
   // this is NO LINK until one exists — deliberately not a plausible number.
@@ -776,7 +835,29 @@ function render(v) {
 
   const psu = v.instruments.find((i) => i.kind === 'psu');
   $('psu-verdict').textContent = psu && psu.linked ? psu.status : 'NO LINK';
-  $('dut-verdict').textContent = v.connected ? (v.trustworthy ? 'LIVE' : 'STALE') : 'NO LINK';
+  $('dut-verdict').textContent = dutLabel(v);
+}
+
+/* What to print beside DEVICE UNDER TEST. Extracted for the same reason
+ * slotClasses and stageClasses are: it is a decision table, and one that needs a
+ * DOM to exercise is one nobody tests.
+ *
+ * Four distinct things, never collapsed:
+ *
+ *   NO LINK       the panel cannot reach the bench, so it knows nothing
+ *   NO RUN        the bench is reachable and no run is in flight
+ *   UNSPECIFIED   a run IS in flight and declared no DUT (``dut`` defaults to "")
+ *   <name>        the run said what it is testing on
+ *
+ * UNSPECIFIED rather than a blank or a plausible-looking placeholder: the spec's
+ * ``dut`` is free text with an empty default, so "the author did not say" is a
+ * real and common state, and it must not be renderable as a DUT that exists. The
+ * stale case keeps the name and lets the panel's own staleness treatment say the
+ * age — the DUT of a run does not stop being that DUT because the feed lagged. */
+function dutLabel(v) {
+  if (!v.connected) return 'NO LINK';
+  if (!v.dut_known) return 'NO RUN';
+  return v.dut || 'UNSPECIFIED';
 }
 
 /* The curtain. When the page cannot reach its own server, the numbers on screen

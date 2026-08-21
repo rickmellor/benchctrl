@@ -63,6 +63,35 @@ LINK_KIND_NAME = "link"
 #: sweep is treated as liveness, not as news.
 PRESENCE_KIND_NAME = "presence"
 
+#: Kinds that start a run, and kinds that end one — both spellings of each.
+#:
+#: ``run_start``/``run_end`` are what
+#: :py:class:`~benchctrl.agent.runs.engine.RunEngine` actually emits. The
+#: ``run_started``/``run_finished`` pair was this module's own invention and
+#: nothing in the agent has ever sent it, which is why :py:attr:`running_runs`
+#: read empty through real runs while its tests passed on the invented spelling.
+#: Both are accepted because a run's events are persisted and replayed on
+#: reconnect, so either vocabulary can arrive from a store.
+RUN_STARTED_KINDS = frozenset({"run_start", "run_started"})
+RUN_FINISHED_KINDS = frozenset({"run_end", "run_finished"})
+
+#: Kind for a test-sequence stage transition, matched as a literal like the rest.
+#:
+#: The bench emits one of these when a run moves between INIT/PREPARE/EXECUTE/
+#: ANALYZE/DONE. It exists so the sequence display *reports* a stage instead of
+#: deriving one from run status, which could only ever light one node and left two
+#: others unreachable.
+RUN_STAGE_KIND_NAME = "run_stage"
+
+#: Every run lifecycle kind this model folds. ``run_error`` is included because a
+#: run that died must not be left reading "running" forever — the one way this
+#: panel could claim the bench was working when it had stopped.
+RUN_EVENT_KINDS = (
+    RUN_STARTED_KINDS
+    | RUN_FINISHED_KINDS
+    | frozenset({"run_step", "run_aborted", "run_error", RUN_STAGE_KIND_NAME})
+)
+
 #: Run states that mean work is in flight. Taken from
 #: :py:mod:`benchctrl.agent.runs.store` (``STATUS_PENDING``/``STATUS_RUNNING``)
 #: and matched to what ``fui/view.py`` already treats as in-flight for its
@@ -181,6 +210,41 @@ class RunView:
     state: str = "unknown"
     step: str = ""
     progress: Optional[float] = None
+    #: Device keys this run declared it would drive, from ``run_start``.
+    #:
+    #: Empty for a run whose start this session never saw — a panel that
+    #: connected mid-run, or an older agent that did not declare them. Empty
+    #: therefore means "not known", never "no devices", and the view must not
+    #: render the difference as though a run had no instruments.
+    devices: tuple[str, ...] = ()
+    #: Which sequence stage this run last reported, from ``run_stage``.
+    #:
+    #: Empty means the bench has not said — an older agent, or a panel that
+    #: connected mid-run. The display must render that as "no stage known" rather
+    #: than picking one, which is the whole point of the change that added this:
+    #: the stage used to be inferred from :py:attr:`state`, so it was always
+    #: confidently wrong rather than sometimes absent.
+    stage: str = ""
+    #: The run's own name, from ``run_start``'s ``run_name``.
+    #:
+    #: Separate from :py:attr:`name`, which is written on *every* run event and so
+    #: holds whatever the latest one carried. ``phase_start`` already sends a phase
+    #: name under ``name``, so sharing the key would mean a run's name was replaced
+    #: the moment phase events were routed into this fold — they are not today,
+    #: which makes the separation cheap to keep and expensive to retrofit.
+    run_name: str = ""
+    #: What the run declared it is testing on, from ``run_start``'s ``dut``.
+    #:
+    #: A bare label is the whole of the spec's identity for a DUT. ``RunSpec.dut``
+    #: defaults to ``""``, so empty means "the author did not say" for a run whose
+    #: start we *did* see — which a display must be able to tell apart from having
+    #: seen no run at all. :py:attr:`dut_known` carries that distinction, because
+    #: this field alone cannot: both cases are the empty string.
+    dut: str = ""
+    #: Whether ``run_start`` was seen, and so whether :py:attr:`dut` means
+    #: anything. False for a panel that connected mid-run or an older agent that
+    #: sent no DUT — "nobody told us", as against a declared-empty DUT.
+    dut_known: bool = False
 
 
 @dataclass
@@ -316,14 +380,40 @@ class BenchStatus:
     def running_runs(self) -> list[str]:
         """Run ids the agent reports as in flight, from :py:attr:`runs`.
 
-        Reuses the run state the model already folds from ``run_started`` /
-        ``run_finished`` rather than keeping a second notion of "a run is
-        happening" — two counters for one fact drift, and the one that drifts is
-        always the one on screen.
+        Reuses the run state the model already folds from ``run_start`` /
+        ``run_end`` rather than keeping a second notion of "a run is happening" —
+        two counters for one fact drift, and the one that drifts is always the one
+        on screen.
         """
         return sorted(
             k for k, r in self.runs.items() if r.state in IN_FLIGHT_RUN_STATES
         )
+
+    @property
+    def enrolled_devices(self) -> dict[str, str]:
+        """Device key -> run id, for every device committed to an in-flight run.
+
+        The answer to "which instruments is this test using", asked of the run
+        rather than of the traffic. A device only reveals itself through calls,
+        and a run makes calls in bursts — a supply set once at phase entry then
+        held for a ten-minute dwell is *in use* the whole time while looking idle
+        for all but 200 ms of it. Enrollment covers the dwell; activity marks the
+        instant.
+
+        Only in-flight runs contribute, so a finished run releases its devices
+        without anything having to clear them: the enrollment has exactly the
+        lifetime of the run that declared it, which is the property that keeps a
+        crashed or aborted run from pinning an instrument to IN RUN forever.
+
+        Ties go to the lowest run id purely for determinism — two runs cannot hold
+        one device (``RunManager.submit`` refuses it), so a tie means a stale view,
+        and a stable answer is easier to read than a flickering one.
+        """
+        out: dict[str, str] = {}
+        for run_id in self.running_runs:
+            for key in self.runs[run_id].devices:
+                out.setdefault(key, run_id)
+        return out
 
     #: How long after its last completed call the bench still counts as busy.
     #:
@@ -829,6 +919,7 @@ class BenchStatus:
             del self.devices[key]
 
         self._apply_workers(status.get("workers"))
+        self._apply_sessions(status.get("devices"))
 
         trips = safety.get("trips") or []
         if trips:
@@ -878,6 +969,46 @@ class BenchStatus:
                     queued[key] = depth
         self.busy_devices = busy
         self.queued_devices = queued
+
+    def _apply_sessions(self, devices: object) -> None:
+        """Fold ``agent.status``'s ``devices`` table: which devices are open now.
+
+        The fix for a defect that made the instrument rail lie for a whole test.
+        :py:attr:`DeviceSlot.opened` had exactly one writer,
+        :py:meth:`apply_registry`, called from exactly one place — the WELCOME
+        frame at connect, when the honest answer is always "nothing is open yet".
+        Nothing updated it afterwards, so every card fell through to STANDBY
+        ("configured, not opened") for the entire session, including for the two
+        instruments a live resistance sweep was driving. The activity marker moved
+        because it comes from action events, which do flow; the status word did
+        not, because it comes from this flag, which did not.
+
+        Only ``opened`` and ``open_error`` are folded here. ``served`` is left
+        alone on purpose: this table is keyed by the same registry, so a device
+        missing from it is one the agent no longer serves — but that is
+        :py:meth:`apply_registry`'s claim to make from an authoritative
+        enumeration, not an inference from a status field. A device absent here
+        simply keeps whatever the last registry frame said and is marked closed.
+
+        Defensive for the same reason :py:meth:`_apply_workers` is: an older agent
+        sends no ``devices`` key at all, and this method runs inside the poll that
+        also clears staleness. Raising over a malformed field would trade one
+        missing word for a blank screen. An absent key means "this agent does not
+        report open state" and must leave the flags untouched, which is why the
+        ``isinstance`` check returns rather than clearing.
+        """
+        if not isinstance(devices, dict):
+            return
+        for key, raw in devices.items():
+            if not isinstance(key, str) or not isinstance(raw, dict):
+                continue
+            slot = self.slots.setdefault(key, DeviceSlot(key=key))
+            slot.opened = bool(raw.get("open"))
+            error = raw.get("open_error")
+            slot.open_error = str(error) if error else None
+        for key, slot in self.slots.items():
+            if key not in devices:
+                slot.opened = False
 
     def apply_event(self, event: dict, *, now: Optional[float] = None) -> None:
         """Fold in one event frame."""
@@ -1014,7 +1145,7 @@ class BenchStatus:
                 # restarted agent, and the larger figure is the one this session
                 # actually saw folded.
                 self.actions_folded = max(self.actions_folded, folded)
-        elif kind in ("run_started", "run_step", "run_finished", "run_aborted"):
+        elif kind in RUN_EVENT_KINDS:
             self._apply_run_event(kind, event)
 
         self.log.append(event)
@@ -1026,20 +1157,91 @@ class BenchStatus:
                 del self.sticky[:-LOG_LIMIT]
 
     def _apply_run_event(self, kind: str, event: dict) -> None:
+        """Fold one run lifecycle event.
+
+        Accepts both spellings of each kind, and the agent's is the one that
+        matters. :py:class:`~benchctrl.agent.runs.engine.RunEngine` emits
+        ``run_start`` and ``run_end`` (asserted in ``test_run_engine.py``); this
+        model was written against ``run_started``/``run_finished``, which nothing
+        in the agent has ever sent. The result was that :py:attr:`running_runs`
+        stayed empty for the whole of a real run — and its tests passed anyway,
+        because they fed it the dashboard's own invented spelling. A vocabulary
+        mismatch between two processes is exactly what a single-process test
+        cannot see.
+
+        Both are kept rather than the wrong pair simply replaced: a run's events
+        are persisted by ``store.append_event`` and replayed on reconnect via
+        ``since_seq``, so a store written by an older or newer agent can hand this
+        model either spelling, and dropping one would silently lose runs from the
+        panel again.
+        """
         run_id = str(event.get("run_id", "") or event.get("run", ""))
         if not run_id:
             return
+        # The engine puts every payload field under ``data``
+        # (``store.Event.to_dict``), and nothing between it and here flattens
+        # that: ``Session.send_event`` copies the dict and adds only seq/ts, and
+        # ``AgentFeed._on_event`` hands it straight to ``apply_event``. Reading
+        # only the top level is why a real run enrolled no devices at all while
+        # this model's unit tests passed — the same class of bug as the
+        # ``run_started`` spelling, one layer down.
+        #
+        # Merged rather than replaced, and the top level wins: hand-built and
+        # replayed events carry these fields flat, a store from another agent
+        # version may use either shape, and where both somehow exist the outer one
+        # is the more specific statement about this event.
+        nested = event.get("data")
+        fields = (
+            {**nested, **event} if isinstance(nested, dict) else event
+        )
         view = self.runs.setdefault(run_id, RunView(run_id=run_id))
-        view.name = str(event.get("name", "") or view.name)
-        if kind == "run_started":
+        view.name = str(fields.get("name", "") or view.name)
+        if kind in RUN_STARTED_KINDS:
             view.state = "running"
-        elif kind == "run_finished":
-            view.state = str(event.get("state", "finished"))
+            declared = fields.get("devices")
+            if isinstance(declared, list):
+                view.devices = tuple(
+                    d for d in declared if isinstance(d, str) and d
+                )
+            # Read only on ``run_start``, unlike ``name`` above: these describe the
+            # run itself, so a later event has nothing new to say about them and a
+            # phase event carrying a stray key must not redefine what is on test.
+            run_name = fields.get("run_name")
+            if isinstance(run_name, str) and run_name:
+                view.run_name = run_name
+            # ``dut_known`` turns on for any ``run_start``, including one that sent
+            # no DUT at all: the start is what we witnessed, and "this run declared
+            # nothing" is a different fact from "we never saw the run". A non-str
+            # value is treated as not declared rather than coerced — ``str(None)``
+            # would put the word "None" in a panel titled DEVICE UNDER TEST.
+            view.dut_known = True
+            dut = fields.get("dut")
+            view.dut = dut if isinstance(dut, str) else ""
+        elif kind in RUN_FINISHED_KINDS:
+            # ``run_end`` carries its outcome under ``status``; ``run_finished``
+            # used ``state``. Read both so the rail shows "safe_stopped" rather
+            # than a flat "finished" for the one outcome that matters most.
+            outcome = fields.get("status") or fields.get("state") or "finished"
+            view.state = str(outcome)
+        elif kind == "run_error":
+            view.state = "error"
         elif kind == "run_aborted":
             view.state = "aborted"
+        elif kind == RUN_STAGE_KIND_NAME:
+            # Recorded verbatim and never checked against a stage list here. This
+            # module deliberately knows nothing about ``benchctrl.agent``, so the
+            # vocabulary lives with the bench that emits it; a panel that dropped a
+            # stage it did not recognise would go blank against a newer agent,
+            # which is the opposite of the failure this fixes. The renderer decides
+            # how to draw a name it does not know.
+            stage = fields.get("stage")
+            if isinstance(stage, str) and stage:
+                view.stage = stage
+            # Deliberately no ``else`` clearing it: a malformed event is not news
+            # that the run left its stage.
         else:
-            view.step = str(event.get("step", "") or view.step)
-        progress = _as_float(event.get("progress"))
+            view.step = str(fields.get("step", "") or view.step)
+        progress = _as_float(fields.get("progress"))
         if progress is not None:
             view.progress = progress
 
@@ -1133,6 +1335,30 @@ class BenchStatus:
             "registry_known": self.registry_known,
             "unclaimed": list(self.unclaimed),
             "runs": {k: r.state for k, r in self.runs.items()},
+            # {run_id: stage} for runs that have reported one, as a map alongside
+            # ``runs`` rather than folded into it: that one is {id: state}, a bare
+            # string several consumers index directly, and widening it to a dict
+            # would churn all of them to carry one more field. Runs that never
+            # reported a stage are absent rather than present-and-empty, so "the
+            # bench has not said" stays distinguishable from any stage name.
+            "run_stages": {
+                k: r.stage for k, r in self.runs.items() if r.stage
+            },
+            # {run_id: name} and {run_id: dut}, parallel maps for the same reason.
+            # ``run_dut`` keeps runs whose declared DUT is empty, because for those
+            # the empty string is the answer — the run said nothing is named. A run
+            # whose start we never saw is absent from both, so the display can tell
+            # "declared nothing" from "we were not told".
+            "run_names": {
+                k: r.run_name for k, r in self.runs.items() if r.run_name
+            },
+            "run_dut": {
+                k: r.dut for k, r in self.runs.items() if r.dut_known
+            },
+            # {device_key: run_id} for devices a live run declared it would drive.
+            # Distinct from busy_devices on purpose: this holds for the run's whole
+            # duration, including the dwells when no call is in flight.
+            "enrolled": self.enrolled_devices,
             "busy": self.any_busy,
             "busy_devices": dict(self.busy_devices),
             "queued_devices": dict(self.queued_devices),
