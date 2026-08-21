@@ -178,6 +178,12 @@ class BenchAgent:
         self._lock = threading.RLock()
         self._deadman_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # The agent's one VISA ResourceManager, built lazily by
+        # :py:meth:`resource_manager`. Its own lock, not ``self._lock``: see
+        # there for why.
+        self._rm: Optional[Any] = None
+        self._rm_tried = False
+        self._rm_lock = threading.Lock()
 
     # --- lifecycle ------------------------------------------------------
 
@@ -205,6 +211,55 @@ class BenchAgent:
             {k: self.workers.get(k) for k in self.registry.open_devices()},
         )
 
+    def resource_manager(self) -> Optional[Any]:
+        """The agent's single VISA ``ResourceManager``, or None if there can't be one.
+
+        Exists because ``pyvisa.ResourceManager()`` is a **singleton** — a second
+        call returns the same underlying object — so any code that makes "its
+        own" manager and closes it afterwards closes *everyone's*, and every
+        already-open instrument's next ``query()`` fails with ``InvalidSession:
+        Invalid session handle``. That is not hypothetical: on the bench board, a
+        read-only HDMI status dashboard calling ``agent.discover`` on its 30 s
+        inventory timer killed a live 4-wire resistance sweep mid-run (Eastwood
+        QR10x + Siglent SDM4065A), two setpoints in, because the scan created and
+        closed a manager the DMM's session depended on. **The dashboard must
+        never be able to disrupt bench function** — that is a project invariant,
+        and this is the object that upholds it: one long-lived manager, owned by
+        the agent, handed to every scan so no scan has cause to make one.
+
+        Lazy, and never fatal. pyvisa stays an *optional* dependency (a bench of
+        serial-only instruments is a valid bench), so importing it at module
+        scope would break agents that have no VISA hardware. A missing pyvisa or
+        an unusable backend returns None, which every discovery entry point
+        already treats as "make your own if you need one" — a VISA problem must
+        not take down request routing.
+
+        Uses a dedicated ``self._rm_lock`` rather than ``self._lock``.
+        ``self._lock`` guards the session and claim tables and is taken by
+        ``register_session`` / ``drop_session`` / ``claim`` / ``release`` on
+        every connect and disconnect; ``ResourceManager()`` enumerates USB and
+        can take ~1.6 s, so holding the session lock across construction would
+        stall unrelated connects behind a bus scan. One lock for one field is
+        also deadlock-free by construction: nothing is called while it is held
+        except pyvisa's constructor, which knows nothing of this agent.
+        """
+        with self._rm_lock:
+            # ``_rm_tried`` and not ``_rm is None``: a bench without a working
+            # VISA backend would otherwise retry the ~1.6 s construction on
+            # every 30 s inventory poll, forever.
+            if self._rm_tried:
+                return self._rm
+            self._rm_tried = True
+            try:
+                import pyvisa
+
+                self._rm = pyvisa.ResourceManager()
+                log.info("agent: opened the shared VISA resource manager")
+            except Exception as exc:  # noqa: BLE001 - optional dependency
+                log.info("agent: no shared VISA resource manager (%s)", exc)
+                self._rm = None
+            return self._rm
+
     def shutdown(self) -> None:
         self._stop.set()
         if self._deadman_thread is not None:
@@ -218,10 +273,35 @@ class BenchAgent:
         self.iterators.close_all()
         self.workers.stop_all()
         self.registry.close_all()
+        # Only now, and only here. Closing the shared manager invalidates every
+        # VISA session made from it (that is the whole hazard this object
+        # exists to avoid), so it must come after the trip that drives the
+        # bench safe and after ``close_all`` has released the instruments —
+        # never on a scan. Idempotent: the drivers' own ``close`` may have
+        # closed the same singleton already, and pyvisa swallows the second
+        # close as ``InvalidSession``.
+        self._close_resource_manager()
         self.blobs.close()
         # Last: the trip above emits events, and closing the bus first would
         # discard the record of the agent driving the bench safe on the way out.
         self.events.close(timeout=1.0)
+
+    def _close_resource_manager(self) -> None:
+        """Release the shared VISA manager, at shutdown only. Never raises.
+
+        Also latches ``_rm_tried``, so a scan arriving on a request thread
+        during teardown gets None and makes nothing new, rather than resurrecting
+        a manager the agent has finished with.
+        """
+        with self._rm_lock:
+            rm, self._rm = self._rm, None
+            self._rm_tried = True
+        if rm is None:
+            return
+        try:
+            rm.close()
+        except Exception:  # noqa: BLE001 - shutdown must not raise
+            log.debug("agent: error closing the VISA resource manager", exc_info=True)
 
     # --- sessions -------------------------------------------------------
 
@@ -502,7 +582,13 @@ class _Handler(socketserver.BaseRequestHandler):
         if method == "agent.discover":
             from benchctrl import discovery
 
-            return discovery.inventory(), None
+            # The agent's own manager, never a fresh one: a scan that built and
+            # closed its own would close this singleton and invalidate every
+            # instrument session on the bench. See
+            # :py:meth:`BenchAgent.resource_manager` for the sweep it killed.
+            return discovery.inventory(
+                resource_manager=agent.resource_manager()
+            ), None
         if method == "agent.status":
             return {
                 "safety": agent.governor.status(),
