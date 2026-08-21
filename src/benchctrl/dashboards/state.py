@@ -41,6 +41,15 @@ from typing import Optional
 #: Events whose severity should keep them on screen rather than scroll away.
 STICKY_SEVERITIES = frozenset({"alarm", "critical"})
 
+#: Run states that mean work is in flight. Taken from
+#: :py:mod:`benchctrl.agent.runs.store` (``STATUS_PENDING``/``STATUS_RUNNING``)
+#: and matched to what ``fui/view.py`` already treats as in-flight for its
+#: flowchart, so the headline and the flowchart cannot disagree about whether a
+#: run is happening. ``pending`` counts: a queued run is work the bench is
+#: committed to, and the gap between accepting one and starting it is not a
+#: window in which the panel should read IDLE.
+IN_FLIGHT_RUN_STATES = frozenset({"pending", "starting", "running"})
+
 #: How many recent events the panel keeps for its log pane. Small: this is a
 #: status display, not a log viewer, and the artifact log is the record of
 #: truth.
@@ -183,11 +192,41 @@ class BenchStatus:
     #: drive", and a rail of five fixed slots structurally cannot say that.
     unclaimed: list[dict] = field(default_factory=list)
     runs: dict[str, RunView] = field(default_factory=dict)
+    #: Which device worker threads are executing a call right now, as
+    #: ``{device_key: method}``. Folded from ``agent.status``'s ``workers``
+    #: (``WorkerPool.stats()``). Empty means nothing is executing — which is not
+    #: the same as nothing being queued, see :py:attr:`queued_devices`.
+    #:
+    #: This exists because a bench being *driven* used to read IDLE: arm state is
+    #: the only thing the headline consulted, so a sequence of measurements with
+    #: no output armed looked exactly like an untouched bench. That is not a
+    #: safety lie but it is a misleading one — it invites someone to start a
+    #: second run on top of the first.
+    busy_devices: dict[str, str] = field(default_factory=dict)
+    #: Per-device queue depth for anything waiting behind the current call, from
+    #: the same ``workers`` payload. Kept separate from :py:attr:`busy_devices`
+    #: because a worker can hold a queue with ``busy_with`` momentarily None,
+    #: between finishing one job and picking up the next: work is still in
+    #: flight there, and a headline that flickered IDLE across that gap would be
+    #: wrong for exactly as long as anyone was looking at it.
+    queued_devices: dict[str, int] = field(default_factory=dict)
     log: list[dict] = field(default_factory=list)
     sticky: list[dict] = field(default_factory=list)
     #: Count of events the agent told us it dropped. Cumulative and shown, so a
     #: chronically-behind panel is visibly chronic rather than briefly odd.
     dropped_events: int = 0
+    #: How many discrete bench actions this session has heard about, counting the
+    #: repeats an ``action`` event stands for rather than the events themselves.
+    #: The pane shows a bounded window; this is the total behind it.
+    actions_seen: int = 0
+    #: How many actions the agent folded into a repeat count instead of sending
+    #: as their own line, as the agent's own cumulative figure. Shown because a
+    #: log that is a summary must be able to say so — a pane that quietly
+    #: collapsed 4000 reads into eleven rows would be the silent truncation this
+    #: module's header rules out. Distinct from :py:attr:`dropped_events`: folded
+    #: actions were *counted and deliberately summarised* at the producer, while
+    #: dropped events were lost because this consumer could not keep up.
+    actions_folded: int = 0
     seconds_since_contact: Optional[float] = None
     deadman_s: Optional[float] = None
     heartbeat_s: Optional[float] = None
@@ -222,6 +261,47 @@ class BenchStatus:
     @property
     def any_armed(self) -> bool:
         return bool(self.armed_devices)
+
+    @property
+    def running_runs(self) -> list[str]:
+        """Run ids the agent reports as in flight, from :py:attr:`runs`.
+
+        Reuses the run state the model already folds from ``run_started`` /
+        ``run_finished`` rather than keeping a second notion of "a run is
+        happening" — two counters for one fact drift, and the one that drifts is
+        always the one on screen.
+        """
+        return sorted(
+            k for k, r in self.runs.items() if r.state in IN_FLIGHT_RUN_STATES
+        )
+
+    @property
+    def any_busy(self) -> bool:
+        """True when the bench is executing or queueing work.
+
+        A run in flight counts even with every worker momentarily idle: the run
+        engine spends most of its time between device calls (settling, waiting
+        out a dwell), and those gaps are not moments when the bench is free.
+        """
+        return bool(self.busy_devices or self.queued_devices or self.running_runs)
+
+    @property
+    def busy_summary(self) -> str:
+        """One short phrase naming what is in flight, for the detail line.
+
+        ``ACTIVE`` on its own says less than it looks like it does — an operator
+        who cannot see WHICH device is busy has to guess whether the panel means
+        their run or someone else's. Names the device and method when they are
+        known, because that is the difference between a status word and an answer.
+        """
+        parts = [f"{key}: {method}" for key, method in sorted(self.busy_devices.items())]
+        parts += [
+            f"{key}: {depth} queued"
+            for key, depth in sorted(self.queued_devices.items())
+            if key not in self.busy_devices
+        ]
+        parts += [f"run {run_id}" for run_id in self.running_runs]
+        return ", ".join(parts)
 
     @property
     def trustworthy(self) -> bool:
@@ -259,6 +339,13 @@ class BenchStatus:
         Order matters and is the whole point: an unproven-unsafe output beats
         a staleness warning, which beats an armed-but-known state, which beats
         idle. The most dangerous true thing wins the largest text.
+
+        ``ACTIVE`` sits at the bottom, above only ``IDLE``. Being busy is not a
+        hazard — it is the bench working normally — and every state above it is
+        either a hazard or a reason to distrust the screen. A bench that is both
+        armed and busy must read ``ARMED``: promoting ACTIVE would let a routine
+        measurement hide a live output, turning the ordering that exists to
+        surface hazards into the thing that buries them.
         """
         if self.unsafe_latch is not None:
             return "UNSAFE"
@@ -277,6 +364,8 @@ class BenchStatus:
             return "ARMED"
         if any(d.recording for d in self.devices.values()):
             return "RECORDING"
+        if self.any_busy:
+            return "ACTIVE"
         return "IDLE"
 
     @property
@@ -293,6 +382,11 @@ class BenchStatus:
             "STALE": "warn",
             "ARMED": "alarm",
             "RECORDING": "info",
+            # info, not warn: work in progress is the bench doing its job. An
+            # amber panel every time a run makes a call is a panel whose colour
+            # stops meaning anything, and the colours here are load-bearing for
+            # the states that are genuinely wrong.
+            "ACTIVE": "info",
             "IDLE": "info",
         }[self.headline]
 
@@ -500,6 +594,18 @@ class BenchStatus:
         knew is the best available guess and blanking it would make an armed
         bench look idle. It is all marked ``inferred`` so the panel renders it
         as unconfirmed.
+
+        The busy readout goes the other way and is dropped, with presence rather
+        than with arm state. The test is which direction the stale claim errs in.
+        A kept ``ARMED`` over-warns: it describes a hazard that has probably
+        gone, and someone treats a safe bench carefully. A kept ``ACTIVE``
+        under-warns in the same shape a kept ``ATTACHED`` does — ``busy_with``
+        was true for the instant the last snapshot was taken and nothing since,
+        so it is an assertion that a call is in flight *now* on a link nobody can
+        see down. It reads as "a run is driving this, leave it alone", which is
+        the reassurance that stops someone checking, and it would be indefinite:
+        no snapshot can arrive to correct it. Dropping it makes the panel fall
+        back to ``NO AGENT``, which is the true thing.
         """
         self.connected = False
         # A finished attempt, however it finished, ends the startup grace: from
@@ -508,6 +614,10 @@ class BenchStatus:
         self.stale_reason = reason or "no session with the agent"
         for device in self.devices.values():
             device.inferred = True
+        # Only the live session could vouch for an in-flight call. See above for
+        # why this drops rather than latching the way arm state does.
+        self.busy_devices = {}
+        self.queued_devices = {}
         # Arm state is kept-but-marked-inferred above, because the last known
         # arm state is the safest available guess. Presence gets the opposite
         # treatment and is dropped outright: a stale "ARMED" over-warns, while a
@@ -557,6 +667,8 @@ class BenchStatus:
         for key in [k for k in self.devices if k not in reported]:
             del self.devices[key]
 
+        self._apply_workers(status.get("workers"))
+
         trips = safety.get("trips") or []
         if trips:
             self.last_trip = trips[-1]
@@ -564,6 +676,47 @@ class BenchStatus:
         self.last_snapshot_mono = stamp
         if self.connected and self.unsafe_latch is None:
             self.stale_reason = None
+
+    def _apply_workers(self, workers: object) -> None:
+        """Fold ``agent.status``'s ``workers`` table: what is executing *now*.
+
+        Each entry is one :py:class:`~benchctrl.agent.worker.DeviceWorker` as
+        ``WorkerPool.stats()`` renders it — ``busy_with`` is the method that
+        worker's thread is inside at this instant, ``depth`` what is queued
+        behind it.
+
+        Replaced wholesale rather than merged, because this is the one field on
+        the snapshot with no lifetime past the snapshot: a device that stopped
+        being busy is reported by *absence*, exactly as a disarmed device is. A
+        merge would leave the panel claiming a call is running that returned
+        minutes ago.
+
+        Two shapes both mean idle and must be treated identically: no entry at
+        all, and an entry with ``busy_with=None`` and ``depth=0``. Workers are
+        created lazily per device, so on the live board an idle bench reports
+        ``workers: {}`` — the same not-knowing-vs-nothing trap
+        :py:class:`DeviceSlot` documents for ``safety.devices``, except here the
+        two genuinely are the same fact and conflating them is correct.
+
+        Defensive throughout: an older agent sends no ``workers`` key at all,
+        and a malformed one must cost the panel its busy readout and nothing
+        else. Raising here would take the arm state and the staleness clear down
+        with it, trading a missing word for a blind screen.
+        """
+        busy: dict[str, str] = {}
+        queued: dict[str, int] = {}
+        if isinstance(workers, dict):
+            for key, raw in workers.items():
+                if not isinstance(key, str) or not isinstance(raw, dict):
+                    continue
+                method = raw.get("busy_with")
+                if method:
+                    busy[key] = _strip_device_prefix(key, str(method))
+                depth = raw.get("depth")
+                if isinstance(depth, int) and not isinstance(depth, bool) and depth > 0:
+                    queued[key] = depth
+        self.busy_devices = busy
+        self.queued_devices = queued
 
     def apply_event(self, event: dict, *, now: Optional[float] = None) -> None:
         """Fold in one event frame."""
@@ -612,6 +765,34 @@ class BenchStatus:
                 view.armed = True
                 view.inferred = True
                 view.last_change_mono = stamp
+        elif kind in ("action", "action_failed"):
+            # Every discrete thing the agent did: a command sent, a value read, an
+            # open, an arm. Folded into the log below like any other event and
+            # deliberately nothing more — an action does NOT touch arm state.
+            #
+            # It is tempting, because the event carries the method name and
+            # ``set_output`` is right there. It would also be wrong in the
+            # dangerous direction: the log's grading is a presentation guess,
+            # while ``device_armed`` and ``safety_trip`` come from the governor,
+            # which owns the driver and knows whether the call took effect. Two
+            # sources for one fact means the quieter one eventually contradicts
+            # the louder one on screen.
+            #
+            # Both counters are read defensively. ``int(event["count"])`` would
+            # raise on a malformed payload, and this method is called from the
+            # feed's receive path: one bad event would kill the session and blank
+            # the panel. That is the "a malformed event does not kill the feed"
+            # rule already tested in this suite, and a numeric field arriving from
+            # another process is exactly where it gets tested for real.
+            self.actions_seen += _as_count(event.get("count"))
+            folded = event.get("folded")
+            if isinstance(folded, int) and not isinstance(folded, bool) and folded >= 0:
+                # Cumulative on the agent side, so this is an assignment rather
+                # than an accumulation — adding would multiply the count. Never
+                # allowed to go backwards: a decrease means a reconnect to a
+                # restarted agent, and the larger figure is the one this session
+                # actually saw folded.
+                self.actions_folded = max(self.actions_folded, folded)
         elif kind in ("run_started", "run_step", "run_finished", "run_aborted"):
             self._apply_run_event(kind, event)
 
@@ -681,6 +862,8 @@ class BenchStatus:
             "stale_reason": self.stale_reason,
             "armed": self.armed_devices,
             "dropped_events": self.dropped_events,
+            "actions_seen": self.actions_seen,
+            "actions_folded": self.actions_folded,
             "unsafe": self.unsafe_latch is not None,
             "observer_denied": self.observer_denied is not None,
             "devices": {
@@ -705,6 +888,10 @@ class BenchStatus:
             "registry_known": self.registry_known,
             "unclaimed": list(self.unclaimed),
             "runs": {k: r.state for k, r in self.runs.items()},
+            "busy": self.any_busy,
+            "busy_devices": dict(self.busy_devices),
+            "queued_devices": dict(self.queued_devices),
+            "busy_summary": self.busy_summary,
         }
 
 
@@ -761,6 +948,37 @@ def _visa_serial(resource: str) -> Optional[str]:
         return None
     serial = parts[3].strip()
     return serial or None
+
+
+def _as_count(value: object) -> int:
+    """How many actions one ``action`` event stands for: an int >= 1.
+
+    Defaults to 1 rather than 0 for anything unusable. An event that arrived
+    describes at least the one action that produced it, so counting it as zero
+    would make the pane's total disagree with the rows visible above it.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 1
+    return value if value >= 1 else 1
+
+
+def _strip_device_prefix(key: str, label: str) -> str:
+    """``siglent_sdm4065a.measure_resistance_4wire`` → ``measure_resistance_4wire``.
+
+    The worker's ``busy_with`` is the label ``WorkerPool.submit`` was given, which
+    is already ``f"{key}.{name}"``. Left alone, the detail line read
+    ``siglent_sdm4065a: siglent_sdm4065a.measure_resistance_4wire`` — observed on
+    the board — and the doubling costs real width on a 1080p panel next to the
+    device name the panel just printed.
+
+    Strips only this device's own prefix, never on the first dot. A method name may
+    contain one, and a blind ``split(".")[-1]`` would silently rename it; a label
+    that is not prefixed at all is passed through unchanged rather than guessed at.
+    """
+    prefix = key + "."
+    if label.startswith(prefix) and len(label) > len(prefix):
+        return label[len(prefix) :]
+    return label
 
 
 def _mono(now: Optional[float]) -> float:

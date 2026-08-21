@@ -20,6 +20,7 @@ import json
 import logging
 import socket
 import socketserver
+import string
 import threading
 import time
 import traceback
@@ -41,6 +42,7 @@ from benchctrl.agent.safety import SafetyGovernor, TripReason
 from benchctrl.agent.worker import PRIORITY_NORMAL, WorkerPool, clamp_blocking
 from benchctrl.exceptions import BenchValueError
 from benchctrl.net import auth as authmod
+from benchctrl.net.codec import TAG as CODEC_TAG
 from benchctrl.net.codec import Decoder, Encoder
 from benchctrl.net.errors import PolicyError, encode_exception
 from benchctrl.net.frames import FrameReader, FrameType, FrameWriter
@@ -74,6 +76,619 @@ OBSERVER_METHODS = frozenset(
         "run.events",
     }
 )
+
+
+#: Kind for an action that completed, and for one that raised. Two kinds rather
+#: than one with a flag, because the log pane shows ``kind`` in its own column:
+#: a reader scanning for what went wrong should not have to decode a boolean.
+ACTION_KIND = "action"
+ACTION_FAILED_KIND = "action_failed"
+
+#: Severity for reading a value — a property read, a status poll, a getprops.
+#: The lowest grade in :py:data:`benchctrl.agent.runs.spec.SEVERITIES`, and
+#: deliberately so: a sample loop's reads are the highest-volume thing the agent
+#: does, and they must be the first thing the event bus sheds.
+ACTION_SEVERITY_READ = "debug"
+
+#: Severity for a command that changed something but cannot make an output live
+#: (``set_voltage``, ``rec.stats``, a run submission's bookkeeping).
+ACTION_SEVERITY_COMMAND = "info"
+
+#: Severity for an action that arms, disarms, opens, or closes. Above ordinary
+#: chatter because these are the lines an operator reconstructing an incident
+#: needs, and they are rare enough that keeping them costs no queue depth.
+ACTION_SEVERITY_ARM = "warn"
+
+#: Severity for an action that raised. A failure outranks the success of the same
+#: verb: "we tried and could not" is the actionable half of the log.
+ACTION_SEVERITY_FAILED = "warn"
+
+#: Severity for a *failed* arm or disarm. The only action grade that reaches
+#: ``alarm``, because a disarm that raised is how an output stays live.
+ACTION_SEVERITY_FAILED_ARM = "alarm"
+
+#: The highest severity an action event may ever carry.
+#:
+#: This is a safety property, not a style choice. The event bus sheds the least
+#: important queued event first (:py:mod:`benchctrl.agent.eventbus`), and it
+#: refuses an incoming event outright when nothing queued ranks *below* it. So if
+#: ordinary bench traffic were graded ``critical``, a queue full of "read
+#: voltage" would refuse the ``safety_trip`` that ``Governor.trip()`` publishes
+#: before it disarms anything — the action log would have crowded out the one
+#: event it exists to make visible. Everything here must stay strictly below
+#: ``critical`` so a trip can always evict its way in.
+ACTION_SEVERITY_CEILING = "alarm"
+
+#: Severities whose events may be folded together by :py:class:`ActionCoalescer`.
+#: Only sheddable grades: anything worth a ``warn`` is worth its own line.
+COALESCED_SEVERITIES = frozenset({ACTION_SEVERITY_READ, ACTION_SEVERITY_COMMAND})
+
+#: How long one identical action signature keeps its line. A repeated read
+#: inside this window increments a count instead of emitting.
+ACTION_COALESCE_S = 0.5
+
+#: How many distinct action signatures the coalescer tracks before it forgets
+#: them all and starts again. Bounds the memory a pathological client can make
+#: the agent hold; the counters it keeps are cumulative and survive the reset.
+ACTION_MAX_SIGNATURES = 64
+
+#: Longest rendering of one value inside a log line.
+ACTION_VALUE_CHARS = 40
+
+#: Longest ``detail`` string on an action event. The log pane is 24 rows of
+#: monospace on a 1080p panel — anything past this is not read, and putting a
+#: waveform on the event bus would cost the bench queue depth to deliver
+#: something nobody can see.
+ACTION_DETAIL_CHARS = 120
+
+#: Longest error text. Longer than ``detail``: an exception message is the whole
+#: content of a failure line, where ``detail`` is a summary beside a verb.
+ACTION_ERROR_CHARS = 160
+
+#: How many items a small container may render inline before it is reduced to
+#: its shape.
+_INLINE_ITEMS = 4
+
+#: kwarg names never rendered into a log line. The agent's own token cannot
+#: reach here (authentication happens in ``_authenticate``, before any request
+#: is routed), so this is about a *device* method that takes a credential —
+#: nothing in tree does today, and a log line is a bad place to discover the
+#: first one.
+_REDACT_KWARGS = frozenset({"token", "password", "passwd", "secret", "key", "api_key"})
+
+#: Name segments that make a *method* one whose arguments are credentials, whoever
+#: they are passed as. Matched against the underscore-separated segments of the
+#: device method name, so ``device_login`` and ``set_api_key`` both hit and
+#: ``set_keyboard_lock`` does not.
+#:
+#: This exists because :py:data:`_REDACT_KWARGS` is the wrong shape on its own: it
+#: can only match a *name*, and a positional argument does not have one.
+#: ``login(tok)`` is how that call is written in every Python calling convention,
+#: and the observed failure was the live agent token rendering 39 of its 43
+#: characters into ``detail``. The clip made that look bounded, which is the trap —
+#: truncation is not redaction, and a test asserting the field's length would have
+#: passed against it.
+_CREDENTIAL_SEGMENTS = frozenset(
+    {
+        "login",
+        "logon",
+        "auth",
+        "authenticate",
+        "authorise",
+        "authorize",
+        "token",
+        "password",
+        "passwd",
+        "passphrase",
+        "secret",
+        "credential",
+        "credentials",
+        "apikey",
+        "pin",
+    }
+)
+
+#: Shortest string a shape check will call a credential. Every string literal a
+#: driver signature actually passes in this tree is at most 10 characters
+#: (``CONTinuous``, ``RESistance``), and ``secrets.token_urlsafe(32)`` is 43, so
+#: this sits in a wide gap rather than on a boundary.
+_SECRET_MIN_CHARS = 20
+
+#: Characters a base64url/hex credential is built from. A path or an SCPI string
+#: contains something outside this set, which is what keeps them readable.
+_SECRET_ALPHABET = frozenset(string.ascii_letters + string.digits + "-_=")
+
+#: How much of a long string the shape check looks at. Bounded on purpose: this
+#: runs on the request path and the strings reaching it include an encoded
+#: recording's base64 payload.
+_SECRET_SAMPLE = 64
+
+
+def _is_credential_method(name: str) -> bool:
+    """True when ``name`` is a method whose arguments must not be rendered.
+
+    Graded by the *method*, because argument position carries no name to match on.
+    Verified against all 389 public driver methods in tree: none matches, so this
+    costs no real log line today.
+    """
+    return bool(set(name.lower().split("_")) & _CREDENTIAL_SEGMENTS)
+
+
+def _looks_secret(text: str) -> bool:
+    """True when a string has the shape of a token, whatever it was called.
+
+    The backstop for a credential passed positionally to a method whose *name*
+    gives no hint — the case :py:func:`_is_credential_method` cannot see. Keyed on
+    shape: long, unbroken, drawn only from the base64url alphabet, and mixing
+    upper, lower and digits. A ``token_urlsafe`` value matches essentially always;
+    an SCPI string, a device key, a path and an all-caps serial number do not.
+
+    Deliberately accepted false positive: a long mixed-case alphanumeric serial
+    would render as its length instead of its value. Losing a serial from one log
+    line is the cheaper error.
+    """
+    if len(text) < _SECRET_MIN_CHARS:
+        return False
+    head = text[:_SECRET_SAMPLE]
+    if not set(head) <= _SECRET_ALPHABET:
+        return False
+    return (
+        any(c.islower() for c in head)
+        and any(c.isupper() for c in head)
+        and any(c.isdigit() for c in head)
+    )
+
+#: Wire verbs that arm, disarm, open, or close something.
+_ARM_GRADE_METHODS = frozenset(
+    {
+        "agent.open",
+        "agent.close",
+        "rec.start",
+        "rec.stop",
+        "run.submit",
+        "run.abort",
+        "iter.open",
+    }
+)
+
+
+def _arming_call_names() -> frozenset[str]:
+    """Device methods the safety governor treats as changing arm state.
+
+    Read from the governor's own table rather than restated here. The log's idea
+    of "this one could make an output live" must not be able to drift from the
+    governor's, because the drift is invisible: the panel would keep grading
+    ``set_output`` as ordinary chatter while the bench armed on it, and the line
+    an incident review needs would be the first thing shed.
+    """
+    try:
+        from benchctrl.agent.safety import _ARMING_CALLS
+
+        return frozenset(_ARMING_CALLS)
+    except Exception:  # pragma: no cover - the action log must never break routing
+        return frozenset()
+
+
+def action_severity(method: str, device_method: str = "", *, ok: bool = True) -> str:
+    """Grade one dispatched action.
+
+    Volume decides the floor and consequence decides the ceiling: a value read is
+    ``debug`` because a run emits thousands of them, an arm is ``warn`` because
+    there is one and it matters, and nothing is ``critical`` — see
+    :py:data:`ACTION_SEVERITY_CEILING`.
+    """
+    arming = method in _ARM_GRADE_METHODS or (
+        method == "device.call" and device_method in _arming_call_names()
+    )
+    if not ok:
+        return ACTION_SEVERITY_FAILED_ARM if arming else ACTION_SEVERITY_FAILED
+    if arming:
+        return ACTION_SEVERITY_ARM
+    if method == "device.call":
+        # A property read and a getter both come through here; only a mutator
+        # changed anything.
+        return (
+            ACTION_SEVERITY_COMMAND
+            if dispatch.is_mutator(device_method)
+            else ACTION_SEVERITY_READ
+        )
+    if method.startswith(("device.", "blob.", "rec.stats", "run.", "agent.", "iter.")):
+        return ACTION_SEVERITY_READ if _is_read_verb(method) else ACTION_SEVERITY_COMMAND
+    return ACTION_SEVERITY_COMMAND
+
+
+#: Verbs that only report. Everything else defaults to ``info``, which is the
+#: safe direction for a verb added later: it is one grade louder than it may
+#: deserve rather than one grade quieter than it needs.
+_READ_VERBS = frozenset(
+    {
+        "agent.hello",
+        "agent.devices",
+        "agent.status",
+        "agent.time",
+        "agent.discover",
+        "device.getprops",
+        "device.read_window",
+        "blob.fetch",
+        "rec.stats",
+        "run.status",
+        "run.list",
+        "run.events",
+        "run.artifacts",
+        "run.fetch_chunk",
+        "iter.next",
+    }
+)
+
+
+def _is_read_verb(method: str) -> bool:
+    return method in _READ_VERBS
+
+
+def _clip(text: str, limit: int) -> str:
+    """One-line, length-bounded rendering of ``text``.
+
+    Newlines are collapsed rather than escaped: an exception message with a
+    newline in it would otherwise break one log row into two, and the pane's rows
+    are how a reader counts what happened.
+
+    **Slices before it normalises.** ``" ".join(s.split())`` on the whole input
+    would be a full scan and a full copy, and the inputs here include an encoded
+    recording's base64 payload — megabytes, per read, in a sample loop, on the
+    board. Slicing to a few times the limit first bounds the work at a constant
+    regardless of what arrived; the slack absorbs whatever whitespace collapsing
+    removes, so a value that fits still renders whole.
+    """
+    raw = text if isinstance(text, str) else str(text)
+    head = raw[: limit * 4 + 8]
+    flat = " ".join(head.split())
+    if len(raw) <= len(head) and len(flat) <= limit:
+        return flat
+    return flat[: max(limit - 1, 1)] + "…"
+
+
+def _summarise(value: object, *, limit: int = ACTION_VALUE_CHARS, depth: int = 0) -> str:
+    """A short, bounded description of one value.
+
+    Truncation happens **before** formatting, not after. ``_clip(str(value))``
+    would be a bug with a measurable cost: a recorded window is hundreds of
+    thousands of samples, and rendering it to a string only to throw all but 40
+    characters away would allocate megabytes on the request path — per read, in a
+    loop, on a board with 2 GB of RAM. So a container reports its *shape*
+    (``list[262144]``) and only small ones are rendered inline.
+
+    Anything that is not a JSON-ish scalar or container reports its type name.
+    ``str()`` is never called on an unknown object: a driver's ``__repr__`` is
+    free to query the instrument, and a log line must not put traffic on the wire
+    to the DUT.
+    """
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        # Before int, which bool subclasses.
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return _clip(repr(value), limit)
+    if isinstance(value, str):
+        if not value:
+            return "''"
+        # Shape check before rendering, not after: a credential that reached here
+        # positionally has no name to match on, and the clip that used to bound it
+        # was only ever bounding it, not hiding it.
+        if _looks_secret(value):
+            return f"«redacted:{len(value)}c»"
+        return _clip(value, limit)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return f"bytes[{len(value)}]"
+    if isinstance(value, (list, tuple, set, frozenset)):
+        if depth or len(value) > _INLINE_ITEMS:
+            return f"{type(value).__name__}[{len(value)}]"
+        inner = ",".join(_summarise(v, limit=limit, depth=depth + 1) for v in value)
+        return f"[{inner}]"
+    if isinstance(value, dict):
+        tagged = _summarise_envelope(value)
+        if tagged is not None:
+            return tagged
+        if depth or len(value) > _INLINE_ITEMS:
+            return f"dict[{len(value)}]"
+        inner = ",".join(
+            f"{_clip(str(k), 12)}={_summarise(v, limit=limit, depth=depth + 1)}"
+            for k, v in value.items()
+        )
+        return "{" + inner + "}"
+    return type(value).__name__
+
+
+def _summarise_envelope(value: dict) -> Optional[str]:
+    """Describe a :py:mod:`benchctrl.net.codec` envelope, or None if not one.
+
+    The result reaching :py:func:`build_action_event` is the *encoded* value, so a
+    recording arrives as ``{"__t": "b64", "v": "<megabytes of base64>"}`` and a
+    measurement as ``{"__t": "rec", ...}``. Rendering those generically put 40
+    characters of base64 on the glass — observed, not hypothesised — which is
+    exactly the "waveform blob in a log line" this log must not produce, and it is
+    worse than useless: it looks like data.
+
+    So the tag is read and the *shape* reported (``b64[1048576]``). Unknown tags
+    fall back to the tag name rather than to the payload, because a tag added
+    later must degrade to a short label, never to its contents.
+    """
+    tag = value.get(CODEC_TAG)
+    if not isinstance(tag, str):
+        return None
+    payload = value.get("v")
+    if tag == "b64" and isinstance(payload, str):
+        # Characters of base64, not decoded bytes: this is a log line, and
+        # decoding to get a byte count would allocate the whole blob to render a
+        # number nobody is measuring anything against.
+        return f"b64[{len(payload)}c]"
+    if tag == "f" and isinstance(payload, str):
+        return payload
+    if tag == "blob":
+        return f"blob[{_summarise(value.get('size'), depth=1)}b]"
+    if tag == "enum":
+        return _clip(f"{value.get('c')}.{payload}", ACTION_VALUE_CHARS)
+    if tag == "dc":
+        # Observed on the board: ``info`` logged the two characters "dc". The
+        # envelope has exactly three keys, so the generic dict branch rendered it
+        # inline and the tag sorted first. Every dataclass-returning method on the
+        # bench had the same useless line. The class name is the fact worth having,
+        # and one field makes it recognisable rather than merely typed.
+        return _clip(f"{value.get('c')}({_summarise_fields(value.get('f'))})", 44)
+    if tag == "rec":
+        # A live recording handle. ``running`` is the part an operator acts on.
+        state = "running" if value.get("running") else "stopped"
+        return _clip(f"rec {value.get('name')} {state}", ACTION_VALUE_CHARS)
+    if tag == "map":
+        items = value.get("items")
+        return f"map[{len(items) if isinstance(items, (list, tuple)) else '?'}]"
+    if tag == "iter":
+        return f"iter#{_summarise(value.get('id'), depth=1)}"
+    return _clip(tag, 16)
+
+
+def _summarise_fields(fields: object) -> str:
+    """One or two fields of an encoded dataclass, enough to recognise it by.
+
+    Not all of them: ``SDM4065AInfo`` has eight, and a log row is one line beside a
+    verb. Fields whose own value is another envelope or a container are skipped
+    rather than descended into, because their rendering is longer than the space
+    left and the class name has already carried the meaning.
+    """
+    if not isinstance(fields, dict):
+        return ""
+    shown = []
+    for name, value in fields.items():
+        if isinstance(value, (dict, list, tuple)) or value is None:
+            continue
+        shown.append(f"{_clip(str(name), 12)}={_summarise(value, limit=16, depth=1)}")
+        if len(shown) == 2:
+            break
+    return ",".join(shown)
+
+
+def _device_action(method: str, p: dict) -> str:
+    """The device-level method a wire verb is carrying, if any.
+
+    ``device.call`` is the interesting one: every driver method on the bench
+    arrives under that single verb, so without this the log would read
+    ``device.call`` forty times and say nothing about what the bench did.
+    """
+    if method == "device.call":
+        name = p.get("method")
+        return _clip(name, ACTION_VALUE_CHARS) if isinstance(name, str) else ""
+    if method == "device.getprops":
+        names = p.get("names")
+        if isinstance(names, (list, tuple)) and names:
+            return _clip(",".join(str(n) for n in names[:3]), ACTION_VALUE_CHARS)
+        return "snapshot"
+    if method == "device.read_window":
+        return "read_window"
+    return ""
+
+
+def _summarise_args(method: str, p: dict) -> str:
+    """The arguments of a ``device.call``, bounded and redacted.
+
+    Only ``device.call``: every other verb's interesting parameter is the device
+    key, which the event carries as its own field, and their parameter dicts are
+    handles (blob ids, rec ids) that mean nothing on a wall panel.
+
+    Redaction happens in three layers, because each catches what the others cannot:
+    a credential *method* renders arity only (positional arguments have no name to
+    match on); a credential *kwarg name* is redacted by name; and any remaining
+    string is shape-checked by :py:func:`_looks_secret`. The first version had only
+    the middle layer, and a token passed as ``args[0]`` went straight to the glass.
+    """
+    if method != "device.call":
+        return ""
+    args = p.get("args") or ()
+    kwargs = p.get("kwargs") or {}
+    if not isinstance(args, (list, tuple)):
+        args = ()
+    if not isinstance(kwargs, dict):
+        kwargs = {}
+    name = p.get("method")
+    if isinstance(name, str) and _is_credential_method(name):
+        # Arity, not values. That a login was attempted is the fact worth logging;
+        # what it was attempted with is never worth logging.
+        return f"«redacted:{len(args) + len(kwargs)} args»"
+    parts = [_summarise(a) for a in args]
+    for key, value in kwargs.items():
+        kwname = str(key)
+        shown = "«redacted»" if kwname.lower() in _REDACT_KWARGS else _summarise(value)
+        parts.append(f"{_clip(kwname, 16)}={shown}")
+    return _clip(",".join(parts), ACTION_DETAIL_CHARS)
+
+
+def _summarise_result(method: str, device_method: str, result: object) -> str:
+    """The result half of a log line.
+
+    A credential-shaped *method* has its result withheld the same way its arguments
+    are. ``get_token()`` returning a short key would otherwise render whole, and a
+    length clip is no protection at all against a bounded-length secret — an 8-char
+    PIN fits inside every limit this module has. Grading by the method is what makes
+    that a decision rather than an accident of the value's size.
+
+    Everything else goes through :py:func:`_summarise`, whose string branch
+    shape-checks anyway, so a token returned by a method with an innocent name is
+    still caught. Residual risk accepted: a short, non-random secret returned by a
+    method whose name gives no hint would render. Nothing in tree does that, and no
+    length or shape rule can distinguish that value from a reading.
+    """
+    if method == "device.call" and _is_credential_method(device_method):
+        return "«redacted»"
+    if method == "agent.open" and isinstance(result, dict):
+        # ``dict[8]`` was the honest rendering of the surface descriptor and told
+        # an operator nothing. The interesting fact about an open is WHICH driver
+        # class took the device, because that is what a wrong-instrument mistake
+        # looks like on the glass.
+        cls = result.get("cls")
+        if isinstance(cls, str) and cls:
+            return _clip(cls, ACTION_VALUE_CHARS)
+    return _summarise(result)
+
+
+def build_action_event(
+    session_id: str,
+    method: str,
+    p: dict,
+    *,
+    ok: bool,
+    result: object = None,
+    error: Optional[BaseException] = None,
+    elapsed_ms: Optional[float] = None,
+) -> dict:
+    """One action, as the event bus will carry it.
+
+    Pure and separate from the handler so the grading and the truncation can be
+    asserted without a socket, a device, or a session.
+    """
+    action = _device_action(method, p)
+    device = p.get("device")
+    event = {
+        "kind": ACTION_KIND if ok else ACTION_FAILED_KIND,
+        "severity": action_severity(method, action, ok=ok),
+        "method": method,
+        "action": action,
+        "device": device if isinstance(device, str) else "",
+        "ok": bool(ok),
+        # How many actions this line stands for. Always present, always at least
+        # 1, so a consumer never has to distinguish "one action" from "a line
+        # whose count was left off".
+        "count": 1,
+        "session": session_id,
+    }
+    if elapsed_ms is not None:
+        event["ms"] = round(float(elapsed_ms), 1)
+    if ok:
+        parts = []
+        args = _summarise_args(method, p)
+        if args:
+            parts.append(args)
+        parts.append(f"→ {_summarise_result(method, action, result)}")
+        event["detail"] = _clip(" ".join(parts), ACTION_DETAIL_CHARS)
+    else:
+        event["detail"] = ""
+        event["error"] = _clip(
+            f"{type(error).__name__}: {error}" if error is not None else "failed",
+            ACTION_ERROR_CHARS,
+        )
+    return event
+
+
+class ActionCoalescer:
+    """Folds repeated identical actions into one line per window.
+
+    Why this is not "emit everything and let the bus shed it"
+    --------------------------------------------------------
+
+    Shedding is the bus's answer to a *slow consumer*, and it is the right one.
+    It is not an answer to a fast producer. A run polling an instrument does
+    thousands of transactions a second, and an event each would make every one of
+    them pay for a dict, a lock, and — inside
+    :py:meth:`~benchctrl.agent.eventbus.EventSubscriber.offer` — a linear scan of
+    a queue up to 256 deep looking for something to evict. That cost lands on the
+    request path of the bench, per SCPI transaction, on the board. The bus would
+    also then be delivering a display 24 rows can never show.
+
+    So repetition is collapsed here, at the producer, where it is nearly free: a
+    dict lookup and an integer. The first action of a burst always emits, so no
+    action is ever invisible; a repeat inside the window increments a count that
+    rides out on the next line of that signature as ``count`` ("read voltage
+    ×47").
+
+    What this loses, stated plainly
+    -------------------------------
+
+    If a burst simply stops, the last window's repeats never reach a ``count``.
+    That tail is not silent: every action event carries ``folded``, the
+    cumulative number of actions that did not get their own line, so a consumer
+    can always say the log is a summary rather than a transcript. Silent
+    truncation is the thing this codebase refuses; a *declared* summary is fine.
+    """
+
+    def __init__(
+        self,
+        *,
+        window_s: float = ACTION_COALESCE_S,
+        max_signatures: int = ACTION_MAX_SIGNATURES,
+    ) -> None:
+        self._window_s = window_s
+        self._max_signatures = max_signatures
+        self._lock = threading.Lock()
+        self._last_emit: dict[tuple, float] = {}
+        self._suppressed: dict[tuple, int] = {}
+        self._folded = 0
+        self._emitted = 0
+
+    def offer(self, event: dict, *, now: Optional[float] = None) -> Optional[dict]:
+        """Return the event to publish, or None when it was folded.
+
+        Never blocks on I/O and never raises: this runs on the request path of
+        every remote call.
+        """
+        severity = event.get("severity")
+        coalescible = bool(event.get("ok")) and severity in COALESCED_SEVERITIES
+        stamp = time.monotonic() if now is None else now
+        signature = (
+            event.get("method", ""),
+            event.get("device", ""),
+            event.get("action", ""),
+            bool(event.get("ok")),
+        )
+        with self._lock:
+            if not coalescible:
+                event["folded"] = self._folded
+                self._emitted += 1
+                return event
+            last = self._last_emit.get(signature)
+            if last is not None and stamp - last < self._window_s:
+                self._suppressed[signature] = self._suppressed.get(signature, 0) + 1
+                self._folded += 1
+                return None
+            if signature not in self._last_emit and (
+                len(self._last_emit) >= self._max_signatures
+            ):
+                # Forget the table rather than grow it. The cumulative counters
+                # survive, so the honesty of `folded` does not depend on the size
+                # of this dict.
+                self._last_emit.clear()
+                self._suppressed.clear()
+            self._last_emit[signature] = stamp
+            event["count"] = 1 + self._suppressed.pop(signature, 0)
+            event["folded"] = self._folded
+            self._emitted += 1
+            return event
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {
+                "emitted": self._emitted,
+                "folded": self._folded,
+                "signatures": len(self._last_emit),
+                "window_s": self._window_s,
+            }
 
 
 class Session:
@@ -170,6 +785,9 @@ class BenchAgent:
         self.failures = authmod.FailureTracker()
         # Built before the governor: the governor's event sink publishes onto it.
         self.events = EventBus()
+        # Folds a sample loop's repeated reads into one line per window, at the
+        # producer, before the bus ever sees them. See ActionCoalescer.
+        self.actions = ActionCoalescer()
         self.governor = SafetyGovernor(
             deadman_s=deadman_s, on_event=self._broadcast_event
         )
@@ -351,6 +969,52 @@ class BenchAgent:
         """
         self.events.publish(event)
 
+    def broadcast_action(
+        self,
+        session_id: str,
+        method: str,
+        p: dict,
+        *,
+        ok: bool,
+        result: object = None,
+        error: Optional[BaseException] = None,
+        elapsed_ms: Optional[float] = None,
+    ) -> Optional[dict]:
+        """Record one dispatched action. Returns the event published, or None.
+
+        On the request path of every remote call, so it must cost nothing the
+        bench can feel: it builds a dict, folds repeats
+        (:py:class:`ActionCoalescer`), and hands the result to the bus, which
+        enqueues and returns. No socket, no lock held across I/O, nothing
+        unbounded.
+
+        Wrapped in ``except Exception`` because the log is strictly less important
+        than the call it describes. A bug in the summarising must not turn a
+        successful ``set_voltage`` into an error the client sees — and worse, must
+        not turn a *disarm* into one.
+        """
+        try:
+            event = build_action_event(
+                session_id,
+                method,
+                p,
+                ok=ok,
+                result=result,
+                error=error,
+                elapsed_ms=elapsed_ms,
+            )
+            # Separate name: `offer` returns None when it folded the event into a
+            # previous line's count, which is not the same type as the event that
+            # went in. Reusing `event` made this a dict-vs-Optional[dict] error.
+            published = self.actions.offer(event)
+            if published is None:
+                return None
+            self.events.publish(published)
+            return published
+        except Exception:  # noqa: BLE001 - never fail a bench action over its log
+            log.exception("agent: action log failed for %s", method)
+            return None
+
     def claim(self, session: Session, device_key: str) -> dict:
         self.registry.entry(device_key)
         with self._lock:
@@ -531,9 +1195,22 @@ class _Handler(socketserver.BaseRequestHandler):
             log.debug("agent: ignoring frame type 0x%02X", frame_type)
 
     def _handle_request(self, session: Session, request: dict) -> None:
+        """Dispatch one request, and record that it happened.
+
+        Every remote action funnels through :py:meth:`_route`, which is why the
+        action log is taken here rather than in each driver: one place, and a verb
+        added later is logged without anybody remembering to log it.
+
+        The event is emitted *after* the reply is on the wire. Building it is
+        cheap but not free, and the client's latency is the bench's latency — a
+        run's inner loop should not wait on the summarising of the previous
+        response. Nothing depends on the ordering: the bus is a separate
+        transport with its own per-subscriber threads.
+        """
         req_id = request.get("id", 0)
         method = request.get("m", "")
         params = request.get("p") or {}
+        started = time.monotonic()
         try:
             result, props = self._route(session, method, params)
             body: dict = {"id": req_id, "r": result}
@@ -548,6 +1225,35 @@ class _Handler(socketserver.BaseRequestHandler):
                 device=params.get("device"),
                 method=params.get("method") or method,
             )
+            # A *failed* call is logged even from an observer: a read-only session
+            # attempting a write is exactly the kind of thing the pane should show.
+            self.agent.broadcast_action(
+                session.session_id,
+                method,
+                params,
+                ok=False,
+                error=exc,
+                elapsed_ms=(time.monotonic() - started) * 1000.0,
+            )
+            return
+        if session.observer:
+            # A successful observer call is not a bench action — the allowlist
+            # makes that structural — and logging it is a feedback loop with the
+            # pane it feeds: the dashboard polls agent.status, agent.devices and
+            # agent.discover on its own timer, which at 24 visible rows would fill
+            # the entire log with the display describing itself and push every
+            # real bench action off the glass within seconds. Excluded as a whole
+            # category rather than rate-limited, so there is no partial silence to
+            # declare: nothing an observer succeeds at is ever logged.
+            return
+        self.agent.broadcast_action(
+            session.session_id,
+            method,
+            params,
+            ok=True,
+            result=result,
+            elapsed_ms=(time.monotonic() - started) * 1000.0,
+        )
 
     def _send_error(self, session, req_id, exc, device=None, method=None) -> None:
         payload = encode_exception(

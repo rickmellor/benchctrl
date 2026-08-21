@@ -667,6 +667,262 @@ def test_a_view_built_from_a_snapshot_with_no_slots_still_renders():
 
 
 # --------------------------------------------------------------------------
+# What is happening at the device right now
+#
+# A slot used to report only configuration and arm state, so a bench being driven
+# looked exactly like an untouched one: a sequence of measurements with no output
+# armed reads STANDBY on every row. The agent already reports which worker thread
+# is inside which call (`agent.status`'s `workers` table), so the rail can say it.
+#
+# The wart these tests pin down: the agent's job label is `f"{key}.{method}"`, so
+# `busy_with` arrives already carrying the device key — on a row headed DMM it
+# reads "siglent_sdm4065a.measure_resistance_4wire".
+# --------------------------------------------------------------------------
+
+
+def workers_payload(devices=None, *, workers=None, since_contact=0.1):
+    """A status snapshot carrying a ``workers`` table alongside the safety one."""
+    payload = status_payload(devices, since_contact=since_contact)
+    payload["workers"] = workers or {}
+    return payload
+
+
+def busy(method, *, depth=0):
+    """One entry of ``WorkerPool.stats()``, as the agent renders it."""
+    return {"busy_with": method, "depth": depth}
+
+
+def test_a_busy_slot_names_the_call_without_repeating_the_device_key(live):
+    """The rail's job is to say what is happening AT this device, and the row is
+    already headed by the device. The agent labels its jobs "{key}.{method}", so
+    printing ``busy_with`` verbatim spends a slot's narrowest line restating the
+    heading above it — "siglent_sdm4065a.measure_resistance_4wire" under DMM."""
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_status(
+        workers_payload(
+            workers={
+                "siglent_sdm4065a": busy("siglent_sdm4065a.measure_resistance_4wire")
+            }
+        ),
+        now=101.0,
+    )
+    dmm = slot(view_of(live), "siglent_sdm4065a")
+    assert dmm["busy"] == "measure_resistance_4wire"
+    assert dmm["key"] not in dmm["busy"], "the slot restated its own heading"
+
+
+def test_a_method_name_containing_a_dot_is_not_truncated_to_its_tail(live):
+    """The stripping must remove a known prefix, not "everything before the last
+    dot". A driver method reached through a sub-object is labelled
+    "rigol_dp2031.channel.set_current", and taking the tail would show
+    ``set_current`` — a call that is running on a channel the operator cannot see,
+    named as if it were the whole story. Naming the wrong call is worse than
+    naming a long one."""
+    live.apply_registry([{"key": "rigol_dp2031", "open": True}])
+    live.apply_status(
+        workers_payload(
+            workers={"rigol_dp2031": busy("rigol_dp2031.channel.set_current")}
+        ),
+        now=101.0,
+    )
+    psu = slot(view_of(live), "rigol_dp2031")
+    assert psu["busy"] == "channel.set_current"
+
+
+def test_an_armed_device_that_is_also_busy_still_reports_armed(live):
+    """The safety one, and the reason ``busy`` is its own field.
+
+    Arming means an output can be live; being mid-call is the bench working
+    normally. If a routine measurement could take the status word, it would hide
+    a live output — exactly the inversion
+    :py:func:`~benchctrl.dashboards.fui.view._slot_state`'s precedence docstring
+    exists to prevent, and the same ordering ``BenchStatus.headline`` applies when
+    it keeps ARMED above ACTIVE. Both facts are true at once and both are shown.
+    """
+    live.apply_registry([{"key": "otii_arc", "open": True}])
+    live.apply_status(
+        workers_payload(
+            {"otii_arc": dev(armed=True)},
+            workers={"otii_arc": busy("otii_arc.set_output")},
+        ),
+        now=101.0,
+    )
+    arc = slot(view_of(live), "otii_arc")
+    assert arc["status"] == "ARMED", "a routine call displaced a live output"
+    assert arc["armed"]
+    # And the busy fact is not lost to make room for it: the operator needs both.
+    assert arc["busy"] == "set_output"
+
+
+def test_an_idle_device_claims_no_activity_at_all(live):
+    """No busy value, not "idle" and not an empty string that reads as one.
+
+    The complement of the test above: it proves ``busy`` tracks the workers table
+    rather than being present whenever the slot is linked.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_inventory(
+        {"devices": [{"device_key": "siglent_sdm4065a", "confidence": "exact"}]}
+    )
+    live.apply_status(workers_payload(workers={}), now=101.0)
+    dmm = slot(view_of(live), "siglent_sdm4065a")
+    assert dmm["status"] == STANDBY
+    assert dmm["busy"] is None
+    assert dmm["queued"] == 0
+
+
+def test_work_queued_behind_the_current_call_is_counted(live):
+    """A depth is the difference between "this will free up" and "there are nine
+    more behind it", and it is the only warning that starting a second run will
+    queue rather than fail."""
+    live.apply_registry([{"key": "rigol_dl3031a", "open": True}])
+    live.apply_status(
+        workers_payload(
+            workers={"rigol_dl3031a": busy("rigol_dl3031a.set_current", depth=3)}
+        ),
+        now=101.0,
+    )
+    load = slot(view_of(live), "rigol_dl3031a")
+    assert load["busy"] == "set_current"
+    assert load["queued"] == 3
+
+
+def test_a_busy_key_the_rail_does_not_show_creates_no_phantom_slot(live):
+    """The workers table is keyed independently of the rail, and the two can
+    legitimately disagree — a device dropped from a restarted agent's --devices
+    list, or a key this build has no driver for. An unknown key must be ignored,
+    not turned into a row: a slot invented from a method name would have no
+    presence, no identity and no status behind it, which is the fabricated readout
+    this module exists to prevent."""
+    live.apply_registry([{"key": "otii_arc", "open": True}])
+    live.apply_status(
+        workers_payload(
+            {"otii_arc": dev()},
+            workers={"nonexistent_widget": busy("nonexistent_widget.calibrate")},
+        ),
+        now=101.0,
+    )
+    view = view_of(live)
+    keys = [sl["key"] for sl in view["instruments"]]
+    assert "nonexistent_widget" not in keys
+    assert keys == ["otii_arc"]
+    assert slot(view, "otii_arc")["busy"] is None
+
+
+def test_a_stale_view_shows_no_call_in_flight(live):
+    """An activity marker has no honest stale form.
+
+    Every other readout can be struck through and still mean something — a
+    crossed-out ARMED warns about a bench nobody can see. "executing
+    measure_resistance_4wire" is an assertion about *this instant*: drawn at all,
+    it says a call is running now, and it would say so indefinitely because no
+    snapshot is arriving to correct it. It reads as "a run is driving this, leave
+    it alone", which is the reassurance that stops someone checking.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_status(
+        workers_payload(
+            {"siglent_sdm4065a": dev()},
+            workers={
+                "siglent_sdm4065a": busy(
+                    "siglent_sdm4065a.measure_resistance_4wire", depth=2
+                )
+            },
+        ),
+        now=101.0,
+    )
+    assert slot(view_of(live), "siglent_sdm4065a")["busy"] == "measure_resistance_4wire"
+
+    live.apply_event({"kind": "events_dropped", "count": 3}, now=102.0)
+    dmm = slot(view_of(live), "siglent_sdm4065a")
+    assert dmm["stale"], "premise: the view must know it is behind"
+    assert dmm["busy"] is None, "a call was left frozen in flight on a stale view"
+    assert dmm["queued"] == 0
+
+
+def test_a_dead_session_leaves_no_call_in_flight(live):
+    """The disconnect half of the same rule, and deliberately not re-implemented
+    in the view: ``BenchStatus.apply_disconnected`` already drops ``busy_devices``
+    with presence and identity, for the same reason. This asserts the view relies
+    on that rather than duplicating it — two places deciding one fact is how the
+    quieter one ends up contradicting the louder one on screen."""
+    live.apply_registry([{"key": "otii_arc", "open": True}])
+    live.apply_status(
+        workers_payload(
+            {"otii_arc": dev()}, workers={"otii_arc": busy("otii_arc.set_output")}
+        ),
+        now=101.0,
+    )
+    assert slot(view_of(live), "otii_arc")["busy"] == "set_output"
+
+    live.apply_disconnected("cable pulled")
+    assert live.busy_devices == {}, "the state model kept a call the link cannot back"
+    arc = slot(view_of(live), "otii_arc")
+    assert arc["busy"] is None
+    assert arc["queued"] == 0
+
+
+@pytest.mark.parametrize(
+    "workers",
+    [
+        "siglent_sdm4065a.measure",  # not a mapping at all
+        ["siglent_sdm4065a"],  # a list where a table was expected
+        42,
+        None,
+        # Well-formed keys carrying values of the wrong type. `busy_devices` is a
+        # flat {key: method} map and `queued_devices` a flat {key: depth} one, so
+        # each of these is unusable for at least one of the two.
+        {"siglent_sdm4065a": {"busy_with": "measure", "depth": 2}},  # raw table
+        {"siglent_sdm4065a": ["measure"]},
+        {"siglent_sdm4065a": None},
+        {"siglent_sdm4065a": True},  # bool: an int by isinstance, not a count
+        {"siglent_sdm4065a": -3},  # a negative depth is not a queue
+        {12: "measure"},  # non-string key
+    ],
+)
+def test_a_malformed_busy_payload_costs_the_marker_and_nothing_else(live, workers):
+    """This field crosses a process boundary from an agent that may be a release
+    ahead or behind. Raising here would take the arm state and the whole rail down
+    with it — a missing word traded for a blank screen.
+
+    Both maps get each payload, because either one can be the malformed half and
+    the two are read by different code: a method where a depth belongs must not
+    become a count, and a depth where a method belongs must not become a name.
+    """
+    live.apply_registry([{"key": "siglent_sdm4065a", "open": True}])
+    live.apply_status(
+        workers_payload({"siglent_sdm4065a": dev()}, workers=None), now=101.0
+    )
+    snap = live.to_dict()
+    # Injected past the state model on purpose: build_view is called with whatever
+    # an AgentFeed produced, so it must validate what it is handed rather than
+    # trusting an upstream that has already been fixed.
+    snap["busy_devices"] = workers
+    snap["queued_devices"] = workers
+    snap["reconnects"] = 0
+    view = build_view(snap, live)
+    dmm = slot(view, "siglent_sdm4065a")
+    assert dmm["busy"] is None
+    assert dmm["queued"] == 0
+    assert dmm["status"] == "IDLE", "a bad workers table cost the rail its arm state"
+
+
+def test_a_snapshot_with_no_busy_fields_at_all_still_renders(live):
+    """An agent, or a stored snapshot, predating the workers table. Same rule as
+    the missing-``slots`` case: degrade to "nothing said" rather than raising."""
+    live.apply_registry([{"key": "otii_arc", "open": True}])
+    live.apply_status(workers_payload({"otii_arc": dev()}), now=101.0)
+    snap = live.to_dict()
+    del snap["busy_devices"]
+    del snap["queued_devices"]
+    snap["reconnects"] = 0
+    arc = slot(build_view(snap, live), "otii_arc")
+    assert arc["busy"] is None
+    assert arc["queued"] == 0
+    assert arc["status"] == "IDLE"
+
+
+# --------------------------------------------------------------------------
 # The footer banner
 # --------------------------------------------------------------------------
 
@@ -824,6 +1080,156 @@ def test_the_log_is_bounded(live):
     for i in range(60):
         live.apply_event({"kind": "tick", "seq": i}, now=101.0 + i)
     assert len(view_of(live)["log"]) <= 24
+
+
+def _action(**overrides):
+    event = {
+        "kind": "action",
+        "severity": "info",
+        "method": "device.call",
+        "action": "set_voltage",
+        "device": "rigol_dp2031",
+        "detail": "3.3,channel=1 → none",
+        "count": 1,
+        "ok": True,
+        "seq": 11,
+    }
+    event.update(overrides)
+    return event
+
+
+def test_an_action_reaches_the_pane_with_its_verb_and_detail(live):
+    """The pane exists to show what the bench did, so the row has to say what.
+
+    ``device.call`` carries every driver method on the bench, so without the
+    device-level verb every row would read ``device.call`` and the pane would be
+    24 identical lines.
+    """
+    live.apply_event(_action(), now=101.0)
+    row = view_of(live)["log"][-1]
+    assert row["action"] == "set_voltage"
+    assert row["device"] == "rigol_dp2031"
+    assert row["detail"] == "3.3,channel=1 → none"
+    assert row["count"] == 1
+    assert row["ok"] is True
+
+
+def test_a_failed_action_is_marked_and_carries_its_error(live):
+    live.apply_event(
+        _action(
+            kind="action_failed",
+            severity="alarm",
+            ok=False,
+            detail="",
+            error="TimeoutError: no response in 5.0s",
+        ),
+        now=101.0,
+    )
+    row = view_of(live)["log"][-1]
+    assert row["ok"] is False
+    assert row["severity"] == "alarm"
+    assert "TimeoutError" in row["error"]
+
+
+def test_a_row_without_a_device_verb_falls_back_to_the_wire_method(live):
+    """``agent.open`` has no device-level verb and is still worth a row.
+
+    An empty first column would make the most important lines on the pane —
+    opening and closing an instrument — the blankest ones.
+    """
+    live.apply_event(
+        _action(method="agent.open", action="", detail="→ {key=x,open=true}"), now=101.0
+    )
+    assert view_of(live)["log"][-1]["action"] == "agent.open"
+
+
+def test_a_long_value_is_truncated_before_it_reaches_the_glass(live):
+    """The agent bounds these already; this pane must not depend on that.
+
+    The limit is enforced in another process, across a version boundary, on a
+    payload that arrives from the network. An agent one release behind — or a
+    future one with a laxer limit — must cost this pane a shortened line, not a
+    row that runs off the panel and drags the columns beside it out of alignment.
+    A waveform must never be what is on screen.
+    """
+    from benchctrl.dashboards.fui.view import (
+        _ACTION_CHARS,
+        _DETAIL_CHARS,
+        _ERROR_CHARS,
+    )
+
+    live.apply_event(
+        _action(
+            action="s" * 500,
+            detail="9" * 100_000,
+            kind="action_failed",
+            ok=False,
+            error="E" * 100_000,
+        ),
+        now=101.0,
+    )
+    row = view_of(live)["log"][-1]
+    assert len(row["detail"]) <= _DETAIL_CHARS, f"detail is {len(row['detail'])} chars"
+    assert len(row["error"]) <= _ERROR_CHARS, f"error is {len(row['error'])} chars"
+    assert len(row["action"]) <= _ACTION_CHARS, f"action is {len(row['action'])} chars"
+
+
+def test_a_multiline_error_stays_one_row(live):
+    """A row count is how a reader judges how much the bench did.
+
+    An exception whose message contains a newline would otherwise occupy two rows
+    and make one failure look like two.
+    """
+    live.apply_event(
+        _action(kind="action_failed", ok=False, error="OSError: read failed\n  retry 3"),
+        now=101.0,
+    )
+    row = view_of(live)["log"][-1]
+    assert "\n" not in row["error"]
+    assert "retry 3" in row["error"]
+
+
+def test_a_folded_burst_shows_its_count_rather_than_hiding_it(live):
+    """A summarised log has to look summarised.
+
+    The agent folds repeated identical reads into one line with a count. Dropping
+    that count would make 47 reads render as one, which is the silent truncation
+    the honesty rules forbid.
+    """
+    live.apply_event(_action(action="read_raw", severity="debug", count=47), now=101.0)
+    view = view_of(live)
+    assert view["log"][-1]["count"] == 47
+
+
+def test_a_row_count_is_never_zero_or_missing(live):
+    """A ``×0`` beside a line saying something happened is a contradiction."""
+    for value in (None, 0, -5, "many", True):
+        live.apply_event(_action(count=value), now=101.0)
+        assert view_of(live)["log"][-1]["count"] >= 1
+
+
+def test_the_pane_can_say_how_much_it_is_not_showing(live):
+    """24 rows off a stream that can run at thousands of actions a second.
+
+    The counts are what let the header admit the pane is a summary. Without them
+    a chronically-folded log looks like a complete record of a quiet bench.
+    """
+    live.apply_event(_action(count=50, folded=4000), now=101.0)
+    view = view_of(live)
+    assert view["actions"] == 50
+    assert view["actions_folded"] == 4000
+    # And folding is not reported as event loss: different failures.
+    assert view["dropped_events"] == 0
+
+
+def test_the_pane_shows_the_newest_actions_when_a_run_floods_it(live):
+    """Bounded, and bounded from the right end: the last 24, not the first."""
+    for i in range(200):
+        live.apply_event(_action(action="read_raw", severity="debug", seq=i), now=101.0 + i)
+    log = view_of(live)["log"]
+    assert len(log) == 24
+    assert log[-1]["seq"] == 199, "the pane kept the oldest rows instead of the newest"
+    assert log[0]["seq"] == 176
 
 
 def test_the_view_survives_no_status_object(live):

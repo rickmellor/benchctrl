@@ -268,11 +268,36 @@ header {
 /* Newest event at the top: on a wall panel nobody scrolls, so the most recent
    thing has to be where the eye lands, not at the bottom of a tall pane. */
 #log { font-size: 10px; line-height: 1.45; position: relative; z-index: 1; }
-#log .row { display: flex; gap: 6px; white-space: nowrap; }
-#log .seq { color: var(--ink-dim); }
-#log .kind { color: var(--cyan); }
-#log .dev { color: var(--ink-dim); }
+/* nowrap plus hidden overflow: a long detail is clipped at the panel edge rather
+   than wrapping. A wrapped row would make one action occupy two lines, and the
+   row count is how a reader judges how much the bench did. */
+#log .row { display: flex; gap: 6px; white-space: nowrap; overflow: hidden; }
+#log .seq { color: var(--ink-dim); flex: 0 0 auto; }
+#log .kind, #log .act { color: var(--cyan); flex: 0 0 auto; }
+#log .dev { color: var(--ink-dim); flex: 0 0 auto; }
+/* The repeat count of a folded burst. Teal, not amber: "this happened 47 times"
+   is information, not a warning, and amber is reserved for things to act on. */
+#log .mult { color: var(--teal); flex: 0 0 auto; }
+/* The detail column takes the leftover width and gives it up first. min-width:0
+   is what actually lets a flex item shrink below its content and clip. */
+#log .detail { color: var(--cyan-dim); flex: 1 1 auto; min-width: 0; overflow: hidden;
+               text-overflow: ellipsis; }
+#log .err { color: var(--amber); flex: 1 1 auto; min-width: 0; overflow: hidden;
+            text-overflow: ellipsis; }
 #log .row.alarm .kind, #log .row.critical .kind { color: var(--red); text-shadow: var(--glow-red); }
+/* A failed action: the verb goes amber so the eye finds it in a pane of cyan. An
+   alarm-grade failure — a disarm that raised — goes red, which is the one place
+   in this pane red is spent. */
+#log .row.fail .act { color: var(--amber); }
+#log .row.fail.alarm .act, #log .row.fail.critical .act {
+  color: var(--red);
+  text-shadow: var(--glow-red);
+}
+#log .row.fail.alarm .err, #log .row.fail.critical .err { color: var(--red); }
+/* Ordinary reads are the highest-volume rows and the least interesting. Dimmed
+   as a whole so the pane's brightness tracks how much is worth reading. */
+#log .row.debug .act { color: var(--cyan-dim); }
+#log .row.debug .detail { color: var(--ink-dim); }
 #log .empty { color: var(--ink-dim); font-size: 10px; }
 
 /* The synthetic background chatter behind the real log: deliberately behind,
@@ -490,6 +515,49 @@ header {
 }
 .slot.armed .name, .slot.armed .state { color: var(--red); text-shadow: var(--glow-red); }
 
+/* What the instrument is executing right now: the driver method its worker
+   thread is inside. Teal, because on this rail teal is "normal and live" — amber
+   and red are spent on states that need acting on, and a measurement in progress
+   needs nothing from anybody.
+
+   Sits below .state so the reading order stays what-it-is, what-it-is-doing,
+   what-call-is-running. Ellipsised like .ident rather than wrapping: a method
+   name is recognisable from its head, and a slot that grows a line taller when a
+   call starts would reflow the whole rail on every poll. */
+.slot .act {
+  font-size: 7px;
+  line-height: 1.2;
+  letter-spacing: 0.08em;
+  color: var(--teal);
+  opacity: 0.85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+/* No activity, no reserved space — same rule as .ident. An empty line here would
+   leave every idle slot a row shorter than a busy one on a rail whose geometry is
+   supposed to be fixed. */
+.slot .act:empty { display: none; }
+
+/* Alive, but quietly. A busy slot pulses its own activity line rather than the
+   whole box: .slot.armed owns the box-level pulse, and two pulsing slots on one
+   rail would make the armed one just another animated row. Opacity only, no
+   border and no background — those are how a slot signals its state, and being
+   busy is not one. Deliberately slower and shallower than node-pulse.
+
+   The marker is part of the pulse rather than a static bullet so that stillness
+   reads as stillness: a stale slot drops the line entirely (the view withholds
+   `busy`), and nothing is left animating over a value nobody vouched for. */
+.slot.working .act {
+  animation: act-pulse 1.6s ease-in-out infinite;
+}
+.slot.working .act::before {
+  content: '▸ ';
+  color: var(--teal);
+}
+@keyframes act-pulse { 50% { opacity: 0.4; } }
+
 /* Unconfirmed: dashed border. We inferred this from an event and were never
    told; it must not look like a confirmed reading. */
 .slot.inferred { border-style: dashed; }
@@ -622,7 +690,8 @@ footer {
 /* Respect the platform switch for reduced motion. On a wall panel this is
    unlikely to be set, but a kiosk is not a reason to ignore it. */
 @media (prefers-reduced-motion: reduce) {
-  #scan, #alerts.live, .stage-node.active, .slot.armed, #headline.sev-info.starting {
+  #scan, #alerts.live, .stage-node.active, .slot.armed, #headline.sev-info.starting,
+  .slot.working .act {
     animation: none;
   }
 }

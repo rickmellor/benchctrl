@@ -232,6 +232,54 @@ _STAGE_FOR_STATE = {
 }
 
 
+def _busy_method(key: str, busy: object) -> Optional[str]:
+    """What ``key``'s worker thread is executing right now, named by method alone.
+
+    The agent labels a job ``f"{key}.{name}"`` (``agent/server.py``), so the raw
+    value hands the device key back to a slot that is already headed by it: on
+    the bench board ``busy_with`` reads
+    ``siglent_sdm4065a.measure_resistance_4wire`` on a row titled DMM. Only a
+    leading ``"{key}."`` is removed, and it is removed *by length*, never by
+    splitting on ``"."`` — a driver method reached through a sub-object arrives
+    as ``rigol_dp2031.channel.set_current``, and ``rsplit(".")[-1]`` would show
+    ``set_current``, naming a call that is not the one running. Naming the wrong
+    call is worse than naming a long one.
+
+    Anything unusable yields None rather than a guess: a payload that is not a
+    dict, a value that is not a string. This field crossed a process boundary
+    from an agent that may be a release ahead or behind, and a malformed
+    ``workers`` table must cost this slot its activity marker and nothing else.
+    """
+    if not isinstance(busy, dict):
+        return None
+    raw = busy.get(key)
+    if not isinstance(raw, str) or not raw:
+        return None
+    prefix = key + "."
+    if raw.startswith(prefix):
+        # ``or raw``: a label that is nothing but the prefix still means a call
+        # is in flight, and returning "" there would report the device idle —
+        # the one thing this field must never do while a thread is inside a
+        # driver call.
+        return raw[len(prefix) :] or raw
+    return raw
+
+
+def _queue_depth(key: str, queued: object) -> int:
+    """How many calls are waiting behind ``key``'s current one; 0 when unknown.
+
+    0 for anything unusable, bools included: ``isinstance(True, int)`` is True,
+    so a flag arriving in this field would otherwise be shown as "1 queued" —
+    a count nobody measured, on a panel whose numbers are what get believed.
+    """
+    if not isinstance(queued, dict):
+        return 0
+    depth = queued.get(key)
+    if isinstance(depth, bool) or not isinstance(depth, int) or depth < 0:
+        return 0
+    return depth
+
+
 def _slot_state(
     dev: Optional[dict],
     slot: Optional[dict],
@@ -241,6 +289,8 @@ def _slot_state(
     registry_known: bool,
     connected: bool,
     discoverable: bool = True,
+    busy: Optional[str] = None,
+    queued: int = 0,
 ) -> dict:
     """One instrument rail slot.
 
@@ -256,7 +306,45 @@ def _slot_state(
     everything, then an open failure (the operator can fix it), then absence,
     then not-yet-scanned, then standby. Getting this order wrong is how a rail
     ends up reporting a configuration detail over an armed output.
+
+    ``busy`` and ``queued`` — what this device's worker thread is executing at
+    this instant — deliberately sit **outside** that ordering, as their own
+    fields, and never touch ``status``. The precedence above is a ranking of
+    claims competing for one word, and every rung on it is either a hazard or a
+    reason to distrust the screen; being busy is neither. It is the bench doing
+    its job, and it is also the only one of these facts that is orthogonal to the
+    rest: an armed supply can be mid-call, and both halves are true at once.
+
+    Folding it into the status word — even only in the standby case, where
+    nothing would visibly compete — was rejected because it makes the safety
+    property depend on a branch. ``status`` would then be the one string that is
+    sometimes the arm state and sometimes an activity report, and the next person
+    to add a rung has to rediscover why. Kept separate, "a routine measurement
+    cannot hide a live output" holds structurally rather than by ordering: there
+    is no input on which ``busy`` can displace ``ARMED``, because no code path
+    writes it there. Same reasoning as :py:attr:`BenchStatus.headline` keeping
+    ``ACTIVE`` below ``ARMED``, one level down.
+
+    Both are carried on *every* slot, including the dark ones. A key with no
+    entry gets ``busy=None`` and ``queued=0``, which the renderer draws as
+    nothing at all — not "idle", which would be a claim.
     """
+    if not trustworthy:
+        # An activity marker has no stale form. Every other readout here can be
+        # struck through and still mean something — a crossed-out ARMED is a
+        # warning about a bench nobody can see — but "executing
+        # measure_resistance_4wire" is an assertion about this instant, and there
+        # is no way to draw it that does not say a call is in flight now.
+        #
+        # A disconnect is already handled at the source:
+        # :py:meth:`BenchStatus.apply_disconnected` drops ``busy_devices`` and
+        # ``queued_devices`` with the session, alongside presence and identity, so
+        # nothing is duplicated for that case. This covers the one it cannot — a
+        # view that is merely *behind*, from dropped events or a silent agent,
+        # where the last snapshot's ``busy_with`` is still on the snapshot and
+        # would sit on the glass indefinitely with nothing arriving to correct it.
+        busy, queued = None, 0
+
     served = bool(slot and slot.get("served"))
     opened = bool(slot and slot.get("opened"))
     open_error = (slot or {}).get("open_error")
@@ -285,6 +373,11 @@ def _slot_state(
         "serial_number": (slot or {}).get("serial_number"),
         "usb_id": (slot or {}).get("usb_id"),
         "open_error": str(open_error) if open_error else None,
+        # What this device is doing *right now*, alongside the status rather than
+        # inside it — see the docstring. None and 0 mean "nothing said so", which
+        # the renderer prints as nothing.
+        "busy": busy,
+        "queued": queued,
     }
 
     # The governor knows about it, so it is open and being tracked: report what
@@ -384,6 +477,12 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
     inventory_taken = bool(snap.get("inventory_taken"))
     registry_known = bool(snap.get("registry_known"))
     connected = bool(snap["connected"])
+    # Passed through untyped and validated per-slot in _busy_method /
+    # _queue_depth, for the same reason `slots` is fetched with .get: these are
+    # newer fields on a payload that arrives from another process, and an agent
+    # without them must cost the rail its activity markers rather than the panel.
+    busy_devices = snap.get("busy_devices")
+    queued_devices = snap.get("queued_devices")
 
     discoverable = _discoverable_keys()
 
@@ -412,6 +511,8 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
                 registry_known=registry_known,
                 connected=connected,
                 discoverable=spec["key"] in discoverable,
+                busy=_busy_method(spec["key"], busy_devices),
+                queued=_queue_depth(spec["key"], queued_devices),
             )
         )
         slots.append(slot)
@@ -466,10 +567,23 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
         "dropped_events": int(snap["dropped_events"]),
         "reconnects": int(snap.get("reconnects", 0)),
         "log": _log_lines(status),
+        # The pane shows 24 rows of a stream that can run at thousands of actions
+        # a second, so it must be able to say it is a summary. `actions` is how
+        # many happened, `actions_folded` how many the agent deliberately
+        # collapsed into a repeat count. Both are cumulative. Kept out of
+        # `dropped_events`: folding is a declared summary, dropping is a loss.
+        "actions": int(snap.get("actions_seen") or 0),
+        "actions_folded": int(snap.get("actions_folded") or 0),
         # The banner along the bottom. Says what the bench is doing, or admits
         # it does not know — never "SYSTEM READY" on an unreachable agent.
         "operation": _operation(snap),
     }
+
+
+#: How many log rows the pane shows. The pane is a fixed-height column on a
+#: 1080p panel; past this the rows are off the glass and building them is work
+#: nobody sees.
+LOG_ROWS = 24
 
 
 def _log_lines(status: Optional[BenchStatus]) -> list[dict]:
@@ -479,6 +593,20 @@ def _log_lines(status: Optional[BenchStatus]) -> list[dict]:
     chatter; that is fine as *decoration* in the renderer's own background
     layer, but this list is bench truth and is kept clean of it so an operator
     scanning for what actually happened is not reading invented lines.
+
+    Most rows are now ``action`` / ``action_failed``: the agent emits one for
+    every method it dispatches, so this is a live record of what the bench did
+    rather than the almost-always-empty pane it used to be (before that, the only
+    event kinds anything produced were ``safety_trip``, ``safety_failed`` and
+    ``events_dropped`` — three things that on a healthy bench never happen).
+
+    ``action`` and ``detail`` are re-truncated here even though the agent already
+    bounded them. Not redundancy for its own sake: this function is what stands
+    between the pane and a *field-length contract enforced in another process*,
+    across a version boundary, on a payload that arrives from the network. An
+    agent one release behind — or a future one whose limit is generous — must cost
+    this pane a shortened line, not a row that runs off the panel and pushes the
+    columns beside it out of alignment.
     """
     if status is None:
         return []
@@ -488,9 +616,67 @@ def _log_lines(status: Optional[BenchStatus]) -> list[dict]:
             "severity": str(e.get("severity", "info")),
             "device": str(e.get("device", "") or ""),
             "seq": e.get("seq"),
+            # The device-level verb ("set_voltage"), which is the useful half of
+            # a `device.call`: without it every driver method on the bench reads
+            # as the same line. Falls back to the wire method so a row is never
+            # blank — `agent.open` has no device verb and is still worth showing.
+            "action": _action_text(e),
+            # Arguments and result, already summarised and bounded by the agent.
+            "detail": _clip(e.get("detail"), _DETAIL_CHARS),
+            # The exception, for a failure. Separate from `detail` so the renderer
+            # can colour it without parsing anything.
+            "error": _clip(e.get("error"), _ERROR_CHARS),
+            # How many identical actions this row stands for; >1 means the agent
+            # folded a burst. Shown as "×47" rather than dropped, so a summarised
+            # log reads as summarised.
+            "count": _as_count(e.get("count")),
+            "ok": False if str(e.get("kind", "")) == "action_failed" else True,
         }
-        for e in status.log[-24:]
+        for e in status.log[-LOG_ROWS:]
     ]
+
+
+#: Bounds for the two free-text columns. Deliberately shorter than the agent's
+#: own limits: this is what fits a row, not what fits an event.
+_DETAIL_CHARS = 96
+_ERROR_CHARS = 96
+_ACTION_CHARS = 28
+
+
+def _action_text(event: dict) -> str:
+    """The verb a row names: the device method, else the wire method."""
+    action = event.get("action")
+    if isinstance(action, str) and action:
+        return _clip(action, _ACTION_CHARS)
+    method = event.get("method")
+    return _clip(method, _ACTION_CHARS) if isinstance(method, str) else ""
+
+
+def _clip(value: object, limit: int) -> str:
+    """A single-line, length-bounded string, or ``""``.
+
+    Collapses whitespace as well as truncating. A newline inside an exception
+    message would otherwise make one event occupy two rows in a pane whose row
+    count is how a reader knows how much happened.
+    """
+    if value is None:
+        return ""
+    flat = " ".join(str(value).split())
+    if len(flat) <= limit:
+        return flat
+    return flat[: max(limit - 1, 1)] + "…"
+
+
+def _as_count(value: object) -> int:
+    """A row's repeat count: an int >= 1, whatever arrived.
+
+    Defaults to 1 rather than 0. A row on screen always represents at least the
+    one action that produced it, and a ``×0`` would read as "this did not happen"
+    beside a line saying it did.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 1
+    return value if value >= 1 else 1
 
 
 def _operation(snap: dict) -> str:

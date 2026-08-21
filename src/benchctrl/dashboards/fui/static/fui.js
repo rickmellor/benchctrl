@@ -443,6 +443,27 @@ function slotIdentity(inst) {
   return bits.join(' · ');
 }
 
+/* What this instrument is doing at this instant: the method its worker thread is
+ * inside, and anything queued behind it.
+ *
+ * A separate line from .state on purpose. The status word is the slot's ranked
+ * claim — ARMED, OPEN FAILED, STANDBY — and an armed output must keep it; the
+ * view carries `busy` as its own field for exactly that reason, so this line
+ * adds to the status rather than competing with it.
+ *
+ * Empty whenever the view did not supply a value, which is where the honesty rule
+ * lands: the view withholds `busy` on a stale or dead session, so this goes blank
+ * rather than leaving a call frozen in flight. Not re-derived here — one place
+ * decides, and it is the one CI can assert. */
+function slotActivity(inst) {
+  if (!inst.busy) return '';
+  const bits = [String(inst.busy).slice(0, 30)];
+  // Queue depth only when something is actually waiting. "+0" is arithmetic, not
+  // information, and the view already reports 0 for "nobody said".
+  if (inst.queued > 0) bits.push(`+${inst.queued}`);
+  return bits.join(' ');
+}
+
 function renderRail(instruments) {
   const rail = $('right');
   // Build once, then update in place: rebuilding the rail every 500ms would
@@ -464,7 +485,8 @@ function renderRail(instruments) {
       el.innerHTML =
         `<div class="name"></div><div class="role"></div>`
         + `<div class="ident"></div>`
-        + `<div class="state"></div><div class="detail"></div>`;
+        + `<div class="state"></div><div class="act"></div>`
+        + `<div class="detail"></div>`;
       rail.appendChild(el);
     }
   }
@@ -476,6 +498,10 @@ function renderRail(instruments) {
     // device-supplied and must never be interpolated into markup.
     el.querySelector('.ident').textContent = slotIdentity(inst);
     el.querySelector('.state').textContent = inst.status;
+    // textContent: a driver method name, which comes from the agent's worker
+    // label rather than from anything this page composes.
+    const act = slotActivity(inst);
+    el.querySelector('.act').textContent = act;
     // textContent, not innerHTML: this carries an agent-supplied error string
     // and a discovered device path, neither of which this page composes.
     el.querySelector('.detail').textContent = slotDetail(inst);
@@ -489,7 +515,12 @@ function renderRail(instruments) {
       + (inst.ready ? ' ready' : '')
       // Something the operator can act on — an open failure, or hardware present
       // that nothing is configured to drive.
-      + (inst.attention ? ' attention' : '');
+      + (inst.attention ? ' attention' : '')
+      // Keyed on the line we actually drew, not on inst.busy: the class drives a
+      // pulse, and an animation running over a blank line is a slot that looks
+      // alive while saying nothing. Withheld and stale both resolve to '' above,
+      // so this cannot outlive the value it advertises.
+      + (act ? ' working' : '');
   });
 }
 
@@ -598,17 +629,31 @@ function renderLog(log) {
   box.textContent = '';
   for (const e of log.slice().reverse()) {
     const row = document.createElement('div');
-    row.className = `row ${e.severity}`;
+    // `fail` rather than reusing the severity classes: a failed action is amber
+    // or red because it FAILED, which is a different fact from its severity
+    // grade, and an operator scanning the pane is looking for the failures.
+    row.className = `row ${e.severity}` + (e.ok === false ? ' fail' : '');
     const add = (cls, text) => {
+      if (!text) return null;
       const span = document.createElement('span');
       span.className = cls;
       span.textContent = text;
       row.appendChild(span);
+      return span;
     };
     add('seq', e.seq === null || e.seq === undefined
       ? '····' : String(e.seq).padStart(4, '0'));
-    add('kind', e.kind);
+    // The verb, which for a device.call is the driver method ("set_voltage").
+    // This is the column the eye reads first, so it gets the bright cyan.
+    add('act', e.action || e.kind);
     add('dev', e.device);
+    // "×47": this row stands for a burst the agent folded. Drawn so a summarised
+    // log looks summarised rather than looking like 47 things never happened.
+    if (e.count > 1) add('mult', `×${e.count}`);
+    // The failure text wins the row's remaining width when there is one: on a
+    // line that failed, the exception IS the content.
+    if (e.ok === false && e.error) add('err', e.error);
+    else add('detail', e.detail);
     box.appendChild(row);
   }
 }
@@ -659,7 +704,17 @@ function render(v) {
   const active = v.stages.find((s) => s.active);
   $('state-stage').textContent = active ? active.name : 'none';
 
-  $('log-verdict').textContent = v.log.length ? 'ACTIVE' : 'IDLE';
+  // The pane header says how much it is NOT showing. 24 rows off a stream that
+  // can run at thousands of actions a second is a summary, and a summary that
+  // does not admit it is one reads as a complete record.
+  const verdict = $('log-verdict');
+  if (v.actions_folded > 0) {
+    verdict.textContent = `${v.actions} ACT / ${v.actions_folded} FOLDED`;
+  } else if (v.actions > 0) {
+    verdict.textContent = `${v.actions} ACT`;
+  } else {
+    verdict.textContent = v.log.length ? 'ACTIVE' : 'IDLE';
+  }
   renderLog(v.log);
   renderRail(v.instruments);
   renderRailHead(v.bench, v.connected);

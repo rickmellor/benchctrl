@@ -220,6 +220,87 @@ def test_shedding_never_reorders_delivery():
     assert kinds == ["b", "c", "d", "e"], f"order was permuted: {kinds}"
 
 
+def test_a_flood_of_bench_actions_cannot_crowd_out_a_safety_trip():
+    """The action log must never be able to cost the panel a trip.
+
+    ``_route`` emits an event for every dispatched method, so a sample loop can
+    fill a display's 32-deep queue in milliseconds. That is fine *only* because
+    action severities stay strictly below ``critical``: eviction makes room by
+    dropping something ranked below the incoming event, and ``offer`` refuses
+    outright when nothing queued ranks lower. Grade an action ``critical`` and the
+    saturated queue would refuse the ``safety_trip`` that ``Governor.trip()``
+    publishes before it disarms anything — the log would have hidden the one
+    event it exists to surface.
+
+    Driven through the real grader rather than hardcoded severities, so raising a
+    grade in ``server.py`` fails here rather than passing a test that agrees with
+    itself.
+    """
+    from benchctrl.agent.server import ACTION_SEVERITY_CEILING, action_severity
+
+    graded = [
+        action_severity("device.call", "read_raw"),
+        action_severity("device.call", "set_voltage"),
+        action_severity("device.call", "set_output"),
+        action_severity("agent.open"),
+        action_severity("device.call", "set_output", ok=False),
+        action_severity("agent.close", ok=False),
+    ]
+    sub = EventSubscriber("panel", RecordingSink(), max_queue=DISPLAY_MAX_QUEUE)
+    for i in range(DISPLAY_MAX_QUEUE):
+        assert sub.offer(_evt(kind="action", severity=graded[i % len(graded)])) is True
+    assert sub.stats()["queued"] == DISPLAY_MAX_QUEUE
+
+    assert sub.offer(_evt(kind="safety_trip", severity="critical")) is True
+    assert "safety_trip" in [e["kind"] for e in sub._queue], (
+        "a queue saturated with bench actions refused a safety_trip: an action "
+        "severity has been graded at or above critical"
+    )
+    # And the grades themselves, so the reason this passed is the intended one.
+    for severity in graded:
+        assert rank_of({"severity": severity}) <= rank_of(
+            {"severity": ACTION_SEVERITY_CEILING}
+        ), f"action severity {severity!r} outranks the declared ceiling"
+        assert rank_of({"severity": severity}) < rank_of({"severity": "critical"})
+
+
+def test_an_arming_action_outranks_a_value_read():
+    """Shedding must sacrifice the read, not the arm.
+
+    Under back-pressure the bus drops the lowest-ranked queued event. If arming
+    and reading were graded the same, an arm would be as likely to be shed as the
+    thousandth voltage read — and the arm is the line an incident review needs.
+    """
+    from benchctrl.agent.server import action_severity
+
+    read = action_severity("device.call", "read_raw")
+    arm = action_severity("device.call", "set_output")
+    assert rank_of({"severity": arm}) > rank_of({"severity": read})
+
+    sub = EventSubscriber("s", RecordingSink(), max_queue=2)
+    assert sub.offer(_evt(kind="read", severity=read)) is True
+    assert sub.offer(_evt(kind="arm", severity=arm)) is True
+    # Saturated. A third read must lose to the queued arm rather than evict it.
+    assert sub.offer(_evt(kind="read2", severity=read)) is False
+    assert "arm" in [e["kind"] for e in sub._queue]
+
+
+def test_a_failed_action_outranks_the_same_action_succeeding():
+    """"We tried and could not" is the actionable half of the log."""
+    from benchctrl.agent.server import action_severity
+
+    for method, action in (
+        ("device.call", "set_voltage"),
+        ("device.call", "set_output"),
+        ("agent.open", ""),
+    ):
+        ok = action_severity(method, action, ok=True)
+        failed = action_severity(method, action, ok=False)
+        assert rank_of({"severity": failed}) > rank_of({"severity": ok}), (
+            f"{method}/{action} failing is not more severe than it succeeding"
+        )
+
+
 # --------------------------------------------------------------------------
 # Drops are reported, never silent
 # --------------------------------------------------------------------------

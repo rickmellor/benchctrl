@@ -28,7 +28,9 @@ from benchctrl.dashboards.state import (
 )
 
 
-def status_payload(devices=None, *, since_contact=0.1, deadman_s=15.0, trips=()):
+def status_payload(
+    devices=None, *, since_contact=0.1, deadman_s=15.0, trips=(), workers=None
+):
     return {
         "safety": {
             "armed": [k for k, v in (devices or {}).items() if v.get("armed")],
@@ -37,7 +39,7 @@ def status_payload(devices=None, *, since_contact=0.1, deadman_s=15.0, trips=())
             "devices": devices or {},
             "trips": list(trips),
         },
-        "workers": {},
+        "workers": workers or {},
         "blobs": {},
         "recordings": [],
     }
@@ -425,6 +427,126 @@ def test_alarms_are_kept_separately_from_chatter(live):
     assert [e["kind"] for e in live.sticky] == ["limit"], (
         "an alarm scrolled out of view under info chatter"
     )
+
+
+def test_an_action_event_reaches_the_log(live):
+    """The pane's whole content. Before action events existed the only kinds
+    anything emitted were safety_trip/safety_failed/events_dropped, so on a
+    healthy bench the log was permanently empty."""
+    live.apply_event(
+        {
+            "kind": "action",
+            "severity": "info",
+            "method": "device.call",
+            "action": "set_voltage",
+            "device": "rigol_dp2031",
+            "detail": "3.3 → none",
+            "count": 1,
+            "ok": True,
+        },
+        now=101.0,
+    )
+    assert [e["kind"] for e in live.log] == ["action"]
+    assert live.log[-1]["action"] == "set_voltage"
+    assert live.actions_seen == 1
+
+
+def test_an_action_event_does_not_change_arm_state(live):
+    """Two sources for one fact drift, and the quieter one wins on screen.
+
+    An action event carries the method name, so inferring "set_output means
+    armed" from it is tempting. It would also be wrong in the dangerous
+    direction: the governor owns the driver and knows whether the call took
+    effect, while the log only knows it was dispatched. A refused or raising
+    ``set_output`` would light ARMED on a bench that never armed.
+    """
+    live.apply_event(
+        {
+            "kind": "action",
+            "severity": "warn",
+            "method": "device.call",
+            "action": "set_output",
+            "device": "otii_arc",
+            "ok": True,
+        },
+        now=101.0,
+    )
+    assert not live.any_armed, "the action log inferred arm state"
+    assert live.headline == "IDLE"
+
+
+def test_a_folded_count_is_carried_rather_than_accumulated(live):
+    """``folded`` is the agent's own cumulative figure.
+
+    Adding it per event would multiply: three events reporting 10, 20, 30 folded
+    actions describe 30 folded actions, not 60.
+    """
+    for folded in (10, 20, 30):
+        live.apply_event(
+            {"kind": "action", "severity": "debug", "count": 5, "folded": folded},
+            now=101.0 + folded,
+        )
+    assert live.actions_folded == 30
+    # actions_seen counts what the rows stand for, not the rows.
+    assert live.actions_seen == 15
+
+
+def test_a_malformed_action_count_does_not_kill_the_feed(live):
+    """``apply_event`` runs on the feed's receive path.
+
+    ``int(event["count"])`` would raise on a payload from a future or buggy
+    agent, and one bad event would end the session and blank the panel — the same
+    rule as ``test_a_malformed_event_does_not_kill_the_feed``, applied to the
+    numeric fields that now arrive from another process.
+    """
+    for bad in ("many", None, -3, 0, [1], True, 2.5):
+        live.apply_event({"kind": "action", "count": bad, "folded": bad}, now=101.0)
+    # Every event still landed, and each counted as at least the one action it is.
+    assert len(live.log) == 7
+    assert live.actions_seen == 7
+    assert live.actions_folded == 0
+
+
+def test_folded_actions_are_reported_separately_from_dropped_events(live):
+    """Two different failures that must not be conflated.
+
+    A *folded* action was counted and deliberately summarised at the producer; a
+    *dropped* event was lost because this consumer could not keep up. Only the
+    second means the view has holes, and only the second may make it stale.
+    """
+    live.apply_event(
+        {"kind": "action", "severity": "debug", "count": 48, "folded": 4000}, now=101.0
+    )
+    assert live.actions_folded == 4000
+    assert live.dropped_events == 0
+    assert live.stale_reason is None, "summarising is not staleness"
+
+    live.apply_event({"kind": "events_dropped", "count": 3}, now=102.0)
+    assert live.dropped_events == 3
+    assert live.actions_folded == 4000
+    assert live.stale_reason is not None
+
+
+def test_an_action_flood_cannot_evict_a_sticky_alarm(live):
+    """The log is bounded, so the pane's memory is the thing under pressure.
+
+    A run's reads arrive by the thousand. An alarm must not scroll out from under
+    them — which is what ``sticky`` is for, and this is that guarantee restated
+    against the traffic that now actually exists.
+    """
+    live.apply_event(
+        {"kind": "safety_trip", "severity": "critical", "devices": []}, now=101.0
+    )
+    for i in range(LOG_LIMIT * 10):
+        live.apply_event(
+            {"kind": "action", "severity": "debug", "action": "read_raw", "n": i},
+            now=102.0 + i,
+        )
+    assert len(live.log) == LOG_LIMIT, "the log grew without bound"
+    assert [e["kind"] for e in live.sticky] == ["safety_trip"], (
+        "a trip was lost under action chatter"
+    )
+    assert live.actions_seen == LOG_LIMIT * 10
 
 
 def test_seq_is_forgotten_across_a_reconnect(live):
@@ -1049,3 +1171,53 @@ def test_the_denial_latches_across_a_reconnect():
 
     assert s.observer_denied is not None, "a good reconnect must not erase it"
     assert s.headline == "NOT OBSERVER"
+
+
+def test_a_busy_method_is_not_prefixed_with_the_device_it_already_names(live):
+    """Observed on the board: the detail line read
+    ``siglent_sdm4065a: siglent_sdm4065a.measure_resistance_4wire``.
+
+    The worker's ``busy_with`` is the label ``WorkerPool.submit`` was given, which
+    is already ``f"{key}.{name}"``, so printing it beside the device key doubles
+    the key. On a 1080p panel that doubling costs real width next to a name the
+    line has just printed.
+    """
+    live.apply_status(
+        status_payload(
+            {"otii_arc": idle()},
+            workers={
+                "siglent_sdm4065a": {
+                    "busy_with": "siglent_sdm4065a.measure_resistance_4wire",
+                    "depth": 0,
+                }
+            },
+        ),
+        now=101.0,
+    )
+    assert live.busy_devices == {"siglent_sdm4065a": "measure_resistance_4wire"}
+    assert live.busy_summary == "siglent_sdm4065a: measure_resistance_4wire"
+
+
+def test_a_method_name_containing_a_dot_survives_the_prefix_strip(live):
+    """``split(".")[-1]`` would have been the two-character version of this fix and
+    would silently rename any method with a dot in it. Only the device's own
+    prefix is removed, and only when it is actually there — a label that arrives
+    unprefixed is passed through rather than guessed at.
+    """
+    live.apply_status(
+        status_payload(
+            {"otii_arc": idle()},
+            workers={"psu": {"busy_with": "psu.set.output.state", "depth": 0}},
+        ),
+        now=101.0,
+    )
+    assert live.busy_devices == {"psu": "set.output.state"}
+
+    live.apply_status(
+        status_payload(
+            {"otii_arc": idle()},
+            workers={"psu": {"busy_with": "bare_method", "depth": 0}},
+        ),
+        now=102.0,
+    )
+    assert live.busy_devices == {"psu": "bare_method"}
