@@ -17,6 +17,11 @@ bridge (CH340, FTDI, CP210x) share their VID/PID with thousands of unrelated
 products, so a match on those is a *guess*. Every result carries a
 :py:attr:`DiscoveredDevice.confidence` and callers must not silently open a
 ``heuristic`` match — probe it, or make the operator choose.
+
+A probe result is graded ``heuristic`` too, and deliberately: it is evidence
+about the *protocol* spoken on a port, which is much better than a shared
+VID/PID but still not the certainty a signature match gives. ``exact`` stays
+reserved for the signature table.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Optional
 
 from benchctrl.exceptions import BenchConnectionError
@@ -102,6 +107,18 @@ SIGNATURES: tuple[DriverSignature, ...] = (
         note="SDM4045A/4055A/4065A share this ID; check *IDN? for the model",
     ),
 )
+
+#: Labels for keys only a probe can return. Kept beside :py:data:`SIGNATURES`
+#: rather than in it, because an entry in that table means "this VID/PID *is*
+#: this instrument" and no VID/PID means that for the QR10x.
+PROBE_LABELS: dict[str, str] = {
+    "eastwood_qr10x": "Eastwood QR10x programmable resistance",
+}
+
+#: The path :py:func:`scan_driverless_bridges` reports for a bridge with no tty.
+#: Not a device node, so there is nothing for a probe to open — see
+#: :py:func:`_is_probe_candidate`.
+AUTO_PATH = "auto"
 
 #: Generic USB-serial bridges. A device behind one of these is *something*,
 #: but the VID/PID says nothing about what.
@@ -398,6 +415,7 @@ def discover(
     serial: bool = True,
     usbtmc: bool = True,
     visa: bool = True,
+    probe: bool = False,
     resource_manager=None,
 ) -> list[DiscoveredDevice]:
     """Scan every enabled transport and return one merged inventory.
@@ -411,6 +429,16 @@ def discover(
     not close a manager it did not create. A caller that holds one must pass it:
     ``pyvisa.ResourceManager()`` is a singleton, so closing a second handle
     invalidates the first.
+
+    ``probe`` is **off by default and must stay that way**. A scan is otherwise
+    read-only — it reads USB descriptors and sysfs — whereas probing *writes*
+    ``AT+DEV.TYPE?`` to a port whose occupant is by definition unknown. The
+    bench dashboard re-scans every 30 s, so a probing default would have the
+    panel type at whatever is plugged into the bench, forever, unasked. Opt in
+    only where a caller has a reason to want an identity badly enough to send
+    bytes for it: the CLI's explicit ``--probe``, or an operator asking the
+    agent "what is that". See :py:func:`probe_unidentified` for what is
+    probed, which is a much narrower set than "everything unidentified".
     """
     found: list[DiscoveredDevice] = []
     if serial:
@@ -426,6 +454,8 @@ def discover(
                 continue
             found.append(dev)
     found.extend(visa_devices)
+    if probe:
+        found = probe_unidentified(found)
     return sorted(found, key=lambda d: (d.transport, d.path))
 
 
@@ -530,9 +560,16 @@ def unidentified(**kwargs) -> list[DiscoveredDevice]:
     return [d for d in discover(**kwargs) if not d.identified]
 
 
-def inventory(**kwargs) -> dict:
-    """A JSON-friendly bench summary, for the CLI and the remote agent."""
-    devices = discover(**kwargs)
+def inventory(*, probe: bool = False, **kwargs) -> dict:
+    """A JSON-friendly bench summary, for the CLI and the remote agent.
+
+    ``probe`` is spelled out here rather than left to ``**kwargs`` because this
+    is the function the agent's ``agent.discover`` and the dashboard's 30 s
+    inventory poll call. The default that keeps a repeating poll from writing to
+    unknown hardware should be visible at the entry point that does the polling,
+    not inferred two frames down — see :py:func:`discover`.
+    """
+    devices = discover(probe=probe, **kwargs)
     by_key: dict[str, list[dict]] = {}
     for d in devices:
         by_key.setdefault(d.device_key or "_unidentified", []).append(d.to_dict())
@@ -575,6 +612,102 @@ def probe_serial_identity(path: str, timeout: float = 1.0) -> Optional[str]:
     except Exception as exc:
         log.debug("probe of %s failed (expected for foreign devices): %s", path, exc)
     return None
+
+
+def _is_probe_candidate(dev: DiscoveredDevice) -> bool:
+    """Whether it is acceptable to write bytes at this device.
+
+    Three conditions, each of which has to hold:
+
+    * **Not already identified.** The signature table decided, so there is
+      nothing to learn and everything to lose: ``AT+DEV.TYPE?`` sent at a power
+      supply is a stray command on an instrument that may be driving a rail.
+      This is the guard that matters — the others only avoid wasted time.
+    * **Serial transport.** ``AT+DEV.TYPE?`` is a serial-line protocol; there is
+      no reason to write it into a USB-TMC node or a VISA resource.
+    * **Behind a known generic bridge.** That is the only situation where
+      VID/PID *cannot* decide and a probe is the sole remaining answer. A device
+      on an unrecognised VID/PID is unidentified for a different reason — nobody
+      has written its signature yet — and poking arbitrary hardware to discover
+      that is not a trade this module makes.
+
+    ``path == "auto"`` is excluded as a consequence of the last condition being
+    about openable ports: the driverless-bridge scanner reports a placeholder,
+    not a node, and probing it would mean claiming the chip over libusb behind
+    the caller's back.
+    """
+    if dev.identified:
+        return False
+    if dev.transport != "serial":
+        return False
+    if dev.path == AUTO_PATH:
+        return False
+    return (dev.vid, dev.pid) in GENERIC_BRIDGES
+
+
+def probe_unidentified(
+    devices: Iterable[DiscoveredDevice], *, timeout: float = 1.0
+) -> list[DiscoveredDevice]:
+    """Identify what it can by probing, returning an upgraded list.
+
+    Written as a pure-ish transform over a scan result so the decision of
+    *whether* to probe stays at the caller's level (see :py:func:`discover`)
+    and the decision of *what* is safe to probe lives in exactly one place,
+    :py:func:`_is_probe_candidate`.
+
+    A successful reply grades :py:data:`HEURISTIC`, not :py:data:`EXACT`. The
+    device answered our protocol, which is strong evidence and far better than
+    a shared VID/PID — but ``exact`` in this module means "the signature table
+    says so", and a QR10x cannot be told from some other AT-speaking box that
+    happens to accept ``DEV.TYPE`` on the strength of one reply.
+
+    Silence is **not** evidence of absence, so a non-answer leaves the device
+    exactly as the scan reported it: still unidentified, still noted as
+    probeable. A CH340 whose device is powered down, mid-boot, or held open by
+    another process is silent, and demoting it to "definitely not ours" would
+    make the bench panel assert an absence it has not established.
+
+    Order and length are preserved: callers de-duplicate and sort on the way
+    out, and a probe that dropped a silent device would delete it from the
+    inventory for failing to answer.
+    """
+    upgraded: list[DiscoveredDevice] = []
+    for dev in devices:
+        if not _is_probe_candidate(dev):
+            upgraded.append(dev)
+            continue
+        key = _probe_quietly(dev.path, timeout)
+        if key is None:
+            upgraded.append(dev)
+            continue
+        log.info("probe identified %s as %s", dev.path, key)
+        upgraded.append(
+            replace(
+                dev,
+                device_key=key,
+                label=PROBE_LABELS.get(key, dev.label),
+                confidence=HEURISTIC,
+                note=f"identified by serial probe, not by VID/PID ({dev.usb_id})",
+            )
+        )
+    return upgraded
+
+
+def _probe_quietly(path: str, timeout: float) -> Optional[str]:
+    """:py:func:`probe_serial_identity`, but immune to a caller's monkeypatch.
+
+    ``probe_serial_identity`` already swallows everything a serial port can
+    throw. This exists because it is a module-level name a test or a caller can
+    replace, and one substitute that raises must not abort a scan of a bench
+    with five instruments on it — the same reason
+    :py:func:`scan_driverless_bridges` treats a USB access failure as "no
+    answer" rather than a discovery failure.
+    """
+    try:
+        return probe_serial_identity(path, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - a failed probe is "unknown", not fatal
+        log.debug("probe of %s raised: %s", path, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------

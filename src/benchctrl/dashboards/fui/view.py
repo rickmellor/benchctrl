@@ -97,16 +97,18 @@ NOT_SERVED = "NOT SERVED"
 #: because it is the only one an operator can usually fix.
 FAULT = "OPEN FAILED"
 
-#: The bench's instrument slots, in the order the right-hand rail stacks them.
+#: Presentation for each instrument benchctrl has a driver for: how it is named
+#: and drawn, *not* which ones this bench has.
 #:
 #: ``kind`` drives which detail panel a slot gets (a DMM gets digits, a supply
 #: gets a trace). ``label`` is what the panel shows: short, uppercase, and
 #: readable at three metres.
 #:
-#: Slots are declared statically rather than discovered so the display has a
-#: fixed geometry — a rail that reflows when a USB cable is nudged is unreadable,
-#: and an instrument silently vanishing from a bench display is exactly the kind
-#: of absence an operator should notice as a dark slot rather than a missing row.
+#: This is a lookup table, not the rail's contents — see :py:func:`_rail_specs`.
+#: Using it directly as the rail was a bug of the "works on my bench" kind: it
+#: hardcoded the development bench's five instruments, so a user with a DMM and
+#: nothing else got three permanently dark slots for hardware they do not own,
+#: and anyone whose agent served a device not in this table got no slot at all.
 INSTRUMENTS: tuple[dict, ...] = (
     {"key": "otii_arc", "label": "OTII ARC", "kind": "smu", "role": "SOURCE/MEASURE"},
     {"key": "rigol_dp2031", "label": "PSU", "kind": "psu", "role": "BENCH SUPPLY"},
@@ -114,6 +116,83 @@ INSTRUMENTS: tuple[dict, ...] = (
     {"key": "siglent_sdm4065a", "label": "DMM", "kind": "dmm", "role": "6.5 DIGIT"},
     {"key": "eastwood_qr10x", "label": "QR10X", "kind": "sensor", "role": "SCANNER"},
 )
+
+#: Presentation for a device this build has no entry for. Its slot is still
+#: drawn, because the agent serving something we cannot name is a fact about the
+#: bench and hiding it would make the rail quietly incomplete.
+_UNKNOWN_KIND = "generic"
+_UNKNOWN_ROLE = "INSTRUMENT"
+
+
+def _label_for(key: str) -> str:
+    """A three-metre-readable name for a device key we have no spec for.
+
+    ``rigol_dp2031`` → ``DP2031``: the vendor prefix is dropped because the model
+    is the distinguishing part and the column is narrow. Falls back to the whole
+    key when there is nothing to drop, rather than to an empty string — an
+    unlabelled slot is worse than an ugly one.
+    """
+    tail = key.split("_", 1)[-1] if "_" in key else key
+    return (tail or key).upper()
+
+
+def _rail_specs(slots: dict) -> list[dict]:
+    """The rail's slots, for the bench described by ``slots``.
+
+    A device earns a row by being **served or present** — the agent will drive it,
+    or the hardware is on the bus. Both halves matter and for opposite reasons: a
+    served device that is absent needs its row to say ``NOT FOUND``, and hardware
+    found on the bus that nothing serves needs one to say ``NOT SERVED``. Those
+    are the two mismatches an operator has to fix, and hiding either would make
+    the rail agree with itself while disagreeing with the bench.
+
+    A recorded ``open_error`` also earns a row, even when the device is by then
+    neither served nor present. The agent demonstrably *tried* to open this
+    instrument and failed, which is the most actionable thing the rail can say —
+    and the combination is reachable: an agent restarted with a shorter device
+    list drops the key from its table while the recorded failure remains. Filtering
+    on served-or-present alone would make the panel drop the one row an operator
+    could act on, precisely when it appeared.
+
+    Otherwise, neither served nor present means nothing has ever referred to this
+    device on this bench, and it gets no row. The state model keeps such a slot on
+    purpose (``served`` is cleared, not deleted, so an unserved-but-attached
+    instrument can still be shown) — so this is the filter that makes the rail
+    describe *a* bench rather than every bench benchctrl has drivers for.
+
+    Membership therefore never turns on cable state alone: unplugging an
+    instrument the agent still serves leaves its row in place and dark, which is
+    the absence an operator should notice, rather than a row silently vanishing.
+
+    Order follows :py:data:`INSTRUMENTS` so a standard bench always stacks the
+    same way regardless of the order the agent lists devices in; anything
+    unrecognised is appended, sorted, so the geometry is still stable frame to
+    frame.
+
+    An empty result is honest and handled: :py:func:`build_view` falls back to the
+    full table before a device table arrives, so the panel is populated during
+    startup rather than blank.
+    """
+    keys = [
+        key
+        for key, slot in slots.items()
+        if isinstance(slot, dict)
+        and (slot.get("served") or slot.get("present") or slot.get("open_error"))
+    ]
+    wanted = set(keys)
+    specs = [dict(s) for s in INSTRUMENTS if s["key"] in wanted]
+
+    known = {s["key"] for s in INSTRUMENTS}
+    for key in sorted(wanted - known):
+        specs.append(
+            {
+                "key": key,
+                "label": _label_for(key),
+                "kind": _UNKNOWN_KIND,
+                "role": _UNKNOWN_ROLE,
+            }
+        )
+    return specs
 
 #: Test-sequence stages for the centre flowchart. Names match the run states the
 #: agent emits; ``INIT`` and ``DONE`` bracket them.
@@ -192,6 +271,19 @@ def _slot_state(
         "discoverable": discoverable,
         "confidence": (slot or {}).get("confidence"),
         "path": (slot or {}).get("path"),
+        # What the hardware says it is, learned from the bus scan: the model
+        # string and the serial off the USB descriptors or the VISA resource.
+        # Deliberately NOT called "label" — the rail's own short label ("PSU")
+        # is on the slot spec under that name, and build_view merges this dict
+        # over it, so reusing the key would replace the three-metre-readable
+        # name with a sentence.
+        #
+        # A serial number is the field that makes the rail auditable: two
+        # DP2031s on a bench are indistinguishable by model alone, and "which
+        # supply did that run drive" is answered here or not at all.
+        "hw_label": (slot or {}).get("label"),
+        "serial_number": (slot or {}).get("serial_number"),
+        "usb_id": (slot or {}).get("usb_id"),
         "open_error": str(open_error) if open_error else None,
     }
 
@@ -295,8 +387,21 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
 
     discoverable = _discoverable_keys()
 
+    # The rail shows this bench, not the development bench. Membership is every
+    # key the state model has a slot for, which is the union of what the agent
+    # serves and what the last scan found — and both halves earn their place: a
+    # served device that is absent needs its row to say NOT FOUND, and a device
+    # found on the bus that nothing serves needs one to say NOT SERVED. Dropping
+    # either would silently hide the exact mismatch an operator must fix.
+    #
+    # Until a device table arrives there is nothing to filter on, so fall back to
+    # the full table rather than an empty rail: a blank column during startup
+    # reads as "this bench has no instruments", which is a claim nobody has
+    # checked. registry_known is precisely the "has a table arrived" flag.
+    specs = _rail_specs(dev_slots) if registry_known and dev_slots else INSTRUMENTS
+
     slots = []
-    for spec in INSTRUMENTS:
+    for spec in specs:
         slot = dict(spec)
         slot.update(
             _slot_state(

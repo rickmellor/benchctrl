@@ -124,6 +124,23 @@ class DeviceSlot:
     confidence: Optional[str] = None
     #: Where it was found — a tty path or a VISA resource string.
     path: Optional[str] = None
+    #: What the instrument is, in words an operator recognises ("Rigol
+    #: DP2000-series power supply"). The rail's own row heading is the device
+    #: *key*, which is a benchctrl name for a driver, not a name for the box on
+    #: the bench — and on a bench with two Rigols the key is the only thing
+    #: telling them apart, so it is worth also saying which is which.
+    label: Optional[str] = None
+    #: The instrument's serial number, which is the only field that identifies
+    #: *this* box rather than its model. It answers the question a rail of
+    #: status words cannot: whether the supply now attached is the same one the
+    #: last run was calibrated against. See :py:func:`_visa_serial` for why it
+    #: often has to be read out of the resource string.
+    serial_number: Optional[str] = None
+    #: ``vvvv:pppp`` as discovery formats it. Kept alongside the label because
+    #: it is the identifier that survives an unrecognised instrument — the same
+    #: reason :py:attr:`BenchStatus.unclaimed` entries carry one — and it is
+    #: what an operator types into ``lsusb`` when the rail and the bus disagree.
+    usb_id: Optional[str] = None
 
 
 @dataclass
@@ -410,6 +427,15 @@ class BenchStatus:
             slot.confidence = str(confidence) if confidence else None
             path = dev.get("path")
             slot.path = str(path) if path else None
+            # Identity, so the rail can say what the instrument IS and not only
+            # how it is doing. All three are best-effort: an agent too old to
+            # send them leaves them None, which the view renders as nothing
+            # rather than as a claim.
+            label = dev.get("label") or dev.get("product") or dev.get("manufacturer")
+            slot.label = str(label) if label else None
+            usb_id = dev.get("usb_id")
+            slot.usb_id = str(usb_id) if usb_id else None
+            slot.serial_number = _device_serial(dev)
         # Absence is only recorded for slots we already know about. Anything the
         # scan did not find is present=False now — an authoritative negative,
         # which is exactly what makes a dark slot mean "looked, not there".
@@ -418,6 +444,9 @@ class BenchStatus:
                 slot.present = False
                 slot.confidence = None
                 slot.path = None
+                slot.label = None
+                slot.serial_number = None
+                slot.usb_id = None
 
         # De-duplicated by USB ID: the same instrument can surface on more than
         # one transport (a CH340 with no tty, plus its VISA alias).
@@ -439,6 +468,15 @@ class BenchStatus:
 
         The slots themselves survive, so the keys stay stable across a reconnect
         and the rail does not flicker; only the claims they carry are dropped.
+
+        Identity — label, serial number, USB ID — is dropped with the rest, and
+        for a sharper version of the same reason. A serial number reads as proof:
+        a rail showing ``DP2A243500269 ATTACHED`` names a specific box, so nobody
+        reads it as a guess, and it stays convincing long after the cable it came
+        from was pulled. Presence going to None already makes the slot say "not
+        scanned"; leaving the serial behind would put a confident identity next
+        to it and undo that. Anything only a live scan could vouch for goes when
+        the session that vouched for it does.
         """
         self.inventory_taken = False
         self.unclaimed = []
@@ -451,6 +489,9 @@ class BenchStatus:
             slot.present = None
             slot.confidence = None
             slot.path = None
+            slot.label = None
+            slot.serial_number = None
+            slot.usb_id = None
 
     def apply_disconnected(self, reason: str = "") -> None:
         """The session went away. No events can arrive, so nothing is current.
@@ -654,6 +695,9 @@ class BenchStatus:
                     "present": s.present,
                     "confidence": s.confidence,
                     "path": s.path,
+                    "label": s.label,
+                    "serial_number": s.serial_number,
+                    "usb_id": s.usb_id,
                 }
                 for k, s in self.slots.items()
             },
@@ -662,6 +706,61 @@ class BenchStatus:
             "unclaimed": list(self.unclaimed),
             "runs": {k: r.state for k, r in self.runs.items()},
         }
+
+
+def _device_serial(dev: dict) -> Optional[str]:
+    """The serial number of one ``agent.discover`` entry, however it is carried.
+
+    The payload's own ``serial_number`` wins when it has one: it was read from
+    the device's string descriptors, whereas the resource string is a backend's
+    rendering of them.
+
+    It usually does not have one. Measured against the bench board, every VISA
+    instrument on it — DP2031, DL3031A, SDM4065A — reports
+    ``serial_number: null`` while its serial sits in plain sight as the third
+    field of the resource string it was found at. pyvisa's ``list_resources``
+    does not open a resource, so nothing has read a descriptor at that point.
+    Falling back to the resource string is what makes the rail show a serial on
+    the instruments that make up most of this bench.
+    """
+    reported = dev.get("serial_number")
+    if reported:
+        return str(reported)
+    path = dev.get("path")
+    return _visa_serial(path) if isinstance(path, str) else None
+
+
+def _visa_serial(resource: str) -> Optional[str]:
+    """The serial-number field of a VISA USB resource string, or None.
+
+    ``USB0::<vid>::<pid>::<serial>::<iface>::INSTR`` — but the interface number
+    is **optional**, and which form you get depends on the backend rather than
+    on the instrument. The same DP2031 is
+    ``USB0::0x1AB1::0xA4A8::DP2A243500269::INSTR`` under NI-VISA and
+    ``USB0::6833::42152::DP2A243500269::0::INSTR`` under pyvisa-py, so a parser
+    that only handled the six-field form would show a serial on the bench board
+    (which needs pyvisa-py, having no kernel ``usbtmc`` module) and nothing at
+    all on a laptop with NI-VISA installed. Field 3 is the serial in both, which
+    is why this indexes from the front rather than counting back from ``INSTR``.
+
+    Splits on ``::`` rather than searching the string, the same rule
+    :py:func:`benchctrl.discovery._visa_usb_ids` and the SDM4065A driver's
+    ``_is_sdm4065a_resource`` follow: a serial number can contain the digits of
+    a VID, so a substring match can land on the wrong field.
+
+    Non-USB resources have no serial field at all — ``ASRL/dev/ttyS0::INSTR``,
+    ``TCPIP0::192.168.1.5::inst0::INSTR`` — and get None. Inventing one from
+    whatever is in that position would put a wrong serial on the rail, which is
+    worse than an empty one: an operator can act on a blank, and would act
+    wrongly on a plausible-looking lie.
+    """
+    parts = resource.split("::")
+    if not parts[0].upper().startswith("USB"):
+        return None
+    if len(parts) < 4:
+        return None
+    serial = parts[3].strip()
+    return serial or None
 
 
 def _mono(now: Optional[float]) -> float:

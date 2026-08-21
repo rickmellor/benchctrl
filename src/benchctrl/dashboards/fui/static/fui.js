@@ -421,11 +421,41 @@ function slotDetail(inst) {
   return '';
 }
 
+/* Who this instrument actually is, from the bus scan: model and serial.
+ *
+ * Empty whenever the view did not supply it, which is the disconnected case —
+ * the state model drops identity when the session dies, so this line goes blank
+ * rather than leaving a serial number on screen for hardware nobody has checked
+ * since. A stale identity is the dangerous kind: it is a claim about the
+ * physical bench, and it is what makes an operator believe the run drove the
+ * supply in front of them.
+ *
+ * The model string is trimmed to keep the slot one line tall; the serial never
+ * is, because a truncated serial is worse than none — it still looks like an
+ * answer. */
+function slotIdentity(inst) {
+  const bits = [];
+  if (inst.hw_label) bits.push(String(inst.hw_label).slice(0, 34));
+  if (inst.serial_number) bits.push(`SN ${inst.serial_number}`);
+  // USB ID only when nothing better is known. It identifies a model, not a
+  // unit, so it is a fallback rather than an addition to a real serial.
+  if (!bits.length && inst.usb_id) bits.push(inst.usb_id);
+  return bits.join(' · ');
+}
+
 function renderRail(instruments) {
   const rail = $('right');
   // Build once, then update in place: rebuilding the rail every 500ms would
   // restart the armed-slot pulse animation on every poll.
-  if (rail.childElementCount !== instruments.length) {
+  //
+  // Keyed on identity, not just length. The rail adapts to whatever the agent
+  // serves, so its membership can change without its size changing — swap a DMM
+  // for a scope and a length check sees nothing, leaving every row's dataset.key
+  // pointing at the instrument that used to be there. The visible text would
+  // update and the key underneath would lie.
+  const wanted = instruments.map((i) => i.key).join(' ');
+  if (rail.dataset.keys !== wanted) {
+    rail.dataset.keys = wanted;
     rail.innerHTML = '';
     for (const inst of instruments) {
       const el = document.createElement('div');
@@ -433,6 +463,7 @@ function renderRail(instruments) {
       el.dataset.key = inst.key;
       el.innerHTML =
         `<div class="name"></div><div class="role"></div>`
+        + `<div class="ident"></div>`
         + `<div class="state"></div><div class="detail"></div>`;
       rail.appendChild(el);
     }
@@ -441,6 +472,9 @@ function renderRail(instruments) {
     const el = rail.children[i];
     el.querySelector('.name').textContent = inst.label;
     el.querySelector('.role').textContent = inst.role;
+    // textContent: this is a USB string descriptor read off the bus, so it is
+    // device-supplied and must never be interpolated into markup.
+    el.querySelector('.ident').textContent = slotIdentity(inst);
     el.querySelector('.state').textContent = inst.status;
     // textContent, not innerHTML: this carries an agent-supplied error string
     // and a discovered device path, neither of which this page composes.
@@ -476,10 +510,18 @@ function renderRailHead(bench, connected) {
     el.className = 'val';
     return;
   }
-  // Denominator is what a scan can decide, not the slot count: one declared
-  // device has no VID/PID signature, so a full bench would otherwise read 4/5
-  // forever. Falls back to total for a view built before `scannable` existed.
+  // Denominator is what a scan can decide, not the slot count: a device with no
+  // VID/PID signature would otherwise make a full bench read 4/5 forever. Falls
+  // back to total for a view built before `scannable` existed.
   const of = bench.scannable == null ? bench.total : bench.scannable;
+  if (!of) {
+    // Nothing on this bench can be found by a scan — a bench of nothing but the
+    // QR10x reaches this. "0/0 ON BUS" is arithmetic, not information, so report
+    // the links and stay silent about a bus population we cannot measure.
+    el.textContent = `${bench.linked}/${bench.total} LINKED`;
+    el.className = 'val';
+    return;
+  }
   el.textContent = `${bench.linked} LINKED · ${bench.present}/${of} ON BUS`;
   el.className = 'val';
 }

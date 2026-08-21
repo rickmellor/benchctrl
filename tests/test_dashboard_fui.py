@@ -237,11 +237,17 @@ def test_scanned_and_absent_is_not_the_same_slot_as_never_scanned(live):
 def test_an_instrument_the_agent_does_not_serve_says_so(live):
     """A configuration fact, not a hardware one, and the operator's fix differs.
 
-    The board this was built against serves exactly one device key while five
-    are declared in the rail, so this is the common case rather than an edge.
+    The instrument has to be *on the bus* for this to be sayable: NOT SERVED is
+    "the hardware is here and nothing will drive it". A device that is neither
+    served nor attached gets no row at all, because on a bench that never had one
+    there is nothing to report — see
+    :py:func:`~benchctrl.dashboards.fui.view._rail_specs`.
     """
     live.apply_registry([{"key": "otii_arc", "open": True}])
-    live.apply_inventory({"devices": []})
+    live.apply_inventory(
+        {"devices": [{"device_key": "siglent_sdm4065a", "confidence": "exact",
+                      "path": "USB0::62700::4640::SDM46A0CA00021::0::INSTR"}]}
+    )
     dmm = slot(view_of(live), "siglent_sdm4065a")
     assert dmm["status"] == NOT_SERVED
     assert not dmm["served"]
@@ -272,11 +278,14 @@ def test_hardware_present_that_nothing_will_drive_demands_attention(live):
     assert load["status"] == ABSENT
     assert not load.get("attention")
 
-    # The third leg: unserved AND absent is the quietest of the three. Without
-    # this the `attention` flag could be keyed on "not served" alone and pass.
-    psu = slot(view, "rigol_dp2031")
-    assert psu["status"] == NOT_SERVED
-    assert not psu.get("attention")
+    # The third leg: unserved AND absent. Nothing on this bench has ever referred
+    # to that device, so the rail gives it no row at all — which is the same
+    # "quietest of the three" fact the old assertion made when the rail was a
+    # fixed five slots. Kept as the complement so `attention` cannot be keyed on
+    # "not served" alone and still pass.
+    assert not any(sl["key"] == "rigol_dp2031" for sl in view["instruments"]), (
+        "a device neither served nor attached is not this bench's business"
+    )
 
 
 def test_an_open_failure_outranks_every_other_dark_state(live):
@@ -455,7 +464,11 @@ def test_the_rail_summary_cannot_disagree_with_the_rail(live):
     assert view["bench"]["present"] == sum(
         1 for s in view["instruments"] if s["present"] is True
     )
-    assert view["bench"]["total"] == len(INSTRUMENTS)
+    # The rail adapts to the bench, so the denominator has to track the column
+    # rather than the driver catalogue: asserting len(INSTRUMENTS) here would be
+    # asserting the development bench, and would let the header claim "2/5" on a
+    # two-instrument bench — exactly the disagreement this test exists to forbid.
+    assert view["bench"]["total"] == len(view["instruments"]) == 2
     assert view["bench"]["inventory_taken"] is True
 
 
@@ -530,6 +543,112 @@ def test_a_heuristic_identification_is_carried_through_as_a_guess(live):
     qr = slot(view_of(live), "eastwood_qr10x")
     assert qr["present"] is True
     assert qr["confidence"] == "heuristic"
+
+
+def test_the_rail_shows_only_the_instruments_this_bench_has():
+    """The rail used to be the development bench's five instruments, hardcoded.
+    A user with one DMM would get four permanently dark slots for hardware they
+    do not own, which is furniture pretending to be a bench."""
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    s.apply_registry([{"key": "siglent_sdm4065a", "open": False}])
+    keys = [sl["key"] for sl in build_view(s.to_dict(), s)["instruments"]]
+    assert keys == ["siglent_sdm4065a"]
+
+
+def test_a_device_this_build_cannot_name_still_gets_a_slot():
+    """The agent serving something the FUI has no spec for is a fact about the
+    bench. Dropping the row would make the rail quietly incomplete — worse than
+    an ugly label, because nothing on screen would hint anything was missing."""
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    s.apply_registry([{"key": "keysight_34470a", "open": False}])
+    sl = build_view(s.to_dict(), s)["instruments"]
+    assert [x["key"] for x in sl] == ["keysight_34470a"]
+    assert sl[0]["label"] == "34470A", "an unnamed slot is worse than an ugly one"
+    assert sl[0]["kind"] == "generic"
+
+
+def test_hardware_on_the_bus_that_nothing_serves_keeps_its_row():
+    """The NOT SERVED case is the whole point of the rail adapting to the *union*
+    of served and found, rather than to the served list alone: a config gap on a
+    bench that has the hardware is precisely what an operator must see."""
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    s.apply_registry([{"key": "siglent_sdm4065a", "open": False}])
+    s.apply_inventory(
+        {"devices": [{"device_key": "rigol_dp2031", "confidence": "exact",
+                      "path": "USB0::6833::42152::DP2A243500269::0::INSTR"}]}
+    )
+    view = build_view(s.to_dict(), s)
+    assert slot(view, "rigol_dp2031")["status"] == NOT_SERVED
+
+
+def test_the_rail_is_never_blank_before_a_device_table_arrives():
+    """An empty column reads as "this bench has no instruments", which is a claim
+    nobody has checked. Until the agent says what it serves, show the full table
+    dark rather than nothing at all."""
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    assert len(build_view(s.to_dict(), s)["instruments"]) == len(INSTRUMENTS)
+
+
+def test_a_bench_that_loses_a_device_loses_its_row_not_its_order():
+    """Membership follows configuration, never cable state: an instrument the
+    agent still serves keeps its row and goes dark, so the operator sees the
+    absence. Only a device the agent stops serving leaves the rail."""
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    s.apply_registry(
+        [{"key": "otii_arc", "open": False}, {"key": "siglent_sdm4065a", "open": False}]
+    )
+    s.apply_inventory({"devices": [{"device_key": "otii_arc", "confidence": "exact"}]})
+    before = [sl["key"] for sl in build_view(s.to_dict(), s)["instruments"]]
+    assert before == ["otii_arc", "siglent_sdm4065a"]
+    # Unplugged, but still served: the row stays and reports the absence.
+    assert slot(build_view(s.to_dict(), s), "siglent_sdm4065a")["status"] == ABSENT
+    # Reconfigured away: now it is not this bench's business.
+    s.apply_registry([{"key": "otii_arc", "open": False}])
+    assert [sl["key"] for sl in build_view(s.to_dict(), s)["instruments"]] == [
+        "otii_arc"
+    ]
+
+
+def test_the_rails_short_label_survives_the_hardware_label(live):
+    """The slot spec's ``label`` is the three-metre-readable name ("PSU"); the
+    scan's is a sentence ("Rigol DP2000-series power supply"). build_view merges
+    the slot state *over* the spec, so carrying the hardware label under the key
+    ``label`` would silently replace the rail's name with prose that does not
+    fit the column. They are two different fields and must stay that way."""
+    live.apply_registry([{"key": "rigol_dp2031", "open": False}])
+    live.apply_inventory(
+        {
+            "devices": [
+                {
+                    "device_key": "rigol_dp2031",
+                    "label": "Rigol DP2000-series power supply",
+                    "path": "USB0::6833::42152::DP2A243500269::0::INSTR",
+                    "usb_id": "1ab1:a4a8",
+                    "confidence": "exact",
+                }
+            ]
+        }
+    )
+    psu = slot(view_of(live), "rigol_dp2031")
+    assert psu["label"] == "PSU", "the rail's own label was overwritten"
+    assert psu["hw_label"] == "Rigol DP2000-series power supply"
+    assert psu["serial_number"] == "DP2A243500269"
+    assert psu["usb_id"] == "1ab1:a4a8"
+
+
+def test_identity_is_not_shown_for_an_instrument_nobody_has_scanned(live):
+    """Identity comes only from a live scan. Before one lands — and after the
+    session that vouched for it dies — the rail must have nothing to print
+    rather than a serial number for hardware nobody has checked since."""
+    live.apply_registry([{"key": "rigol_dp2031", "open": False}])
+    psu = slot(view_of(live), "rigol_dp2031")
+    assert psu["hw_label"] is None
+    assert psu["serial_number"] is None
 
 
 def test_a_view_built_from_a_snapshot_with_no_slots_still_renders():

@@ -220,6 +220,17 @@ Three distinctions in that table are doing real work:
   `discovery.SIGNATURES` per frame rather than hardcoded, so adding a signature
   upgrades the slot automatically instead of leaving it saying "cannot tell"
   after the thing that could tell arrived.
+
+  `discover(probe=True)` exists and will identify such a device by asking it
+  `AT+DEV.TYPE?`, but it is off by default and cannot rescue this slot on the
+  development board anyway. Probing writes bytes at hardware, so it is opt-in, it
+  never touches an already-identified instrument, and it needs an openable port —
+  and the board's kernel ships **no `ch341` module** (only `usbserial.ko`), so the
+  CH340 has no `/dev/ttyUSB*` and discovery reports `path="auto"`. The QR10x is
+  fully reachable there through the driver's userspace bridge — it answers with
+  `QR101A-1M-R1`, serial `00000248` — but only by *opening* it, which is not
+  something a status display may do. `NO ID` is therefore the honest state for
+  that slot rather than a gap waiting to be plumbed.
 - **`NOT SERVED` vs no device table at all.** An agent that never sent a table is
   not an agent that sent one omitting the key. Without `registry_known`, every
   slot reads `NOT SERVED` against an older agent and on the first frame.
@@ -230,14 +241,61 @@ over-warns, which is the safe direction. A stale `ATTACHED` under-warns by
 asserting something about the physical bench that nobody has checked since the
 link died.
 
-Hardware the scan finds that no driver claims gets its own list below the rail —
-a fixed five-slot rail structurally cannot show it, and "something is plugged in
-that benchctrl cannot drive" is a real bench fact. On the development board that
-list is a CH340 bridge; an SDG1032X and a DS1000Z are physically attached but
-absent from it, because without a udev rule pyvisa-py cannot read their string
-descriptors and they are **invisible rather than unopenable** (see
-[`remote.md`](remote.md#usb-tmc-instruments-need-three-more-wheels-and-a-udev-rule)).
-That is also why the board's scan identifies four instruments with six attached.
+Hardware the scan finds that no driver claims gets its own list below the rail,
+because the rail only has rows for devices benchctrl has drivers for, and
+"something is plugged in that benchctrl cannot drive" is a real bench fact. On the
+development board that list is a CH340 bridge plus an SDG1032X and a DS1000Z
+scope — both attached, both identified, neither having a driver yet.
+
+### The rail adapts to the bench, but never to cable state
+
+Slot membership comes from the agent's device table and the last scan; the
+presentation table (`INSTRUMENTS`) is a *lookup*, not the rail's contents. The
+first version used it directly, which hardcoded the development bench: a user
+with one DMM got four permanently dark slots for hardware they do not own, and an
+agent serving a device with no entry in that table got **no row at all** — the
+rail was silently incomplete with nothing on screen hinting at it. A device with
+no spec now still gets a row, labelled from its key (`rigol_dp2031` → `DP2031`),
+because an ugly label beats a missing instrument.
+
+A device earns a row by being **served, present, or carrying an open error**, and
+each disjunct covers a case the others miss:
+
+- **served but absent** → its row says `NOT FOUND`: there is a cable to plug in.
+- **present but unserved** → `NOT SERVED`: the hardware is here and the config
+  has a gap. This is why membership is the *union* and not just the served list.
+- **neither, but it failed to open** → `OPEN FAILED`. Reachable when an agent is
+  restarted with a shorter device list while the recorded failure survives on the
+  slot; filtering on served-or-present alone would drop the single row an operator
+  could act on, exactly when it appeared.
+
+Anything else — neither served, nor attached, nor ever tried — gets no row,
+because nothing on this bench has ever referred to it.
+
+What membership deliberately does *not* follow is what is currently plugged in.
+Unplugging an instrument the agent still serves changes its `present` to false and
+leaves the row where it was, so the absence is visible rather than a row quietly
+vanishing; only a configuration change alters the rail's shape. The counter's
+denominator tracks the rail for the same reason — a two-instrument bench must not
+read `2/5`, and a bench of nothing but the QR10x drops the bus count entirely
+rather than printing `0/0`, which is arithmetic and not information.
+
+### Identity: what the slot *is*, not just what it is doing
+
+Each slot carries the model string and serial number discovery read off the bus
+(`hw_label`, `serial_number`, `usb_id`). The serial is the field that makes the
+rail auditable: two DP2031s on one bench are indistinguishable by model alone, and
+"which supply did that run drive" is answered here or not at all. VISA reports it
+as field 3 of the resource string (`USB0::6833::42152::DP2A243500269::0::INSTR`)
+even when `serial_number` comes back null, so it is parsed from there — by
+splitting on `::`, never by substring search, and handling the NI-VISA form that
+omits the trailing interface number. A resource with no serial field yields
+nothing rather than a wrong string.
+
+Identity is dropped on disconnect along with presence, and for the same reason: it
+is a claim about the physical bench. A slot still displaying `SN DP2A243500269`
+after the link died is what convinces an operator that the run in front of them
+drove the supply in front of them.
 Only entries carrying a `usb_id` are listed, so the board's four `/dev/ttyS*`
 ports and VISA aliases do not inflate the bench.
 

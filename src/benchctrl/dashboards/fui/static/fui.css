@@ -429,6 +429,27 @@ header {
 .slot .name { font-size: 12px; font-weight: 700; color: var(--ink-dim); }
 .slot .role { font-size: 7px; color: var(--ink-dim); opacity: 0.7; text-transform: uppercase; }
 .slot .state { font-size: 9px; letter-spacing: 0.1em; color: var(--ink-dim); }
+/* Model and serial, from the bus scan. Sits between the role and the state so
+   the reading order is what-it-is then what-it-is-doing.
+
+   Styled quiet on purpose: identity is reference information an operator looks
+   up deliberately, never something they need to catch from across the room, and
+   the alert colours must stay the loudest thing on this rail. It is not given a
+   per-state colour for the same reason — a serial number is equally true on an
+   armed slot and a standby one, so lighting it up with the state would imply the
+   identity itself had changed. Ellipsised, unlike .detail: the model string is
+   cosmetic once truncated, whereas the serial is emitted whole or not at all. */
+.slot .ident {
+  font-size: 6.5px;
+  line-height: 1.2;
+  color: var(--ink-dim);
+  opacity: 0.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.slot .ident:empty { display: none; }
 /* Where it is, or why it is dark. Deliberately the quietest text in the slot:
    it is diagnostic detail, and it must not compete with the state above it.
    Wraps rather than ellipsising — a truncated device path is no use at all. */

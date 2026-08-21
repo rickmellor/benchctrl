@@ -793,6 +793,189 @@ def test_the_feed_requests_an_observer_session():
 
 
 # --------------------------------------------------------------------------
+# Instrument identity: which box, not just which state
+#
+# The rail's row heading is the device *key*, a benchctrl name for a driver. It
+# does not say which of two Rigols is on the bench, and it cannot say whether
+# the supply attached now is the one the last run was calibrated against. Only
+# the serial number answers that, and on this bench it mostly is not where you
+# would expect it: measured against the board, every VISA instrument reports
+# ``serial_number: null`` while its serial sits in field 3 of the resource
+# string it was found at.
+# --------------------------------------------------------------------------
+
+
+#: One ``agent.discover`` entry, shaped exactly as the bench board reports the
+#: DP2031 — including ``serial_number: None``, which is the whole problem.
+DISCOVERED_PSU = {
+    "path": "USB0::6833::42152::DP2A243500269::0::INSTR",
+    "transport": "visa",
+    "device_key": "rigol_dp2031",
+    "label": "Rigol DP2000-series power supply",
+    "usb_id": "1ab1:a4a8",
+    "serial_number": None,
+    "confidence": "exact",
+}
+
+
+def test_a_visa_instruments_serial_is_read_out_of_its_resource_string():
+    """The measured case: the payload's ``serial_number`` is null and the serial
+    is field 3 of the resource string. ``list_resources()`` never opens a
+    resource, so no descriptor has been read at that point — trusting only the
+    reported field would leave the rail with no serial for the DP2031, the
+    DL3031A and the SDM4065A, which is most of this bench.
+    """
+    s = BenchStatus()
+    s.apply_inventory({"devices": [DISCOVERED_PSU]})
+    psu = s.to_dict()["slots"]["rigol_dp2031"]
+    assert psu["serial_number"] == "DP2A243500269"
+    assert psu["label"] == "Rigol DP2000-series power supply"
+    assert psu["usb_id"] == "1ab1:a4a8"
+
+
+def test_the_ni_visa_form_without_an_interface_number_also_yields_a_serial():
+    """Which form arrives depends on the backend, not on the instrument.
+
+    The same DP2031 is ``USB0::0x1AB1::0xA4A8::DP2A243500269::INSTR`` under
+    NI-VISA and ``USB0::6833::42152::DP2A243500269::0::INSTR`` under pyvisa-py:
+    the interface field is optional. A parser that required it would show a
+    serial on the bench board (which needs pyvisa-py, having no kernel
+    ``usbtmc`` module) and nothing at all on a laptop with NI-VISA — a
+    difference in the display that looks like a difference in the hardware.
+    """
+    s = BenchStatus()
+    s.apply_inventory(
+        {
+            "devices": [
+                dict(
+                    DISCOVERED_PSU,
+                    path="USB0::0x1AB1::0xA4A8::DP2A243500269::INSTR",
+                )
+            ]
+        }
+    )
+    assert s.to_dict()["slots"]["rigol_dp2031"]["serial_number"] == "DP2A243500269"
+
+
+@pytest.mark.parametrize(
+    "resource",
+    [
+        "ASRL/dev/ttyS0::INSTR",
+        "TCPIP0::192.168.1.5::inst0::INSTR",
+    ],
+)
+def test_a_resource_with_no_serial_field_reports_none_not_a_wrong_string(resource):
+    """Only USB resources carry a serial. The board has four ``/dev/ttyS*``
+    aliases, so this path is walked on every scan.
+
+    Reading whichever token sits in that position would put ``INSTR`` or an IP
+    address on the rail as a serial number. That is worse than a blank: an
+    operator can act on a blank, and would act wrongly on something that looks
+    like an answer.
+    """
+    s = BenchStatus()
+    s.apply_inventory(
+        {"devices": [dict(DISCOVERED_PSU, path=resource, usb_id=None)]}
+    )
+    assert s.to_dict()["slots"]["rigol_dp2031"]["serial_number"] is None
+
+
+def test_a_reported_serial_number_beats_the_one_parsed_from_the_path():
+    """When the agent read the string descriptors, believe it over a backend's
+    rendering of them. The parse is a fallback, not an override — an agent that
+    grows the ability to report a serial must not be second-guessed by it.
+    """
+    s = BenchStatus()
+    s.apply_inventory(
+        {"devices": [dict(DISCOVERED_PSU, serial_number="FROM-DESCRIPTOR")]}
+    )
+    psu = s.to_dict()["slots"]["rigol_dp2031"]
+    assert psu["serial_number"] == "FROM-DESCRIPTOR"
+
+
+def test_identity_does_not_outlive_the_session_that_vouched_for_it(live):
+    """The dangerous direction, and the reason identity is dropped on disconnect.
+
+    A serial number reads as proof. ``DP2A243500269 ATTACHED`` names one specific
+    box, so nobody reads it as a guess — and it stays just as convincing after
+    the cable has been pulled, which is exactly when the panel is blind. Presence
+    reverting to None already makes the slot say "not scanned"; a confident
+    identity sitting beside that undoes it.
+    """
+    live.apply_inventory({"devices": [DISCOVERED_PSU]})
+    attached = live.to_dict()["slots"]["rigol_dp2031"]
+    assert attached["serial_number"] == "DP2A243500269", "fixture never identified it"
+
+    live.apply_disconnected("cable pulled")
+
+    blind = live.to_dict()["slots"]["rigol_dp2031"]
+    assert blind["present"] is None
+    assert blind["serial_number"] is None, (
+        "the rail still names a specific instrument nobody has seen since the "
+        "link died"
+    )
+    assert blind["label"] is None
+    assert blind["usb_id"] is None
+
+
+def test_a_scan_that_no_longer_finds_an_instrument_drops_its_identity(live):
+    """The same rule for a live session: a scan is authoritative about absence,
+    so a slot the scan missed must not keep the identity an earlier scan gave it.
+    Without this, unplugging one instrument on a bench that stays connected
+    leaves its serial on screen indefinitely.
+    """
+    live.apply_inventory({"devices": [DISCOVERED_PSU]})
+    live.apply_inventory({"devices": []})
+    psu = live.to_dict()["slots"]["rigol_dp2031"]
+    assert psu["present"] is False
+    assert psu["serial_number"] is None
+    assert psu["label"] is None
+    assert psu["usb_id"] is None
+
+
+def test_an_inventory_with_no_identity_fields_at_all_still_folds_in(live):
+    """An older agent whose ``discover`` predates these fields. The panel must
+    lose the identity, not the inventory: presence is the fact the rail cannot
+    do without, and raising here would cost the whole scan.
+    """
+    live.apply_inventory({"devices": [{"device_key": "rigol_dp2031"}, "not a dict"]})
+    psu = live.to_dict()["slots"]["rigol_dp2031"]
+    assert psu["present"] is True, "the scan was lost, not just its identity"
+    assert psu["serial_number"] is None
+    assert psu["label"] is None
+    assert psu["usb_id"] is None
+
+
+def test_a_serial_transport_device_falls_back_to_its_product_name(live):
+    """The Otii Arc, as the board reports it: ``serial_number`` null and no
+    resource string to mine, but ``manufacturer``/``product`` populated. Worth
+    showing — a labelled slot with no serial still tells an operator more than a
+    bare device key does.
+    """
+    live.apply_inventory(
+        {
+            "devices": [
+                {
+                    "path": "/dev/ttyACM0",
+                    "transport": "serial",
+                    "device_key": "otii_arc",
+                    "label": "",
+                    "product": "Arc",
+                    "manufacturer": "Qoitech",
+                    "usb_id": "0fce:d1e6",
+                    "serial_number": None,
+                    "confidence": "exact",
+                }
+            ]
+        }
+    )
+    arc = live.to_dict()["slots"]["otii_arc"]
+    assert arc["label"] == "Arc"
+    assert arc["usb_id"] == "0fce:d1e6"
+    assert arc["serial_number"] is None, "a tty path is not a serial number"
+
+
+# --------------------------------------------------------------------------
 # Asking for the observer role is not the same as having it
 # --------------------------------------------------------------------------
 #

@@ -8,7 +8,7 @@ from typing import Optional
 import pytest
 
 from benchctrl import discovery
-from benchctrl.discovery import EXACT, UNKNOWN, DiscoveredDevice
+from benchctrl.discovery import EXACT, HEURISTIC, UNKNOWN, DiscoveredDevice
 
 
 @dataclass
@@ -335,6 +335,255 @@ def test_discover_includes_driverless_bridges(monkeypatch):
     found = discovery.discover(usbtmc=False, visa=False)
 
     assert [d.path for d in found] == ["auto"]
+
+
+# --------------------------------------------------------------------------
+# Probing from a scan — opt-in only
+# --------------------------------------------------------------------------
+#
+# probe_serial_identity() existed for a release with nothing calling it, which
+# is why eastwood_qr10x — the one key with no VID/PID signature — could never be
+# identified and its bench slot read NO ID forever. Wiring it in is the fix; the
+# hazard the wiring introduces is that a probe *writes* AT+DEV.TYPE? to a port
+# whose occupant is unknown, and the dashboard re-scans every 30 s. Hence: off
+# unless asked, and never at anything the signature table has already claimed.
+
+#: A CH340 bridge, i.e. the one situation where VID/PID cannot decide.
+BRIDGE_IDS = dict(vid=0x1A86, pid=0x7523)
+
+
+class ProbeSpy:
+    """Stands in for :py:func:`probe_serial_identity`, recording every call.
+
+    Recording is the point: the safety property is about probes *not happening*,
+    and a test that only inspected the returned devices would pass just as well
+    against code that probed everything and discarded the answers.
+    """
+
+    def __init__(self, replies=None, raises=False):
+        self.paths: list[str] = []
+        self._replies = replies or {}
+        self._raises = raises
+
+    def __call__(self, path, timeout=1.0):
+        self.paths.append(path)
+        if self._raises:
+            raise OSError(f"probe of {path} exploded")
+        return self._replies.get(path)
+
+
+def _patch_probe(monkeypatch, spy):
+    monkeypatch.setattr(discovery, "probe_serial_identity", spy)
+    return spy
+
+
+def test_a_scan_never_probes_unless_asked(monkeypatch):
+    """The safety-critical default, on both entry points a poll goes through.
+
+    ``inventory()`` is what the agent's ``agent.discover`` serves and what the
+    bench dashboard calls every 30 s. If probing were on by default, that timer
+    would write AT commands into whatever is plugged into the bench for as long
+    as the panel is up, with nobody having asked for it.
+    """
+    spy = _patch_probe(monkeypatch, ProbeSpy({"/dev/ttyUSB0": "eastwood_qr10x"}))
+    _patch_ports(monkeypatch, [FakePort("/dev/ttyUSB0", **BRIDGE_IDS)])
+
+    found = discovery.discover(usbtmc=False, visa=False)
+    inv = discovery.inventory(usbtmc=False, visa=False)
+
+    assert spy.paths == [], "a default scan wrote bytes to an unknown device"
+    # And the device is still reported, just unclaimed — the pre-probe answer.
+    assert [d.device_key for d in found] == [None]
+    assert inv["identified"] == 0
+
+
+def test_probing_identifies_a_qr10x_behind_a_bridge(monkeypatch):
+    """The gap this closes, end to end against the real simulator.
+
+    No monkeypatched probe here: a real ``AT+DEV.TYPE?`` goes down a real pty
+    and the reply comes back from the QR10x sim, so this fails if the wiring
+    reaches ``probe_serial_identity`` with something it cannot open. The CH340
+    ids are the honest setup — that bridge is where the real unit sits.
+    """
+    from benchctrl.sim.qr10x import SimulatedQR10x
+
+    with SimulatedQR10x() as sim:
+        _patch_ports(monkeypatch, [FakePort(sim.port, **BRIDGE_IDS)])
+
+        found = discovery.discover(usbtmc=False, visa=False, probe=True)
+
+    assert [d.device_key for d in found] == ["eastwood_qr10x"]
+    # A reply is strong evidence about the protocol on the port, not the
+    # certainty a signature gives, and EXACT here would licence a caller to skip
+    # the confirmation the module's own docstring demands.
+    assert found[0].confidence == HEURISTIC
+    assert "probe" in found[0].note
+    assert "QR10x" in found[0].label
+
+
+def test_an_identified_instrument_is_never_probed(monkeypatch):
+    """Writing AT commands at a power supply is the hazard here.
+
+    The input is deliberately one that *only* the identified check rejects: a
+    claimed device that is also sitting on a generic bridge's VID/PID. A test
+    using a real instrument's ids (the Arc's, say) would pass against code with
+    no identified check at all, because the bridge check would reject it anyway
+    — the two guards would be indistinguishable.
+    """
+    spy = _patch_probe(monkeypatch, ProbeSpy({"/dev/ttyUSB0": "eastwood_qr10x"}))
+    psu = DiscoveredDevice(
+        path="/dev/ttyUSB0",
+        transport="serial",
+        device_key="rigol_dp2031",
+        label="Rigol DP2000-series power supply",
+        confidence=EXACT,
+        **BRIDGE_IDS,
+    )
+
+    result = discovery.probe_unidentified([psu])
+
+    assert spy.paths == [], "probed an instrument the signature table had claimed"
+    assert result == [psu], "an identified device must come back untouched"
+
+
+def test_only_devices_behind_a_known_bridge_are_probed(monkeypatch):
+    """An unrecognised VID/PID is unidentified for a different reason.
+
+    A bare Arduino (2341:0043) is unclaimed because nobody has written its
+    signature, not because its ids are uninformative. Probing every unidentified
+    device would mean writing to arbitrary hardware on the bench to learn
+    something a signature entry should have told us.
+    """
+    spy = _patch_probe(monkeypatch, ProbeSpy())
+    _patch_ports(monkeypatch, [FakePort("/dev/ttyACM3", vid=0x2341, pid=0x0043)])
+    _patch_find_all(monkeypatch, [])
+
+    found = discovery.discover(usbtmc=False, visa=False, probe=True)
+
+    assert spy.paths == []
+    assert not found[0].identified
+
+
+def test_a_non_serial_device_is_not_probed_even_on_bridge_ids(monkeypatch):
+    """``AT+DEV.TYPE?`` is a serial-line protocol; a TMC node is not a serial port.
+
+    A **contract** test on ``probe_unidentified``, not a reachability one: no scan
+    is known to produce a usbtmc node carrying a CH340's ids. But the function is
+    public and takes any list, so its guarantee has to hold for the list it is
+    handed rather than for the one ``discover()`` happens to build.
+
+    The ids are the CH340's deliberately. With an instrument's own ids the bridge
+    check would reject this device too and the test would pass against a version
+    with no transport check at all — which is exactly what happened: the first
+    draft of this suite let that mutant survive.
+    """
+    spy = _patch_probe(monkeypatch, ProbeSpy({"/dev/usbtmc0": "eastwood_qr10x"}))
+    node = DiscoveredDevice(
+        path="/dev/usbtmc0", transport="usbtmc", confidence=UNKNOWN, **BRIDGE_IDS
+    )
+
+    assert discovery.probe_unidentified([node]) == [node]
+    assert spy.paths == [], "wrote an AT command into a USB-TMC instrument node"
+
+
+def test_a_bridge_with_no_tty_is_not_probed(monkeypatch):
+    """``path="auto"`` is a placeholder, not something to open.
+
+    The driverless-bridge scanner reports a CH340 the kernel never bound, so
+    reaching it means claiming the chip over libusb and standing up a pty.
+    Doing that inside a scan would take the USB claim out from under whatever
+    the caller opens next, to answer a question it did not ask.
+    """
+    spy = _patch_probe(monkeypatch, ProbeSpy())
+    _patch_ports(monkeypatch, [])
+    _patch_find_all(monkeypatch, [FakeUsbDevice()])
+
+    found = discovery.discover(usbtmc=False, visa=False, probe=True)
+
+    assert [d.path for d in found] == ["auto"]
+    assert spy.paths == [], "opened a bridge the caller had not asked us to claim"
+
+
+def test_a_silent_device_is_left_unidentified_rather_than_claimed():
+    """Silence is not evidence, in either direction.
+
+    A real Arc sim behind bridge ids: it receives the probe and says nothing
+    useful back. Claiming it anyway would put the wrong driver against a real
+    instrument, and the reverse error — marking it "definitely not ours" — would
+    be just as wrong, because a QR10x that is powered down, mid-boot, or held
+    open by another process is also silent.
+    """
+    from benchctrl.sim.otii_arc import SimulatedOtiiArc
+
+    with SimulatedOtiiArc() as sim:
+        before = [
+            DiscoveredDevice(
+                path=sim.port,
+                transport="serial",
+                label="CH340 USB-serial bridge",
+                confidence=UNKNOWN,
+                note="generic USB-serial bridge — probe to identify",
+                **BRIDGE_IDS,
+            )
+        ]
+
+        after = discovery.probe_unidentified(before, timeout=0.3)
+
+    assert [d.device_key for d in after] == [None]
+    assert after[0].confidence == UNKNOWN
+    assert after == before, "a non-answer must not change what the scan reported"
+
+
+def test_a_probe_that_fails_does_not_break_the_scan(monkeypatch):
+    """One unresponsive device must not cost the operator the whole inventory.
+
+    ``probe_serial_identity`` swallows its own serial errors, but it is a
+    module-level name, so the scan cannot assume that of whatever is bound to
+    it. The second port is the assertion that matters: a scan that aborted
+    part-way would report a bench with an instrument missing, which reads as
+    unplugged hardware.
+    """
+    spy = _patch_probe(monkeypatch, ProbeSpy(raises=True))
+    _patch_ports(
+        monkeypatch,
+        [
+            FakePort("/dev/ttyUSB0", **BRIDGE_IDS),
+            FakePort("/dev/ttyACM0", vid=0x0FCE, pid=0xD1E6, product="Arc"),
+        ],
+    )
+
+    found = discovery.discover(usbtmc=False, visa=False, probe=True)
+
+    assert spy.paths == ["/dev/ttyUSB0"]
+    assert [d.path for d in found] == ["/dev/ttyACM0", "/dev/ttyUSB0"]
+    assert [d.device_key for d in found] == ["otii_arc", None]
+
+
+def test_inventory_can_opt_in_to_probing(monkeypatch):
+    """The remote agent's own entry point, since that is where an operator asks.
+
+    ``agent.discover`` serves ``inventory()``, so a probe that only reached
+    through ``discover()`` would leave the remote caller — the one host that
+    cannot look at the USB bus itself — unable to ever identify the QR10x.
+    """
+    _patch_probe(monkeypatch, ProbeSpy({"/dev/ttyUSB0": "eastwood_qr10x"}))
+    _patch_ports(monkeypatch, [FakePort("/dev/ttyUSB0", **BRIDGE_IDS)])
+
+    inv = discovery.inventory(usbtmc=False, visa=False, probe=True)
+
+    assert inv["identified"] == 1
+    assert "eastwood_qr10x" in inv["by_device_key"]
+    assert inv["by_device_key"]["eastwood_qr10x"][0]["confidence"] == HEURISTIC
+
+
+def test_every_probe_label_is_a_real_device_key():
+    """A probe returning a key nothing can open would be a worse failure than
+    the NO ID it replaces: the panel would show the slot as found while the
+    registry had no driver for it."""
+    from benchctrl.config import DEVICE_KEYS
+
+    for key in discovery.PROBE_LABELS:
+        assert key in DEVICE_KEYS
 
 
 # --------------------------------------------------------------------------
