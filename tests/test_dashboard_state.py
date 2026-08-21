@@ -1221,3 +1221,136 @@ def test_a_method_name_containing_a_dot_survives_the_prefix_strip(live):
         now=102.0,
     )
     assert live.busy_devices == {"psu": "bare_method"}
+
+
+# --------------------------------------------------------------------------
+# The link heartbeat: an idle bench must still prove it is alive
+# --------------------------------------------------------------------------
+
+
+def beat(**overrides):
+    """One link heartbeat as the agent emits it."""
+    e = {"kind": "link", "severity": "debug", "heartbeat_s": 5.0, "armed": [],
+         "observers": 1}
+    e.update(overrides)
+    return e
+
+
+def test_a_quiet_bench_goes_stale_without_heartbeats(live):
+    """The problem the heartbeat exists to solve.
+
+    An idle bench emits no events: nothing armed, no run, no actions. Without a
+    heartbeat the panel cannot tell that from a link that died, so after the
+    silence budget it must say so rather than keep showing a reassuring IDLE.
+    """
+    budget = 5.0 * SILENCE_HEARTBEATS
+    assert live.check_silence(now=100.0 + budget - 1.0) is None
+    assert live.check_silence(now=100.0 + budget + 1.0) is not None
+    assert live.headline == "STALE"
+
+
+def test_heartbeats_keep_a_quiet_bench_from_going_stale(live):
+    """The same span of wall clock, with beats arriving, stays IDLE."""
+    budget = 5.0 * SILENCE_HEARTBEATS
+    for t in (105.0, 110.0, 115.0, 120.0):
+        live.apply_event(beat(), now=t)
+    assert live.check_silence(now=100.0 + budget + 5.0) is None
+    assert live.headline == "IDLE"
+    # Not merely "not stale": the beats actually arrived. The panel's own status
+    # polling would satisfy the weaker claim on its own, so asserting freshness
+    # without this would pass against a heartbeat that was never implemented.
+    assert live.link_beats == 4
+
+
+def test_a_heartbeat_is_never_written_to_the_log(live):
+    """LOG.MGR is 24 visible rows and belongs to the bench, not the link.
+
+    At one beat per 5s a logged heartbeat would evict every real action within
+    about two minutes, leaving an operator watching the connection describe
+    itself. This is the assertion that keeps that from regressing.
+    """
+    live.apply_event(
+        {"kind": "action", "severity": "debug", "action": "measure", "detail": "100.04"},
+        now=101.0,
+    )
+    for i in range(LOG_LIMIT * 3):
+        live.apply_event(beat(), now=102.0 + i)
+
+    assert [e.get("kind") for e in live.log] == ["action"]
+    assert live.log[0].get("action") == "measure"
+    assert live.link_beats == LOG_LIMIT * 3
+    assert not any(e.get("kind") == "link" for e in live.sticky)
+
+
+def test_a_heartbeat_does_not_touch_arm_state(live):
+    """Arm state has one source of truth, and this is not it.
+
+    The heartbeat carries ``armed`` for a consumer that wants it, but folding it
+    in here would make two writers for one safety fact — and the quieter one
+    eventually contradicts the louder one on screen.
+    """
+    live.apply_event({"kind": "device_armed", "device": "otii_arc"}, now=101.0)
+    assert live.devices["otii_arc"].armed is True
+
+    # A heartbeat that disagrees must not disarm the panel's view.
+    live.apply_event(beat(armed=[]), now=102.0)
+    assert live.devices["otii_arc"].armed is True
+    assert live.headline == "ARMED"
+
+
+def test_a_heartbeat_updates_the_silence_budget_to_the_agents_live_figure(live):
+    """A reconfigured agent reports its new interval on the beat itself.
+
+    The budget should follow that rather than the value captured at connect
+    time, or a bench moved to slow heartbeats reads as perpetually stale.
+    """
+    assert live.heartbeat_s == 5.0
+    live.apply_event(beat(heartbeat_s=30.0), now=101.0)
+    assert live.heartbeat_s == 30.0
+    # 40s of quiet is stale under the old 15s budget, fine under the new 90s one.
+    assert live.check_silence(now=141.0) is None
+
+
+def test_a_malformed_heartbeat_does_not_disturb_the_budget(live):
+    """Junk in the field leaves the previous figure standing."""
+    for bad in (None, "soon", 0, -5, float("nan")):
+        live.apply_event(beat(heartbeat_s=bad), now=101.0)
+        assert live.heartbeat_s == 5.0, f"{bad!r} changed the budget"
+
+
+def test_beats_do_not_survive_a_disconnect(live):
+    """A beat count is a claim about *this* link being alive.
+
+    Carrying it across a disconnect would assert beats are arriving on a session
+    where by definition none can.
+    """
+    live.apply_event(beat(), now=101.0)
+    assert live.link_beats == 1
+    live.apply_disconnected("the agent closed the connection")
+    assert live.link_beats == 0
+    assert live.to_dict()["link_beats"] == 0
+
+
+def test_a_timestamp_of_zero_is_a_real_mark(live):
+    """Regression: ``if m`` discarded a mark of exactly 0.0.
+
+    ``time.monotonic()`` is never 0.0, so this could not misfire in production —
+    but a test using 0.0 as its clock base had its only mark dropped and the
+    staleness assertion passed against a view that was never checked. A guard
+    that cannot be tested is the failure this module exists to prevent.
+    """
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=0.0)
+    # A snapshot too, so the only thing under test is the 0.0 mark rather than
+    # the "waiting for the first status snapshot" message apply_connected leaves
+    # behind. Asserting `is not None` alone passed against that leftover text —
+    # it could not tell a real staleness verdict from startup boilerplate.
+    s.apply_status(status_payload({"otii_arc": idle()}), now=0.0)
+    s.apply_event({"kind": "action", "severity": "debug"}, now=0.0)
+    assert s.last_event_mono == 0.0
+    assert s.last_snapshot_mono == 0.0
+    assert s.check_silence(now=0.0) is None
+
+    reason = s.check_silence(now=5.0 * SILENCE_HEARTBEATS + 1.0)
+    assert reason is not None and "nothing from the agent" in reason
+    assert s.headline == "STALE"

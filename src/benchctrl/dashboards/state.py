@@ -41,6 +41,19 @@ from typing import Optional
 #: Events whose severity should keep them on screen rather than scroll away.
 STICKY_SEVERITIES = frozenset({"alarm", "critical"})
 
+#: The agent's periodic link heartbeat (``LINK_KIND`` in
+#: :py:mod:`benchctrl.agent.server`). A literal rather than an import, because
+#: this module deliberately depends on nothing in ``agent`` — the dashboard runs
+#: against a *remote* agent over a wire protocol, and a panel that could only be
+#: built where the agent is importable would not be a remote panel. The event
+#: kinds below are matched the same way for the same reason.
+#:
+#: The heartbeat exists because an idle bench is otherwise indistinguishable from
+#: a dead link: with nothing armed and no run, the agent emits no events, and
+#: this module cannot tell "quiet" from "gone". It updates liveness and is never
+#: logged — see :py:meth:`BenchStatus.apply_event`.
+LINK_KIND_NAME = "link"
+
 #: Run states that mean work is in flight. Taken from
 #: :py:mod:`benchctrl.agent.runs.store` (``STATUS_PENDING``/``STATUS_RUNNING``)
 #: and matched to what ``fui/view.py`` already treats as in-flight for its
@@ -227,6 +240,13 @@ class BenchStatus:
     #: actions were *counted and deliberately summarised* at the producer, while
     #: dropped events were lost because this consumer could not keep up.
     actions_folded: int = 0
+    #: Link heartbeats received. Not shown as log rows (they are never logged),
+    #: but exposed so a header can prove the link is live on a bench where
+    #: nothing else is happening, and so a test can assert the heartbeat is
+    #: actually arriving rather than merely that the panel is not stale — those
+    #: are different claims, and the dashboard's own polling would satisfy the
+    #: weaker one on its own.
+    link_beats: int = 0
     seconds_since_contact: Optional[float] = None
     deadman_s: Optional[float] = None
     heartbeat_s: Optional[float] = None
@@ -618,6 +638,12 @@ class BenchStatus:
         # why this drops rather than latching the way arm state does.
         self.busy_devices = {}
         self.queued_devices = {}
+        # Zeroed with the busy readout, not kept with arm state. A heartbeat
+        # count is a claim about *this link* being alive, so carrying it across a
+        # disconnect is the one thing it must never do: it would read as "beats
+        # are arriving" on a session where, by definition, none can. The next
+        # session counts its own from zero.
+        self.link_beats = 0
         # Arm state is kept-but-marked-inferred above, because the last known
         # arm state is the safest available guess. Presence gets the opposite
         # treatment and is dropped outright: a stale "ARMED" over-warns, while a
@@ -729,6 +755,32 @@ class BenchStatus:
         if isinstance(seq, int):
             self.last_seq = seq
 
+        if kind == LINK_KIND_NAME:
+            # Liveness only, and it returns before the log append below.
+            #
+            # That early return is the whole point of handling this kind
+            # separately. LOG.MGR shows 24 rows; a heartbeat every 5s would
+            # evict every real bench action within about two minutes and leave
+            # the operator watching the connection talk about itself. The
+            # timestamp taken at the top of this method has already done the one
+            # job a heartbeat has.
+            #
+            # `armed` is deliberately NOT folded in from here. It rides along for
+            # a consumer that wants it, but arm state on this panel comes from
+            # `device_armed`/`safety_trip` and `agent.status` — the governor's own
+            # sources. Two writers for one safety fact means the quieter one
+            # eventually contradicts the louder one on screen, which is the same
+            # rule the action handler below follows for the same reason.
+            self.link_beats += 1
+            hb = _as_float(event.get("heartbeat_s"))
+            if hb is not None and hb > 0:
+                # The agent's live figure, which outranks the one from WELCOME:
+                # a reconfigured agent reports its new interval here, and the
+                # silence budget should follow it rather than a value fixed at
+                # connect time.
+                self.heartbeat_s = hb
+            return
+
         if kind == "events_dropped":
             # The agent is telling us our own view has holes. Believe it.
             count = event.get("count")
@@ -835,7 +887,18 @@ class BenchStatus:
         if not self.connected:
             return self.stale_reason
         stamp = _mono(now)
-        marks = [m for m in (self.last_event_mono, self.last_snapshot_mono) if m]
+        # `is not None`, not truthiness: a mark of exactly 0.0 is a real
+        # timestamp, and `if m` discarded it. `time.monotonic()` is never 0.0 on
+        # a running system so this could not fire in production, but a test
+        # passing `now=0.0` — the obvious base for a synthetic clock — had its
+        # first mark silently dropped, so the whole staleness assertion passed
+        # against a view that was never checked. A guard that cannot be tested is
+        # the failure mode this module exists to prevent.
+        marks = [
+            m
+            for m in (self.last_event_mono, self.last_snapshot_mono)
+            if m is not None
+        ]
         if not marks:
             return self.stale_reason
         quiet = stamp - max(marks)
@@ -864,6 +927,7 @@ class BenchStatus:
             "dropped_events": self.dropped_events,
             "actions_seen": self.actions_seen,
             "actions_folded": self.actions_folded,
+            "link_beats": self.link_beats,
             "unsafe": self.unsafe_latch is not None,
             "observer_denied": self.observer_denied is not None,
             "devices": {

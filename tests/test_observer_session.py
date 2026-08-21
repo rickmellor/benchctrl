@@ -775,9 +775,8 @@ def test_an_encoded_dataclass_names_its_class_rather_than_its_tag():
     the generic dict branch rendered it inline, with the tag first. Every
     dataclass-returning method on the bench produced the same meaningless line.
     """
-    from benchctrl.net.codec import TAG
-
     from benchctrl.agent.server import build_action_event
+    from benchctrl.net.codec import TAG
 
     encoded = {
         TAG: "dc",
@@ -806,9 +805,8 @@ def test_no_codec_tag_renders_as_the_bare_tag_name():
     import pathlib
     import re
 
-    from benchctrl.net.codec import TAG
-
     from benchctrl.agent.server import _summarise
+    from benchctrl.net.codec import TAG
 
     source = pathlib.Path(__import__("benchctrl.net.codec", fromlist=["x"]).__file__)
     tags = set(re.findall(r"TAG:\s*\"([a-z0-9]+)\"", source.read_text()))
@@ -1089,3 +1087,127 @@ def test_dropping_a_session_removes_its_subscriber(bench):
         time.sleep(0.02)
     names = {s["name"] for s in bench.agent.events.stats()["subscribers"]}
     assert session_id not in names, f"subscriber leaked: {names}"
+
+
+# --------------------------------------------------------------------------
+# The link heartbeat: emitted only while a dashboard is listening
+# --------------------------------------------------------------------------
+
+
+def test_the_agent_knows_whether_a_dashboard_is_listening(bench):
+    """Observer presence comes from the session table, not a new handshake.
+
+    Using the sessions it already tracks means the answer cannot drift from
+    reality: a dashboard whose socket dies is out of the table by the time
+    ``drop_session`` returns, without having had to say goodbye.
+    """
+    assert bench.agent.observer_count() == 0
+    obs = bench.connect(observer=True)
+    deadline = time.monotonic() + 3.0
+    while bench.agent.observer_count() < 1 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert bench.agent.observer_count() == 1
+
+    # A normal client is not an observer and must not make the agent think a
+    # display is attached.
+    bench.connect()
+    assert bench.agent.observer_count() == 1
+
+    obs.close()
+    deadline = time.monotonic() + 3.0
+    while bench.agent.observer_count() > 0 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert bench.agent.observer_count() == 0
+
+
+def test_no_heartbeat_is_emitted_when_nobody_is_listening(bench):
+    """A bench with no dashboard produces no heartbeats at all.
+
+    There is nobody to reassure, and an event every few seconds forever is a
+    cost paid by every consumer on the bus, including the run engine's.
+    """
+    # Watches the event BUS, not a client socket. Asserting that a
+    # late-connecting observer saw no beats proves nothing: it would not have
+    # received beats emitted before it attached even if the gate were gone. The
+    # claim is that the agent *published* none at all.
+    published = []
+    bench.agent.events.publish = (  # type: ignore[method-assign]
+        lambda event, _real=bench.agent.events.publish: (
+            published.append(event),
+            _real(event),
+        )[1]
+    )
+
+    bench.agent.start_deadman()
+    try:
+        assert bench.agent.observer_count() == 0
+        # Well past several intervals, so a gate-free agent would have emitted
+        # repeatedly by now.
+        time.sleep(bench.agent.heartbeat_s * 5)
+        assert [e for e in published if e.get("kind") == "link"] == []
+
+        # And the gate is the only reason: attach an observer and beats appear on
+        # the same bus, with the same timer, in the same test.
+        obs = bench.connect(observer=True)
+        obs.on_event = lambda e: None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if [e for e in published if e.get("kind") == "link"]:
+                break
+            time.sleep(0.05)
+        assert [e for e in published if e.get("kind") == "link"], (
+            "no heartbeat after an observer attached — the test cannot tell the "
+            "gate from a heartbeat that never works"
+        )
+    finally:
+        bench.agent.shutdown()
+
+
+def test_heartbeats_flow_once_an_observer_attaches(bench):
+    """The end-to-end path: agent timer -> event bus -> observer socket."""
+    seen = []
+    obs = bench.connect(observer=True)
+    obs.on_event = lambda e: seen.append(e)
+    bench.agent.start_deadman()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if len([e for e in seen if e.get("kind") == "link"]) >= 2:
+                break
+            time.sleep(0.05)
+    finally:
+        bench.agent.shutdown()
+
+    beats = [e for e in seen if e.get("kind") == "link"]
+    assert len(beats) >= 2, f"expected repeated heartbeats, got {len(beats)}"
+    first = beats[0]
+    # Graded so the bus sheds it before anything about the bench.
+    assert first["severity"] == "debug"
+    # Carries the interval it was promised at, so a consumer can size its own
+    # silence budget without knowing the agent's configuration.
+    assert first["heartbeat_s"] == bench.agent.heartbeat_s
+    assert first["observers"] >= 1
+    assert first["armed"] == []
+
+
+def test_a_heartbeat_reports_arm_state_from_the_governor(bench):
+    """The ``armed`` field is the governor's list, not a guess."""
+    seen = []
+    obs = bench.connect(observer=True)
+    obs.on_event = lambda e: seen.append(e)
+    # `is_armed` is `output_armed or emulating`, so this is a genuine armed
+    # device from the governor's point of view without energising anything.
+    bench.agent.governor.set_emulating("otii_arc", True)
+    bench.agent.start_deadman()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if any(e.get("kind") == "link" for e in seen):
+                break
+            time.sleep(0.05)
+    finally:
+        bench.agent.shutdown()
+
+    beats = [e for e in seen if e.get("kind") == "link"]
+    assert beats, "no heartbeat arrived"
+    assert beats[0]["armed"] == ["otii_arc"]

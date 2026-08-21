@@ -712,6 +712,12 @@ function render(v) {
     verdict.textContent = `${v.actions} ACT / ${v.actions_folded} FOLDED`;
   } else if (v.actions > 0) {
     verdict.textContent = `${v.actions} ACT`;
+  } else if (v.link_beats > 0) {
+    // Nothing has happened on this bench yet, and that is the whole difficulty:
+    // an empty log looks identical whether the agent is idle or gone. The beat
+    // count is the only positive evidence the link is alive, so show it rather
+    // than a bare IDLE that would read the same on a dead connection.
+    verdict.textContent = `LINK ${v.link_beats}`;
   } else {
     verdict.textContent = v.log.length ? 'ACTIVE' : 'IDLE';
   }

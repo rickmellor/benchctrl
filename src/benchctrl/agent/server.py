@@ -123,6 +123,34 @@ ACTION_SEVERITY_CEILING = "alarm"
 #: Only sheddable grades: anything worth a ``warn`` is worth its own line.
 COALESCED_SEVERITIES = frozenset({ACTION_SEVERITY_READ, ACTION_SEVERITY_COMMAND})
 
+#: Kind for the periodic link heartbeat. The agent emits this so a *quiet* bench
+#: still proves it is alive: on an idle bench with nothing armed and no run, no
+#: other event is produced at all, and a consumer cannot tell "nothing is
+#: happening" from "the link died three minutes ago". Both look like silence.
+#:
+#: A consumer must treat this kind as liveness *only* and never append it to a
+#: visible log — see the note on :py:data:`LINK_SEVERITY`.
+LINK_KIND = "link"
+
+#: Severity for the link heartbeat: the lowest grade there is, for the same
+#: reason reads are ``debug``. This is bookkeeping about the connection rather
+#: than a fact about the bench, so it must be the *first* thing the event bus
+#: sheds under pressure. A heartbeat that displaced a real bench event would
+#: have inverted its own purpose.
+LINK_SEVERITY = ACTION_SEVERITY_READ
+
+#: How often the link heartbeat is emitted, as a multiple of the agent's
+#: advertised ``heartbeat_s``.
+#:
+#: Deliberately faster than the consumer's silence budget, which is
+#: ``heartbeat_s * SILENCE_HEARTBEATS`` (3.0) in
+#: :py:mod:`benchctrl.dashboards.state`. At 1.0 the two rates would be equal and
+#: ordinary scheduling jitter on a small board would produce false STALE
+#: flapping; at 3.0 or above every heartbeat would arrive exactly as the budget
+#: expired, which is the same bug with extra steps. One beat per interval against
+#: a three-beat budget means two may be lost or shed before the panel warns.
+LINK_INTERVAL_HEARTBEATS = 1.0
+
 #: How long one identical action signature keeps its line. A repeated read
 #: inside this window increments a count instead of emitting.
 ACTION_COALESCE_S = 0.5
@@ -802,6 +830,10 @@ class BenchAgent:
         self._rm: Optional[Any] = None
         self._rm_tried = False
         self._rm_lock = threading.Lock()
+        # When the last link heartbeat went out. None means "never", so the
+        # first due check on the deadman thread emits immediately rather than
+        # making a freshly-connected dashboard wait out a full interval.
+        self._last_link_mono: Optional[float] = None
 
     # --- lifecycle ------------------------------------------------------
 
@@ -816,11 +848,69 @@ class BenchAgent:
 
     def _deadman_loop(self) -> None:
         while not self._stop.wait(0.5):
+            # The trip check comes first and keeps its own handler, so nothing
+            # added below can delay or skip it. This thread's first duty is
+            # driving an abandoned bench safe; the heartbeat is a courtesy to a
+            # display and is strictly subordinate to that.
             try:
                 if self.governor.should_trip():
                     self.trip(TripReason.HEARTBEAT_LOST)
             except Exception:  # pragma: no cover
                 log.exception("deadman loop raised")
+            # Reuses this thread rather than starting a second one: it already
+            # ticks at 0.5 s, it is already guaranteed to be running whenever the
+            # agent is, and publishing is a non-blocking enqueue onto the event
+            # bus. A dedicated thread would cost a thread on a 2 GB board and add
+            # a lifecycle to get wrong, to do the same work on the same period.
+            try:
+                self._maybe_emit_link()
+            except Exception:  # pragma: no cover
+                log.exception("agent: link heartbeat raised")
+
+    def _maybe_emit_link(self) -> None:
+        """Emit a link heartbeat if one is due and anyone is listening.
+
+        Gated on an observer actually being attached. A bench with no dashboard
+        connected produces no heartbeats at all — there is nobody to reassure,
+        and a bus that carries an event every few seconds forever is a cost paid
+        by every consumer, including the run engine's own subscribers.
+
+        The interval is derived from the agent's advertised ``heartbeat_s``
+        rather than being a constant of its own, because that is the figure the
+        agent puts in its WELCOME and the figure a consumer builds its silence
+        budget from. Two independent numbers that must stay in a ratio is a
+        drift waiting to happen: change the config and the panel starts crying
+        wolf, with nothing in either file to say why.
+        """
+        interval = self.heartbeat_s * LINK_INTERVAL_HEARTBEATS
+        if interval <= 0:
+            return  # heartbeats disabled by configuration
+        now = time.monotonic()
+        if self._last_link_mono is not None and now - self._last_link_mono < interval:
+            return
+        # Checked after the clock, not before: an idle bench with no dashboard
+        # would otherwise leave ``_last_link_mono`` stale, and the first frame
+        # after one connects would be judged overdue by however long the agent
+        # had been sitting there alone.
+        if self.observer_count() <= 0:
+            self._last_link_mono = now
+            return
+        self._last_link_mono = now
+        self.events.publish(
+            {
+                "kind": LINK_KIND,
+                "severity": LINK_SEVERITY,
+                # What the heartbeat is *for*: a consumer can compare this to the
+                # interval it was promised and decide the link is late without
+                # having to know the agent's configuration.
+                "heartbeat_s": self.heartbeat_s,
+                # Included so a quiet beat still carries the two facts a status
+                # panel would otherwise have to poll for. Cheap and already in
+                # memory: neither touches an instrument.
+                "armed": sorted(self.governor.armed_devices),
+                "observers": self.observer_count(),
+            }
+        )
 
     def trip(self, reason: TripReason) -> dict:
         return self.governor.trip(
@@ -922,6 +1012,20 @@ class BenchAgent:
             log.debug("agent: error closing the VISA resource manager", exc_info=True)
 
     # --- sessions -------------------------------------------------------
+
+    def observer_count(self) -> int:
+        """How many observer sessions are currently attached.
+
+        The agent already knows this — an observer registers itself like any
+        other session — so "is a dashboard listening?" needs no new handshake or
+        registration verb. Using the session table rather than a separate
+        subscribe call also means the answer cannot drift from reality: a
+        dashboard whose socket died is out of ``_sessions`` by the time
+        ``drop_session`` returns, so it stops being counted without having to
+        remember to say goodbye.
+        """
+        with self._lock:
+            return sum(1 for s in self._sessions.values() if s.observer)
 
     def register_session(self, session: Session) -> None:
         with self._lock:

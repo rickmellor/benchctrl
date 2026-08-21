@@ -574,6 +574,11 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
         # `dropped_events`: folding is a declared summary, dropping is a loss.
         "actions": int(snap.get("actions_seen") or 0),
         "actions_folded": int(snap.get("actions_folded") or 0),
+        # Link heartbeats. The only positive evidence on an idle bench that the
+        # agent is still there: with nothing armed and no run, every other
+        # counter here stays put whether the link is quiet or dead. Never a log
+        # row — see `BenchStatus.apply_event`.
+        "link_beats": int(snap.get("link_beats") or 0),
         # The banner along the bottom. Says what the bench is doing, or admits
         # it does not know — never "SYSTEM READY" on an unreachable agent.
         "operation": _operation(snap),
@@ -630,7 +635,7 @@ def _log_lines(status: Optional[BenchStatus]) -> list[dict]:
             # folded a burst. Shown as "×47" rather than dropped, so a summarised
             # log reads as summarised.
             "count": _as_count(e.get("count")),
-            "ok": False if str(e.get("kind", "")) == "action_failed" else True,
+            "ok": str(e.get("kind", "")) != "action_failed",
         }
         for e in status.log[-LOG_ROWS:]
     ]
