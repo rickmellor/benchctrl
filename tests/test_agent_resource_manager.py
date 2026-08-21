@@ -56,6 +56,18 @@ class FakeResourceManager:
         self.close_calls = 0
         self.list_calls = 0
 
+    @property
+    def session(self):
+        """Raises once closed, like pyvisa's — the agent's liveness check.
+
+        Real pyvisa raises ``InvalidSession`` on attribute *access* after close,
+        which is what makes an open-but-dead manager detectable in ~24 us instead
+        of a ~1.4 s ``list_resources()``.
+        """
+        if self.closed:
+            raise RuntimeError("InvalidSession: the resource might be closed")
+        return 8200951
+
     def list_resources(self):
         self.list_calls += 1
         if self.closed:
@@ -432,3 +444,179 @@ def test_the_shared_manager_is_closed_at_shutdown_and_only_then(tmp_path, fake_v
     assert rm.close_calls == 1
     # And a scan racing teardown gets nothing rather than a fresh manager.
     assert agent.resource_manager() is None
+
+
+# --------------------------------------------------------------------------
+# Drivers must not close the singleton
+# --------------------------------------------------------------------------
+#
+# The tests above guard the *scan* side and held throughout the second outage,
+# because the closer was not a scan: each VISA driver's ``connect`` builds its
+# own manager and its ``close`` used to close it under
+# ``if self._owns_rm``. Since the manager is a singleton, "its own" is the
+# agent's, so closing one instrument silently killed VISA for the whole agent.
+
+
+class _RecordingInstrument:
+    """Minimal stand-in for a pyvisa Resource."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.timeout = 0
+        self.read_termination = ""
+        self.write_termination = ""
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize(
+    ("module_path", "class_name"),
+    [
+        ("benchctrl.drivers.siglent_sdm4065a.driver", "SiglentSDM4065A"),
+        ("benchctrl.drivers.rigol_dp2031.driver", "RigolDP2031"),
+        ("benchctrl.drivers.rigol_dl3031a.driver", "RigolDL3031A"),
+    ],
+)
+def test_closing_an_instrument_does_not_close_the_shared_manager(
+    module_path, class_name
+):
+    """Every VISA driver: closing the instrument must spare the manager.
+
+    Parametrised over all three because the bug was copy-pasted identically into
+    each, so fixing only the one being demonstrated would leave the same outage
+    reachable through the supply or the load.
+
+    ``owns_resource_manager=True`` is passed deliberately — that is the flag the
+    factory sets and the one the old code branched on, so this asserts the flag
+    no longer licenses closing a manager nobody can own.
+    """
+    import importlib
+
+    cls = getattr(importlib.import_module(module_path), class_name)
+    rm = FakeResourceManager()
+    inst = _RecordingInstrument()
+
+    dev = cls(
+        inst,
+        resource_string=SIGLENT_RESOURCE,
+        owns_resource_manager=True,
+        resource_manager=rm,
+    )
+    dev.close()
+
+    assert inst.closed, "the instrument's own session must still be released"
+    assert rm.close_calls == 0, (
+        f"{class_name}.close() closed the shared VISA manager; every other open "
+        "instrument's next query now raises InvalidSession"
+    )
+    # The manager is not merely unclosed but still usable, which is the property
+    # the bench actually depends on.
+    assert rm.list_resources() == (SIGLENT_RESOURCE,)
+
+
+def test_a_second_instrument_still_works_after_the_first_is_closed():
+    """The bench-observed symptom, end to end through two drivers.
+
+    Two instruments share the singleton. Closing the DMM used to make the
+    supply's manager dead, so discovery reported an empty bus and the HDMI
+    dashboard rendered NOT FOUND for hardware that was plugged in and answering.
+    """
+    from benchctrl.drivers.rigol_dp2031.driver import RigolDP2031
+    from benchctrl.drivers.siglent_sdm4065a.driver import SiglentSDM4065A
+
+    rm = FakeResourceManager()
+    dmm = SiglentSDM4065A(
+        _RecordingInstrument(),
+        resource_string=SIGLENT_RESOURCE,
+        owns_resource_manager=True,
+        resource_manager=rm,
+    )
+    psu_inst = _RecordingInstrument()
+    RigolDP2031(
+        psu_inst,
+        resource_string="USB0::6833::42152::DP2A243500269::0::INSTR",
+        owns_resource_manager=True,
+        resource_manager=rm,
+    )
+
+    dmm.close()
+
+    assert not psu_inst.closed, "closing the DMM must not touch the supply"
+    # The scan the dashboard runs every 30 s still sees the bench.
+    assert [d.path for d in discovery.scan_visa(rm)] == [SIGLENT_RESOURCE]
+
+
+# --------------------------------------------------------------------------
+# Recovery from a poisoned singleton
+# --------------------------------------------------------------------------
+
+
+def test_the_agent_rebuilds_a_manager_that_something_else_closed(agent, fake_visa):
+    """``_rm_tried`` must not latch a dead manager for the life of the process.
+
+    Belt and braces behind the driver fix: any third party in the process can
+    close the singleton (a script, a notebook, a driver added later), and the
+    agent should not need a service restart to see its instruments again.
+    """
+    fake = fake_visa()
+    assert _discover(agent)["count"] == 1
+    poisoned = agent.resource_manager()
+
+    poisoned.close()  # somebody else's teardown, not the agent's
+
+    assert _discover(agent)["count"] == 1, "the agent did not recover"
+    assert fake.constructions == 2, "expected exactly one rebuild"
+    assert agent.resource_manager() is not poisoned
+
+
+def test_a_live_manager_is_never_rebuilt(agent, fake_visa):
+    """The recovery check must not cost a manager per poll.
+
+    Distinguishes "rebuild when dead" from "rebuild always" — the latter would
+    pass the recovery test above while reintroducing the original outage, since
+    each new manager construction abandons the previous singleton handle.
+    """
+    fake = fake_visa()
+
+    for _ in range(5):
+        assert _discover(agent)["count"] == 1
+
+    assert fake.constructions == 1
+    assert agent.resource_manager().close_calls == 0
+
+
+def test_recovery_does_not_resurrect_the_manager_after_shutdown(tmp_path, fake_visa):
+    """Shutdown still wins: ``_rm is None`` means gone, not "rebuild me".
+
+    The liveness check is only consulted for a manager that exists, so the
+    deliberate teardown latch keeps working — otherwise a scan racing shutdown
+    would build a fresh manager on a bench that has just been driven safe.
+    """
+    fake = fake_visa()
+    agent = BenchAgent(DeviceRegistry(), token=TOKEN, runs_dir=tmp_path / "runs")
+    _discover(agent)
+    agent.shutdown()
+
+    assert agent.resource_manager() is None
+    assert fake.constructions == 1, "shutdown must not be followed by a rebuild"
+
+
+def test_a_failed_visa_scan_is_logged_loudly_enough_to_see(caplog):
+    """A dead bus must not read like an idle bench.
+
+    An empty return is ambiguous by nature, so the *log* is the only thing that
+    separates "no VISA instruments connected" from "VISA is broken". At debug
+    level this said nothing at the service's normal level, which is why three
+    connected instruments showed NOT FOUND with a silent journal.
+    """
+
+    class DeadManager:
+        def list_resources(self):
+            raise RuntimeError("InvalidSession: the resource might be closed")
+
+    with caplog.at_level("WARNING", logger="benchctrl.discovery"):
+        assert discovery.scan_visa(DeadManager()) == []
+
+    assert caplog.records, "a total loss of the VISA bus was logged below WARNING"
+    assert "InvalidSession" in caplog.text

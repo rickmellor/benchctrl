@@ -956,7 +956,19 @@ class BenchAgent:
             # VISA backend would otherwise retry the ~1.6 s construction on
             # every 30 s inventory poll, forever.
             if self._rm_tried:
-                return self._rm
+                if self._rm is None or self._rm_is_live(self._rm):
+                    return self._rm
+                # The manager is open-but-dead: something closed the singleton
+                # out from under us. Rebuild rather than hand back a handle
+                # whose every use raises. Without this the agent never
+                # recovers, because ``_rm_tried`` stays latched for the life of
+                # the process — on the bench board that showed up as the supply,
+                # load and DMM all reading NOT FOUND until a service restart.
+                log.warning(
+                    "agent: the shared VISA manager was closed by something "
+                    "else; rebuilding it"
+                )
+                self._rm = None
             self._rm_tried = True
             try:
                 import pyvisa
@@ -967,6 +979,31 @@ class BenchAgent:
                 log.info("agent: no shared VISA resource manager (%s)", exc)
                 self._rm = None
             return self._rm
+
+    @staticmethod
+    def _rm_is_live(rm: Any) -> bool:
+        """Whether a ResourceManager still has a valid session.
+
+        Reads ``rm.session``, which pyvisa turns into an ``InvalidSession`` raise
+        once the manager is closed. Measured at ~24 us on the bench board — cheap
+        enough to check on the path of every inventory poll, unlike
+        ``list_resources()``, which enumerates USB and takes ~1.4 s.
+
+        A manager with no ``session`` attribute at all (a fake, or a backend that
+        does not expose one) counts as live: the point is to catch the specific
+        closed-singleton failure, not to reject anything unfamiliar.
+        """
+        try:
+            # Assigned rather than read bare: the *raise* is the signal, but a
+            # bare attribute read reads as dead code (and ruff flags it as one).
+            # The value itself is deliberately not judged — only whether getting
+            # it raised.
+            _ = rm.session
+        except AttributeError:
+            return True
+        except Exception:  # noqa: BLE001 - InvalidSession and friends
+            return False
+        return True
 
     def shutdown(self) -> None:
         self._stop.set()

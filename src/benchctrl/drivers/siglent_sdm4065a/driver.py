@@ -348,6 +348,9 @@ class SiglentSDM4065A:
     ):
         self._inst = instrument
         self._resource = resource_string
+        # Retained for API compatibility, but no longer gates anything: a
+        # ResourceManager is a process-wide singleton, so no driver can own one.
+        # See :py:meth:`close`.
         self._owns_rm = owns_resource_manager
         self._rm = resource_manager
         self._info: Optional[SDM4065AInfo] = None
@@ -427,18 +430,29 @@ class SiglentSDM4065A:
         return dmm
 
     def close(self) -> None:
-        """Release the VISA session. Safe to call more than once."""
+        """Release *this instrument's* VISA session. Safe to call more than once.
+
+        Deliberately does not close the ResourceManager, even when
+        ``owns_resource_manager`` was set. ``pyvisa.ResourceManager()`` is a
+        **singleton**: the manager this driver built in :py:meth:`connect` is the
+        same underlying object as the agent's and every other driver's, so there
+        is no such thing as a manager this driver owns. Closing it invalidates
+        the shared session for everyone — bench-verified on the Uno Q, where
+        closing the DMM made ``list_resources()`` raise ``InvalidSession`` for the
+        whole agent, which ``discovery.scan_visa`` reports as an empty bus, so the
+        HDMI dashboard showed the supply, load and DMM as NOT FOUND while all
+        three were plugged in and working.
+
+        Releasing ``self._inst`` is what frees the USB endpoint; the manager holds
+        no per-instrument resource worth reclaiming. The process exiting is what
+        closes the manager, plus the agent's own deliberate shutdown path.
+        """
         if self._closed:
             return
         try:
             self._inst.close()
         except Exception:
             log.debug("error closing VISA instrument", exc_info=True)
-        if self._owns_rm and self._rm is not None:
-            try:
-                self._rm.close()
-            except Exception:
-                log.debug("error closing VISA resource manager", exc_info=True)
         self._closed = True
 
     @property

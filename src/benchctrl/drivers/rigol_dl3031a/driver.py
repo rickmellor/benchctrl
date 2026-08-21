@@ -230,18 +230,20 @@ class RigolDL3031A:
         )
 
     def close(self) -> None:
-        """Release the VISA session. Safe to call multiple times."""
+        """Release *this instrument's* VISA session. Safe to call multiple times.
+
+        Does not close the ResourceManager, even though :py:meth:`connect` built
+        one: ``pyvisa.ResourceManager()`` is a **singleton**, so that manager is
+        also the agent's and every other driver's. Closing it raises
+        ``InvalidSession`` for every other open instrument and makes the bus scan
+        report an empty bench. See :py:meth:`SiglentSDM4065A.close`.
+        """
         if self._closed:
             return
         try:
             self._inst.close()
         except Exception:
             log.debug("error closing VISA instrument", exc_info=True)
-        if self._owns_rm and self._rm is not None:
-            try:
-                self._rm.close()
-            except Exception:
-                log.debug("error closing VISA resource manager", exc_info=True)
         self._closed = True
 
     def __enter__(self) -> RigolDL3031A:

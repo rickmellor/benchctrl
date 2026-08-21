@@ -382,8 +382,18 @@ def scan_visa(resource_manager=None) -> list[DiscoveredDevice]:
 
     try:
         resources = sorted(rm.list_resources())
-    except Exception as exc:  # pragma: no cover - backend-specific
-        log.debug("VISA list_resources failed: %s", exc)
+    except Exception as exc:
+        # Warning, not debug: an empty list here is indistinguishable from "no
+        # VISA instruments plugged in", so at debug level a total loss of the
+        # VISA bus looks exactly like an idle bench. That is precisely how the
+        # closed-singleton bug stayed hidden — the dashboard rendered NOT FOUND
+        # for three connected instruments and the service log said nothing at
+        # its normal level.
+        log.warning(
+            "VISA list_resources failed, so this scan reports no VISA "
+            "instruments even if some are connected: %s",
+            exc,
+        )
         return []
     finally:
         if close_after:
