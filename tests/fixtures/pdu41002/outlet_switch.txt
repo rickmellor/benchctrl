@@ -1,0 +1,84 @@
+### PDU41002 mains switching, over SERIAL — outlet 8, real contactor movement
+### firmware 1.3.4 / captured 2026-08-24
+### Nothing was plugged into the PDU. Outlet 8 was left On.
+###
+### THE CENTRAL FINDING: oltctrl returns NO confirmation of any kind. Compare
+### the SWITCH-OFF response below with the PRE response — the command produces
+### a blank line and a re-prompt, and nothing else. There is no "OK", no status,
+### no error, and the response is byte-identical whether or not the outlet
+### actually moved.
+###
+### That is why read-back verification is mandatory rather than prudent: the
+### response cannot distinguish success from a no-op. verify=True re-reads
+### oltsta index N show and compares.
+
+### PRE — state before switching
+### CMD: oltsta index 8 show
+oltsta index 8 show
+
+    Outlet8
+    Outlet Name : Outlet8
+    Status :      On
+
+CyberPower >
+
+### SWITCH-OFF — the write. Round trip 0.62s.
+### CMD: oltctrl index 8 act off
+oltctrl index 8 act off
+
+CyberPower >
+
+### POST-OFF — read back after ~2s settle. Status flipped to Off.
+### CMD: oltsta index 8 show
+oltsta index 8 show
+
+    Outlet8
+    Outlet Name : Outlet8
+    Status :      Off
+
+CyberPower >
+
+### SWITCH-ON — the write. Round trip 0.63s.
+### CMD: oltctrl index 8 act on
+oltctrl index 8 act on
+
+CyberPower >
+
+### POST-ON — read back after ~4s settle. Restored to On.
+### Note oltcfg reports a 3s on-delay and 3s off-delay per outlet, so the
+### settle window must exceed the configured delay, not just the ~1.5s the
+### contactor itself takes. A retry loop bounded at ~1.5s would flake here.
+### CMD: oltsta index 8 show
+oltsta index 8 show
+
+    Outlet8
+    Outlet Name : Outlet8
+    Status :      On
+
+CyberPower >
+
+### FINAL — all 8 outlets confirmed On at end of capture.
+### CMD: oltsta show
+oltsta show
+
+    #  Name                                 Status
+    -----------------------------------------------------------------------------
+    1  Outlet1                              On
+    2  Outlet2                              On
+    3  Outlet3                              On
+    4  Outlet4                              On
+    5  Outlet5                              On
+    6  Outlet6                              On
+    7  Outlet7                              On
+    8  Outlet8                              On
+
+CyberPower >
+
+### Timing summary for the retry window
+###   oltctrl command round trip:     ~0.62 s (both directions)
+###   configured on/off delay:         3 s per outlet (oltcfg index all show)
+###   configured reboot duration:      5 s per outlet
+###   observed state settle:           within 2 s for off, within 4 s for on
+### A read-back retry budget must therefore cover the CONFIGURED delay plus
+### margin — the driver should derive it from oltcfg rather than hardcode it,
+### because an operator can change td_on/td_off per outlet.
