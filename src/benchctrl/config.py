@@ -41,6 +41,7 @@ DEVICE_KEYS: tuple[str, ...] = (
     "rigol_dl3031a",
     "rigol_dp2031",
     "siglent_sdm4065a",
+    "cyberpower_pdu41002",
 )
 
 MODES: tuple[str, ...] = ("local", "remote", "sim")
@@ -103,9 +104,46 @@ class EndpointConfig:
         )
 
 
+#: Keys in ``DeviceConfig.open`` whose values are secrets and must never be
+#: round-tripped by ``to_dict()``. Mirrors what ``EndpointConfig.to_dict()``
+#: already does for ``token``.
+SECRET_OPEN_KEYS: frozenset[str] = frozenset({"password", "passphrase", "secret"})
+
+#: What a masked secret is replaced with, matching ``EndpointConfig.to_dict()``.
+MASKED = "***"
+
+
+def _mask_secrets(open_kwargs: Mapping[str, Any]) -> dict:
+    """Copy ``open_kwargs`` with any secret value replaced by ``"***"``.
+
+    ``to_dict()`` feeds ``save()`` and the diagnostic dumps, so an unmasked
+    password here gets written back into a config file on disk. The preferred
+    path is to keep the secret out of config entirely — the PDU driver reads
+    ``BENCHCTRL_PDU_PASSWORD`` from the environment for exactly that reason —
+    but a config that does carry one should not be the thing that persists it.
+
+    Note this masks the *output* only. It deliberately does not alter the live
+    ``open`` dict, which still has to reach the driver intact.
+    """
+    return {
+        k: (MASKED if k in SECRET_OPEN_KEYS and v is not None else v)
+        for k, v in open_kwargs.items()
+    }
+
+
 @dataclass(frozen=True)
 class DeviceConfig:
-    """Where one device lives."""
+    """Where one device lives.
+
+    ``open`` is an untyped dict forwarded to the driver's ``open()`` as
+    ``**open_kwargs``. Two cautions, both load-bearing for the PDU:
+
+    - It is **not** a place for secrets. It crosses the agent RPC wire, which is
+      authenticated but unencrypted, and ``to_dict()`` masks known secret keys
+      on output but cannot mask one it does not recognise.
+    - Round-tripping through ``to_dict()`` is therefore lossy by design for
+      those keys; ``from_dict(to_dict(x))`` does not preserve a password.
+    """
 
     mode: str = "local"
     endpoint: Optional[str] = None
@@ -122,7 +160,7 @@ class DeviceConfig:
         if self.endpoint:
             d["endpoint"] = self.endpoint
         if self.open:
-            d["open"] = dict(self.open)
+            d["open"] = _mask_secrets(self.open)
         return d
 
     @classmethod

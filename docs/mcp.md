@@ -5,7 +5,7 @@ exposes your whole bench as tools any MCP-aware client (Claude Code,
 Claude Desktop, Cursor, custom agents) can call. Built on the official
 `mcp` Python SDK.
 
-**280 tools**, registered per driver:
+**292 tools**, registered per driver:
 
 | Source | Tools |
 |---|---|
@@ -14,8 +14,9 @@ Claude Desktop, Cursor, custom agents) can call. Built on the official
 | Rigol DL3031A | 45 |
 | Rigol DP2031 | 134 |
 | Siglent SDM4065A | 54 |
+| CyberPower PDU41002 | 12 |
 | Cross-driver (battery, recording I/O, connection) | 13 |
-| **Total** | **280** |
+| **Total** | **292** |
 
 Each driver registers its own surface via `register_mcp_tools(mcp)`;
 `benchctrl.mcp` is the orchestrator that wires them together. A driver
@@ -68,7 +69,7 @@ BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_TOKEN=... benchctrl-mcp
 BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_LOCAL_DEVICES=otii_arc benchctrl-mcp
 
 # no hardware at all
-BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a benchctrl-mcp
+BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a,cyberpower_pdu41002 benchctrl-mcp
 ```
 
 With nothing configured everything is local. See
@@ -151,6 +152,7 @@ their SDK methods, which are documented in [`drivers.md`](drivers.md):
 | `dl3031a_*` | Rigol DL3031A | 45 |
 | `dp2031_*` | Rigol DP2031 | 134 |
 | `sdm4065a_*` | Siglent SDM4065A | 54 |
+| `pdu41002_*` | CyberPower PDU41002 | 12 |
 
 The DP2031 set is the large one, covering source/measure, protection,
 IEEE 488.2 status, channel pairing and tracking, the Arb timer
@@ -164,6 +166,25 @@ number instead, so the tools that affect accuracy — `sdm4065a_set_range`,
 docstrings. In particular `sdm4065a_measure_*` reconfigures before it
 triggers and therefore discards a null; `sdm4065a_read` and
 `sdm4065a_read_nulled` are the ones to use after nulling.
+
+The `pdu41002_*` set is the one to read the docstrings of before
+calling. It is the only driver whose device switches mains, and in this
+release every one of its tools is **read-only** — `pdu41002_open`
+reports `switching_available: false` through
+`pdu41002_allowed_outlets()` so a model cannot infer from an allowlist
+that it has a way to use it. `pdu41002_open` also takes **no password
+parameter**: it is absent rather than defaulted, because a credential
+passed as a tool argument would be logged in the conversation
+transcript. The password comes from `BENCHCTRL_PDU_PASSWORD` in the
+server's environment.
+
+Two device behaviours worth knowing before a model calls them:
+`pdu41002_open` fails with a *session* error, not an auth error, when
+another transport holds the device's single CLI session — and it fails
+that way *after* the password is accepted; and `pdu41002_close` must be
+called, because closing the connection without it leaves the PDU
+unreachable from the other transport. See
+[`drivers.md`](drivers.md#cyberpower-pdu41002--8-outlet-switched-pdu).
 
 Four of its tools exist because of documented firmware defects rather
 than because the SCPI surface needed them: `sdm4065a_command_error`

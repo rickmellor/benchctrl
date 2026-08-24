@@ -9,6 +9,91 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### CyberPower PDU41002 switched PDU — reads, over serial *or* SSH
+
+The bench can now see mains: eight-outlet 120 V / 20 A switched PDU,
+whole-device metering, per-outlet state and delays. It is the first
+driver whose device switches mains power and the first with a network
+transport — and, in this release, **nothing in it can move a
+contactor.** Reads land first on purpose, so the parsers, the session
+handling and the allowlist machinery are all proven on hardware before
+any method can cut power.
+
+`open(port=...)` selects the serial console, `open(host=...)` selects
+SSH, and supplying both raises rather than silently preferring one:
+which wire carried a mains switch has to be answerable from a run log.
+`allowed_outlets` is a required keyword argument with no "all" default,
+because a config typo has to fail closed on this device.
+
+One CLI engine serves both transports, and that was measured rather
+than assumed — `sys show`, `oltsta show`, `console show` and friends are
+byte-identical across the two, and a `PDU41002Info` read over SSH
+compares equal to the same read over serial. So there is one grammar,
+one set of parsers and one simulator. **No SNMP** (disabled on the
+device, and the CLI covers every capability) and **no new
+dependencies**: serial is `pyserial`, SSH is a `pty.fork()` to
+`/usr/bin/ssh`, so nothing needs a compiled wheel on a board with no
+pip.
+
+Three device behaviours drove design decisions that look odd without
+them:
+
+- **The CLI is single-session across the whole device**, and the
+  incumbent wins. A second login *completes* — banner and all — and is
+  then hung up, so the failure is indistinguishable from a bad password
+  unless the driver names it. Hence a distinct `PDU41002SessionError`
+  that survives the RPC wire. Consequence: `close()` **must** send
+  `exit`, because CLI session state outlives the serial port and a
+  driver that merely closes its port leaves the PDU unreachable from
+  the other transport. This is the only `close()` in the repo with a
+  required side effect on the device.
+- **There is no interrupt character.** `\x03` is echoed and taken as
+  part of the command; a bare `CR` is the resync. This one was caught by
+  the simulator faithfully reproducing the hardware rather than
+  agreeing with the driver.
+- **SSH needs three non-default flags**, each fixed by measurement:
+  group-*exchange* KEX fails on firmware 1.3.4 (force
+  `diffie-hellman-group14-sha256`), the device offers only
+  `keyboard-interactive` so pubkey auth is refused and a pty is
+  mandatory, and the exported host key is all zeros so host-key
+  verification is worthless — pinned to `/dev/null` rather than
+  poisoning the operator's `known_hosts`.
+
+**First device in benchctrl that needs a secret.** It is read from
+`BENCHCTRL_PDU_PASSWORD` in the environment of the process that talks to
+the device, never from config and never from `open_kwargs`:
+`DeviceConfig.to_dict()` writes `open` back verbatim, and the RPC wire
+is HMAC-authenticated but plaintext, so either path would have leaked
+it. `DeviceConfig.to_dict()` now also masks `password` / `passphrase` /
+`secret` keys inside `open` as `***`, which makes config round-tripping
+lossy for those keys by design. The MCP `pdu41002_open` tool has no
+password parameter at all — absent, not defaulted, so a model cannot put
+a credential where it would be logged in a transcript.
+
+Method names are constrained by the agent's dispatch gate, which derives
+mutators purely from name prefixes: an `outlet_on()` would have been
+remotely callable *without a writer claim*, i.e. mains switching
+bypassing the claim gate. Every future switching method therefore takes
+an existing prefix, and adding `"outlet_"` to the prefix list was
+rejected because it would also capture the reads.
+
+Self-protection here is a **cabling invariant, not a software
+guarantee**: the PDU powers bench instruments and DUTs only, with the
+agent host and network gear deliberately not plugged into it. That is
+written down in `docs/drivers.md` as a deployment assumption, because it
+is what makes a governor-triggered cut safe to support at all.
+
+Fixtures under `tests/fixtures/pdu41002/` are verbatim transcript
+excerpts with firmware version and capture date, not text written from
+the manual — a simulator built from the same misreading as the driver
+agrees with it. `deploy/udev/62-benchctrl-ftdi.rules` binds
+`/dev/benchctrl/pdu41002` to the adapter's serial number, since
+`ttyUSB0` is enumeration-order and the driver must not open whichever
+cable happened to come up first.
+
+Still to come: outlet switching with mandatory read-back verification,
+and run-engine integration so a phase can power-cycle a DUT.
+
 ### Serial transport selection — kernel driver first
 
 `benchctrl.transports.autoserial` picks how to reach a CH340-based

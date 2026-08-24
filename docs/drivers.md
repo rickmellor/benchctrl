@@ -17,6 +17,7 @@ Each driver is independent and optional. Import only what you need.
 | Rigol DL3031A electronic load | `benchctrl.drivers.rigol_dl3031a.RigolDL3031A` | USB-TMC + SCPI via pyvisa | **shipped (v0.9.3)** |
 | Rigol DP2031 triple-output programmable PSU | `benchctrl.drivers.rigol_dp2031.RigolDP2031` | USB-TMC + SCPI via pyvisa | **shipped (v1.1.0)** |
 | Siglent SDM4065A 6½-digit bench DMM | `benchctrl.drivers.siglent_sdm4065a.SiglentSDM4065A` | USB-TMC + SCPI via pyvisa | **shipped (unreleased)** |
+| CyberPower PDU41002 8-outlet switched PDU | `benchctrl.drivers.cyberpower_pdu41002.CyberPowerPDU41002` | vendor CLI over USB-Serial (FTDI) **or** SSH | **reads only (unreleased)** |
 
 ## QR10x — programmable resistance
 
@@ -765,3 +766,227 @@ on the instrument. The simulator accepts both deliberately: matching
 only the colon-prefixed form would make error queries fall through to
 the generic register model and answer `0`, i.e. a permanently clean
 error queue — the one failure a driver cannot detect for itself.
+
+## CyberPower PDU41002 — 8-outlet switched PDU
+
+[CyberPower PDU41002](https://www.cyberpowersystems.com) — 1U rack
+switched PDU, 120 V / 20 A, eight individually switchable NEMA 5-20R
+outlets, whole-device metering, RS-232 console and 10/100 Ethernet.
+
+This is the first driver in the tree that **switches mains power**, and
+the first with a network transport. Both facts change how it is shaped.
+
+For every other instrument, "safe" means *output off*. For a PDU,
+cutting mains is itself the disruptive act: it can de-power a DUT
+mid-measurement and drop other instruments' sessions. So the default is
+**do not move the contactors**, every switchable outlet is opt-in, and
+`close()` deliberately leaves outlet state alone.
+
+> **This release is reads only.** No method in the current driver can
+> change an outlet. `allowed_outlets` is validated and recorded but not
+> yet used, and the MCP surface says so in
+> `pdu41002_allowed_outlets()`. Switching lands with `set_outlet_state`.
+
+### Quick start
+
+```python
+from benchctrl.drivers.cyberpower_pdu41002 import CyberPowerPDU41002
+
+# serial — the bootstrap and recovery transport
+with CyberPowerPDU41002.open(port="/dev/benchctrl/pdu41002",
+                             allowed_outlets=(1, 2)) as pdu:
+    print(pdu.read_identity())          # sys show
+    print(pdu.read_device_status())     # devsta show — load, V, Hz, kWh
+    print(pdu.outlet_states())          # {1: True, 2: True, ...}
+
+# network — same driver, same CLI, same parsers
+with CyberPowerPDU41002.open(host="pdu-benchctrl",
+                             allowed_outlets=(1, 2)) as pdu:
+    print(pdu.measure_load_A())
+```
+
+`allowed_outlets` is a **required** keyword argument. There is no "all"
+default and no `Optional`: a config typo has to fail closed on the one
+device that can drop mains.
+
+### One CLI, two byte pipes, no SNMP
+
+The vendor CLI is byte-identical over both transports. That was measured,
+not assumed — `sys show`, `oltsta show`, `oltsta index 1 show`,
+`console show` and `snmpv1 show` compare exactly across serial and SSH,
+and a `PDU41002Info` read over SSH compares equal to the same read over
+serial. `devsta show` differs only in live mains voltage.
+
+So there is one command engine, one grammar, one set of parsers and one
+simulator, with a deliberately thin link seam beneath
+(`write` / `read` / `is_open` / `close`). Adding the SSH path changed no
+public signature.
+
+SNMP is **not used and is disabled on the device**. The CLI covers
+switching, state, metering and identity, so SNMP would have bought a
+second differently-shaped protocol, a second codec and a second
+simulator for zero capability — plus a cleartext-credential exposure.
+
+### Only one session exists — on the whole device
+
+The PDU permits **exactly one CLI session at a time across all
+transports**, and this is the single most surprising thing about it:
+
+- **The incumbent wins.** An SSH login attempted while serial is logged
+  in *completes* — the banner prints in full — and the device then
+  immediately hangs up. The serial session carries on unaffected.
+- **The failure looks exactly like a bad password**, because it arrives
+  *after* the password is accepted. The driver raises
+  `PDU41002SessionError` rather than an auth error specifically so this
+  is diagnosable; that type survives the RPC wire for the same reason.
+- **Closing the port does not end the device session.** CLI session
+  state outlives the serial port, so `close()` **must** send `exit`.
+  Skipping it leaves the PDU unreachable from the other transport. This
+  is the one driver in the repo whose `close()` has a required side
+  effect on the device.
+
+"Network alongside serial" therefore means **alternating, not
+concurrent**. `open()` takes exactly one transport; passing both `port`
+and `host` raises rather than silently preferring one, so a run log can
+always answer which wire a switch travelled on.
+
+Serial stays the bootstrap and recovery path: no key, no negotiation,
+no password-prompt handling.
+
+### The password
+
+The PDU is benchctrl's first device that needs a secret, and the obvious
+places to put one are both wrong:
+
+- `DeviceConfig.open` is written back verbatim by `to_dict()`, so a
+  password there lands in any saved config;
+- `open_kwargs` crosses benchctrl's RPC wire, which is
+  HMAC-authenticated but **plaintext**.
+
+So leave `password=None` and set **`BENCHCTRL_PDU_PASSWORD`** in the
+environment of the process that talks to the device — the agent's own
+environment, not the client's. A missing password fails at `open()`
+naming the variable, rather than later as a login timeout.
+
+```bash
+read -rs BENCHCTRL_PDU_PASSWORD && export BENCHCTRL_PDU_PASSWORD
+```
+
+Belt and braces around that: `DeviceConfig.to_dict()` now masks
+`password` / `passphrase` / `secret` keys in `open` as `***` (so
+config round-tripping is lossy for those keys **by design**), the
+driver's and links' `__repr__` carry no credential material, and the
+password never reaches a command line — no `sshpass`, no env prefix on
+the ssh argv, both of which would expose it in the process list.
+
+The simulator accepts a configured password, so hardware-free tests
+never need the real one.
+
+### SSH quirks worth knowing (firmware 1.3.4)
+
+Each of these is a fixed flag in `links.py` with a comment; they look
+like sloppy security defaults and are not.
+
+| Symptom | Cause | What the driver does |
+|---|---|---|
+| `key exchange failed!` | group-*exchange* KEX is broken on this firmware | forces `KexAlgorithms=diffie-hellman-group14-sha256` |
+| `Permission denied (keyboard-interactive)` even with the matching key uploaded | device offers keyboard-interactive **only**; pubkey auth is refused | `PubkeyAuthentication=no`, and a pty via `pty.fork()` + `ssh -tt` to type the password |
+| host key reads as all zeros | the exported ed25519 host key is null | `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` — unverifiable either way, so don't poison the operator's `known_hosts` |
+
+Login over SSH takes around 7.5 s. It is slow, not stuck.
+
+### Reads
+
+| Method | CLI verb | Notes |
+|---|---|---|
+| `read_identity()` | `sys show` | name, location, contact, model, HW/FW version, MAC — the `*IDN?` equivalent |
+| `read_device_status()` | `devsta show` | load A/W/VA, power factor, voltage, frequency, peak load, energy kWh |
+| `measure_load_A()` / `measure_voltage_V()` / `measure_frequency_Hz()` | `devsta show` | scalar convenience wrappers |
+| `outlet_states()` | `oltsta show` | every outlet in one round trip |
+| `outlet_state(n)` / `outlet_name(n)` | `oltsta` | `True` means energised |
+| `read_outlet_config(refresh=False)` | `oltcfg index all show` | per-outlet on/off delay and reboot duration; cached |
+| `transport` / `is_open` / `outlet_count` / `allowed_outlets` / `panic_outlets` | — | properties |
+
+Metering is **whole-device**. The PDU41002 does not meter outlets
+individually, so there is no per-outlet current to ask for.
+`power_factor` is `None` at zero load — the device prints `----`, which
+is normal rather than a fault.
+
+### Deployment assumptions
+
+**Self-protection here is a cabling invariant, not a software
+guarantee.** The driver cannot know which outlet feeds what.
+
+The current bench policy is that the PDU powers **bench instruments and
+DUTs only**: the Arduino Uno Q agent host and the network gear are *not*
+plugged into it. That is what makes it impossible for the bench to cut
+power to its own agent, or to the control path that would recover it.
+
+If that ever changes — if the board or the switch is moved onto the PDU
+— then `allowed_outlets` and `panic_outlets` are the controls to
+revisit *before* the move, not after. Defence in depth available on the
+device itself: its `oltuser` model can restrict outlets in firmware.
+Configure that by hand if you want it; benchctrl will not do it for you.
+
+Open the adapter by its stable symlink, not `/dev/ttyUSB0`:
+`deploy/udev/62-benchctrl-ftdi.rules` binds
+`/dev/benchctrl/pdu41002` to the FTDI serial number, because ttyUSB
+numbering is enumeration-order and a second USB-serial adapter can take
+`ttyUSB0` while the driver still opens it and starts issuing commands.
+
+### Traps the driver avoids by construction
+
+- **`menumode` is a one-way trap.** Sending it switches the session to a
+  menu interface, and returning to the CLI requires a full logout and
+  login. Every parser would then fail while the link still looks
+  healthy. No method emits it.
+- **`console telnet enable` would disable SSH.** The two are mutually
+  exclusive in firmware, so that verb can kill the network transport
+  from underneath a running test. Not in the method surface.
+- **There is no interrupt character.** `\x03` is not an interrupt on
+  this CLI — it is echoed and taken as part of the command (a stray one
+  produces `Command not found` at a constant column). A bare `CR` *is*
+  the resync, and that is what `_resync()` sends after a timeout.
+- **Read until the prompt, never until a blank line.** An unknown verb
+  produces a ~30-line verb dump, and the number of blank lines before
+  the prompt varies by error shape (2, 3, 0). Blank-line termination
+  truncates mid-error and desyncs the session.
+- **Line endings are not uniform** — caret lines are introduced by a
+  bare `\n\r`. The engine parses bytes rather than trusting
+  `splitlines()`.
+- **Serial echoes the command; SSH does not.** The largest textual
+  difference between the transports, and why echo stripping is
+  conditional on the link.
+- **Idle logout is a safety hazard, not an annoyance.** After the idle
+  timeout (`devcfg idletime`, default 3 min) a command is consumed *as a
+  username* and silently swallowed. `_cmd()` detects a login prompt in
+  any response, and read-back verification is the second line of
+  defence.
+
+### Simulator
+
+`benchctrl.sim.pdu41002.SimulatedPDU41002` replays captured device
+output byte-for-byte: the canned responses under
+`tests/fixtures/pdu41002/` are verbatim transcript excerpts with the
+firmware version and capture date recorded, not text written from the
+manual. That distinction matters — a simulator built from the same
+misreading as the driver agrees with it. This one earned its keep
+immediately by reproducing the hardware's handling of `\x03`, which is
+how that driver bug was found.
+
+Test hooks: `hold_session()` / `release_session()` (single-session
+contention), `force_logout()` (deterministic re-auth, no wall clock),
+`command_log`, `login_log` (records `(user, accepted)` — never
+passwords), `hangup_count` and `inject_error(shape)`.
+
+One caveat recorded in the fixture README: the prompt is
+`"CyberPower > "` **with a trailing space** on the wire. The checked-in
+fixture files lost it to trailing-whitespace stripping, so do not
+"correct" `PROMPT` to match the files — every read would break.
+
+### MCP tools
+
+12 tools, prefixed `pdu41002_`, all read-only. `pdu41002_open` takes
+**no password parameter at all** — absent, not defaulted — so a model
+cannot place a credential in a tool-call argument where it would be
+logged in the conversation transcript.

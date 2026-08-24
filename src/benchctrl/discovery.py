@@ -405,6 +405,13 @@ def discover(
     ``/dev/usbtmc0`` node it is bound to are the same instrument, and
     reporting both would make a bench look twice as populated as it is. The
     VISA form wins because that is what the driver needs to open it.
+
+    **Passive.** Nothing here writes to a device; identification is by VID/PID
+    and sysfs only. Devices behind a generic bridge therefore come back
+    unidentified, and turning them into a device key needs an explicit
+    :py:func:`probe_serial_identity` call. That separation is worth keeping now
+    that one probe candidate is a switched PDU: enumerating a bench must never
+    be the thing that writes bytes to a mains contactor's control port.
     """
     found: list[DiscoveredDevice] = []
     if serial:
@@ -452,31 +459,95 @@ def inventory(**kwargs) -> dict:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class SerialProbe:
+    """One "write these bytes at this baud and see who answers" attempt.
+
+    Probes are tried in order and the first match wins, so the ordering in
+    :py:data:`SERIAL_PROBES` is part of the behaviour, not incidental.
+
+    Attributes:
+        device_key: what a match identifies.
+        baudrate: probes are baud-specific. Two of our devices now sit behind
+            the *same* FTDI bridge at different rates, so a single hardcoded
+            baud can no longer identify the bus.
+        request: bytes to write. Always a write, never a bare read: a silent
+            device is indistinguishable from an absent one otherwise.
+        marker: substring whose presence in the reply means "this is it".
+        label: human description, for logs.
+    """
+
+    device_key: str
+    baudrate: int
+    request: bytes
+    marker: str
+    label: str = ""
+
+
+#: Probe attempts, in order. Kept ordered most-specific-first.
+#:
+#: **One of these devices switches mains power.** The PDU probe is a bare ``\r``
+#: — the gentlest thing that makes this CLI answer — and it cannot switch
+#: anything: no outlet verb is sent, and a CR at either the login prompt or the
+#: ready prompt merely re-prompts. It is still the reason ``discover()`` keeps
+#: ``probe=False`` as its default: writing bytes to unknown serial ports is
+#: acceptable for a resistance box and worth a deliberate opt-in when one of the
+#: candidates is a power distribution unit.
+SERIAL_PROBES: tuple[SerialProbe, ...] = (
+    SerialProbe(
+        device_key="eastwood_qr10x",
+        baudrate=115200,
+        request=b"AT+DEV.TYPE?\r\n",
+        marker="DEV.TYPE",
+        label="Eastwood QR10x (AT command set)",
+    ),
+    SerialProbe(
+        device_key="cyberpower_pdu41002",
+        baudrate=9600,
+        # A bare CR: the PDU's CLI answers with either its ready prompt or a
+        # login prompt, both of which are unambiguous and neither of which
+        # changes any state.
+        request=b"\r",
+        marker="CyberPower",
+        label="CyberPower PDU41002 (switched PDU — CLI prompt)",
+    ),
+)
+
+
 def probe_serial_identity(path: str, timeout: float = 1.0) -> Optional[str]:
     """Ask an unidentified serial device what it is.
 
-    Only for devices behind a generic bridge, where VID/PID cannot decide.
-    Currently recognises the QR10x by its ``AT+DEV.TYPE?`` reply.
+    Only for devices behind a generic bridge, where VID/PID cannot decide —
+    which is now the common case rather than an edge one: the QR10x and the
+    PDU41002 both appear as FTDI/CH-class bridges, and the PDU's
+    ``(0x0403, 0x6001)`` is already in :py:data:`GENERIC_BRIDGES`.
 
-    Returns the matching device key, or None. Never raises: probing is
-    best-effort by nature, and a device that ignores us is simply not one
-    of ours.
+    Tries each entry in :py:data:`SERIAL_PROBES` in order, reopening the port at
+    that probe's baud rate. Returns the matching device key, or None. Never
+    raises: probing is best-effort by nature, and a device that ignores us is
+    simply not one of ours.
     """
     try:
         import serial
     except ImportError:  # pragma: no cover
         return None
 
-    try:
-        with serial.Serial(path, 115200, timeout=timeout) as ser:
-            ser.reset_input_buffer()
-            ser.write(b"AT+DEV.TYPE?\r\n")
-            ser.flush()
-            reply = ser.read(128).decode("ascii", errors="replace")
-            if "DEV.TYPE" in reply:
-                return "eastwood_qr10x"
-    except Exception as exc:
-        log.debug("probe of %s failed (expected for foreign devices): %s", path, exc)
+    for probe in SERIAL_PROBES:
+        try:
+            with serial.Serial(path, probe.baudrate, timeout=timeout) as ser:
+                ser.reset_input_buffer()
+                ser.write(probe.request)
+                ser.flush()
+                reply = ser.read(256).decode("ascii", errors="replace")
+                if probe.marker in reply:
+                    return probe.device_key
+        except Exception as exc:
+            log.debug(
+                "probe %s of %s failed (expected for foreign devices): %s",
+                probe.device_key,
+                path,
+                exc,
+            )
     return None
 
 

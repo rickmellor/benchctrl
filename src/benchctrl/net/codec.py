@@ -73,6 +73,12 @@ def _wire_types() -> dict[str, type]:
     add("benchctrl.drivers.rigol_dl3031a.driver", "RigolDLInfo")
     add("benchctrl.drivers.rigol_dp2031.driver", "RigolDP2031Info")
     add("benchctrl.drivers.siglent_sdm4065a.driver", "SDM4065AInfo")
+    add(
+        "benchctrl.drivers.cyberpower_pdu41002.driver",
+        "PDU41002Info",
+        "PDU41002Status",
+        "OutletConfig",
+    )
     add("benchctrl.battery.profile", "BatteryProfile", "DischargeStep")
     add("benchctrl.battery.emulator", "EmulatorState")
 
