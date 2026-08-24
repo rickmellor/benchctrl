@@ -35,6 +35,16 @@ Facts the driver and simulator must honour, each observed rather than inferred:
 
 1. **Prompt is `CyberPower > `** (trailing space). It terminates every
    response, and it is the only reliable read-until sentinel.
+
+   **Caveat for anyone diffing these files byte-for-byte:** the trailing space
+   is *not* present in the checked-in text, because the editor stripped
+   trailing whitespace when these transcripts were saved. It **is** present on
+   the wire — re-measured directly against the device on 2026-08-24, which
+   reported `b'CyberPower > '` as the tail bytes and zero space-less
+   occurrences. Do not "fix" `PROMPT` to match these files; a sentinel of
+   `"CyberPower >"` without the space would silently match a prefix, and one of
+   `"CyberPower > "` compared against a stripped fixture makes every read
+   appear to time out.
 2. **Serial echoes the command back; SSH does not.** The first line of a
    serial response is the command itself. Any parser must strip a leading echo
    *conditionally*, not assume one either way — this is the single largest
