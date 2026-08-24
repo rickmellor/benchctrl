@@ -64,6 +64,10 @@ CREATE TABLE IF NOT EXISTS chunk(
 CREATE TABLE IF NOT EXISTS artifact(
   run_id TEXT, name TEXT, path TEXT, kind TEXT, sha256 TEXT,
   PRIMARY KEY(run_id, name));
+
+CREATE TABLE IF NOT EXISTS analysis(
+  run_id TEXT PRIMARY KEY, verdict TEXT, evaluated_utc TEXT,
+  result_json TEXT);
 """
 
 STATUS_PENDING = "pending"
@@ -74,12 +78,35 @@ STATUS_ERRORED = "errored"
 STATUS_SAFE_STOPPED = "safe_stopped"
 STATUS_INTERRUPTED = "interrupted"
 
+#: Statuses a run reaches when its spec declared acceptance criteria and the
+#: bench evaluated them. They *replace* ``complete`` rather than sitting beside
+#: it, and only for a run that ran to the end: every other terminal status
+#: describes how the engine exited, which is a different question and the more
+#: urgent one. A safe-stopped run that happens to satisfy its checks is still
+#: safe-stopped, and burying that under a green PASS would be the worst thing
+#: this feature could do.
+#:
+#: ``inconclusive`` deliberately has no status of its own — a run whose checks
+#: could not be evaluated stays ``complete``, because the engine did complete and
+#: the verdict is carried separately. Promoting "we could not judge" to a terminal
+#: status would make it look like an engine outcome.
+STATUS_PASSED = "passed"
+STATUS_FAILED = "failed"
+
 TERMINAL = (
     STATUS_COMPLETE,
     STATUS_ABORTED,
     STATUS_ERRORED,
     STATUS_SAFE_STOPPED,
+    STATUS_PASSED,
+    STATUS_FAILED,
 )
+
+#: Terminal statuses meaning the engine ran every phase to the end. The gate on
+#: whether acceptance criteria are evaluated at all: judging a DUT on a run that
+#: was aborted half way through would produce a verdict about a test that did not
+#: happen.
+COMPLETED_OK = (STATUS_COMPLETE, STATUS_PASSED, STATUS_FAILED)
 
 
 def default_runs_dir() -> Path:
@@ -392,6 +419,57 @@ class RunStore:
         keys = ("ts_mono", "n", "min", "max", "mean", "last")
         return [dict(zip(keys, r)) for r in rows]
 
+    def metric_aggregate(
+        self, channel: str, agg: str, *, phase_idx: Optional[int] = None
+    ) -> Optional[float]:
+        """One aggregate of everything recorded on ``channel``, or None.
+
+        None means "no rows", which the caller must keep distinct from a value of
+        zero: an acceptance check against an unrecorded channel is inconclusive,
+        and ``0.0`` would satisfy most thresholds anyone writes.
+
+        Aggregated in SQL over the ``metric`` rows rather than over the recording
+        chunks. The rows are what the engine already wrote while the run was
+        happening — one per channel per metric period — so this reads a few hundred
+        floats where the chunks are hundreds of megabytes the board cannot hold at
+        once. It is a decimated view of the recording and is honest about being
+        one: the aggregate is over sampled points, not over every point the Arc
+        captured.
+
+        ``min``/``max``/``mean`` aggregate the corresponding per-row column, so an
+        aggregate-of-aggregates. With the engine writing ``n=1`` rows whose five
+        columns are all the same reading, those coincide with the true sampled
+        figures. They would diverge if a caller ever wrote pre-summarised rows with
+        ``n>1``, where the mean of means is unweighted — noted rather than
+        corrected, because nothing writes such rows today and a weighted mean
+        computed from columns that may be NULL is the kind of arithmetic that
+        silently produces a plausible wrong number.
+
+        ``last`` is the most recent row by time, not an aggregate: the ordering is
+        what makes it meaningful, and ``MAX(vlast)`` would quietly answer a
+        different question.
+        """
+        columns = {"min": "MIN(vmin)", "max": "MAX(vmax)", "mean": "AVG(vmean)"}
+        where = "run_id=? AND ch=?"
+        params: list[Any] = [self.run_id, channel]
+        if phase_idx is not None:
+            where += " AND phase_idx=?"
+            params.append(phase_idx)
+        if agg == "last":
+            sql = (
+                f"SELECT vlast FROM metric WHERE {where} AND vlast IS NOT NULL "
+                f"ORDER BY ts_mono DESC LIMIT 1"
+            )
+        elif agg in columns:
+            sql = f"SELECT {columns[agg]} FROM metric WHERE {where}"
+        else:
+            raise ValueError(f"unknown metric aggregate {agg!r}")
+        with self._lock:
+            row = self._conn.execute(sql, params).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return float(row[0])
+
     def latest_metric(self, channel: str) -> Optional[dict]:
         with self._lock:
             row = self._conn.execute(
@@ -463,6 +541,51 @@ class RunStore:
                 fh.write(f"\n## {heading}\n\n")
             fh.write(text.rstrip() + "\n")
 
+    # --- analysis -------------------------------------------------------
+
+    def set_analysis(self, result: dict) -> None:
+        """Record the acceptance verdict and every check behind it.
+
+        Stored whole rather than as a column per check: the shape is the spec
+        author's, one row per criterion they wrote, and a schema that had to change
+        when someone added a check would put a migration between an operator and
+        their test. The verdict is lifted out to its own column because that is the
+        one field anything queries.
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO analysis(run_id,verdict,evaluated_utc,"
+                "result_json) VALUES(?,?,?,?)",
+                (
+                    self.run_id,
+                    str(result.get("verdict", "")),
+                    _utc(),
+                    json.dumps(result, separators=(",", ":")),
+                ),
+            )
+            self._conn.commit()
+
+    def analysis(self) -> Optional[dict]:
+        """The recorded verdict, or None if this run was never judged.
+
+        None is the answer for every run whose spec declared no criteria, and it
+        must stay distinguishable from a verdict: "nobody said what passing means"
+        is not a result, and a display that rendered it as one would put a word
+        where there is no judgement.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT result_json FROM analysis WHERE run_id=?", (self.run_id,)
+            ).fetchone()
+        if row is None or not row[0]:
+            return None
+        try:
+            loaded = json.loads(row[0])
+        except json.JSONDecodeError:  # pragma: no cover
+            log.warning("analysis row for %s is not valid JSON", self.run_id)
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
     def write_manifest(self) -> Path:
         manifest = {
             "run": self.info(),
@@ -470,6 +593,13 @@ class RunStore:
             "chunks": self.chunks(),
             "event_count": len(self.events_since(0, limit=100_000)),
         }
+        # Only when there is one, for the reason ``analysis()`` returns None: the
+        # bundle must not carry a key that reads as a verdict on a run nobody
+        # declared criteria for. A reader can then treat presence as the question
+        # "was this run judged" without inspecting the value.
+        judged = self.analysis()
+        if judged is not None:
+            manifest["analysis"] = judged
         path = self.run_dir / "manifest.json"
         path.write_text(json.dumps(manifest, indent=2))
         return path

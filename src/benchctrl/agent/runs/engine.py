@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from benchctrl.agent.runs import analysis as analysis_mod
 from benchctrl.agent.runs import store as store_mod
 from benchctrl.agent.runs.rules import (
     EXIT_OFFSET,
@@ -33,7 +34,13 @@ from benchctrl.agent.runs.rules import (
     SAFETY_OFFSET,
     RuleEngine,
 )
-from benchctrl.agent.runs.spec import STAGES, Phase, RunSpec
+from benchctrl.agent.runs.spec import (
+    STAGES,
+    VERDICT_FAIL,
+    VERDICT_PASS,
+    Phase,
+    RunSpec,
+)
 from benchctrl.agent.runs.store import RunStore, new_run_id
 from benchctrl.exceptions import BenchValueError
 
@@ -594,11 +601,17 @@ class RunEngine:
         # ``_end_chunk`` above has already flushed the final chunk, so the gate
         # sees the true count from either position.
         #
-        # Skipped when nothing was recorded: hashing no chunks is not an analysis
-        # step, and lighting a node for a few microseconds of bookkeeping would be
-        # the cinematic lie rather than a measurement. ``next_chunk_index`` is the
-        # store's own count of what it holds, and is 0 exactly when no chunk was
-        # ever written — including on an ``idle``-only run, which records nothing.
+        # Skipped when nothing was recorded and nothing is to be judged: hashing no
+        # chunks is not an analysis step, and lighting a node for a few microseconds
+        # of bookkeeping would be the cinematic lie rather than a measurement.
+        # ``next_chunk_index`` is the store's own count of what it holds, and is 0
+        # exactly when no chunk was ever written — including on an ``idle``-only
+        # run, which records nothing.
+        #
+        # Acceptance criteria light it in their own right, and the ``or`` is not
+        # symmetry for its own sake. A spec can declare checks over metric rows
+        # while recording no chunks at all, and on such a run the node would have
+        # stayed dark through the only work in the run that is genuinely analysis.
         # DONE only after the output is idled, and before ``run_end``. Emitting it
         # earlier would light the terminal node while the device was still being
         # brought down; emitting it after ``run_end`` would let a consumer that
@@ -606,13 +619,95 @@ class RunEngine:
         # path — including safe-stop and error — because a sequence that stops
         # mid-flow on an aborted run leaves EXECUTE lit forever, which reads as a
         # test still in progress.
-        severity = "critical" if status == store_mod.STATUS_SAFE_STOPPED else "info"
-        if self._chunks_written():
+        if self._chunks_written() or self._will_analyse(status):
             self._emit_stage("ANALYZE")
+        status = self._analyse(status, reason)
+        severity = "critical" if status == store_mod.STATUS_SAFE_STOPPED else "info"
         self.store.write_manifest()
         self._emit_stage("DONE")
         self._emit("run_end", severity=severity, payload={"status": status, "reason": reason})
         log.info("run %s finished: %s (%s)", self.run_id, status, reason)
+
+    def _will_analyse(self, status: str) -> bool:
+        """Whether acceptance criteria are about to be evaluated.
+
+        Both halves matter. A spec with no checks has nothing to judge; a run that
+        did not reach the end of its phase list must not be judged, because a
+        verdict drawn from a run that was aborted half way through is a statement
+        about a test that did not happen. An operator who stopped a soak at ten
+        minutes of an eight-hour spec has not learned that the DUT failed.
+        """
+        return bool(self.spec.analysis) and status in store_mod.COMPLETED_OK
+
+    def _analyse(self, status: str, reason: str) -> str:
+        """Evaluate acceptance criteria and return the run's final status.
+
+        Returns ``status`` unchanged for any run this does not judge, so the caller
+        can use the result unconditionally. A judged run comes back ``passed`` or
+        ``failed``, which *replaces* ``complete``: the spec said what passing meant
+        and the bench answered, so leaving the coarser word as the run's status
+        would keep the verdict a footnote on the one field everything queries.
+        An ``inconclusive`` verdict leaves the status ``complete`` — the engine did
+        complete, and "we could not judge" is not an engine outcome.
+
+        Wrapped in a bare ``except`` for the same reason ``_chunks_written`` is: it
+        sits between the run's measurements and its terminal events, and a
+        reporting failure here must not cost the run its manifest, its DONE
+        transition, or ``run_end``. The data is already on disk; a missing verdict
+        can be recomputed from the bundle, and a missing ``run_end`` leaves every
+        consumer showing a run that never ended.
+        """
+        if not self._will_analyse(status):
+            return status
+        try:
+            result = analysis_mod.evaluate(
+                self.spec.analysis,
+                self.store,
+                phase_index={p.name: i for i, p in enumerate(self.spec.phases)},
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("run %s: analysis raised", self.run_id)
+            self._emit(
+                "run_analysis",
+                severity="warn",
+                source="analysis",
+                payload={"verdict": "", "error": repr(exc)},
+            )
+            return status
+        if result is None:  # pragma: no cover - _will_analyse already checked
+            return status
+        self.store.set_analysis(result)
+        verdict = result["verdict"]
+        promoted = {
+            VERDICT_PASS: store_mod.STATUS_PASSED,
+            VERDICT_FAIL: store_mod.STATUS_FAILED,
+        }.get(verdict, status)
+        if promoted != status:
+            self.status = promoted
+            # ``reason`` is carried through rather than replaced with the verdict.
+            # It says why the run *stopped* ("all phases complete"), which stays
+            # true, and the verdict says whether the DUT passed. Overwriting one
+            # with the other would lose a fact to report a different one.
+            self.store.set_status(promoted, stop_reason=reason)
+        # Emitted before ``run_end``, so a consumer that drops a run on ``run_end``
+        # still receives the verdict — the same ordering argument DONE makes. The
+        # severity is the verdict's: a failed acceptance test is a real finding and
+        # must not arrive at the same weight as a heartbeat.
+        self._emit(
+            "run_analysis",
+            severity="alarm" if verdict == VERDICT_FAIL else "info",
+            source="analysis",
+            payload=result,
+        )
+        log.info(
+            "run %s analysis: %s (%d passed, %d failed, %d inconclusive)",
+            self.run_id,
+            verdict,
+            result["passed"],
+            result["failed"],
+            result["inconclusive"],
+        )
+        return promoted
 
     # --- reporting ------------------------------------------------------
 
@@ -628,8 +723,22 @@ class RunEngine:
                     if 0 <= self._phase_idx < len(self.spec.phases)
                     else None
                 ),
+                # Whether this run has acceptance criteria at all, known from the
+                # spec before a single measurement is taken. Distinct from the
+                # verdict below being empty, which means the criteria exist and have
+                # not been evaluated yet — a display that could not tell those apart
+                # would have to choose between showing nothing on a run that will
+                # produce a verdict and showing a pending verdict on a run that
+                # never will.
+                "has_analysis": bool(self.spec.analysis),
             }
         )
+        # The verdict, once there is one. Absent rather than empty on a run that has
+        # not been judged, matching ``store.analysis()`` and the manifest: presence
+        # is the answer to "was this run judged".
+        judged = self.store.analysis()
+        if judged is not None:
+            info["analysis"] = judged
         return info
 
 

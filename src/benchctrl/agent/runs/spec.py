@@ -63,6 +63,27 @@ OPS = ("<", "<=", ">", ">=", "==", "!=")
 
 SEVERITIES = ("debug", "info", "warn", "alarm", "critical")
 
+#: Which aggregate of a channel's recorded metrics an acceptance check tests.
+#:
+#: These are exactly the columns ``store.append_metric`` already writes, so a
+#: check never needs the raw chunks — the aggregate it asks for was computed while
+#: the run was happening. ``last`` is first because it is the default: most
+#: acceptance criteria are about where the DUT ended up ("the rail settled below
+#: 3.4 V"), and a spec that says nothing should get the cheap, obvious reading.
+AGGS = ("last", "mean", "min", "max")
+
+#: The verdicts an :py:class:`Analysis` can reach.
+#:
+#: ``inconclusive`` is a first-class outcome, not an error. A check whose channel
+#: recorded nothing — an aborted run, a phase that never ran, a misspelled channel
+#: code — has not passed and has not failed, and collapsing that into either would
+#: be the single most damaging lie this feature could tell: a green PASS on a run
+#: that measured nothing, or a FAIL that sends someone to debug a healthy DUT.
+VERDICT_PASS = "pass"
+VERDICT_FAIL = "fail"
+VERDICT_INCONCLUSIVE = "inconclusive"
+VERDICTS = (VERDICT_PASS, VERDICT_FAIL, VERDICT_INCONCLUSIVE)
+
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
@@ -378,6 +399,177 @@ class Rule:
 
 
 @dataclass(frozen=True)
+class Check:
+    """One acceptance criterion: did the DUT do what the test required?
+
+    Deliberately the same ``{ch, op, value}`` grammar as :py:class:`Condition`,
+    and deliberately *not* the same class. A condition is control — it aborts a
+    run or ends a phase, and it is evaluated against a live sample while the
+    output is energised. A check is judgement, evaluated once, after the run, on
+    data that is already written. Sharing the class would have let an author put a
+    ``for_s`` dwell on a check, where it has no meaning, or an aggregate on a
+    safety limit, where it would be actively dangerous: ``mean`` voltage staying
+    under a ceiling says nothing about the peak that damaged the DUT.
+
+    What the two do share is :py:data:`OPS` and the ``ch``/``value`` spelling, so
+    an author who has written one has already learned the other.
+    """
+
+    #: Which recorded channel to judge. Named ``ch`` on the wire, like
+    #: :py:class:`Condition`. Required: unlike a condition, a check has no
+    #: ``metric`` alternative — there is nothing to judge that the run did not
+    #: record, and a check against an unrecorded name is a spec bug worth
+    #: refusing at submit time rather than an ``inconclusive`` hours later.
+    channel: str = ""
+    #: Which aggregate of that channel to test. See :py:data:`AGGS`.
+    agg: str = "last"
+    op: str = "<"
+    value: float = 0.0
+    #: Restrict the judgement to one phase, by name. Empty means the whole run.
+    #:
+    #: This is what makes an aggregate meaningful. ``max`` current over an entire
+    #: run includes the inrush of every phase, so a soak-current limit expressed
+    #: run-wide is a check on the startup transient wearing a soak's name. The
+    #: phase name is validated against the spec's own phase list, so a typo is
+    #: caught before anything is energised rather than reported as
+    #: ``inconclusive`` when the run is already over.
+    phase: str = ""
+    #: What this check is for, in the operator's words. Shown on the dashboard
+    #: beside the result, because "mv.last < 3.4" is the test and "rail settled"
+    #: is what someone standing at the bench needs to read.
+    label: str = ""
+
+    def __post_init__(self) -> None:
+        _as_float(self, "value")
+        _require(bool(self.channel), "every analysis check needs a 'ch'")
+        _require(
+            self.op in OPS, f"unknown operator {self.op!r}; valid: {list(OPS)}"
+        )
+        _require(
+            self.agg in AGGS,
+            f"analysis check on {self.channel!r}: unknown agg {self.agg!r}; "
+            f"valid: {list(AGGS)}",
+        )
+
+    @property
+    def name(self) -> str:
+        """A stable identifier for this check, for the wire and the manifest.
+
+        Derived rather than authored, and it includes ``phase`` because two checks
+        differing only in phase are the commonest pair an author writes — a soak
+        limit and a startup limit on the same channel. Keyed on the label alone,
+        those two would collide in any map a consumer built.
+        """
+        scope = f"{self.phase}." if self.phase else ""
+        return f"{scope}{self.channel}.{self.agg}"
+
+    def describe(self) -> str:
+        where = f" in {self.phase}" if self.phase else ""
+        return f"{self.channel}.{self.agg} {self.op} {self.value:g}{where}"
+
+    def passes(self, sample: float) -> bool:
+        """Whether one aggregate value satisfies this check.
+
+        The operator table is duplicated from :py:meth:`Condition.matches` rather
+        than shared, and that is the same separation the class comment argues for:
+        these two are evaluated on different data at different times by different
+        code paths, and a single implementation would be one edit away from letting
+        a check's grammar leak into the safety envelope.
+        """
+        if self.op == "<":
+            return sample < self.value
+        if self.op == "<=":
+            return sample <= self.value
+        if self.op == ">":
+            return sample > self.value
+        if self.op == ">=":
+            return sample >= self.value
+        if self.op == "==":
+            return sample == self.value
+        return sample != self.value
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {"ch": self.channel, "op": self.op, "value": self.value}
+        # ``agg`` is written even at its default, unlike ``stage`` on a phase.
+        # A phase's stage default is derived from a *mapping this build owns*, so
+        # baking it into a hash would let a later retune rewrite archived specs.
+        # ``last`` is not derived from anything — it is the literal default, and
+        # writing it makes the judgement the bundle records self-describing
+        # without having to know which build read the spec.
+        d["agg"] = self.agg
+        if self.phase:
+            d["phase"] = self.phase
+        if self.label:
+            d["label"] = self.label
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Check:
+        return cls(
+            channel=str(d.get("ch", "")),
+            agg=str(d.get("agg", "last")),
+            op=str(d.get("op", "<")),
+            value=float(d.get("value", 0.0)),
+            phase=str(d.get("phase", "")),
+            label=str(d.get("label", "")),
+        )
+
+
+@dataclass(frozen=True)
+class Analysis:
+    """Acceptance criteria: what "the DUT passed" means for this run.
+
+    Until this existed, a run's outcome described how the *engine* exited —
+    ``complete`` means "all phases ran", which is true of a board that drew twice
+    its budget and of one that met spec. Someone had to open the bundle to learn
+    which. These checks are the spec's own answer, evaluated by the bench that
+    took the measurements, recorded in the manifest beside them.
+
+    Declarative for the reason the whole spec is: this is judged on a board that
+    may be unattended for hours, the criteria have to be reviewable before
+    anything is energised, and they are hashed into the spec so a verdict can
+    always be traced to the rule that produced it. A code hook would be more
+    expressive and would forfeit all three.
+    """
+
+    checks: tuple[Check, ...] = ()
+    #: Whether a check that could not be evaluated fails the run.
+    #:
+    #: Default False, so an unevaluable check yields ``inconclusive`` rather than
+    #: ``fail``. That is the honest reading — nothing was measured, so nothing was
+    #: judged — and it keeps the two apart on the panel, where FAIL should send
+    #: someone to look at the DUT and INCONCLUSIVE should send them to look at the
+    #: test. An author who would rather have a missing measurement stop the line
+    #: sets this True, which is a real position to hold and not the default one.
+    strict: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "checks", tuple(self.checks))
+
+    def __bool__(self) -> bool:
+        """Truthy only with checks to run, so ``if spec.analysis:`` reads right.
+
+        An ``Analysis()`` with no checks is what every spec written before this
+        feature has, and it must be indistinguishable from having said nothing:
+        no ANALYZE work, no verdict, nothing serialised, no change to the hash.
+        """
+        return bool(self.checks)
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {"checks": [c.to_dict() for c in self.checks]}
+        if self.strict:
+            d["strict"] = True
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Analysis:
+        return cls(
+            checks=tuple(Check.from_dict(c) for c in d.get("checks", ())),
+            strict=bool(d.get("strict", False)),
+        )
+
+
+@dataclass(frozen=True)
 class LLMConfig:
     """How much the on-board model may participate.
 
@@ -442,6 +634,10 @@ class RunSpec:
     phases: tuple[Phase, ...] = ()
     rules: tuple[Rule, ...] = ()
     llm: LLMConfig = field(default_factory=LLMConfig)
+    #: What "passed" means for this run. Empty for a run that does not say, which
+    #: is every spec written before this existed — such a run reaches a terminal
+    #: status and no verdict, exactly as it did before.
+    analysis: Analysis = field(default_factory=Analysis)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "phases", tuple(self.phases))
@@ -452,6 +648,31 @@ class RunSpec:
         _require(len(names) == len(set(names)), f"phase names must be unique: {names}")
         for phase in self.phases:
             self.safety.check_setpoints(phase.setpoints)
+        # An analysis check is validated against the rest of the spec, which is the
+        # only place that can be done: a check names a channel and a phase, and
+        # whether those exist is a fact about *this* run.
+        #
+        # Refused here rather than reported as ``inconclusive`` after the run. Both
+        # are honest, but one costs an hour of bench time and a DUT's worth of
+        # setup to discover a typo, and the other costs a submit. A check that
+        # cannot be evaluated by construction is a broken test, not an
+        # inconclusive one — ``inconclusive`` is for a check that was well-formed
+        # and found no data, which is a fact about the run rather than the spec.
+        for check in self.analysis.checks:
+            _require(
+                check.channel in self.sampling.channels
+                or check.channel == "board_temp_C",
+                f"analysis check {check.describe()!r} names channel "
+                f"{check.channel!r}, which this run does not record; "
+                f"sampling.channels is {list(self.sampling.channels)}",
+            )
+            if check.phase:
+                _require(
+                    check.phase in names,
+                    f"analysis check {check.describe()!r} names phase "
+                    f"{check.phase!r}, which this run does not have; "
+                    f"phases are {names}",
+                )
         total = sum(p.duration_s for p in self.phases)
         _require(
             total <= self.safety.max_duration_s,
@@ -467,7 +688,7 @@ class RunSpec:
         return self.phases[index]
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "schema": SCHEMA_VERSION,
             "name": self.name,
             "device": self.device,
@@ -479,6 +700,14 @@ class RunSpec:
             "rules": [r.to_dict() for r in self.rules],
             "llm": self.llm.to_dict(),
         }
+        # Omitted entirely when there are no checks, so adding this feature did not
+        # move the hash of a single archived spec. The alternative — an always-
+        # present ``"analysis": {"checks": []}`` — would have re-hashed every spec
+        # ever written, and the hash is the one thing tying a result bundle to the
+        # test that produced it. Same rule as a phase's derived ``stage``.
+        if self.analysis:
+            d["analysis"] = self.analysis.to_dict()
+        return d
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, sort_keys=True)
@@ -508,6 +737,7 @@ class RunSpec:
             phases=tuple(Phase.from_dict(p) for p in d.get("phases", ())),
             rules=tuple(Rule.from_dict(r) for r in d.get("rules", ())),
             llm=LLMConfig.from_dict(d.get("llm", {})),
+            analysis=Analysis.from_dict(d.get("analysis", {})),
         )
 
     @classmethod
