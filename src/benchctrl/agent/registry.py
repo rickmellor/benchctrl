@@ -21,6 +21,14 @@ from benchctrl.exceptions import BenchConnectionError, BenchValueError
 
 log = logging.getLogger("benchctrl.agent.registry")
 
+#: Device keys that switch mains. Explicit rather than duck-typed on
+#: ``set_outlet_state``, because deciding *which* device a run's outlet
+#: setpoints refer to has to be answerable **without opening anything** — the
+#: whole point is to refuse a run before a contactor moves. Add a key here when
+#: a second switched PDU lands; a bench with two of them needs the spec to name
+#: one, not a registry that guesses.
+SWITCHED_PDU_KEYS: tuple[str, ...] = ("cyberpower_pdu41002",)
+
 
 @dataclass
 class DeviceEntry:
@@ -256,12 +264,27 @@ def build_default_registry(
 
         return SiglentSDM4065A.open(**kw)
 
+    def _pdu(**kw):
+        from benchctrl.drivers.cyberpower_pdu41002 import CyberPowerPDU41002
+
+        # Deliberately NOT via transports.autoserial: that exists for the CH340
+        # bridge, whose kernel driver may be absent. This PDU's FT232R has a
+        # kernel driver, and autoserial's probing would open unrelated ports on
+        # a bench where one of them switches mains.
+        #
+        # No password is injected here. It is resolved inside open() from
+        # BENCHCTRL_PDU_PASSWORD in *this agent's* environment, which is the
+        # whole point: open_kwargs arrive over the unencrypted RPC wire, so a
+        # password routed through here would have crossed the LAN in clear.
+        return CyberPowerPDU41002.open(**kw)
+
     openers = {
         "otii_arc": _arc,
         "eastwood_qr10x": _qr,
         "rigol_dl3031a": _dl,
         "rigol_dp2031": _dp,
         "siglent_sdm4065a": _dmm,
+        "cyberpower_pdu41002": _pdu,
     }
 
     for key in keys:

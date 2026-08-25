@@ -125,12 +125,47 @@ def make_sdm4065a(**kwargs) -> Any:
     return _bind_lifetime(driver, sim)
 
 
+def make_pdu41002(**kwargs) -> Any:
+    """A real ``CyberPowerPDU41002`` driving a :py:class:`SimulatedPDU41002`.
+
+    Differs from the other factories in two ways, both because this is the
+    first device with a credential and the first that switches mains:
+
+    - **The password is supplied here**, matching the simulator's, so sim mode
+      never needs ``BENCHCTRL_PDU_PASSWORD`` set. A test that had to export a
+      password to run offline would be a bad trade.
+    - **``allowed_outlets`` defaults to every outlet — in sim mode only.** On
+      hardware it is mandatory and has no default, precisely so a config typo
+      cannot silently widen switching scope. Against a simulator there are no
+      contactors to move, and requiring it would make every sim caller repeat
+      boilerplate. Callers can still pass a narrower set to exercise the
+      allowlist itself.
+    """
+    from benchctrl.drivers.cyberpower_pdu41002 import CyberPowerPDU41002
+    from benchctrl.sim.pdu41002 import SimulatedPDU41002
+
+    sim_kwargs = dict(kwargs.pop("sim", {}))
+    kwargs.pop("port", None)
+    kwargs.pop("host", None)  # the sim is always reached over its pty
+    sim = SimulatedPDU41002(**sim_kwargs)
+    sim.start()
+    kwargs.setdefault("password", sim.password)
+    kwargs.setdefault("allowed_outlets", tuple(range(1, sim.outlets + 1)))
+    try:
+        driver = CyberPowerPDU41002.open(port=sim.port, **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
 FACTORIES: dict[str, Callable[..., Any]] = {
     "otii_arc": make_otii_arc,
     "eastwood_qr10x": make_qr10x,
     "rigol_dl3031a": make_dl3031a,
     "rigol_dp2031": make_dp2031,
     "siglent_sdm4065a": make_sdm4065a,
+    "cyberpower_pdu41002": make_pdu41002,
 }
 
 

@@ -1,0 +1,32 @@
+# Stable symlink for the FTDI FT232R that reaches the CyberPower PDU41002's
+# serial console.
+#
+# Unlike 60-benchctrl-ch341.rules, this file grants **no** permissions and
+# needs none: the kernel has an ftdi_sio driver, so the adapter appears as
+# /dev/ttyUSB* owned root:dialout 0660 and the bench user is already in
+# dialout. There is no libusb path here and no reason to open one.
+#
+# What this file is actually for is *identity*. The PDU is the one device on
+# this bench that switches mains, and /dev/ttyUSB0 is a race: it is assigned in
+# enumeration order, so plugging in a second USB-serial adapter can hand
+# ttyUSB0 to something else while the driver still opens it and starts issuing
+# oltctrl commands. Binding on the adapter's own serial number removes the
+# ordering dependency.
+#
+# Scoped by serial number, not just VID/PID, and deliberately so: 0403:6001 is
+# a generic FT232R that also appears in benchctrl's discovery GENERIC_BRIDGES
+# list. A VID/PID-only symlink would point at whichever FTDI cable enumerated
+# first. If the adapter is ever replaced, update ATTRS{serial} here — a
+# symlink that silently stops appearing is a much better failure than one that
+# silently points at a different cable.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", \
+    ATTRS{serial}=="B0027PK6", SYMLINK+="benchctrl/pdu41002"
+
+# Then open it by the symlink, never by ttyUSB0:
+#
+#   CyberPowerPDU41002.open(port="/dev/benchctrl/pdu41002",
+#                           allowed_outlets=(1, 2))
+#
+# The network transport (open(host=...)) needs no udev rule at all — it is an
+# outbound TCP connection to the PDU's SSH server, and the PDU's own hostname
+# is the stable identifier.

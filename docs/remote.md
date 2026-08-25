@@ -153,6 +153,56 @@ guarantee is a hardware interlock: a relay on the DUT rail driven from a
 GPIO, or the Arc's own GPO. Treat the governor as damage limitation, not a
 safety certificate.
 
+### The PDU is exempt from the safe state, and cuts mains only on request
+
+For every instrument on the bench, "safe" means *stop sourcing or sinking*.
+For a PDU it does not: cutting mains is itself the disruptive act — it
+de-powers a DUT mid-measurement and drops the other instruments' sessions with
+it. So a lost heartbeat must not become a bench-wide power failure, and the
+PDU41002 is deliberately exempt from `default_safe_state()`.
+
+It is also exempt from **arm tracking**. Energising an outlet is not arming an
+output: nothing is being driven, and the instrument plugged into that outlet
+arms itself separately on its own device key. `set_outlet_state` is therefore
+absent from `_ARMING_CALLS` on purpose. Adding it would start a deadman
+countdown on every switch — power up the bench, go to lunch, come back to a
+tripped governor — and would mark the PDU armed with nothing able to disarm it,
+because of the exemption above.
+
+Those two exemptions together mean the PDU never appears in `armed_devices`, so
+cutting mains on a trip needs its own path:
+
+```python
+CyberPowerPDU41002.open(port="/dev/benchctrl/pdu41002",
+                        allowed_outlets=(3, 4),
+                        panic_outlets=(4,))   # only outlet 4 may be cut
+```
+
+`panic_outlets` is **empty by default** and must be a subset of
+`allowed_outlets` — the governor can never cut an outlet the driver itself may
+not touch. On a trip:
+
+- **Nothing armed means nothing cut.** The panic cut exists to stop an
+  *unattended live output*; on an idle bench a lost heartbeat is a connectivity
+  problem, and cutting mains would create a real one.
+- **Armed instruments are disarmed first**, then the mains is cut. Not
+  cosmetic: pulling the supply out from under a live output is how an inductive
+  kick reaches a DUT.
+- **The cut is confirmed by read-back**, and a cut that cannot be confirmed
+  reports `FAILED` rather than `SAFE`. `oltctrl` acknowledges nothing, so a
+  device that accepts the command and moves nothing is byte-identical to one
+  that obeys — and telling an operator a DUT is de-powered when its contactor
+  never moved is worse than failing loudly.
+- **It gets a much larger time budget** than the half second instruments get.
+  An outlet honours its configured `td_off` (3 s as shipped), so a contactor
+  physically cannot report itself off inside the instrument budget; reusing it
+  would escalate to a transport reset on every trip.
+
+Whether this is safe to enable at all rests on a **cabling invariant, not
+software**: the agent host and the network gear are not plugged into the PDU,
+so the bench cannot cut power to itself or to the path that would recover it.
+See [drivers.md](drivers.md#deployment-assumptions).
+
 Deploy with `ExecStopPost=... --safe-stop` so a service restart disarms the
 bench rather than leaving an output live across the gap. That is what the unit
 in [`deploy/`](../deploy/README.md) does — it invokes `python3 -m

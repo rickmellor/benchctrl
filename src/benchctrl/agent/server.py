@@ -1754,6 +1754,23 @@ class _Handler(socketserver.BaseRequestHandler):
                 f"— call agent.claim first"
             )
         device = agent.registry.get(spec.device)
+        pdu = pdu_worker = None
+        if spec.switched_outlets:
+            pdu_key = self._resolve_pdu_key(spec)
+            # A **second** claim, on the PDU's own key. Without this a session
+            # holding only the Arc could submit a spec that switches mains, and
+            # `run.submit` would become the one path into a mains contactor that
+            # skips the writer gate every other route enforces. Checked before
+            # the device is opened, so a refusal costs nothing.
+            if not session.holds(pdu_key):
+                raise PolicyError(
+                    f"this run switches mains outlets "
+                    f"{sorted(spec.switched_outlets)}, which requires the "
+                    f"writer claim on {pdu_key} as well as on {spec.device} — "
+                    f"call agent.claim for both"
+                )
+            pdu = agent.registry.get(pdu_key)
+            pdu_worker = agent.workers.get(pdu_key)
         engine = agent.runs.submit(
             spec,
             device,
@@ -1761,6 +1778,8 @@ class _Handler(socketserver.BaseRequestHandler):
             governor=agent.governor,
             on_event=agent._broadcast_event,
             clock_scale=float(p.get("clock_scale", 1.0)),
+            pdu=pdu,
+            pdu_worker=pdu_worker,
         )
         if spec.llm.enabled:
             from benchctrl.agent.llm.supervisor import build_supervisor
@@ -1770,6 +1789,30 @@ class _Handler(socketserver.BaseRequestHandler):
                 engine.attach_llm(supervisor.start())
         engine.start()
         return {"run_id": engine.run_id, "spec_sha256": spec.sha256}
+
+    def _resolve_pdu_key(self, spec: RunSpec) -> str:
+        """Which registered device this run's outlet setpoints refer to.
+
+        Refuses ambiguity rather than picking. On a bench with two switched PDUs
+        "outlet 3" names two different physical contactors, and guessing means
+        cutting power to the wrong DUT — a failure the operator would read as a
+        flaky device, not as a wiring question.
+        """
+        from benchctrl.agent.registry import SWITCHED_PDU_KEYS
+
+        served = [k for k in self.agent.registry.keys if k in SWITCHED_PDU_KEYS]
+        if not served:
+            raise BenchValueError(
+                f"this run switches mains outlets "
+                f"{sorted(spec.switched_outlets)} but this agent serves no "
+                f"switched PDU (it serves: {self.agent.registry.keys})"
+            )
+        if len(served) > 1:
+            raise BenchValueError(
+                f"this agent serves more than one switched PDU ({served}), so "
+                f"'outlet 3' is ambiguous. The spec must name the PDU."
+            )
+        return served[0]
 
     def _run_fetch_chunk(self, session: Session, p: dict) -> dict:
         """Expose one recorded chunk as a blob for the host to pull."""

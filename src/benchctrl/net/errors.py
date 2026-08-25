@@ -123,6 +123,26 @@ def _registry() -> dict[str, type]:
              "SDM4065AOverloadError", "SDM4065ATimeoutError",
              "SDM4065AValueError"),
         ),
+        (
+            "benchctrl.drivers.cyberpower_pdu41002.driver",
+            # Three extra beyond the usual Connection/Command/Timeout/Value,
+            # and every one of them has to survive the wire to be actionable:
+            #
+            # - PolicyError: the outlet was outside allowed_outlets. Degrading
+            #   it to RuntimeError would make a *refused mains switch* look
+            #   like a device fault, and the fix (widen the allowlist) is a
+            #   deliberate human decision, not a retry.
+            # - SessionError: the CLI is single-session, so the remote caller
+            #   must be able to tell "another session holds the device" from
+            #   "your password is wrong" — the device produces both *after*
+            #   accepting the password, so only the type distinguishes them.
+            # - AuthError: likewise must not blur into ConnectionError; the
+            #   remedy is BENCHCTRL_PDU_PASSWORD on the agent, not a reconnect.
+            ("PDU41002Error", "PDU41002ConnectionError", "PDU41002CommandError",
+             "PDU41002ProtocolError", "PDU41002TimeoutError",
+             "PDU41002ValueError", "PDU41002AuthError", "PDU41002PolicyError",
+             "PDU41002SessionError"),
+        ),
     ):
         try:
             module = __import__(module_path, fromlist=["*"])

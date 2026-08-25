@@ -151,6 +151,79 @@ about 100 ms (`KNOWN_LIMITATIONS` A-1). Moving both to the bench moves the
 deadlock with them, so the engine forbids the combination structurally
 rather than discovering it at 3 a.m.
 
+## Power-cycling a DUT mid-run
+
+A phase can switch mains outlets on a [PDU41002](drivers.md#switching), which
+is what makes cold-boot, brownout-recovery and hung-DUT tests expressible as a
+spec rather than as someone standing at the bench.
+
+```json
+{
+  "safety": { "allowed_outlets": [3] },
+  "phases": [
+    {"name": "running",  "mode": "cv",   "duration_s": 600,
+     "setpoints": {"voltage_V": 3.0}},
+    {"name": "mains-off", "mode": "idle", "duration_s": 30,
+     "setpoints": {"outlets": {"3": false}}},
+    {"name": "cold-boot", "mode": "cv",   "duration_s": 300, "settle_s": 20,
+     "setpoints": {"outlets": {"3": true}, "voltage_V": 3.0}}
+  ]
+}
+```
+
+**`safety.allowed_outlets` is empty by default, and empty means none.** It is
+an allowlist for this experiment, checked *in addition to* the driver's own
+`allowed_outlets`: the driver says what this deployment may ever touch, the
+spec says what this run is allowed to. A phase naming an unlisted outlet is
+refused at submission — in **both directions**, because de-powering a DUT is as
+much a state change as energising one.
+
+Aggregates are inexpressible. There is no spelling of `all`, `b1` or `b2`, and
+a `bool` index is refused before `int` (`True` would silently become outlet 1).
+
+Four properties worth knowing before you leave one running overnight:
+
+- **A failed switch fails the phase.** `oltctrl` acknowledges nothing, so the
+  engine goes through `set_outlet_state(..., verify=True)` and lets the
+  exception end the run. Logging it and carrying on is the tempting choice and
+  it produces a bundle full of data describing a power cycle that never
+  happened.
+- **Mains is switched before the instrument setpoint.** A setpoint applied
+  while the DUT is de-powered lands nowhere, and energising mains under an
+  already-live output is how an inductive kick reaches a DUT. On a governor
+  trip the order is the reverse — see
+  [remote.md](remote.md#the-pdu-is-exempt-from-the-safe-state-and-cuts-mains-only-on-request).
+- **`settle_s` defaults to 3 s, not 0.** A DUT coming up on mains draws inrush
+  and then boots, so the opening samples of a power-cycle phase describe a
+  supply settling rather than the thing under test. Set it to your DUT's boot
+  time; `"settle_s": 0` is a valid, explicit "this one needs none". The window
+  counts against `max_duration_s`, and an abort arriving during it is not made
+  to wait it out.
+- **A run never cuts mains on its own way out.** Phase ends, aborts and errors
+  leave outlets exactly where the last phase put them: the next phase almost
+  certainly wants the DUT up, and the operator may be about to inspect a live
+  one. Cutting on a lost heartbeat is the governor's separate, opt-in
+  `panic_outlets` decision.
+
+Over the wire this needs the writer claim on **both** device keys — the
+instrument and the PDU:
+
+```python
+client.call("agent.claim", {"device": "otii_arc"})
+client.call("agent.claim", {"device": "cyberpower_pdu41002"})
+client.call("run.submit", {"spec": spec})
+```
+
+Without the second claim `run.submit` would be the one path to a mains
+contactor that skipped the gate every other route enforces. The refusal names
+the key to claim. An ordinary spec that mentions no outlets needs no PDU claim
+even on a bench that has one.
+
+Every transition is in the run record as a `run_outlet` event carrying the
+**verified read-back** state, not the requested one — so the timeline says what
+the contactor did. A mains transition missing from the bundle is a hole in the
+audit trail of a run that power-cycled a DUT.
+
 ## Following a run
 
 ```python

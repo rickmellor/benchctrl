@@ -73,6 +73,12 @@ def _wire_types() -> dict[str, type]:
     add("benchctrl.drivers.rigol_dl3031a.driver", "RigolDLInfo")
     add("benchctrl.drivers.rigol_dp2031.driver", "RigolDP2031Info")
     add("benchctrl.drivers.siglent_sdm4065a.driver", "SDM4065AInfo")
+    add(
+        "benchctrl.drivers.cyberpower_pdu41002.driver",
+        "PDU41002Info",
+        "PDU41002Status",
+        "OutletConfig",
+    )
     add("benchctrl.battery.profile", "BatteryProfile", "DischargeStep")
     add("benchctrl.battery.emulator", "EmulatorState")
 
@@ -145,7 +151,13 @@ class Encoder:
         if isinstance(value, (list, tuple)):
             return [self.encode(v, _depth + 1) for v in value]
 
-        if isinstance(value, set):
+        if isinstance(value, (set, frozenset)):
+            # frozenset is NOT a subclass of set, so listing only `set` here
+            # made every PDU41002 call fail — its `allowed_outlets` property is
+            # a frozenset, and the property snapshot rides along on *every*
+            # response, so the failure was total rather than confined to the
+            # one getter. Sorted by repr for a deterministic wire form; both
+            # arrive as a list, since JSON has no set.
             return [self.encode(v, _depth + 1) for v in sorted(value, key=repr)]
 
         if isinstance(value, dict):

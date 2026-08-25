@@ -57,6 +57,7 @@ from benchctrl.battery import (
     estimate_life_constant_current,
     estimate_life_from_profile,
 )
+from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as _pdu41002_tools
 from benchctrl.drivers.eastwood_qr10x import mcp_tools as _qr10x_tools
 from benchctrl.drivers.otii_arc import mcp_tools as _arc_tools
 from benchctrl.drivers.rigol_dl3031a import mcp_tools as _dl3031a_tools
@@ -78,6 +79,7 @@ _qr10x_tools.register_mcp_tools(mcp)
 _dl3031a_tools.register_mcp_tools(mcp)
 _dp2031_tools.register_mcp_tools(mcp)
 _sdm4065a_tools.register_mcp_tools(mcp)
+_pdu41002_tools.register_mcp_tools(mcp)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +386,25 @@ from benchctrl.drivers.siglent_sdm4065a.mcp_tools import (
     sdm4065a_set_temperature_unit,
     sdm4065a_standard_event_status,
     sdm4065a_write,
+)
+
+# PDU41002 tools — read-only in this build: nothing here switches mains.
+from benchctrl.drivers.cyberpower_pdu41002.mcp_tools import (
+    pdu41002_allowed_outlets,
+    pdu41002_clear_outlet_command,
+    pdu41002_close,
+    pdu41002_info,
+    pdu41002_measure_frequency,
+    pdu41002_measure_load,
+    pdu41002_measure_voltage,
+    pdu41002_open,
+    pdu41002_outlet_config,
+    pdu41002_outlet_state,
+    pdu41002_outlet_states,
+    pdu41002_reset_outlet,
+    pdu41002_set_outlet_state,
+    pdu41002_status,
+    pdu41002_transport,
 )
 
 

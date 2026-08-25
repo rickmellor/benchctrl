@@ -9,6 +9,192 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### CyberPower PDU41002 switched PDU — over serial *or* SSH
+
+The bench can now cut and restore mains: eight-outlet 120 V / 20 A
+switched PDU, whole-device metering, per-outlet state and delays, and
+per-outlet switching. It is the first driver whose device switches mains
+power and the first with a network transport.
+
+Reads landed first on purpose, so the parsers, the session handling and
+the allowlist machinery were all proven on hardware before any method
+could cut power. `allowed_outlets` gates every switch; nothing moves
+implicitly — `close()`, `__exit__` and the governor's default safe state
+all deliberately leave outlet state alone, because for a PDU (unlike
+every other instrument) *cutting* power is itself the disruptive act.
+
+`open(port=...)` selects the serial console, `open(host=...)` selects
+SSH, and supplying both raises rather than silently preferring one:
+which wire carried a mains switch has to be answerable from a run log.
+`allowed_outlets` is a required keyword argument with no "all" default,
+because a config typo has to fail closed on this device.
+
+One CLI engine serves both transports, and that was measured rather
+than assumed — `sys show`, `oltsta show`, `console show` and friends are
+byte-identical across the two, and a `PDU41002Info` read over SSH
+compares equal to the same read over serial. So there is one grammar,
+one set of parsers and one simulator. **No SNMP** (disabled on the
+device, and the CLI covers every capability) and **no new
+dependencies**: serial is `pyserial`, SSH is a `pty.fork()` to
+`/usr/bin/ssh`, so nothing needs a compiled wheel on a board with no
+pip.
+
+Four device behaviours drove design decisions that look odd without
+them:
+
+- **`oltctrl` acknowledges nothing.** A switch command answers with a
+  blank line and a re-prompt, byte-identical whether or not the
+  contactor moved. So `set_outlet_state` returns the **verified
+  read-back** state rather than `None`, and the wait for it is sized from
+  the outlet's own configured `td_on` / `td_off` (operator-settable, 3 s
+  as shipped) rather than from a hardcoded number that would flake the
+  moment someone raised it. `reset_outlet` returns `None` and says why:
+  a reboot ends where it started, so no read-back can distinguish
+  "cycled" from "never moved". Testing this needed a simulator that can
+  *lie* — hence `ignore_switches`, which acknowledges a switch and moves
+  nothing.
+- **The CLI is single-session across the whole device**, and the
+  incumbent wins. A second login *completes* — banner and all — and is
+  then hung up, so the failure is indistinguishable from a bad password
+  unless the driver names it. Hence a distinct `PDU41002SessionError`
+  that survives the RPC wire. Consequence: `close()` **must** send
+  `exit`, because CLI session state outlives the serial port and a
+  driver that merely closes its port leaves the PDU unreachable from
+  the other transport. This is the only `close()` in the repo with a
+  required side effect on the device.
+- **There is no interrupt character.** `\x03` is echoed and taken as
+  part of the command; a bare `CR` is the resync. This one was caught by
+  the simulator faithfully reproducing the hardware rather than
+  agreeing with the driver.
+- **SSH needs three non-default flags**, each fixed by measurement:
+  group-*exchange* KEX fails on firmware 1.3.4 (force
+  `diffie-hellman-group14-sha256`), the device offers only
+  `keyboard-interactive` so pubkey auth is refused and a pty is
+  mandatory, and the exported host key is all zeros so host-key
+  verification is worthless — pinned to `/dev/null` rather than
+  poisoning the operator's `known_hosts`.
+
+**First device in benchctrl that needs a secret.** It is read from
+`BENCHCTRL_PDU_PASSWORD` in the environment of the process that talks to
+the device, never from config and never from `open_kwargs`:
+`DeviceConfig.to_dict()` writes `open` back verbatim, and the RPC wire
+is HMAC-authenticated but plaintext, so either path would have leaked
+it. `DeviceConfig.to_dict()` now also masks `password` / `passphrase` /
+`secret` keys inside `open` as `***`, which makes config round-tripping
+lossy for those keys by design. The MCP `pdu41002_open` tool has no
+password parameter at all — absent, not defaulted, so a model cannot put
+a credential where it would be logged in a transcript.
+
+Method names are constrained by the agent's dispatch gate, which derives
+mutators purely from name prefixes: an `outlet_on()` would have been
+remotely callable *without a writer claim*, i.e. mains switching
+bypassing the claim gate. So the three switching methods are
+`set_outlet_state`, `reset_outlet` and `clear_outlet_command`, the
+mutator set is pinned by exact-equality tests in both directions
+(locally and against the live agent surface), and adding `"outlet_"` to
+the prefix list was rejected because it would also capture the reads.
+
+Aggregate targeting is impossible structurally rather than by validation
+— `oltctrl index all act off` is one line that de-powers the whole bench.
+Two independent guards: coercion rejects anything that is not a plain
+in-range `int` (catching a bad *argument*, `bool` before `int` so `True`
+cannot become outlet 1), and every rendered command is matched against a
+single-index whitelist regex before a byte is written (catching a bad
+*rendering*, which coercion cannot see). `menumode` and
+`console telnet enable` are unreachable by the same regex — the first is
+a one-way trap that breaks every parser, the second would disable SSH
+from underneath a running test.
+
+Self-protection here is a **cabling invariant, not a software
+guarantee**: the PDU powers bench instruments and DUTs only, with the
+agent host and network gear deliberately not plugged into it. That is
+written down in `docs/drivers.md` as a deployment assumption, because it
+is what makes a governor-triggered cut safe to support at all.
+
+Fixtures under `tests/fixtures/pdu41002/` are verbatim transcript
+excerpts with firmware version and capture date, not text written from
+the manual — a simulator built from the same misreading as the driver
+agrees with it. `deploy/udev/62-benchctrl-ftdi.rules` binds
+`/dev/benchctrl/pdu41002` to the adapter's serial number, since
+`ttyUSB0` is enumeration-order and the driver must not open whichever
+cable happened to come up first.
+
+**The governor's exemptions are now deliberate rather than accidental.**
+`default_safe_state()` was already inert on the PDU — it implements none
+of the four methods that function tries — so the omission is now written
+down with its reasoning, because "fixing" it would turn one lost
+heartbeat into a bench-wide power cut. `set_outlet_state` is likewise
+absent from `_ARMING_CALLS` on purpose: energising an outlet is not
+arming an output, and treating it as one would start a deadman countdown
+on every switch *and* mark the PDU permanently armed with nothing able to
+disarm it.
+
+Those two exemptions mean the PDU never appears in `armed_devices`, so
+the opt-in cut needed its own path or `panic_outlets` would have been a
+setting that silently did nothing — an inert governor, indistinguishable
+from a working one. `trip()` now also walks devices that authorised a
+cut, *after* the armed devices (pulling mains from under a live output is
+how an inductive kick reaches a DUT), confirms each outlet by read-back,
+and reports FAILED rather than SAFE when it cannot. It gets a budget
+derived from the outlet count instead of the half second instruments get,
+because a contactor honouring a 3 s `td_off` physically cannot report
+itself off in time and every trip would otherwise escalate to a transport
+reset. Nothing armed still means nothing cut.
+
+**A phase can now power-cycle a DUT.** `safety.allowed_outlets` and a
+phase `setpoints.outlets` mapping bring mains into the declarative layer,
+so cold-boot, brownout-recovery and hung-DUT tests are specs rather than
+someone standing at the bench.
+
+Adding fields to the spec had one trap worth naming: `RunSpec.sha256`
+hashes canonical JSON and is the only thing tying an archived result
+bundle to the spec that produced it, so a key emitted unconditionally
+would silently re-hash **every spec ever archived** — including runs with
+nothing to do with mains. Both new fields are emitted only when used, and
+a test pins the hash of an outlet-free spec against a hard-coded value
+captured before any of this existed. Outlet keys normalise to sorted ints
+on construction, because JSON object keys are strings and `{3: true}`
+would otherwise hash differently after a round trip.
+
+Empty `allowed_outlets` means **none**, not unrestricted, and it is
+checked in both directions — de-powering a DUT is as much a state change
+as energising one. Aggregates stay inexpressible (`all`, `b1`, `b2`
+cannot be spelled) and `bool` is refused before `int`, matching the
+driver.
+
+Four engine behaviours, each the answer to a way this could look fine and
+be wrong:
+
+- **A failed switch fails the phase.** The engine goes through
+  `set_outlet_state(..., verify=True)` and lets the exception end the
+  run. Since `oltctrl` acknowledges nothing, the alternative — log it and
+  carry on, in a process nobody is watching — produces a bundle full of
+  data describing a power cycle that never happened.
+- **A spec that switches outlets with no PDU attached is refused at
+  construction**, before the run directory exists. Skipping the switch
+  and completing is the same failure with a worse signature.
+- **Mains first, then the instrument setpoint.** A setpoint applied to a
+  de-powered DUT lands nowhere; energising mains under a live output is
+  how an inductive kick reaches a DUT. The governor's trip path is the
+  same ordering in reverse.
+- **`settle_s` defaults to 3 s, not 0**, so the opening samples of a
+  power-cycle phase are not a supply settling and a DUT booting. It is
+  `Optional` rather than a float defaulting to zero because absent and
+  `0.0` mean opposite things here, and conflating them would make the
+  safe default unreachable. It counts against `max_duration_s`, is
+  refused on a phase that switches nothing, and an abort arriving during
+  one does not wait it out.
+
+A run never cuts mains on its own way out — phase ends, aborts and errors
+all leave outlets where the last phase put them. Every transition is a
+`run_outlet` event carrying the verified read-back state, not the
+requested one.
+
+Remotely this needs the writer claim on **both** device keys. Without
+that check `run.submit` would have been the one path to a mains contactor
+that skipped the gate every other route enforces; the refusal names the
+key to claim. A spec that mentions no outlets needs no PDU claim, even on
+a bench that has one.
 ### Verifiable source sync to a board (`deploy/sync-board.sh`)
 
 Development tooling, not part of installation. It exists because the FUI

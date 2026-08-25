@@ -131,6 +131,25 @@ GENERIC_BRIDGES: dict[tuple[int, int], str] = {
     (0x067B, 0x2303): "Prolific PL2303 USB-serial bridge",
 }
 
+#: Device keys identifiable from a udev symlink, keyed by the symlink's basename
+#: under :py:data:`SYMLINK_DIR`. Populated by ``deploy/udev/*.rules``.
+#:
+#: The *passive* counterpart to :py:data:`SERIAL_PROBES`: exact rather than
+#: heuristic, and it writes nothing to the device. For the PDU41002 that is the
+#: only acceptable option — probing it authenticates badly against a mains
+#: switch; see the note on ``SERIAL_PROBES``.
+SYMLINK_KEYS: dict[str, str] = {
+    "pdu41002": "cyberpower_pdu41002",
+}
+
+#: Human labels for symlink-identified devices, for the inventory listing.
+SYMLINK_LABELS: dict[str, str] = {
+    "cyberpower_pdu41002": "CyberPower PDU41002 8-outlet switched PDU",
+}
+
+#: Where ``deploy/udev/*.rules`` place their symlinks.
+SYMLINK_DIR = "/dev/benchctrl"
+
 
 @dataclass(frozen=True)
 class DiscoveredDevice:
@@ -219,6 +238,34 @@ def scan_serial() -> list[DiscoveredDevice]:
                     product=product,
                     confidence=sig.confidence,
                     note=sig.note,
+                )
+            )
+            continue
+
+        # Passive identification for devices behind a generic bridge, where
+        # VID/PID cannot decide. Safe to do here — unlike probing — because it
+        # only resolves symlinks. It is how the PDU41002 gets identified at all:
+        # probing it writes into its login prompt (see SERIAL_PROBES).
+        by_symlink = identify_by_symlink(p.device)
+        if by_symlink is not None:
+            found.append(
+                DiscoveredDevice(
+                    path=p.device,
+                    transport="serial",
+                    device_key=by_symlink,
+                    label=SYMLINK_LABELS.get(by_symlink, by_symlink),
+                    vid=vid,
+                    pid=pid,
+                    serial_number=getattr(p, "serial_number", None),
+                    description=p.description or "",
+                    manufacturer=getattr(p, "manufacturer", None),
+                    product=product,
+                    confidence=EXACT,
+                    note=(
+                        "identified by udev symlink, not VID/PID — open it by "
+                        f"{SYMLINK_DIR}/ path so the binding survives "
+                        "re-enumeration"
+                    ),
                 )
             )
             continue
@@ -441,14 +488,19 @@ def discover(
     invalidates the first.
 
     ``probe`` is **off by default and must stay that way**. A scan is otherwise
-    read-only — it reads USB descriptors and sysfs — whereas probing *writes*
-    ``AT+DEV.TYPE?`` to a port whose occupant is by definition unknown. The
-    bench dashboard re-scans every 30 s, so a probing default would have the
-    panel type at whatever is plugged into the bench, forever, unasked. Opt in
-    only where a caller has a reason to want an identity badly enough to send
-    bytes for it: the CLI's explicit ``--probe``, or an operator asking the
-    agent "what is that". See :py:func:`probe_unidentified` for what is
-    probed, which is a much narrower set than "everything unidentified".
+    read-only — it reads USB descriptors and sysfs — whereas probing *writes* to
+    a port whose occupant is by definition unknown. The bench dashboard re-scans
+    every 30 s, so a probing default would have the panel type at whatever is
+    plugged into the bench, forever, unasked. Opt in only where a caller has a
+    reason to want an identity badly enough to send bytes for it: the CLI's
+    explicit ``--probe``, or an operator asking the agent "what is that". See
+    :py:func:`probe_unidentified` for what is probed, which is a much narrower
+    set than "everything unidentified".
+
+    That default hardened from a preference into a rule when a switched PDU
+    joined the probe candidates: one of the ports a probe would write to is a
+    mains contactor's control port, and enumerating a bench must never be the
+    thing that writes bytes to it.
     """
     found: list[DiscoveredDevice] = []
     if serial:
@@ -596,31 +648,183 @@ def inventory(*, probe: bool = False, **kwargs) -> dict:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class SerialProbe:
+    """One "write these bytes at this baud and see who answers" attempt.
+
+    Probes are tried in order and the first match wins, so the ordering in
+    :py:data:`SERIAL_PROBES` is part of the behaviour, not incidental.
+
+    Attributes:
+        device_key: what a match identifies.
+        baudrate: probes are baud-specific. Two of our devices now sit behind
+            the *same* FTDI bridge at different rates, so a single hardcoded
+            baud can no longer identify the bus.
+        request: bytes to write. Always a write, never a bare read: a silent
+            device is indistinguishable from an absent one otherwise.
+        markers: substrings, **any** of which means "this is it". A tuple
+            rather than one string because a device with a login prompt answers
+            differently depending on whether a session is already open, and
+            both answers identify it. Matching is case-sensitive.
+        label: human description, for logs.
+    """
+
+    device_key: str
+    baudrate: int
+    request: bytes
+    markers: tuple[str, ...]
+    label: str = ""
+
+
+#: Probe attempts, in order. First match wins.
+#:
+#: **The PDU41002 is deliberately not in this list**, and that absence is a
+#: finding rather than an omission. The plan called for a bare-``\r`` probe at
+#: 9600 on the assumption that a CR merely re-prompts an idle console. Measured
+#: on firmware 1.3.4, it does not: a CR *submits an empty line* to whatever
+#: login field is current, so successive CRs walk the device's authentication
+#: state machine —
+#:
+#:   CR 1 -> ``\r\n\r\nLogin Name : ``      (identifiable)
+#:   CR 2 -> ``\r\nLogin Password : ``      (empty username submitted)
+#:   CR 3 -> ``Please wait for authentication....`` then, ~15 s later,
+#:           ``Login Failed`` and back to ``Login Name : ``
+#:
+#: Three consequences, each fatal to the idea of probing this device:
+#:
+#: 1. **A probe cannot identify it reliably.** The vendor string appears in only
+#:    one of the three states, so the answer depends on what touched the console
+#:    beforehand. Measured directly: five consecutive probe calls returned
+#:    ``None, cyberpower_pdu41002, None, None, None``.
+#: 2. **It is not read-only.** The device logged
+#:    ``Login authorization failure via Console`` for the probe traffic — a
+#:    discovery sweep writing authentication failures into a mains switch's
+#:    audit log, which also makes a real intrusion harder to spot.
+#: 3. **It blocks the console for ~15 s.** During the authentication delay the
+#:    port answers nothing, so a probe can leave the device unusable to the
+#:    driver that follows it.
+#:
+#: No inert alternative exists: opening the port, and writing ``?``, DEL or NUL
+#: without a terminator, all produce **no reply at all**, so there is nothing to
+#: match on. The PDU is therefore identified *passively* by its udev symlink
+#: (``deploy/udev/62-benchctrl-ftdi.rules``, keyed on the adapter's serial
+#: number) — see :py:func:`identify_by_symlink`. That is strictly better than a
+#: probe anyway: it is exact rather than heuristic, and it writes nothing.
+SERIAL_PROBES: tuple[SerialProbe, ...] = (
+    SerialProbe(
+        device_key="eastwood_qr10x",
+        baudrate=115200,
+        request=b"AT+DEV.TYPE?\r\n",
+        # The leading "+" and trailing "=" are both load-bearing. A marker of
+        # "DEV.TYPE" is a substring of this probe's own request, so any device
+        # that ECHOES what it receives matches it — and the PDU echoes on its
+        # serial console. Measured at 9600: the PDU answered
+        # `b'AT+DEV.TYPE\n....'`, which "DEV.TYPE" matched, so discovery
+        # identified a mains switch as a programmable resistor. The QR10x's real
+        # reply is `+DEV.TYPE=QR101A-…`; an echoed request ends in `?`, never
+        # `=`.
+        #
+        # At 115200 the PDU returns framing garbage (all-zero bytes) rather than
+        # its echo, so the baud mismatch masked this — but nothing guarantees a
+        # future device behind the same bridge shares that luck, and a marker
+        # satisfied by its own echo is wrong regardless of who it happens to
+        # spare.
+        markers=("+DEV.TYPE=",),
+        label="Eastwood QR10x (AT command set)",
+    ),
+)
+
+
+def identify_by_symlink(
+    path: str, symlink_dir: Optional[str] = None
+) -> Optional[str]:
+    """Identify a serial device by a udev symlink pointing at it.
+
+    Passive: resolves symlinks and compares paths. Nothing is opened and nothing
+    is written, which is what makes it usable on a device that switches mains.
+
+    Args:
+        path: the ``/dev/tty*`` node to identify.
+        symlink_dir: where to look. Defaults to :py:data:`SYMLINK_DIR`, read at
+            *call* time rather than as a default argument value — a
+            ``symlink_dir: str = SYMLINK_DIR`` default binds at import, which
+            silently ignores anyone (tests included) monkeypatching the module
+            constant.
+
+    Returns the device key, or None when no symlink resolves to ``path``. Never
+    raises — a missing ``/dev/benchctrl`` just means the udev rules are not
+    installed, which is a normal state on a developer laptop.
+    """
+    import os
+
+    if symlink_dir is None:
+        symlink_dir = SYMLINK_DIR
+
+    try:
+        target = os.path.realpath(path)
+        entries = os.listdir(symlink_dir)
+    except OSError as exc:
+        log.debug("no symlink identification for %s: %s", path, exc)
+        return None
+
+    for name in entries:
+        key = SYMLINK_KEYS.get(name)
+        if key is None:
+            continue
+        try:
+            if os.path.realpath(os.path.join(symlink_dir, name)) == target:
+                return key
+        except OSError:  # pragma: no cover - a symlink vanishing mid-scan
+            continue
+    return None
+
+
 def probe_serial_identity(path: str, timeout: float = 1.0) -> Optional[str]:
     """Ask an unidentified serial device what it is.
 
-    Only for devices behind a generic bridge, where VID/PID cannot decide.
-    Currently recognises the QR10x by its ``AT+DEV.TYPE?`` reply.
+    Only for devices behind a generic bridge, where VID/PID cannot decide — the
+    QR10x's CH340 and the PDU's FT232R are both in
+    :py:data:`GENERIC_BRIDGES`.
+
+    Tries :py:func:`identify_by_symlink` first, because it is exact and writes
+    nothing, then each entry in :py:data:`SERIAL_PROBES` in order, reopening the
+    port at that probe's baud rate. Stops at the first match.
+
+    **This function writes to the port**, so it is opt-in rather than part of
+    ``discover()``. The PDU41002 is not probeable at all — a bare CR submits an
+    empty login line, and repeated probes log authentication failures on it and
+    block its console for ~15 s — so it relies entirely on the symlink path
+    above. See the note on :py:data:`SERIAL_PROBES`.
 
     Returns the matching device key, or None. Never raises: probing is
-    best-effort by nature, and a device that ignores us is simply not one
-    of ours.
+    best-effort by nature, and a device that ignores us is simply not one of
+    ours.
     """
+    symlinked = identify_by_symlink(path)
+    if symlinked is not None:
+        return symlinked
+
     try:
         import serial
     except ImportError:  # pragma: no cover
         return None
 
-    try:
-        with serial.Serial(path, 115200, timeout=timeout) as ser:
-            ser.reset_input_buffer()
-            ser.write(b"AT+DEV.TYPE?\r\n")
-            ser.flush()
-            reply = ser.read(128).decode("ascii", errors="replace")
-            if "DEV.TYPE" in reply:
-                return "eastwood_qr10x"
-    except Exception as exc:
-        log.debug("probe of %s failed (expected for foreign devices): %s", path, exc)
+    for probe in SERIAL_PROBES:
+        try:
+            with serial.Serial(path, probe.baudrate, timeout=timeout) as ser:
+                ser.reset_input_buffer()
+                ser.write(probe.request)
+                ser.flush()
+                reply = ser.read(256).decode("ascii", errors="replace")
+                if any(marker in reply for marker in probe.markers):
+                    return probe.device_key
+        except Exception as exc:
+            log.debug(
+                "probe %s of %s failed (expected for foreign devices): %s",
+                probe.device_key,
+                path,
+                exc,
+            )
     return None
 
 

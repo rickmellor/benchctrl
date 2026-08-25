@@ -17,6 +17,7 @@ Each driver is independent and optional. Import only what you need.
 | Rigol DL3031A electronic load | `benchctrl.drivers.rigol_dl3031a.RigolDL3031A` | USB-TMC + SCPI via pyvisa | **shipped (v0.9.3)** |
 | Rigol DP2031 triple-output programmable PSU | `benchctrl.drivers.rigol_dp2031.RigolDP2031` | USB-TMC + SCPI via pyvisa | **shipped (v1.1.0)** |
 | Siglent SDM4065A 6½-digit bench DMM | `benchctrl.drivers.siglent_sdm4065a.SiglentSDM4065A` | USB-TMC + SCPI via pyvisa | **shipped (unreleased)** |
+| CyberPower PDU41002 8-outlet switched PDU | `benchctrl.drivers.cyberpower_pdu41002.CyberPowerPDU41002` | vendor CLI over USB-Serial (FTDI) **or** SSH | **shipped (unreleased)** — switches mains |
 
 ## QR10x — programmable resistance
 
@@ -765,3 +766,347 @@ on the instrument. The simulator accepts both deliberately: matching
 only the colon-prefixed form would make error queries fall through to
 the generic register model and answer `0`, i.e. a permanently clean
 error queue — the one failure a driver cannot detect for itself.
+
+## CyberPower PDU41002 — 8-outlet switched PDU
+
+[CyberPower PDU41002](https://www.cyberpowersystems.com) — 1U rack
+switched PDU, 120 V / 20 A, eight individually switchable NEMA 5-20R
+outlets, whole-device metering, RS-232 console and 10/100 Ethernet.
+
+This is the first driver in the tree that **switches mains power**, and
+the first with a network transport. Both facts change how it is shaped.
+
+For every other instrument, "safe" means *output off*. For a PDU,
+cutting mains is itself the disruptive act: it can de-power a DUT
+mid-measurement and drop other instruments' sessions. So the default is
+**do not move the contactors**, every switchable outlet is opt-in, and
+`close()` deliberately leaves outlet state alone.
+
+> **This driver switches real mains power.** `set_outlet_state`,
+> `reset_outlet` and `clear_outlet_command` move contactors on whatever
+> is plugged into the PDU. Nothing switches unless its index is in
+> `allowed_outlets`, and nothing switches implicitly — `close()`,
+> `__exit__` and the governor's default safe state all deliberately
+> leave outlet state alone. See [Switching](#switching).
+
+### Quick start
+
+```python
+from benchctrl.drivers.cyberpower_pdu41002 import CyberPowerPDU41002
+
+# serial — the bootstrap and recovery transport
+with CyberPowerPDU41002.open(port="/dev/benchctrl/pdu41002",
+                             allowed_outlets=(1, 2)) as pdu:
+    print(pdu.read_identity())          # sys show
+    print(pdu.read_device_status())     # devsta show — load, V, Hz, kWh
+    print(pdu.outlet_states())          # {1: True, 2: True, ...}
+
+# network — same driver, same CLI, same parsers
+with CyberPowerPDU41002.open(host="pdu-benchctrl",
+                             allowed_outlets=(1, 2)) as pdu:
+    print(pdu.measure_load_A())
+```
+
+`allowed_outlets` is a **required** keyword argument. There is no "all"
+default and no `Optional`: a config typo has to fail closed on the one
+device that can drop mains.
+
+### One CLI, two byte pipes, no SNMP
+
+The vendor CLI is byte-identical over both transports. That was measured,
+not assumed — `sys show`, `oltsta show`, `oltsta index 1 show`,
+`console show` and `snmpv1 show` compare exactly across serial and SSH,
+and a `PDU41002Info` read over SSH compares equal to the same read over
+serial. `devsta show` differs only in live mains voltage.
+
+So there is one command engine, one grammar, one set of parsers and one
+simulator, with a deliberately thin link seam beneath
+(`write` / `read` / `is_open` / `close`). Adding the SSH path changed no
+public signature.
+
+SNMP is **not used and is disabled on the device**. The CLI covers
+switching, state, metering and identity, so SNMP would have bought a
+second differently-shaped protocol, a second codec and a second
+simulator for zero capability — plus a cleartext-credential exposure.
+
+### Only one session exists — on the whole device
+
+The PDU permits **exactly one CLI session at a time across all
+transports**, and this is the single most surprising thing about it:
+
+- **The incumbent wins.** An SSH login attempted while serial is logged
+  in *completes* — the banner prints in full — and the device then
+  immediately hangs up. The serial session carries on unaffected.
+- **The failure looks exactly like a bad password**, because it arrives
+  *after* the password is accepted. The driver raises
+  `PDU41002SessionError` rather than an auth error specifically so this
+  is diagnosable; that type survives the RPC wire for the same reason.
+- **Closing the port does not end the device session.** CLI session
+  state outlives the serial port, so `close()` **must** send `exit`.
+  Skipping it leaves the PDU unreachable from the other transport. This
+  is the one driver in the repo whose `close()` has a required side
+  effect on the device.
+
+"Network alongside serial" therefore means **alternating, not
+concurrent**. `open()` takes exactly one transport; passing both `port`
+and `host` raises rather than silently preferring one, so a run log can
+always answer which wire a switch travelled on.
+
+Serial stays the bootstrap and recovery path: no key, no negotiation,
+no password-prompt handling.
+
+### The password
+
+The PDU is benchctrl's first device that needs a secret, and the obvious
+places to put one are both wrong:
+
+- `DeviceConfig.open` is written back verbatim by `to_dict()`, so a
+  password there lands in any saved config;
+- `open_kwargs` crosses benchctrl's RPC wire, which is
+  HMAC-authenticated but **plaintext**.
+
+So leave `password=None` and set **`BENCHCTRL_PDU_PASSWORD`** in the
+environment of the process that talks to the device — the agent's own
+environment, not the client's. A missing password fails at `open()`
+naming the variable, rather than later as a login timeout.
+
+```bash
+read -rs BENCHCTRL_PDU_PASSWORD && export BENCHCTRL_PDU_PASSWORD
+```
+
+Belt and braces around that: `DeviceConfig.to_dict()` now masks
+`password` / `passphrase` / `secret` keys in `open` as `***` (so
+config round-tripping is lossy for those keys **by design**), the
+driver's and links' `__repr__` carry no credential material, and the
+password never reaches a command line — no `sshpass`, no env prefix on
+the ssh argv, both of which would expose it in the process list.
+
+The simulator accepts a configured password, so hardware-free tests
+never need the real one.
+
+### SSH quirks worth knowing (firmware 1.3.4)
+
+Each of these is a fixed flag in `links.py` with a comment; they look
+like sloppy security defaults and are not.
+
+| Symptom | Cause | What the driver does |
+|---|---|---|
+| `key exchange failed!` | group-*exchange* KEX is broken on this firmware | forces `KexAlgorithms=diffie-hellman-group14-sha256` |
+| `Permission denied (keyboard-interactive)` even with the matching key uploaded | device offers keyboard-interactive **only**; pubkey auth is refused | `PubkeyAuthentication=no`, and a pty via `pty.fork()` + `ssh -tt` to type the password |
+| host key reads as all zeros | the exported ed25519 host key is null | `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` — unverifiable either way, so don't poison the operator's `known_hosts` |
+
+Login over SSH takes around 7.5 s. It is slow, not stuck.
+
+### Reads
+
+| Method | CLI verb | Notes |
+|---|---|---|
+| `read_identity()` | `sys show` | name, location, contact, model, HW/FW version, MAC — the `*IDN?` equivalent |
+| `read_device_status()` | `devsta show` | load A/W/VA, power factor, voltage, frequency, peak load, energy kWh |
+| `measure_load_A()` / `measure_voltage_V()` / `measure_frequency_Hz()` | `devsta show` | scalar convenience wrappers |
+| `outlet_states()` | `oltsta show` | every outlet in one round trip |
+| `outlet_state(n)` / `outlet_name(n)` | `oltsta` | `True` means energised |
+| `read_outlet_config(refresh=False)` | `oltcfg index all show` | per-outlet on/off delay and reboot duration; cached |
+| `transport` / `is_open` / `outlet_count` / `allowed_outlets` / `panic_outlets` | — | properties |
+
+Metering is **whole-device**. The PDU41002 does not meter outlets
+individually, so there is no per-outlet current to ask for.
+`power_factor` is `None` at zero load — the device prints `----`, which
+is normal rather than a fault.
+
+### Switching
+
+Three methods move contactors, and there is deliberately **no
+`outlet_on()` / `outlet_off()` pair** — one switching verb means one code
+path to audit.
+
+| Method | CLI verb | Returns |
+|---|---|---|
+| `set_outlet_state(n, on, *, delayed=False, verify=True)` | `oltctrl index n act on\|off\|delayon\|delayoff` | the **verified read-back** state |
+| `reset_outlet(n, *, delayed=False)` | `oltctrl index n act reboot\|delayreboot` | `None` |
+| `clear_outlet_command(n)` | `oltctrl index n act cancel` | `None` |
+
+```python
+with CyberPowerPDU41002.open(port="/dev/benchctrl/pdu41002",
+                             allowed_outlets=(3,)) as pdu:
+    assert pdu.set_outlet_state(3, False) is False   # verified off
+    ...
+    assert pdu.set_outlet_state(3, True) is True     # verified on
+```
+
+**`set_outlet_state` returns the read-back state, not `None`, because
+`oltctrl` reports nothing at all.** Its reply is a blank line and a
+re-prompt — byte-identical whether or not the contactor moved (captured
+in `tests/fixtures/pdu41002/outlet_switch.txt`). There is no other way to
+learn what happened, so read-back is mandatory rather than prudent.
+`verify=False` skips it and logs a warning; the value it returns is the
+state you *asked for*, not the state the outlet is in.
+
+**The verify budget is derived from the device, not hardcoded.** Each
+outlet's `td_on` / `td_off` is operator-configurable (3 s as shipped),
+and `oltcfg` is read to size the wait. A budget picked from the measured
+~0.62 s round trip or ~1.5 s settle looks generous and then flakes on a
+unit whose delay someone raised. If the outlet never agrees,
+`PDU41002ProtocolError` says so and names both possibilities — it did not
+move, or its delay exceeds the budget.
+
+**`reset_outlet` returns `None` on purpose.** A reboot ends where it
+started, so a read-back cannot tell "cycled" from "never moved". The
+transient cut is the point and it is not observable after the fact, so
+the method makes no claim about it. If you need proof of the cut, drive
+`set_outlet_state(n, False)` then `True` and verify each.
+
+**`clear_outlet_command` is gated like a switch**, not like a read.
+Cancelling a scheduled cut leaves mains *on* when an operator expected it
+off — a state change in every sense that matters.
+
+#### Two independent guards, and why the method names matter
+
+Aggregate targeting is impossible **structurally**, not by validation:
+`oltctrl index all act off` is one line that de-powers the whole bench,
+so no signature accepts `"all"`, `"b1"`, `"b2"` or a collection. Two
+separate checks enforce it:
+
+1. `_coerce_outlet` rejects anything that is not a plain in-range `int`
+   — `bool` before `int`, so `True` cannot become outlet 1. That catches
+   a bad *argument*.
+2. Every rendered command is matched against
+   `^oltctrl index \d+ act (on|off|reboot|delayon|delayoff|delayreboot|cancel)$`
+   before a byte is written. That catches a bad *rendering* — a formatting
+   bug or a future edit to the action table — which the first check
+   cannot see.
+
+The switching methods are named `set_`, `reset` and `clear_` because
+`agent/dispatch.py` derives which calls need the writer claim **purely
+from the method name**, with no driver-declared override. A method named
+`outlet_on()` would be remotely callable by any read-only observer:
+mains switching that bypasses the claim gate entirely. Renaming any of
+the three silently removes that protection, which is why the mutator set
+is pinned by an exact-equality test in both directions.
+
+### Deployment assumptions
+
+**Self-protection here is a cabling invariant, not a software
+guarantee.** The driver cannot know which outlet feeds what.
+
+The current bench policy is that the PDU powers **bench instruments and
+DUTs only**: the Arduino Uno Q agent host and the network gear are *not*
+plugged into it. That is what makes it impossible for the bench to cut
+power to its own agent, or to the control path that would recover it.
+
+If that ever changes — if the board or the switch is moved onto the PDU
+— then `allowed_outlets` and `panic_outlets` are the controls to
+revisit *before* the move, not after. Defence in depth available on the
+device itself: its `oltuser` model can restrict outlets in firmware.
+Configure that by hand if you want it; benchctrl will not do it for you.
+
+Open the adapter by its stable symlink, not `/dev/ttyUSB0`:
+`deploy/udev/62-benchctrl-ftdi.rules` binds
+`/dev/benchctrl/pdu41002` to the FTDI serial number, because ttyUSB
+numbering is enumeration-order and a second USB-serial adapter can take
+`ttyUSB0` while the driver still opens it and starts issuing commands.
+
+### Traps the driver avoids by construction
+
+- **`menumode` is a one-way trap.** Sending it switches the session to a
+  menu interface, and returning to the CLI requires a full logout and
+  login. Every parser would then fail while the link still looks
+  healthy. No method emits it.
+- **`console telnet enable` would disable SSH.** The two are mutually
+  exclusive in firmware, so that verb can kill the network transport
+  from underneath a running test. Not in the method surface.
+- **There is no interrupt character.** `\x03` is not an interrupt on
+  this CLI — it is echoed and taken as part of the command (a stray one
+  produces `Command not found` at a constant column). A bare `CR` *is*
+  the resync, and that is what `_resync()` sends after a timeout.
+- **Read until the prompt, never until a blank line.** An unknown verb
+  produces a ~30-line verb dump, and the number of blank lines before
+  the prompt varies by error shape (2, 3, 0). Blank-line termination
+  truncates mid-error and desyncs the session.
+- **Line endings are not uniform** — caret lines are introduced by a
+  bare `\n\r`. The engine parses bytes rather than trusting
+  `splitlines()`.
+- **Serial echoes the command; SSH does not.** The largest textual
+  difference between the transports, and why echo stripping is
+  conditional on the link.
+- **Idle logout is a safety hazard, not an annoyance.** After the idle
+  timeout (`devcfg idletime`, default 3 min) a command is consumed *as a
+  username* and silently swallowed. `_cmd()` detects a login prompt in
+  any response, and read-back verification is the second line of
+  defence.
+- **A bare `CR` is not inert at the login prompt.** It submits an *empty
+  line* to whichever field is current, so repeated CRs walk the
+  authentication state machine and end in a ~15 s `Please wait for
+  authentication....` / `Login Failed` cycle during which the console
+  answers nothing. This is why the PDU is not discovery-probeable — see
+  below.
+
+### Discovery: identified passively, never probed
+
+The FT232R's `0403:6001` is a generic bridge, so VID/PID cannot name this
+device. The other bridge-hidden instrument (the QR10x) is identified by
+*probe* — writing a harmless query and matching the reply. **That
+approach is not usable here**, and the reason is worth recording because
+the obvious design is wrong:
+
+| Attempt | Measured result on firmware 1.3.4 |
+|---|---|
+| bare `\r` at 9600 | walks the login state machine; the vendor string appears in only one of three states, so five consecutive probes returned `None, cyberpower_pdu41002, None, None, None` |
+| any probe at all | the device logs `Login authorization failure via Console` — a bench sweep writing auth failures into a mains switch's audit trail |
+| during the retry | ~15 s of silence, so a probe can lock out the driver behind it |
+| `?`, `DEL`, `NUL` with no terminator | **no reply at all** — nothing to match on |
+| opening the port and reading | no greeting |
+
+So `SERIAL_PROBES` deliberately contains **no PDU entry**, and
+`discovery.identify_by_symlink()` names it from the udev symlink instead:
+
+```
+$ benchctrl-discover
+/dev/ttyUSB0  cyberpower_pdu41002  exact
+    identified by udev symlink, not VID/PID — open it by /dev/benchctrl/
+    path so the binding survives re-enumeration
+```
+
+This is strictly better than a probe rather than a consolation prize: it
+is exact rather than heuristic, it survives re-enumeration because the
+rule keys on the adapter's serial number, and identifying the bench
+writes **zero bytes** to a mains contactor's control port. It does
+require `deploy/udev/62-benchctrl-ftdi.rules` to be installed; without
+it the PDU comes back unidentified, which is the correct failure — an
+unidentified port is obvious, whereas a probe that names the wrong
+device is not.
+
+### Simulator
+
+`benchctrl.sim.pdu41002.SimulatedPDU41002` replays captured device
+output byte-for-byte: the canned responses under
+`tests/fixtures/pdu41002/` are verbatim transcript excerpts with the
+firmware version and capture date recorded, not text written from the
+manual. That distinction matters — a simulator built from the same
+misreading as the driver agrees with it. This one earned its keep
+immediately by reproducing the hardware's handling of `\x03`, which is
+how that driver bug was found.
+
+Test hooks: `hold_session()` / `release_session()` (single-session
+contention), `force_logout()` (deterministic re-auth, no wall clock),
+`command_log`, `login_log` (records `(user, accepted)` — never
+passwords), `hangup_count` and `inject_error(shape)`.
+
+One caveat recorded in the fixture README: the prompt is
+`"CyberPower > "` **with a trailing space** on the wire. The checked-in
+fixture files lost it to trailing-whitespace stripping, so do not
+"correct" `PROMPT` to match the files — every read would break.
+
+### MCP tools
+
+15 tools, prefixed `pdu41002_`. `pdu41002_open` takes **no password
+parameter at all** — absent, not defaulted — so a model cannot place a
+credential in a tool-call argument where it would be logged in the
+conversation transcript.
+
+Three of them switch mains: `pdu41002_set_outlet_state`,
+`pdu41002_reset_outlet` and `pdu41002_clear_outlet_command`. Each
+docstring opens by saying so and points at `allowed_outlets` as an
+operator decision to *ask about* rather than widen — a model reading only
+the tool description should not be able to mistake these for
+configuration.

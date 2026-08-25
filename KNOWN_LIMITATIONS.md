@@ -527,6 +527,258 @@ Code reference:
 `src/benchctrl/drivers/siglent_sdm4065a/driver.py` — `set_autozero`,
 `get_autozero`, `reading_timeout_ms`, `_resize_timeout`.
 
+### F-9. PDU41002 allows exactly one CLI session, device-wide
+Bench-measured on firmware 1.3.4, and undocumented by the vendor. The
+PDU permits **one management session at a time across all transports** —
+serial and SSH are not independent channels into it.
+
+Three measurements:
+
+- SSH alone logs in, reaches the prompt and survives 30 s idle. Fine.
+- SSH attempted *while serial is logged in* **completes
+  authentication** — the banner prints in full — and the device then
+  immediately hangs up. **The incumbent wins**; the serial session is
+  unaffected and keeps working.
+- After `exit` on serial, SSH connects and runs commands normally.
+
+Two consequences, neither obvious:
+
+1. **Closing the serial port does not end the device session.** CLI
+   session state outlives the port, so a driver that merely closes the
+   port leaves the device occupied and every later SSH attempt dies
+   *after* a successful login. `close()` therefore **must** send `exit`.
+   This is the only `close()` in the repo with a required side effect on
+   the device, and skipping it is a correctness bug rather than
+   impoliteness.
+2. **The failure is indistinguishable from bad credentials** unless the
+   driver looks closely, because it arrives *after* the password is
+   accepted. The driver raises `PDU41002SessionError`, which is
+   registered in `net/errors.py` so the type survives the RPC wire — a
+   remote caller that saw a generic error would misdiagnose this as an
+   auth problem every time.
+
+Affects: "network alongside serial" means **alternating, not
+concurrent**. `open()` takes exactly one transport and holds one
+session; there is no supported configuration with both links live. An
+abandoned session (a process killed between login and `exit`) locks the
+device out until the idle timeout expires (`devcfg idletime`, default
+3 min).
+
+Workaround: none, and none attempted — this is a device limit, not
+something to engineer around. Always use the context manager, and if the
+device appears to reject a correct password, wait out the idle timeout
+before concluding the credentials are wrong.
+
+Code reference:
+`src/benchctrl/drivers/cyberpower_pdu41002/driver.py` — `close`,
+`_login_ssh`, `_raise_if_hungup`.
+
+### F-10. PDU41002 SSH needs three non-default options, and a pty
+Bench-measured on firmware 1.3.4. Each of these reads like a sloppy
+security default and is not:
+
+- **Group-exchange KEX is broken.** The OpenSSH default
+  `diffie-hellman-group-exchange-sha256` fails with
+  `key exchange failed!`. Forcing the fixed group
+  `diffie-hellman-group14-sha256` completes the handshake. The defect is
+  specific to group *exchange*, where the client asks the server to
+  propose a group.
+- **Pubkey auth is refused.** The device offers only
+  `keyboard-interactive`, even from a host holding the private key
+  matching the `id_rsa.pub` uploaded to the device through its own web
+  UI. So the uploaded public key is not usable for client auth,
+  `BatchMode=yes` can never work, and the link needs a **pty**
+  (`pty.fork()` + `ssh -tt`) to type the password into the client's
+  prompt. Unattended runs therefore depend on
+  `BENCHCTRL_PDU_PASSWORD`, not on a board key.
+- **The exported ed25519 host key is all zeros.** `ssh-keyscan` reads a
+  null key, so host-key verification is worthless here. The driver pins
+  `StrictHostKeyChecking=no` with `UserKnownHostsFile=/dev/null` —
+  accepting an unverifiable key is unavoidable, but poisoning the
+  operator's real `known_hosts` with a null entry is not.
+
+Also: over SSH the password prompt comes from the **ssh client**
+(`(admin@host) password:`) and the device never shows its own
+`Login Name :` / `Login Password :`. The two transports' login sequences
+are genuinely different, so sharing one login loop is actively wrong,
+not merely untidy — the serial path pokes with a bare CR to discover
+session state, which over SSH would submit an empty password.
+
+Affects: the network transport only. Login over SSH takes ~7.5 s; it is
+slow, not stuck.
+
+Workaround: none needed — the flags are fixed in the link and commented.
+Firmware 1.4.0 is on hand and might fix the KEX defect, but flashing is
+a separate decision and is not a prerequisite for anything.
+
+Code reference:
+`src/benchctrl/drivers/cyberpower_pdu41002/links.py` — `SSH_OPTIONS`,
+`SshLink`; `driver.py` — `_login_ssh`.
+
+### F-11. PDU41002 CLI has no interrupt character, and `menumode` is one-way
+Bench-measured. Three CLI behaviours that each break an assumption
+carried over from the SCPI drivers:
+
+- **`\x03` is not an interrupt.** It is echoed and consumed as part of
+  the command — a stray one yields `Command not found` at a *constant*
+  column regardless of command length. It also does **not** clear a
+  dirty input line. A bare `CR` does, and that is the resync the driver
+  sends after a timeout. (Sending `\x03` as a prefix broke every command
+  in the driver's first end-to-end run; the simulator caught it by
+  reproducing the hardware's behaviour rather than agreeing with the
+  driver's assumption.)
+- **`menumode` is a one-way trap.** Sending it switches the session to a
+  menu interface, and the manual is explicit that returning to the CLI
+  requires a full logout and login. Every parser would then fail against
+  menu output while the link still looked healthy. No driver method
+  emits it.
+- **`console telnet enable` silently disables SSH.** The two are
+  mutually exclusive in firmware, so that verb can kill the network
+  transport from underneath a running test. Not in the method surface.
+
+Parsing traps in the same family: read until the **prompt**, never until
+a blank line — the unknown-verb error carries a ~30-line verb dump and
+the number of blank lines before the prompt varies by error shape
+(2, 3, 0), so blank-line termination truncates mid-error and desyncs the
+session. Line endings are not uniform (caret lines are introduced by a
+bare `\n\r`), so the engine parses bytes rather than trusting
+`splitlines()`. And serial echoes the command while SSH does not, which
+is the largest textual difference between the transports.
+
+Also: **idle logout is a safety hazard, not an annoyance.** After
+`devcfg idletime` (default 3 min) expires, a command is consumed as a
+*username* and silently swallowed while the operator believes it ran.
+`_cmd()` detects a login prompt in any response, and read-back
+verification is the second line of defence.
+
+Affects: anything extending the driver's command surface.
+
+Code reference:
+`src/benchctrl/drivers/cyberpower_pdu41002/driver.py` — `_round_trip`,
+`_resync`, `_read_until`, `_raise_for_error`, `_strip_echo`.
+
+### F-12. PDU41002 out of scope, deliberately
+Not defects — capabilities the driver refuses to expose, recorded so the
+omissions read as decisions rather than oversights.
+
+- **Aggregate outlet targeting.** `oltctrl index all act off` is one
+  line that de-powers the entire bench. No signature accepts `"all"`,
+  `"b1"`, `"b2"` or a collection, and this is enforced twice: non-`int`
+  rejected at coercion, and the rendered command asserted against a
+  single-index regex before the write.
+- **Cold-start configuration** (`devcfg coldstasta` / `coldstadly`).
+  Getting it wrong energises the bench unattended, with nobody present.
+- **Daisy chain** (`guest 1|2|3`, accepted by every verb). An off-by-one
+  switches a *different physical box*, which is the worst available
+  failure mode for a mains switch.
+- **Per-outlet metering.** Not a driver limit — the PDU41002 meters the
+  device total only, so there is no per-outlet current to read.
+  `power_factor` is `None` at zero load (the device prints `----`).
+- **SNMP**, the web UI (`login_pass.cgi` posts credentials in
+  cleartext), and UDP 3052 (undocumented PDNU discovery).
+
+Also note that **self-protection is a cabling invariant, not a software
+guarantee**: the driver cannot know which outlet feeds what. What makes
+self-kill impossible on this bench is that the agent host and the
+network gear are not plugged into the PDU. That assumption is stated in
+`docs/drivers.md`, and `allowed_outlets` / `panic_outlets` are the
+controls to revisit *before* anyone changes the cabling.
+
+### F-13. PDU41002 cannot be identified by a discovery probe
+Bench-measured, and it invalidates the obvious design. The FT232R's
+`0403:6001` is in `GENERIC_BRIDGES`, so VID/PID cannot name this device
+and the natural move is the same probe mechanism the QR10x uses: write
+something harmless, match the reply. The planned probe was a bare `\r` at
+9600, on the assumption that a CR merely re-prompts an idle console.
+
+**It does not.** A CR submits an *empty line* to whichever login field is
+current, so successive probes walk the authentication state machine:
+
+```
+CR 1 -> \r\n\r\nLogin Name :          (the only identifiable state)
+CR 2 -> \r\nLogin Password :          (empty username submitted)
+CR 3 -> Please wait for authentication....   ~15 s, then Login Failed
+```
+
+Three measured consequences, any one of which disqualifies probing:
+
+- **Unreliable.** The vendor string appears in one of three states, so
+  the answer depends on what touched the console beforehand. Five
+  consecutive `probe_serial_identity()` calls against the real device
+  returned `None, cyberpower_pdu41002, None, None, None`.
+- **Not read-only.** The device recorded `Login authorization failure via
+  Console` in its own event log for probe traffic — a bench sweep writing
+  auth failures into a mains switch's audit trail, which also makes real
+  intrusion attempts harder to spot.
+- **Disruptive.** The console answers nothing during the ~15 s
+  authentication delay, so probing can lock out the driver behind it.
+
+No inert alternative exists: opening the port, and writing `?`, `DEL` or
+`NUL` without a terminator, all produce **no reply at all**.
+
+So the PDU is identified *passively*, by the udev symlink from
+`deploy/udev/62-benchctrl-ftdi.rules` (`discovery.identify_by_symlink`,
+wired into `scan_serial`). That is better than a probe rather than a
+fallback — exact instead of heuristic, stable across re-enumeration
+because the rule keys on the adapter's serial number, and it writes zero
+bytes to the device.
+
+**The limitation that remains:** without that udev rule installed the PDU
+comes back unidentified. That is the correct failure (an unidentified
+port is visible; a probe naming the wrong device is not), but it means
+`benchctrl-discover` on a host with no rules installed will not find it.
+
+A related defect was found in the same pass and **fixed**: the QR10x
+probe matched on `DEV.TYPE`, a substring of its own request
+`AT+DEV.TYPE?`, so any device that echoes its input matched — and the PDU
+echoes. The marker is now `+DEV.TYPE=`, which an echo cannot produce. On
+hardware the 115200-vs-9600 baud mismatch happened to mask this, but the
+marker was wrong regardless of which devices it spared.
+
+Affects: `benchctrl-discover` output, and any future device behind a
+generic bridge that authenticates on its console.
+
+Code reference:
+`src/benchctrl/discovery.py` — `SERIAL_PROBES` (note), `SYMLINK_KEYS`,
+`identify_by_symlink`, `scan_serial`.
+
+### F-14. `oltctrl` acknowledges nothing, so a switch is unfalsifiable without a read-back
+Bench-measured on firmware 1.3.4, and it is the constraint that shapes the
+whole switching surface. `oltctrl index N act off` answers with a **blank
+line and a re-prompt** — byte-identical whether the contactor moved, the
+index was out of the device's range in a way the parser missed, or the
+session had silently timed out and consumed the command as a username.
+There is no success marker, no failure marker and no error code. The
+transcript is checked in at `tests/fixtures/pdu41002/outlet_switch.txt`.
+
+Consequences that are not obvious from the vendor manual:
+
+- **`set_outlet_state` reads the outlet back and returns *that*, not
+  `None` and not the requested state.** `verify=False` exists but logs a
+  warning and returns the request unconfirmed; there is no honest way to
+  make it return anything better.
+- **The read-back budget must be derived from the device.** Each outlet's
+  `td_on` / `td_off` is operator-configurable, so a hardcoded wait sized
+  from the measured ~0.62 s round trip or ~1.5 s settle time flakes on a
+  unit whose delay someone raised. The driver reads `oltcfg` and adds a
+  margin.
+- **`reset_outlet` cannot be verified at all.** A reboot ends where it
+  started, so no read-back distinguishes "cycled" from "never moved". It
+  returns `None` rather than implying a guarantee it cannot make. Drive
+  `set_outlet_state(n, False)` then `True` if you need the cut proved.
+- **A simulator that always obeys cannot test any of this.** So
+  `SimulatedPDU41002` has an `ignore_switches` flag: it accepts and
+  acknowledges `oltctrl` byte-for-byte and moves nothing. Without a
+  device that can lie, the read-back path has no failing case to catch.
+
+Affects: every switching call, and any caller tempted to treat a returned
+value of `None` from `reset_outlet` as "it didn't work".
+
+Code reference:
+`src/benchctrl/drivers/cyberpower_pdu41002/driver.py` —
+`set_outlet_state`, `reset_outlet`, `_verify_outlet`, `_verify_budget_s`;
+`src/benchctrl/sim/pdu41002.py` — `ignore_switches`, `_blank_ack`.
+
 ## Harness
 
 ### A-1. Emulator + `SMU.record()` deadlock

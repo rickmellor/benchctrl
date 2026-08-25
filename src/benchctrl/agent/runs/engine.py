@@ -48,6 +48,14 @@ log = logging.getLogger("benchctrl.agent.runs.engine")
 
 TICK_S = 0.25
 
+#: How long one verified outlet switch may take on the PDU's worker.
+#: The driver derives its own read-back budget from the outlet's configured
+#: ``td_on``/``td_off`` (3 s as shipped) plus a 3 s margin, so a worker timeout
+#: below that would pre-empt the driver's own verification and report a
+#: *timeout* where the truthful answer is "the contactor did not move" — two
+#: failures with different remedies. Sized well clear of it.
+PDU_SWITCH_TIMEOUT_S = 30.0
+
 
 class RunEngine:
     """Executes one :py:class:`RunSpec` against one device."""
@@ -63,15 +71,34 @@ class RunEngine:
         on_event: Optional[Callable[[dict], None]] = None,
         agent_version: str = "",
         clock_scale: float = 1.0,
+        pdu=None,
+        pdu_worker=None,
     ) -> None:
         self.spec = spec
         self.device = device
         self.worker = worker
+        #: The switched PDU, if this run's phases switch mains. A *second*
+        #: device, on its own key and its own worker — the run's `device` is the
+        #: instrument being driven. Absent unless the spec asks for outlets, so
+        #: an ordinary run never touches mains even if a PDU is on the bench.
+        self.pdu = pdu
+        self.pdu_worker = pdu_worker
         self.governor = governor
         self.on_event = on_event
         #: Compresses phase durations for tests. Never touches the safety
         #: envelope, which is evaluated against real measurements.
         self.clock_scale = max(clock_scale, 1e-6)
+
+        # Refused here rather than at the phase that switches, and before the
+        # run directory exists: a spec that power-cycles a DUT and silently
+        # skipped every switch would run to "complete" having measured a DUT
+        # that was never rebooted. Wrong data reported as good data.
+        if spec.switched_outlets and pdu is None:
+            raise BenchValueError(
+                f"spec switches mains outlets {sorted(spec.switched_outlets)} "
+                f"but no PDU was supplied to the run engine. A run that cannot "
+                f"switch is not a run with switching skipped."
+            )
 
         self.run_id = new_run_id(spec.name)
         base = Path(runs_dir) if runs_dir else store_mod.default_runs_dir()
@@ -296,6 +323,12 @@ class RunEngine:
         self.spec.safety.check_setpoints(phase.setpoints)
         sp = phase.setpoints
 
+        # Mains **first**, and it is not a preference. An instrument setpoint
+        # applied while its DUT is de-powered lands nowhere; energising mains
+        # under an already-live output is how an inductive kick reaches a DUT.
+        # The order is the same one the governor uses in reverse on a trip.
+        self._apply_outlets(phase)
+
         if phase.mode == "idle":
             self._submit(lambda: self._safe_set("set_output", False), "idle")
             return
@@ -328,6 +361,58 @@ class RunEngine:
                 self.spec.device, "set_output", (True,), {}, session_id="run-engine"
             )
 
+    def _apply_outlets(self, phase: Phase) -> None:
+        """Switch this phase's mains outlets, then wait for the DUT to settle.
+
+        Runs on the PDU's own worker, not the instrument's: they are two
+        devices, and serialising a 3-second contactor delay behind the
+        instrument's queue would stall the measurement path for no reason.
+
+        A failed switch **fails the phase**. It is tempting to log it and carry
+        on — the run is unattended and nobody is watching — but a power-cycle
+        test whose power cycle did not happen produces data that looks fine and
+        describes nothing. `set_outlet_state(verify=True)` raises when the
+        contactor never moved, and that exception is allowed to propagate.
+        """
+        outlets = phase.setpoints.get("outlets") or {}
+        if not outlets:
+            return
+        if self.pdu is None:  # pragma: no cover - refused in __init__
+            raise BenchValueError("phase switches outlets but no PDU is attached")
+
+        for idx in sorted(outlets):
+            want = outlets[idx]
+            state = self._submit_pdu(
+                lambda i=idx, w=want: self.pdu.set_outlet_state(i, w, verify=True),
+                f"outlet_{idx}",
+            )
+            # Emitted per outlet, and *after* the verified read-back, so the run
+            # record says what the contactor did rather than what was asked. A
+            # mains transition missing from the timeline is a hole in the audit
+            # trail of a run that power-cycled a DUT.
+            self._emit(
+                "run_outlet",
+                payload={"outlet": idx, "requested": want, "state": bool(state)},
+            )
+
+        settle = phase.effective_settle_s * self.clock_scale
+        if settle > 0:
+            self._emit("run_outlet_settle", payload={"settle_s": settle})
+            # `wait`, not `sleep`: an abort arriving during a settle window must
+            # not have to outlast it. On a 30 s DUT boot that is the difference
+            # between stopping now and stopping in half a minute.
+            self._stop.wait(settle)
+
+    def _submit_pdu(self, fn, label: str):
+        """Queue work on the PDU's worker, falling back to inline.
+
+        Inline is the local/SDK case and the test case; the worker exists so the
+        agent serialises access to the device's single CLI session.
+        """
+        if self.pdu_worker is None:
+            return fn()
+        return self.pdu_worker.submit(fn, label=label, timeout=PDU_SWITCH_TIMEOUT_S)
+
     def _safe_set(self, method: str, *args) -> None:
         fn = getattr(self.device, method, None)
         if fn is None:
@@ -336,6 +421,14 @@ class RunEngine:
         fn(*args)
 
     def _idle_device(self) -> None:
+        # Idles the *instrument*, never the mains. A phase end is not a reason
+        # to de-power a DUT: the next phase almost certainly wants it up, and a
+        # run whose every phase boundary power-cycled the DUT would measure
+        # boot behaviour and nothing else. Outlets are left exactly where the
+        # last phase put them — including at `_finish`, so an aborted run does
+        # not silently cut mains. Cutting on a *trip* is the governor's opt-in
+        # `panic_outlets` path, which is a different decision by a different
+        # component; see `agent/safety.py`.
         try:
             self._submit(lambda: self._safe_set("set_output", False), "output_off")
             if self.governor is not None:

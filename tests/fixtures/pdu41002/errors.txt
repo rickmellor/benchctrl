@@ -1,0 +1,83 @@
+### PDU41002 error response shapes, over SERIAL
+### firmware 1.3.4 / captured 2026-08-24
+###
+### THREE distinct shapes, not the two the manual documents. A parser that
+### assumes "always a caret line" mis-handles the second one entirely.
+###
+### Note the caret line is introduced by a bare "\n\r", not "\r\n".
+
+### SHAPE 1 — unknown verb: caret + "Command not found" + FULL VERB DUMP
+### The verb dump is ~30 lines and is part of the error response. A read-until
+### that stops at the first blank line will truncate mid-error and desync the
+### session. This dump is also the authoritative verb list for firmware 1.3.4.
+### CMD: bogusverb
+bogusverb
+             ^
+Error : Command not found
+
+    devsta
+    devcfg
+    oltsta
+    oltcfg
+    oltctrl
+    schedule
+    date
+    ntp
+    sys
+    dst
+    login
+    admin
+    device
+    oltuser
+    radius
+    ldap
+    tcpip
+    tcpip6
+    snmpv1
+    snmpv3
+    trap
+    web
+    console
+    ftp
+    eventlog
+    syslog
+    menumode
+    clear
+    exit
+
+CyberPower >
+
+### SHAPE 2 — out-of-range index: NO caret, NO "Error :" prefix
+### Completely different shape from shapes 1 and 3. This is also the device's
+### own statement that it has 8 outlets, and the check that confirms
+### outlet_count without trusting the datasheet.
+### CMD: oltsta index 99 show
+oltsta index 99 show
+
+Index number must be 1 to 8
+
+
+CyberPower >
+
+### SHAPE 3 — bad parameter: caret + "Parameter Error" + USAGE LINE
+### The caret column (33) points at the offending token, and the usage line
+### that follows is the authoritative argument list for oltctrl. Note there is
+### no blank line before the prompt here, unlike shapes 1 and 2.
+### CMD: oltctrl index 8 act bogus
+oltctrl index 8 act bogus
+                                 ^
+Error : Parameter Error
+    oltctrl index <outlet index> act <on | off| reboot| delayon| delayoff| delayreboot| cancel>
+CyberPower >
+
+### Parsing consequences
+###
+### 1. Detect errors by the presence of "Error :" OR the index-range sentence.
+###    Keying only on "^" misses shape 2; keying only on "Error :" misses it too.
+### 2. Capture the caret COLUMN when present (shapes 1 and 3) — that is the
+###    CommandError.marker the driver reports.
+### 3. Blank-line counts before the prompt differ per shape (2, 3, 0). Read
+###    until the prompt, never until a blank line.
+### 4. The oltctrl usage line above shows the exact accepted actions; note it
+###    includes "reboot" and the "delay*" variants, and note the irregular
+###    spacing ("on | off|") — do not generate commands from this string.

@@ -1,0 +1,119 @@
+### PDU41002 read-only command set over SERIAL
+### firmware 1.3.4 / hardware 1.2 / captured 2026-08-24
+### FTDI FT232R /dev/ttyUSB0, 9600 8N1
+###
+### Format: a "### CMD: <verb>" line, then the response verbatim.
+### Serial ECHOES the command, so the echo is the first line of each response.
+### The trailing prompt "CyberPower > " is included; it is the read sentinel.
+
+### CMD: sys show
+sys show
+    Name : PDU-BENCHCTRL
+    Location : Office
+    Contact : Rick
+    Model : PDU41002
+    Hardware Version : 1.2
+    Firmware Version : 1.3.4
+    MAC Address : 00-0C-15-42-29-41
+
+CyberPower >
+
+### CMD: devsta show
+### NOTE: Voltage and Frequency are live readings and vary between captures.
+### Peak Load and Energy carry parenthesised timestamps, tab-separated.
+devsta show
+
+    Load
+    -----------------------------------------------
+    Device Load : 0.00 A/ 0 W/ 0 VA
+    Power Factor : ----
+    Peak Load : 0.00A	(at 08/08/2025 19:05:15)
+    Energy : 0.0kWh	(from 08/08/2025 19:05:15)
+
+    Utility
+    -----------------------------------------------
+    Voltage : 122.0V
+    Frequency : 60.0Hz
+
+CyberPower >
+
+### CMD: oltsta show
+### Column layout: index, name (width ~37), status. Status is trailing-padded.
+oltsta show
+
+    #  Name                                 Status
+    -----------------------------------------------------------------------------
+    1  Outlet1                              On
+    2  Outlet2                              On
+    3  Outlet3                              On
+    4  Outlet4                              On
+    5  Outlet5                              On
+    6  Outlet6                              On
+    7  Outlet7                              On
+    8  Outlet8                              On
+
+CyberPower >
+
+### CMD: oltsta index 1 show
+oltsta index 1 show
+
+    Outlet1
+    Outlet Name : Outlet1
+    Status :      On
+
+CyberPower >
+
+### CMD: oltcfg index all show
+### NOTE: the header wraps onto TWO physical lines ("On/Off/Reboot" then
+### "Delay/Delay/Duration"). A line-pair-blind parser will mis-read it.
+oltcfg index all show
+
+    #  Name                                    On       Off       Reboot
+                                             Delay     Delay     Duration
+    -----------------------------------------------------------------------------
+    1  Outlet1                               3 s        3 s       5 s
+    2  Outlet2                               3 s        3 s       5 s
+    3  Outlet3                               3 s        3 s       5 s
+    4  Outlet4                               3 s        3 s       5 s
+    5  Outlet5                               3 s        3 s       5 s
+    6  Outlet6                               3 s        3 s       5 s
+    7  Outlet7                               3 s        3 s       5 s
+    8  Outlet8                               3 s        3 s       5 s
+
+CyberPower >
+
+### CMD: console show
+console show
+    Console Type :  SSH
+    Telnet Port :  23
+    SSH Port :  22
+
+CyberPower >
+
+### CMD: snmpv1 show
+snmpv1 show
+    SNMPv1 : Disable
+
+    Community        IP Address                              Access Type
+    ---------------------------------------------------------------------
+    public           0.0.0.0                                 Read Only
+    private          0.0.0.0                                 Read/Write
+    public2          0.0.0.0                                 Forbidden
+    public3          0.0.0.0                                 Forbidden
+
+CyberPower >
+
+### CMD: snmpv3 show
+### NOTE: rows here are separated by a bare "\n\r", NOT "\r\n". Preserved as
+### captured. Splitting on "\r\n" alone yields one giant row.
+snmpv3 show
+    SNMPv3 : Disable
+
+    User Name                       Status  IP Address                Auth  Priv
+    ----------------------------------------------------------------------------
+    snmpv3                          Disable 0.0.0.0                   NONE  NONE
+    cyber snmpv3 user2              Disable 0.0.0.0                   NONE  NONE
+    cyber snmpv3 user3              Disable 0.0.0.0                   NONE  NONE
+    cyber snmpv3 user4              Disable 0.0.0.0                   NONE  NONE
+
+CyberPower >
