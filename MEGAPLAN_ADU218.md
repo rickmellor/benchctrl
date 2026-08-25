@@ -324,10 +324,11 @@ claim**. Every mutator must therefore take an existing prefix. Proposed:
 
 ```python
 # reads (deliberately no mutator prefix)
-is_open -> bool;  relay_count -> int (8);  input_count -> int (8)
+is_open -> bool  (the LINK, not a contact — see below);  relay_count -> int (8)
+input_count -> int (8)
 allowed_relays -> frozenset[int]
 read_identity() -> ADU218Info          # from the USB descriptor, not a command
-relay_state(index) -> bool             # RPKn
+relay_state(index) -> bool             # RPKn — True == ENERGISED (conducting)
 relay_states() -> dict[int, bool]      # PK, one round trip
 input_state(port, index) -> bool       # RPyn
 input_states() -> dict[str, tuple]     # RPA + RPB
@@ -344,6 +345,41 @@ clear_counter(index) -> int                          # RCn — reads AND clears
 reset_relays() -> None                               # MK000, the safe state
 close(); __enter__; __exit__
 ```
+
+### RESOLVED: `is_open` keeps its framework meaning, and relay state never uses it
+
+This needed settling **before** any code, because `is_open` would otherwise have
+to be renamed after Stage 1, and it appears in five registries. It is not a free
+choice: `agent/registry.py:45` defines `is_open` as *"the driver object exists"*
+and `to_dict()` publishes it as the `"open"` key for **every** device the agent
+serves, so it reaches the dashboards and the RPC wire with that meaning already
+fixed. Seven other implementations agree (`transports/ch341.py`,
+`transports/ptybridge.py`, `sim/loopback.py`, `drivers/otii_arc/transport.py`,
+`drivers/eastwood_qr10x/driver.py`, and both `cyberpower_pdu41002` links) — in
+all of them `is_open` means **the link is connected**.
+
+For a relay that word is overloaded in the worst possible way: an *open* relay
+is **not** conducting, while an *open* driver **is** connected. The two senses
+are not merely different, they point in opposite directions on the thing an
+operator cares about. So:
+
+1. **`is_open` on the ADU218 driver means the usbfs link is connected**, exactly
+   as everywhere else. It says nothing about any contact. Changing its meaning
+   for one device would make the agent's own `"open"` field mean two things
+   depending on `device_key`.
+2. **No relay-facing name may use `open`, `close`, `opened` or `closed`.** That
+   already rules out `close_relay()`/`open_relay()`, which the mutator-prefix
+   gate rules out independently — two unrelated reasons, which is why the
+   surface above has neither.
+3. **`relay_state(index) -> bool` must document its polarity explicitly, and
+   `True` means energised/conducting**, matching `set_relay_state(index, on=…)`
+   and the device's own `RPKn`=1. A bool whose polarity is inferred from the
+   method name is exactly the wire-shape defect class memory records: a value
+   nobody stated, read the wrong way round by the second caller.
+4. `close()` remains `close()` — it is the framework's teardown verb and takes
+   no relay argument, so it cannot be confused for a contact operation. Its
+   docstring must still say it **does not de-energise the relays**, because that
+   is a genuine hazard and unrelated to naming.
 
 Constraints on the implementation behind that surface, each traceable to a
 measured or documented fact rather than taste:
@@ -471,31 +507,61 @@ path** — which is the opposite conclusion to §6.2's, and the two must not be
 conflated: staying out of `SWITCHED_PDU_KEYS` is about *run-engine setpoints*,
 not about *trip behaviour*.
 
-Three things to settle before Stage 5, none of which should be decided by
-accident:
+Three things to settle before Stage 5. **Two are now settled by reading the code;
+the third is genuinely the user's call.**
 
-1. **Should a trip open the relays?** My inclination is yes, opt-in per relay via
-   an `allowed_relays`-subset argument mirroring `panic_outlets` — the
-   `panic_outlets_of()` duck type ("has this attribute" is the whole contract)
-   already generalises, so this needs no change to `safety.py`. But it is an
-   operator policy question about what is wired, not something a driver should
-   assume. Default empty.
-2. **Do not let `_ARMING_CALLS` catch this device by name.** It maps
-   `set_output`/`enable_output`/`disable_output`/`set_input` to arming state, and
-   energising a signal relay is not "arming an output" — matching would start a
-   deadman countdown on every relay switch. The planned names dodge it, but only
-   because `set_relay_state` is not spelled `set_output`. **That is a naming
-   coincidence holding up a safety behaviour**, so it wants a test asserting the
-   ADU218 surface intersects `_ARMING_CALLS` nowhere, not a comment hoping nobody
-   renames it.
-3. **The watchdog interacts with all of this** and is the reason to keep them
-   apart. If `WD` is armed, a governor trip that *stops issuing commands* already
-   opens every relay within ≤1 s with no software involvement — a better guarantee
-   than any `safe_state_fns` entry. So the honest design is: the watchdog is the
-   real interlock, and a `reset_relays()` trip hook is the belt-and-braces for
-   when it is not armed. Whatever is chosen, `default_safe_state()`'s docstring
-   must say which, because the next reader will otherwise inherit the PDU's
-   reasoning by proximity.
+1. **CORRECTION — reusing `panic_outlets` is not free, as I claimed.** I wrote
+   that the `panic_outlets_of()` duck type "already generalises, so this needs no
+   change to `safety.py`". That is true of the *authorisation* check and false of
+   the *cut*. `panic_outlets_of()` (`safety.py:447`) is duck-typed on the
+   property, but the function that does the work,
+   `panic_outlet_safe_state()` (`safety.py:483`), hardcodes the PDU's **method
+   names**: `obj.set_outlet_state(outlet, False, verify=False)` at :507 and
+   `obj.outlet_state(outlet)` at :520. An ADU218 exposing `panic_outlets` would
+   therefore be *selected* as a panic target at :244 and then raise
+   `AttributeError` on every relay inside the cut — reported as `FAILED`, i.e. a
+   trip path that looks wired and cannot work. So there are two real options and
+   the choice must be explicit:
+   - **(a)** name the ADU218's own methods `set_outlet_state`/`outlet_state`,
+     which is wrong — these are relays, not outlets, and it would collide with
+     §5a's whole point that the PDU's reasoning does not transfer; or
+   - **(b)** give the driver a distinct property (e.g. `panic_relays`) and a
+     small `safety.py` branch, or generalise the cut to look up the accessor pair
+     alongside the authorisation property. **(b)**, and the cost is a real
+     `safety.py` change, not zero.
+
+   Either way the timeout maths needs revisiting too: `_panic_cut_for()` sizes
+   its budget from `PANIC_CUT_CONFIRM_S + PANIC_CUT_PER_OUTLET_S * n`, both
+   derived from a contactor's 3 s `td_off`. An ADU218 relay settles in
+   milliseconds and its whole round trip is 16.7 ms measured, so the PDU's budget
+   is ~3 orders too generous — harmless for correctness, but it would make a
+   wedged ADU218 sit in the trip path for seconds before escalating.
+
+2. **CONFIRMED by measurement, not by reading: the surface intersects
+   `_ARMING_CALLS` nowhere, and every method classifies correctly.** Checked the
+   planned surface against the live `_ARMING_CALLS` and `dispatch.is_mutator`:
+   intersection is empty; all six writes (`set_relay_state`, `set_relay_port`,
+   `set_debounce`, `set_watchdog`, `clear_counter`, `reset_relays`) classify as
+   mutators; all twelve reads do not. So energising a signal relay will not start
+   a deadman countdown, and no read requires a writer claim.
+
+   The concern stands unchanged though, because the *mechanism* is still a naming
+   coincidence — `set_relay_state` misses only because it is not spelled
+   `set_output`. Hence the test asserting the intersection is empty **and** that
+   the mutator/read split is exactly as above, so a later rename that reclassifies
+   a method fails loudly instead of silently ungating a relay.
+
+3. **Should a trip open the relays? Still open — this one is the user's.** My
+   inclination is yes, opt-in per relay, default empty. But the watchdog changes
+   the calculus and is the reason to decide rather than default: if `WD` is armed,
+   a trip that *stops issuing commands* already opens every relay within ≤1 s with
+   no software in the decision — a stronger guarantee than any `safe_state_fns`
+   entry, since it survives a wedged agent, a killed process and an unplugged
+   cable alike. So the honest design is that **the watchdog is the real
+   interlock**, and a `reset_relays()` trip hook is belt-and-braces for when it is
+   not armed. Whatever is chosen, `default_safe_state()`'s docstring must say
+   which and why, because the next reader will otherwise inherit the PDU's
+   reasoning by proximity — which is precisely how this gap was created.
 
 ## 6. Architecture and open design decisions
 
