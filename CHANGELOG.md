@@ -119,8 +119,29 @@ agrees with it. `deploy/udev/62-benchctrl-ftdi.rules` binds
 `ttyUSB0` is enumeration-order and the driver must not open whichever
 cable happened to come up first.
 
-Still to come: run-engine integration so a phase can power-cycle a DUT,
-and the governor's opt-in `panic_outlets` cut.
+**The governor's exemptions are now deliberate rather than accidental.**
+`default_safe_state()` was already inert on the PDU — it implements none
+of the four methods that function tries — so the omission is now written
+down with its reasoning, because "fixing" it would turn one lost
+heartbeat into a bench-wide power cut. `set_outlet_state` is likewise
+absent from `_ARMING_CALLS` on purpose: energising an outlet is not
+arming an output, and treating it as one would start a deadman countdown
+on every switch *and* mark the PDU permanently armed with nothing able to
+disarm it.
+
+Those two exemptions mean the PDU never appears in `armed_devices`, so
+the opt-in cut needed its own path or `panic_outlets` would have been a
+setting that silently did nothing — an inert governor, indistinguishable
+from a working one. `trip()` now also walks devices that authorised a
+cut, *after* the armed devices (pulling mains from under a live output is
+how an inductive kick reaches a DUT), confirms each outlet by read-back,
+and reports FAILED rather than SAFE when it cannot. It gets a budget
+derived from the outlet count instead of the half second instruments get,
+because a contactor honouring a 3 s `td_off` physically cannot report
+itself off in time and every trip would otherwise escalate to a transport
+reset. Nothing armed still means nothing cut.
+
+Still to come: run-engine integration so a phase can power-cycle a DUT.
 
 ### Serial transport selection — kernel driver first
 
