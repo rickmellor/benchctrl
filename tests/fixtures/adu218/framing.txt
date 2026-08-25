@@ -1,0 +1,53 @@
+ADU218 wire-framing determination
+=================================
+Device: Ontrak ADU218, USB 0a07:00da, serial E02246
+Access: stdlib fcntl.ioctl USBDEVFS_BULK on EP 0x01 (OUT) / 0x81 (IN)
+State:  read-only with respect to relays; only PK was ever sent
+
+Question: is the leading 0x01 byte a required report prefix, or incidental?
+
+Why this needed re-measuring
+----------------------------
+An earlier trial appeared to show bare ASCII working. It did not: the response
+read after the bare-ASCII write was the PREVIOUS prefixed command's answer,
+still queued on EP 0x81. Interrupt-IN responses persist until read, so any
+framing experiment that does not drain the endpoint first will credit the
+wrong command. Every trial below drains EP 0x81 to empty (250 ms reads until
+ETIMEDOUT) before writing, so a response can only belong to the command just
+sent.
+
+Trials (each 8 bytes, NUL-padded)
+---------------------------------
+  A  b'\x01PK'  -> b'\x01000\x00\x00\x00\x00'   ANSWERED
+  B  b'PK'      -> TIMEOUT (errno 110)          SILENT
+  C  b'PK'      -> TIMEOUT (errno 110)          SILENT   (B is repeatable)
+  D  b'\x00PK'  -> TIMEOUT (errno 110)          SILENT
+  E  b'\x02PK'  -> TIMEOUT (errno 110)          SILENT
+  F  b'\x01PK'  -> b'\x01000\x00\x00\x00\x00'   ANSWERED (control: link healthy)
+
+Conclusions
+-----------
+1. The 0x01 prefix is MANDATORY. Bare ASCII is silently ignored.
+2. It is specifically 0x01, not "any non-ASCII lead byte": 0x00 and 0x02 are
+   both ignored just as bare ASCII is. So the driver must send the literal
+   byte, and a test asserting "first byte is not an ASCII letter" would pass
+   for encodings the device rejects.
+3. Responses also carry the 0x01 prefix, so the reply is not simply an echo of
+   the request framing choice - both directions are prefixed.
+4. Bad framing behaves exactly like an unknown command: silence, no error, and
+   no lasting harm. Trial F answers normally straight after four rejections.
+   Combined with errors.txt, this means SILENCE IS THE DEVICE'S ONLY ERROR
+   SIGNAL - it cannot distinguish "I did not understand the bytes" from "I did
+   not understand the command" from "this command has no reply".
+
+Cross-check against the in-tree kernel driver
+---------------------------------------------
+Linux carries a driver for this exact device: drivers/usb/misc/adutux.c binds
+vendor 0x0a07 with product 0x0064+118 = 0x00da, commented /* ADU218 */. Its
+write() copies the user buffer straight to the interrupt-OUT endpoint and adds
+no header, and its read() returns the interrupt payload unmodified. So a
+process talking through /dev/usb/adutuxN must send the same 0x01-prefixed
+8-byte packets measured above, and receives the same prefixed replies.
+
+That is what licenses one command encoder for both access paths: the framing
+is a property of the device, not of the route to it.

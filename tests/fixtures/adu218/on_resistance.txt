@@ -1,0 +1,47 @@
+ADU218 K0 closed-contact resistance characterisation
+====================================================
+Witness: SDM4065A s/n SDM46A0CA00021 fw 0.0.0.20
+Question: the datasheet gives 700 mohm typical / 1.1 ohm maximum
+on-state resistance for the ADU218's Panasonic AQZ207 PhotoMOS
+relays. The bench measures roughly nine times that. Is the extra
+resistance in the relay, in the leads, or in the measurement?
+
+K0 closed (RPK0=1)
+
+--- 2-wire, eight repeats (establishes the noise floor) ---
+  0: 6.13937 ohm
+  1: 6.13964 ohm
+  2: 6.13984 ohm
+  3: 6.14020 ohm
+  4: 6.13987 ohm
+  5: 6.14014 ohm
+  6: 6.13996 ohm
+  7: 6.14035 ohm
+  mean=6.13992 ohm  spread=0.983 mohm
+  -> the spread is milliohms, so the offset is systematic, not noise
+
+--- 4-wire (would remove lead resistance IF sense leads present) ---
+  4-wire: -146172.31500 ohm
+  delta 2w-4w = 146178.45492 ohm
+  NOTE: with no sense leads attached this function returns a
+  plausible-looking negative number rather than raising. Do not
+  use 4-wire as a witness on this setup (KNOWN_LIMITATIONS H-5).
+
+--- continuity function ---
+  continuity: 6.00636 ohm
+
+--- open state: is 'OPEN' truly out of range? ---
+K0 open (RPK0=0)
+  SDM4065AOverloadError: 9.9E37 overload sentinel (over-range)
+
+--- DC voltage across the open contact ---
+  DCV: 0.000595 V
+
+CONCLUSION: unexplained. Section H-5 bounds this bench's lead
+error at about 79 mohm, two orders of magnitude too small to
+account for a ~5 ohm excess, and the milliohm spread rules out
+noise. Candidates not yet separated: the specific relay's actual
+on-resistance, contact/clip resistance at the terminal block, or
+a range-dependent offset in the 2-wire function. Recorded as open
+rather than rationalised. The driver must NOT use the datasheet
+on-resistance as a validation threshold.
