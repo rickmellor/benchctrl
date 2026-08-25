@@ -242,9 +242,14 @@ differs as above; de-bounce options differ (see below).
    The reading was ~6.14 Ω against the manual's 700 mΩ typical / 1.1 Ω maximum.
    Eight repeats spread 0.98 mΩ, so it was stable and systematic, not noise. It
    is a **2-wire** measurement (the 4-wire attempt returned −146172 Ω with no
-   sense leads attached), so it includes lead and contact resistance — and § H-5
-   bounds this bench's *lead* error at ~79 mΩ, far too small to explain a 5 Ω
-   discrepancy. That was where the question sat: unexplained.
+   sense leads attached), so it includes lead and contact resistance — which was
+   argued away by citing § H-5's ~79 mΩ lead error as far too small to explain a
+   5 Ω discrepancy. **That citation was itself the wrong-conditions mistake a
+   third time:** H-5's figure was measured on a QR10x 100 Ω setpoint with a
+   different lead set and different connections, so it bounds *that* path, not
+   this one — and it turned out to be wrong by 57x here. With the bound removed,
+   the 2-wire/4-wire distinction was never dismissible. That was where the
+   question sat: unexplained.
 
    It is no longer unexplained. A later session read the same closed contact at
    **10.694 Ω** with nothing in software changed — a **+4.55 Ω step**, and
