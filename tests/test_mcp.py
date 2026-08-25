@@ -674,3 +674,196 @@ def test_sdm4065a_tools_have_docstrings():
 
     for fn in sdm_tools._TOOLS:
         assert fn.__doc__ and fn.__doc__.strip(), f"{fn.__name__} missing docstring"
+
+
+# ----- CyberPower PDU41002: the first MCP surface that could cut mains ------
+
+
+def test_pdu41002_mcp_tools_cover_the_driver_surface():
+    """Every public driver method is reachable through a tool.
+
+    Unlike the other drivers, the tool names here are **not** the method names:
+    the MCP surface is phrased for a model (``pdu41002_info``,
+    ``pdu41002_status``) while the driver is phrased for the SDK
+    (``read_identity``, ``read_device_status``). So parity needs an explicit
+    map rather than a prefix strip — and the map is the useful artifact,
+    because it is what fails when a method is added and the tool is forgotten.
+    """
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
+    from benchctrl.drivers.cyberpower_pdu41002.driver import CyberPowerPDU41002
+
+    #: tool suffix -> the driver method it exposes
+    TOOL_TO_METHOD = {
+        "info": "read_identity",
+        "status": "read_device_status",
+        "measure_load": "measure_load_A",
+        "measure_voltage": "measure_voltage_V",
+        "measure_frequency": "measure_frequency_Hz",
+        "outlet_states": "outlet_states",
+        "outlet_state": "outlet_state",
+        "outlet_config": "read_outlet_config",
+    }
+    #: tools with no single method behind them — they compose properties
+    COMPOSED = {"open", "close", "allowed_outlets", "transport"}
+
+    # Deliberately not exposed:
+    #   open/close — the tools exist, but they wrap lifecycle rather than a
+    #                capability, and pdu41002_open takes no password parameter
+    #                where the classmethod does
+    #   outlet_name — folded into pdu41002_outlet_state's dict, which returns
+    #                index, state and name together; a separate tool would be
+    #                an extra round trip on a 9600 baud console for a field the
+    #                model already has
+    exempt = {"open", "close", "outlet_name"}
+
+    methods = {
+        name
+        for name in vars(CyberPowerPDU41002)
+        if not name.startswith("_") and callable(getattr(CyberPowerPDU41002, name))
+    } - exempt
+    tools = {fn.__name__[len("pdu41002_"):] for fn in pdu_tools._TOOLS}
+
+    assert tools == set(TOOL_TO_METHOD) | COMPOSED, (
+        "the tool list changed — update TOOL_TO_METHOD so parity is still "
+        f"checked. Unmapped: {sorted(tools - set(TOOL_TO_METHOD) - COMPOSED)}"
+    )
+    covered = set(TOOL_TO_METHOD.values())
+    assert not (methods - covered), (
+        f"driver methods with no MCP tool: {sorted(methods - covered)}"
+    )
+    # Every mapped method must actually exist, or the map rots into a
+    # comfortable fiction that passes while covering nothing.
+    for tool, method in TOOL_TO_METHOD.items():
+        assert hasattr(CyberPowerPDU41002, method), (
+            f"pdu41002_{tool} maps to missing method {method}"
+        )
+
+
+def test_pdu41002_tools_are_registered_on_the_shared_server():
+    """Owning the tools is not the same as registering them."""
+    import asyncio
+
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
+    from benchctrl.mcp import mcp
+
+    registered = {t.name for t in asyncio.run(mcp.list_tools())}
+    for fn in pdu_tools._TOOLS:
+        assert fn.__name__ in registered, f"{fn.__name__} not registered on the server"
+
+
+def test_pdu41002_tools_are_importable_from_the_orchestrator():
+    from benchctrl import mcp as m
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
+
+    missing = [fn.__name__ for fn in pdu_tools._TOOLS if not hasattr(m, fn.__name__)]
+    assert missing == []
+
+
+def test_pdu41002_tools_have_docstrings():
+    """For this driver the docstrings *are* the safety interface — they are what
+    a model reads before calling something on a device that switches mains — so
+    an empty one is a real defect."""
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
+
+    for fn in pdu_tools._TOOLS:
+        assert fn.__doc__ and fn.__doc__.strip(), f"{fn.__name__} missing docstring"
+
+
+def test_pdu41002_open_takes_no_password_parameter():
+    """Absent, not defaulted.
+
+    A credential passed as a tool argument is logged in the conversation
+    transcript, so the parameter must not exist for a model to fill in. The
+    password comes from ``BENCHCTRL_PDU_PASSWORD`` in the server's environment.
+
+    Checks every tool, not just ``open``: a future ``pdu41002_reconnect`` would
+    reintroduce the hole.
+    """
+    import inspect
+
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
+
+    for fn in pdu_tools._TOOLS:
+        params = set(inspect.signature(fn).parameters)
+        leaky = params & {"password", "passphrase", "secret", "token", "env"}
+        assert not leaky, f"{fn.__name__} accepts credential material: {sorted(leaky)}"
+
+
+def test_pdu41002_has_no_tool_that_switches_an_outlet():
+    """This release is read-only, and that is asserted rather than described.
+
+    A tool that could move a contactor arriving without review is exactly the
+    thing to catch mechanically. When switching lands, this test is updated
+    deliberately — which is the point.
+    """
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
+
+    for fn in pdu_tools._TOOLS:
+        name = fn.__name__
+        assert "set_outlet" not in name
+        assert "reset" not in name
+        assert "reboot" not in name
+        assert "toggle" not in name
+
+
+def test_pdu41002_read_tools_report_a_clear_error_before_open():
+    """A model that calls a read first must get "call open" back, not a
+    ``NoneType`` traceback — the message is what tells it what to do next."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
+    from benchctrl.drivers.cyberpower_pdu41002 import PDU41002ConnectionError
+
+    pdu_tools._pdu = None
+    with pytest.raises(PDU41002ConnectionError, match="pdu41002_open"):
+        m.pdu41002_status()
+
+
+def test_pdu41002_close_is_safe_to_call_when_not_open():
+    """Teardown must not raise. A close that failed because nothing was open
+    would make cleanup code unreliable on the one device where a *missed*
+    close leaves the PDU unreachable from the other transport."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
+
+    pdu_tools._pdu = None
+    assert m.pdu41002_close()["closed"] is False
+
+
+def test_pdu41002_tools_work_against_the_simulator():
+    """The read tools end to end, through the module singleton.
+
+    Bypasses ``pdu41002_open`` (which would need a real port) by injecting the
+    simulator-backed driver, so the tools' own logic is what is under test.
+    """
+    from benchctrl import mcp as m
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
+    from benchctrl.sim.factories import make_pdu41002
+
+    driver = make_pdu41002(allowed_outlets=(2, 3))
+    pdu_tools._pdu = driver
+    try:
+        assert m.pdu41002_info()["model"] == "PDU41002"
+        assert m.pdu41002_status()["frequency_Hz"] == pytest.approx(60.0)
+        assert m.pdu41002_measure_voltage()["voltage_V"] == pytest.approx(121.7)
+        assert m.pdu41002_transport()["transport"] == "serial"
+
+        # JSON object keys are strings, so the tool must key by str(index) —
+        # a model that got integer keys back would see them stringified
+        # anyway, and an inconsistency here is a silent KeyError in its code.
+        states = m.pdu41002_outlet_states()
+        assert set(states["outlets"]) == {str(i) for i in range(1, 9)}
+        assert states["on_count"] == 8
+
+        one = m.pdu41002_outlet_state(1)
+        assert one["on"] is True and one["index"] == 1
+
+        cfg = m.pdu41002_outlet_config()
+        assert cfg["outlets"]["1"]["on_delay_s"] == 3
+
+        # The policy report must not imply a capability that does not exist.
+        policy = m.pdu41002_allowed_outlets()
+        assert policy["allowed_outlets"] == [2, 3]
+        assert policy["switching_available"] is False
+    finally:
+        pdu_tools._pdu = None
+        driver.close()

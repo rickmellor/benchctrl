@@ -231,6 +231,279 @@ def test_probe_never_raises_on_a_bad_path():
     assert discovery.probe_serial_identity("/dev/does-not-exist") is None
 
 
+def test_the_pdu_is_deliberately_not_probeable():
+    """The PDU must not be in the probe list, and the reason is measured.
+
+    The plan called for a bare-``\\r`` probe at 9600 on the assumption that a CR
+    merely re-prompts an idle console. On firmware 1.3.4 it does not: a CR
+    *submits an empty line* to whichever login field is current, so successive
+    probes walk the authentication state machine (``Login Name`` → ``Login
+    Password`` → a ~15 s ``Please wait for authentication....`` → ``Login
+    Failed``).
+
+    Measured consequences, any one of which disqualifies probing:
+
+    - **Unreliable.** Five consecutive probe calls against the real device
+      returned ``None, cyberpower_pdu41002, None, None, None`` — the vendor
+      string only appears in one of the three states.
+    - **Not read-only.** The device recorded ``Login authorization failure via
+      Console`` in its own event log for the probe traffic.
+    - **Disruptive.** The console answers nothing during the ~15 s
+      authentication delay, so probing can lock out the driver behind it.
+
+    So this asserts an *absence*. Re-adding a PDU probe should fail here and
+    send the reader to the note on ``SERIAL_PROBES``.
+    """
+    keys = [p.device_key for p in discovery.SERIAL_PROBES]
+    assert "cyberpower_pdu41002" not in keys
+
+
+def test_the_pdu_is_identified_passively_by_its_udev_symlink(tmp_path):
+    """The replacement path: exact, and it writes nothing.
+
+    ``deploy/udev/62-benchctrl-ftdi.rules`` binds the adapter's serial number to
+    ``/dev/benchctrl/pdu41002``, which is better evidence than any probe reply —
+    it cannot be confused by another device's echo, and identifying the bench no
+    longer writes bytes to a mains contactor's control port.
+    """
+    port = tmp_path / "ttyUSB0"
+    port.write_text("")
+    link_dir = tmp_path / "benchctrl"
+    link_dir.mkdir()
+    (link_dir / "pdu41002").symlink_to(port)
+
+    assert (
+        discovery.identify_by_symlink(str(port), symlink_dir=str(link_dir))
+        == "cyberpower_pdu41002"
+    )
+
+
+def test_symlink_identification_opens_nothing(tmp_path, monkeypatch):
+    """Passive means passive.
+
+    The whole justification for this path over a probe is that it does not
+    touch the device, so the test forbids ``serial.Serial`` outright rather than
+    trusting the implementation to keep being read-only.
+    """
+    import serial
+
+    def boom(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("symlink identification opened the port")
+
+    monkeypatch.setattr(serial, "Serial", boom)
+
+    port = tmp_path / "ttyUSB0"
+    port.write_text("")
+    link_dir = tmp_path / "benchctrl"
+    link_dir.mkdir()
+    (link_dir / "pdu41002").symlink_to(port)
+
+    assert (
+        discovery.identify_by_symlink(str(port), symlink_dir=str(link_dir))
+        == "cyberpower_pdu41002"
+    )
+
+
+def test_a_symlink_for_a_different_port_does_not_claim_this_one(tmp_path):
+    """The symlink identifies *a* port, not every port.
+
+    ``/dev/ttyUSB0`` is assigned in enumeration order, so the case that matters
+    is two FTDI adapters present and the symlink pointing at the other one.
+    Claiming the wrong port here would hand the PDU driver a foreign device and
+    let it issue ``oltctrl`` at it.
+    """
+    pdu = tmp_path / "ttyUSB0"
+    other = tmp_path / "ttyUSB1"
+    pdu.write_text("")
+    other.write_text("")
+    link_dir = tmp_path / "benchctrl"
+    link_dir.mkdir()
+    (link_dir / "pdu41002").symlink_to(pdu)
+
+    assert discovery.identify_by_symlink(str(other), symlink_dir=str(link_dir)) is None
+
+
+def test_missing_udev_rules_are_not_an_error(tmp_path):
+    """A developer laptop has no ``/dev/benchctrl``. That is unidentified, not
+    broken — the same contract the probe path has."""
+    port = tmp_path / "ttyUSB0"
+    port.write_text("")
+    assert (
+        discovery.identify_by_symlink(
+            str(port), symlink_dir=str(tmp_path / "nope")
+        )
+        is None
+    )
+
+
+def test_an_unknown_symlink_name_is_ignored(tmp_path):
+    """Only names in ``SYMLINK_KEYS`` identify anything.
+
+    ``60-benchctrl-ch341.rules`` already creates ``/dev/benchctrl/ch341`` for a
+    *bridge*, which says nothing about what is attached to it. Treating any
+    symlink in the directory as an identification would map that bridge to
+    whatever key happened to be listed.
+    """
+    port = tmp_path / "ttyUSB0"
+    port.write_text("")
+    link_dir = tmp_path / "benchctrl"
+    link_dir.mkdir()
+    (link_dir / "ch341").symlink_to(port)
+
+    assert discovery.identify_by_symlink(str(port), symlink_dir=str(link_dir)) is None
+
+
+def test_probing_consults_the_symlink_before_writing_anything(monkeypatch, tmp_path):
+    """Ordering inside ``probe_serial_identity``.
+
+    A device identifiable passively must never be written to, so the symlink
+    check has to come first. Enforced by making every serial open fail: if the
+    symlink path is consulted first, the PDU is still identified.
+    """
+    import serial
+
+    def boom(*args, **kwargs):
+        raise AssertionError("probed a device that the symlink already identified")
+
+    monkeypatch.setattr(serial, "Serial", boom)
+
+    port = tmp_path / "ttyUSB0"
+    port.write_text("")
+    link_dir = tmp_path / "benchctrl"
+    link_dir.mkdir()
+    (link_dir / "pdu41002").symlink_to(port)
+    monkeypatch.setattr(discovery, "SYMLINK_DIR", str(link_dir))
+
+    assert discovery.probe_serial_identity(str(port)) == "cyberpower_pdu41002"
+
+
+def test_scan_serial_identifies_the_pdu_without_probing(monkeypatch, tmp_path):
+    """The wiring, not just the helper.
+
+    ``scan_serial()`` is what ``discover()`` calls, and it must not need
+    ``probe=True`` to name the PDU — otherwise the one device where probing is
+    unacceptable is also the one device that requires it. The FT232R's
+    ``0403:6001`` is in ``GENERIC_BRIDGES``, so without this it comes back
+    unidentified.
+    """
+    port = tmp_path / "ttyUSB0"
+    port.write_text("")
+    link_dir = tmp_path / "benchctrl"
+    link_dir.mkdir()
+    (link_dir / "pdu41002").symlink_to(port)
+    monkeypatch.setattr(discovery, "SYMLINK_DIR", str(link_dir))
+    _patch_ports(
+        monkeypatch,
+        [FakePort(str(port), vid=0x0403, pid=0x6001, serial_number="B0027PK6")],
+    )
+
+    found = discovery.scan_serial()
+    assert len(found) == 1
+    assert found[0].device_key == "cyberpower_pdu41002"
+    assert found[0].confidence == EXACT
+    assert found[0].identified
+    assert "udev symlink" in found[0].note
+
+
+def test_every_serial_probe_is_a_write_not_a_command():
+    """A probe is sent to a port whose device is *unknown* — that is the entire
+    premise — so any probe that could be a meaningful command on some other
+    instrument is a hazard. Bounded to short, inert requests."""
+    for probe in discovery.SERIAL_PROBES:
+        assert probe.request.endswith((b"\r", b"\n"))
+        assert len(probe.request) <= 16, f"{probe.device_key}: probe too chatty"
+        lowered = probe.request.lower()
+        for dangerous in (b"off", b"act", b"reboot", b"reset"):
+            assert dangerous not in lowered, (
+                f"{probe.device_key}: probe {probe.request!r} could be a command"
+            )
+
+
+def test_no_probe_marker_is_a_substring_of_its_own_request():
+    """The bug that made discovery call a mains PDU a resistance box.
+
+    The QR10x probe writes ``AT+DEV.TYPE?`` and matched on ``DEV.TYPE`` — a
+    substring of what it had just sent. The PDU's serial console echoes, so it
+    replied with the probe text and matched. Any marker that a bare echo can
+    satisfy identifies *every echoing device* as the probed one, which for this
+    bench means misidentifying the one device that switches mains.
+    """
+    for probe in discovery.SERIAL_PROBES:
+        echoed = probe.request.decode("ascii", errors="replace")
+        for marker in probe.markers:
+            assert marker not in echoed, (
+                f"{probe.device_key}: marker {marker!r} is satisfied by an echo "
+                f"of the probe itself ({echoed!r})"
+            )
+
+
+def test_no_two_probes_can_match_the_same_reply():
+    """Ordering decides ties, so an ambiguous marker set is silently wrong.
+
+    Whichever probe is listed first wins, and the first-listed is not
+    necessarily the correct answer — that is precisely how the echo bug
+    presented, as a QR10x identification of a PDU rather than as no match.
+    """
+    for probe in discovery.SERIAL_PROBES:
+        for other in discovery.SERIAL_PROBES:
+            if other.device_key == probe.device_key:
+                continue
+            for marker in probe.markers:
+                for other_marker in other.markers:
+                    assert marker not in other_marker, (
+                        f"{probe.device_key}'s {marker!r} also matches "
+                        f"{other.device_key}'s {other_marker!r}"
+                    )
+
+
+def test_the_pdu_is_not_misidentified_as_a_qr10x(monkeypatch):
+    """The concrete false positive, through the real probe loop.
+
+    With the old ``DEV.TYPE`` marker this returned ``eastwood_qr10x`` for a PDU
+    — discovery naming a mains switch as a programmable resistor, which is the
+    worst possible direction for that error. Checked in both session states,
+    since the console echoes either way.
+
+    On real hardware the 115200-vs-9600 baud mismatch happened to mask this (the
+    PDU returned framing garbage instead of its echo), but the simulator shares
+    a pty with no baud emulation and so sees the echo directly. Both are worth
+    covering: the marker is wrong regardless of which devices it happens to
+    spare.
+    """
+    from benchctrl.sim.pdu41002 import SimulatedPDU41002
+
+    for require_login in (True, False):
+        with SimulatedPDU41002(require_login=require_login) as sim:
+            assert discovery.probe_serial_identity(sim.port, timeout=0.3) is None
+
+
+def test_the_qr10x_still_identifies_after_the_marker_fix():
+    """The tightened marker must not cost the identification it exists for."""
+    from benchctrl.sim.qr10x import SimulatedQR10x
+
+    with SimulatedQR10x() as sim:
+        assert discovery.probe_serial_identity(sim.port) == "eastwood_qr10x"
+
+
+def test_each_probe_carries_its_own_baud_rate():
+    """The generalisation survives having only one probe left.
+
+    ``probe_serial_identity`` used to hardcode 115200. The PDU sits behind the
+    same class of bridge at 9600, which is what forced the per-probe baud
+    rate — and although the PDU is no longer probed, the hardcoding was still a
+    latent bug: the next 9600 device would silently fail to identify. Asserted
+    per-probe rather than as "more than one baud exists", which stopped being
+    true when the PDU probe was removed.
+    """
+    for probe in discovery.SERIAL_PROBES:
+        assert probe.baudrate > 0
+
+    import inspect
+
+    source = inspect.getsource(discovery.probe_serial_identity)
+    assert "probe.baudrate" in source, "the baud rate is hardcoded again"
+
+
 def test_format_inventory_is_readable(monkeypatch):
     text = discovery.format_inventory(
         [

@@ -684,6 +684,64 @@ network gear are not plugged into the PDU. That assumption is stated in
 `docs/drivers.md`, and `allowed_outlets` / `panic_outlets` are the
 controls to revisit *before* anyone changes the cabling.
 
+### F-13. PDU41002 cannot be identified by a discovery probe
+Bench-measured, and it invalidates the obvious design. The FT232R's
+`0403:6001` is in `GENERIC_BRIDGES`, so VID/PID cannot name this device
+and the natural move is the same probe mechanism the QR10x uses: write
+something harmless, match the reply. The planned probe was a bare `\r` at
+9600, on the assumption that a CR merely re-prompts an idle console.
+
+**It does not.** A CR submits an *empty line* to whichever login field is
+current, so successive probes walk the authentication state machine:
+
+```
+CR 1 -> \r\n\r\nLogin Name :          (the only identifiable state)
+CR 2 -> \r\nLogin Password :          (empty username submitted)
+CR 3 -> Please wait for authentication....   ~15 s, then Login Failed
+```
+
+Three measured consequences, any one of which disqualifies probing:
+
+- **Unreliable.** The vendor string appears in one of three states, so
+  the answer depends on what touched the console beforehand. Five
+  consecutive `probe_serial_identity()` calls against the real device
+  returned `None, cyberpower_pdu41002, None, None, None`.
+- **Not read-only.** The device recorded `Login authorization failure via
+  Console` in its own event log for probe traffic — a bench sweep writing
+  auth failures into a mains switch's audit trail, which also makes real
+  intrusion attempts harder to spot.
+- **Disruptive.** The console answers nothing during the ~15 s
+  authentication delay, so probing can lock out the driver behind it.
+
+No inert alternative exists: opening the port, and writing `?`, `DEL` or
+`NUL` without a terminator, all produce **no reply at all**.
+
+So the PDU is identified *passively*, by the udev symlink from
+`deploy/udev/62-benchctrl-ftdi.rules` (`discovery.identify_by_symlink`,
+wired into `scan_serial`). That is better than a probe rather than a
+fallback — exact instead of heuristic, stable across re-enumeration
+because the rule keys on the adapter's serial number, and it writes zero
+bytes to the device.
+
+**The limitation that remains:** without that udev rule installed the PDU
+comes back unidentified. That is the correct failure (an unidentified
+port is visible; a probe naming the wrong device is not), but it means
+`benchctrl-discover` on a host with no rules installed will not find it.
+
+A related defect was found in the same pass and **fixed**: the QR10x
+probe matched on `DEV.TYPE`, a substring of its own request
+`AT+DEV.TYPE?`, so any device that echoes its input matched — and the PDU
+echoes. The marker is now `+DEV.TYPE=`, which an echo cannot produce. On
+hardware the 115200-vs-9600 baud mismatch happened to mask this, but the
+marker was wrong regardless of which devices it spared.
+
+Affects: `benchctrl-discover` output, and any future device behind a
+generic bridge that authenticates on its console.
+
+Code reference:
+`src/benchctrl/discovery.py` — `SERIAL_PROBES` (note), `SYMLINK_KEYS`,
+`identify_by_symlink`, `scan_serial`.
+
 ## Harness
 
 ### A-1. Emulator + `SMU.record()` deadlock

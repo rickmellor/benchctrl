@@ -151,7 +151,13 @@ class Encoder:
         if isinstance(value, (list, tuple)):
             return [self.encode(v, _depth + 1) for v in value]
 
-        if isinstance(value, set):
+        if isinstance(value, (set, frozenset)):
+            # frozenset is NOT a subclass of set, so listing only `set` here
+            # made every PDU41002 call fail — its `allowed_outlets` property is
+            # a frozenset, and the property snapshot rides along on *every*
+            # response, so the failure was total rather than confined to the
+            # one getter. Sorted by repr for a deterministic wire form; both
+            # arrive as a list, since JSON has no set.
             return [self.encode(v, _depth + 1) for v in sorted(value, key=repr)]
 
         if isinstance(value, dict):

@@ -406,8 +406,15 @@ def test_deadman_disarms_when_the_client_vanishes(bench, arc):
     bench.client._stop.set()
     bench.client._sock.close()
 
+    # Wait on BOTH the hardware effect and the governor's bookkeeping. They are
+    # not simultaneous: `Governor._make_safe` runs `safe_state(obj)` on the
+    # device worker — which is what clears the sim's output register — and only
+    # calls `_clear()` (which resets `output_armed`) after `job.done.wait()`
+    # returns on the governor thread. Waiting on the register alone and then
+    # asserting `any_armed` immediately is a race that loses under load:
+    # measured 2 failures in 12 runs on an unmodified tree.
     _wait(lambda: bench.sim.params[0x09] == 0, timeout=8.0)
-    assert not bench.agent.governor.any_armed
+    _wait(lambda: not bench.agent.governor.any_armed, timeout=8.0)
 
 
 def test_shutdown_disarms(bench, arc):

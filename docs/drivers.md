@@ -962,6 +962,47 @@ numbering is enumeration-order and a second USB-serial adapter can take
   username* and silently swallowed. `_cmd()` detects a login prompt in
   any response, and read-back verification is the second line of
   defence.
+- **A bare `CR` is not inert at the login prompt.** It submits an *empty
+  line* to whichever field is current, so repeated CRs walk the
+  authentication state machine and end in a ~15 s `Please wait for
+  authentication....` / `Login Failed` cycle during which the console
+  answers nothing. This is why the PDU is not discovery-probeable — see
+  below.
+
+### Discovery: identified passively, never probed
+
+The FT232R's `0403:6001` is a generic bridge, so VID/PID cannot name this
+device. The other bridge-hidden instrument (the QR10x) is identified by
+*probe* — writing a harmless query and matching the reply. **That
+approach is not usable here**, and the reason is worth recording because
+the obvious design is wrong:
+
+| Attempt | Measured result on firmware 1.3.4 |
+|---|---|
+| bare `\r` at 9600 | walks the login state machine; the vendor string appears in only one of three states, so five consecutive probes returned `None, cyberpower_pdu41002, None, None, None` |
+| any probe at all | the device logs `Login authorization failure via Console` — a bench sweep writing auth failures into a mains switch's audit trail |
+| during the retry | ~15 s of silence, so a probe can lock out the driver behind it |
+| `?`, `DEL`, `NUL` with no terminator | **no reply at all** — nothing to match on |
+| opening the port and reading | no greeting |
+
+So `SERIAL_PROBES` deliberately contains **no PDU entry**, and
+`discovery.identify_by_symlink()` names it from the udev symlink instead:
+
+```
+$ benchctrl-discover
+/dev/ttyUSB0  cyberpower_pdu41002  exact
+    identified by udev symlink, not VID/PID — open it by /dev/benchctrl/
+    path so the binding survives re-enumeration
+```
+
+This is strictly better than a probe rather than a consolation prize: it
+is exact rather than heuristic, it survives re-enumeration because the
+rule keys on the adapter's serial number, and identifying the bench
+writes **zero bytes** to a mains contactor's control port. It does
+require `deploy/udev/62-benchctrl-ftdi.rules` to be installed; without
+it the PDU comes back unidentified, which is the correct failure — an
+unidentified port is obvious, whereas a probe that names the wrong
+device is not.
 
 ### Simulator
 
