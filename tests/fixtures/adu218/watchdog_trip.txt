@@ -1,0 +1,36 @@
+ADU218 watchdog trip-time measurement (WD1, documented 1 s)
+==========================================================
+Device: Ontrak ADU218, USB 0a07:00da
+Witness: SDM4065A s/n SDM46A0CA00021 fw 0.0.0.20, on K0
+Wiring: K0 load side -> DMM leads only. No load current.
+
+Method: close K0, arm WD1, stay SILENT for exactly T, then read RPK0
+once. That read ends the silence window, so RPK0 reports the state AT
+T seconds of silence with nothing having refed the timer. One trial
+per window; the window is re-established from scratch each time.
+
+Why not poll: any command refeeds the timer (manual 6d, invalid
+commands included), so polling would prevent the timeout under test.
+Why RPK0 and not the DMM: a DMM read costs ~0.7 s, and that latency is
+exactly what corrupted the earlier '3.7 s' figure.
+
+  T (s)   RPK0 after T s of silence   WD    verdict
+  -----   -------------------------   ---   -------
+   0.40               1                1    closed (not yet)
+   0.70               1                1    closed (not yet)
+   0.90               1                1    closed (not yet)
+   1.10               0                0    OPEN (tripped)
+   1.40               0                0    OPEN (tripped)
+   2.00               0                0    OPEN (tripped)
+
+Bracket: still closed at 0.90 s, open by 1.10 s.
+So the WD1 trip lies in (0.90, 1.10] s of silence.
+
+=== independent corroboration of the tripped state ===
+K0 re-closed, WD off:  RPK0=1  DMM: 6.1391 ohm (CLOSED)
+WD1 armed, silent 2.0 s: RPK0=0  WD=0  DMM: overload sentinel (OPEN)
+(DMM is on a separate bus and sends nothing to the ADU218, so reading
+ it cannot feed the watchdog. It is the only independent evidence the
+ contact physically moved.)
+
+restored: WD=0 PK=000 DB=1

@@ -66,7 +66,7 @@ would have been a driver bug:
 
 | # | Finding | Consequence for the driver |
 |---|---|---|
-| 1 | **`RI` does not exist.** §5 lists it; §6b calls the same function `PI`. The device answers `PI` and times out on `RI` | A driver written from the summary table hangs on *every* input read |
+| 1 | **`RI` does not exist.** §5 lists it; §6b calls the same function `PI` in four places. The device answers `PI` and times out on `RI`. Both spellings really are in the PDF, so this is a genuine internal contradiction the hardware settles — cite §6b, never §5 | A driver written from the summary table hangs on *every* input read |
 | 2 | **PORT A and PORT B are 4 bits each**, not 8. Eight inputs across two isolated ports | Why `PK` returns 3 digits and `PA` returns 2. Indexing inputs 0–7 against one port is wrong |
 | 3 | **Silence is the only error signal.** An unknown command returns nothing — no string, no sentinel | The driver needs a per-command *"expects a response"* table; it cannot discover this at runtime, because correct write-only silence is byte-identical to an error |
 | 4 | **The `0x01` prefix is mandatory and is specifically `0x01`** — bare ASCII, `0x00` and `0x02` are all ignored | A test asserting "byte 0 is non-printable" would pass for two encodings the device rejects |
@@ -107,6 +107,13 @@ there is no load current and the manual's *"1 CPS at full load"* PhotoMOS limit
 (with its 20%-of-rated-current escape clause) does not bind. Switching was
 still kept slow (0.5 s settle) and the cycle count small.
 
+**Ratings, for sizing the driver's posture:** Panasonic AQZ207 PhotoMOS, form A
+N.O., **1 A @ 120 VAC / 120 VDC**, 1 CPS at full load, and — worth stating
+because an operator would not infer it — **primary insulation only** (the sibling
+ADU208 is double-insulated; this model is not). The 1-CPS limit is
+load-dependent, so it is a `KNOWN_LIMITATIONS.md` entry rather than a code check:
+the driver cannot know what is attached.
+
 ## 4. The find that changes more than this driver: the watchdog works
 
 `ROADMAP.md`'s *"Hardware interlock for unattended runs"* is open work waiting
@@ -114,10 +121,27 @@ on a GPIO e-stop button ordered 2026-08-19, and `KNOWN_LIMITATIONS.md § N-1`
 states the honest position that **no software deadman can guarantee an output
 goes off**. The ADU218 answers that in hardware:
 
-- `WD1` armed, then host silence → K0 **opened after 3.7 s**, witnessed by the
-  DMM, and `WD` self-cleared to `0`.
+- `WD1` armed, then host silence → K0 **opened**, witnessed by the DMM, and `WD`
+  self-cleared to `0`. Trip measured by bisection at **(0.90, 1.10] s**, i.e.
+  the documented 1 s (`watchdog_trip.txt`).
 - **Control case:** fed with `PK` every 0.3 s → K0 stayed **closed** for 3.1 s
   with `WD` still `1`.
+
+**A correction to my own earlier claim.** The first capture reported "opened
+after 3.7 s" and I reported that as a trip time. It was not: it is `sleep(3.0)`
+plus the latency of the DMM read that followed, so it timed my *observation*,
+not the timeout. Read as a trip time it implied WD1 fires at ~3.7x its label and
+therefore that no WD interval could be trusted without characterisation — a
+reviewer drew exactly that conclusion from it. Re-measured properly by bisecting
+the silence window (stay quiet for exactly T, then one `RPK0` read that
+terminates the window, since polling would refeed the timer): closed at 0.90 s,
+open by 1.10 s. **There is no timing anomaly.** None of the four design
+consequences below depended on the bad number — they follow from arming coupling
+relay state to call frequency.
+
+The ladder is bounded and documented: `WD0` off, `WD1` 1 s, `WD2` 10 s, `WD3`
+1 min, `n ∈ 0..3`. No `WD4`, no custom interval, and `WDn` sets the interval
+*and* arms in one command — there is no separate arm step to hold.
 
 The control is what makes this safe to rely on: the relay drops because the
 host went *quiet*, not because arming `WD1` opens relays. A wedged agent, a
@@ -133,15 +157,27 @@ the "inert governor" trap.** Four consequences, all in `watchdog.txt`:
    silently open a load the driver was told to hold closed. So `WD` must
    **never** be armed implicitly, and the driver must **not** offer a
    keep-alive thread that hides the coupling.
-2. `WD1` (1 s) is unusable for a general bench; `WD3` (1 min) is the only
-   setting a run loop can plausibly meet.
+2. `WD1` (1 s, confirmed) is unusable for a general bench; `WD3` (1 min) is the
+   longest available and the only setting a run loop can plausibly meet.
 3. `WD` self-clearing to `0` is the **only** distinguishable trace that a
    timeout fired. Polling it is how a host learns. That read belongs in the run
    event stream — a fired interlock absent from the artifact bundle is a gap in
-   the audit trail.
+   the audit trail. **But the trace is weaker than it looks:** `WD`=0 means both
+   "timed out" *and* "never enabled", so it is only interpretable against a
+   driver-held expected value, and a driver restart loses that — the first `WD`
+   read after a restart is ambiguous by construction. So the driver holds the
+   armed state itself, and writes `WD0` at `open()` unless it is using the
+   watchdog, to replace an inherited state with a known one.
 4. A test must assert the **ladder** (fed stays closed, unfed opens) against a
    synthetic clock — not merely that `WD1` is accepted. A watchdog nobody feeds
    is indistinguishable from one that works until the day it should have fired.
+5. **A status poller silently neuters it.** Any command refeeds the timer —
+   invalid ones included, per §6d — so a health-check loop reading `PK` keeps the
+   deadman fed however wedged the control path is. The control case above did
+   this deliberately, with nothing but `PK`. Two consequences: the feed must live
+   on the **control** path only, and a benchctrl dashboard polling device state
+   would be enough to disable the interlock. This is the inert-governor shape
+   again, and it is the strongest argument against any background feeder.
 
 ## 5. Method surface — names are a safety decision
 
@@ -175,6 +211,42 @@ clear_counter(index) -> int                          # RCn — reads AND clears
 reset_relays() -> None                               # MK000, the safe state
 close(); __enter__; __exit__
 ```
+
+Constraints on the implementation behind that surface, each traceable to a
+measured or documented fact rather than taste:
+
+- **An explicit per-command `responsive: bool`,** never inferred from the
+  mnemonic. The naming pattern nearly holds — responsive commands start with `R`
+  or `P`, bare `DB`/`WD` answer while their `n`-suffixed setters do not — but
+  **`RKn` starts with `R` and is write-only**, and it is the most-called command
+  on the device. Write-only: `SKn`, `RKn`, `MKddd`, `DBn`, `WDn`. Responsive:
+  `RPKn`, `PK`, `RPyn`, `RPy`, `Py`, `PI`, `REn`, `RCn`, `DB`, `WD`.
+- **Drain in `open()`, and expect up to three stale frames.** The USB core holds
+  ~3 buffers per device, and a stale reply survives a process restart — so
+  session N can read session N−1's answers. Drain-until-empty, not drain-one.
+- **Two different index ranges.** Relays are `n ∈ 0..7`, input lines `n ∈ 0..3`
+  (4 bits per port). A single shared validator is a live off-by-four bug.
+- **Validate host-side and never let the device arbitrate.** Out-of-range
+  behaviour is undocumented, and `MK300` exceeds a byte — if it aliases rather
+  than being rejected, a whole-port write could close relays nobody asked for.
+  Bounds: relays 0..7, inputs 0..3, `MK` 000–255 zero-padded to 3, `DB` 0..2,
+  `WD` 0..3, ASCII payload ≤ 7 bytes.
+- **`read_counter` is the safe one; `clear_counter` must never be auto-retried.**
+  `RCn` is the only responsive command that mutates state, so a lost reply after
+  the device cleared loses the count permanently. Prefer `REn` + host-side
+  differencing wherever the value matters.
+- **Do not assume relays are open at `open()`.** Power-on relay state is
+  undocumented, and USB *suspend* explicitly holds outputs in their last state —
+  including when the host suspends the device because **no handle is open**. So a
+  closed handle can coexist with energised outputs indefinitely. Read `PK` and
+  report it; drive `MK000` only when explicitly asked.
+- **Three de-bounce settings, not four.** The web page lists a fourth (`NONE`)
+  but the manual bounds `n` to 0..2 and the captures show 0/1/2. The same
+  four-option string appears on the ADU208 and ADU228 pages, so it reads as
+  shared boilerplate.
+- **200 ms read timeout**, matching all three of Ontrak's examples; with
+  `bInterval` 10 at low speed the round-trip floor is ~10-20 ms, so that is ~10x
+  margin.
 
 Notes on the non-obvious choices:
 
@@ -309,6 +381,16 @@ model, because each is a driver bug if unhandled:
   injectable clock rather than wall time
 - **4-bit input ports**, so an 0–7 index against one port fails in the sim too
 - a `command_log: list[bytes]` so tests can assert exact emitted bytes
+- **a queue depth of ~3**, not one, so a test can prove drain-until-empty is
+  required and drain-one is insufficient
+- **`RCn` as read-and-clear**, so a test can demonstrate that retrying it loses
+  the count — the sim is the only safe place to exercise that
+- **any command refeeding the watchdog**, invalid ones included, so the
+  "status poller neuters the interlock" failure is reproducible offline. This is
+  the single most valuable thing the sim can model, because it is the one that
+  looks like success right up until it matters
+- **relays holding state across a simulated suspend / handle close**, so the
+  "close() does not de-energise" property is a test rather than a comment
 
 ## 10. Verification
 
@@ -329,14 +411,38 @@ model, because each is a driver bug if unhandled:
 ## 11. Note on process
 
 `AGENTS.md` step 3 asks for three advisory sub-agents (spec / accuracy /
-integration) before driver code. They were spawned; **their reports never
-arrived** — the session was compacted while they ran and the tasks are gone.
-Rather than re-spawn and wait, I did step 4's work by hand, which is what
-produced §2's five findings and §4's watchdog result. That is a stronger
-outcome than the agent reports would have been, because every claim here is
-measured on the device rather than read from a PDF — but the *integration*
-agent's anti-pattern list is the one thing genuinely not replaced, so §6 and §7
-were derived by reading the PDU41002 commit stack directly instead.
+integration) before driver code. They were spawned, the session compacted while
+they ran, and their reports did not arrive with it — so I did step 4's work by
+hand, which is what produced §2's five findings and §4's watchdog result.
+
+**The spec agent later turned out to still be alive and its report has now
+landed**, after the hardware work. That ordering was lucky rather than clever,
+and it is worth recording which way the corroboration ran: measurement first
+meant the manual could be checked against the device instead of the reverse.
+Eight of the nine measured findings are documented *rules* rather than
+coincidences, which is a much stronger footing than "it worked when I tried it" —
+and one of them (`RI` vs `PI`) resolves a genuine self-contradiction *in* the
+vendor document, which measurement alone could not have adjudicated.
+
+The report also caught something I would not have caught myself: it took my
+"opened after 3.7 s" at face value, as any reader would, and reasoned that WD1
+therefore fires at ~3.7x its documented interval and that no WD setting could be
+trusted without characterisation. That inference was sound; **my number was
+wrong** — it timed my own observation, not the trip. Re-measuring properly gave
+(0.90, 1.10] s. The lesson is the one memory already records about governors:
+I had measured the wrong thing and labelled it the right thing. A figure that is
+an artifact of the instrumentation reads exactly like a device property.
+
+What the manual supplied that no amount of probing could, because probing is the
+risk on a switching device: the bounded `WDn` ladder, the absence of any
+non-volatile write, the absence of any mode-latch, and the four things not to
+send. It also independently confirmed the on-resistance discrepancy is
+unexplained *by the manual* — the on-state figures carry no test conditions at
+all — and named the relay part (Panasonic AQZ207) as the next document to read.
+
+Still outstanding: the **accuracy** agent's adversarial review (re-tasked, not
+yet returned) and the **integration** agent's anti-pattern list, so §6 and §7
+remain derived from reading the PDU41002 commit stack directly.
 
 ## 12. Deferred, inherited from master
 
