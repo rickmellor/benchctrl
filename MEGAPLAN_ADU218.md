@@ -337,25 +337,124 @@ Three decisions I recommend but which are worth your look:
    `scan_serial()` cannot see it for the same structural reason
    `scan_driverless_bridges()` exists.
 
+   **The signature and the scanner are one atomic change, not two steps.**
+   Measured: a `SIGNATURES` entry with no working scanner is *worse than no
+   entry* — the panel reports `NOT FOUND` for a device that is served and open,
+   where omitting the signature yields `OPEN`. So a signature **obliges** a
+   scanner in the same commit, or the FUI confidently reports working hardware as
+   unplugged. And `transport="usbfs"` buys less than it looks:
+   `_match_signature()` (`discovery.py:932-940`) **accepts and ignores** its
+   `transport` argument, so the field is documentation, not a discriminator. The
+   one place it does bite is `_is_probe_candidate` (`discovery.py:831-859`), which
+   requires `transport == "serial"` — so a non-serial transport is unprobeable
+   *by construction*. That is the behaviour I want, but I should record that it
+   comes free rather than from a decision I made.
+
+   There is also a **count coupling** to satisfy at the same time:
+   `test_the_bus_denominator_excludes_what_no_scan_can_find` asserts
+   `scannable == len(INSTRUMENTS) - 1`, hardcoding exactly one unscannable
+   instrument (the QR10x). Landing `INSTRUMENTS` + `SIGNATURES` + `scan_usbfs()`
+   together keeps that arithmetic true; landing the row alone breaks it.
+
+   Closest structural precedent is `945accf`, which exists because a driverless
+   CH340 "was invisible to `scan_serial()`, which enumerates `comports()` — that
+   lists ttys, and the whole problem is that no tty exists", so the QR10x read as
+   "not plugged in" while plugged in and working. The ADU218 has the same
+   no-tty shape but, unlike the QR10x, a clean VID/PID — so it can legitimately
+   sit in the scan numerator once `scan_usbfs()` exists.
+
 ## 7. Registries a new driver must land in
 
-Verified against the PDU41002 commit stack, which is the freshest precedent.
-Each of these is a silent failure if missed:
+Failure modes below are **measured against the installed package**, not inferred
+from the PDU41002 commit stack. Two of my earlier entries were backwards; both
+are corrected here, and the distinction matters because loud and silent misses
+need different mitigations — a loud one needs no test, a silent one needs an
+explicit test or it ships.
+
+**Raises immediately (you cannot miss these):**
 
 | File | Change | Failure if missed |
 |---|---|---|
-| `config.py:38` | `DEVICE_KEYS` += `"ontrak_adu218"` | `Config.from_dict` **silently drops** the device |
-| `agent/registry.py:264` | `_adu` opener closure, lazy import | `BenchValueError: no opener for device key` |
-| `sim/factories.py:162` | `make_adu218()` + `FACTORIES` entry | sim mode unavailable |
-| `mcp.py` | import + `register_mcp_tools(mcp)` + flat re-export block | MCP parity test fails |
-| `net/codec.py:76` | `ADU218Info` | dataclasses degrade to bare dicts over the wire |
-| `net/errors.py:141` | every exception | types degrade along the MRO remotely |
-| `discovery.py` | `SIGNATURES` + `scan_usbfs()` + `transport="usbfs"` | invisible to the bench inventory |
-| `dashboards/fui/view.py:130` | `INSTRUMENTS` row | slot drawn as unknown-kind |
+| `agent/registry.py:264` | `_adu` opener closure, lazy import | `BenchValueError: no opener for device key` at registry build |
+| `sim/factories.py:162` | `make_adu218()` + `FACTORIES` entry | `BenchValueError: no simulator for device key` |
+| `net/codec.py:76` | `ADU218Info` | **`BenchProtocolError: dataclass not in the wire-type allowlist`** — this one is loud, not silent |
+| `config.py:38` (flag path) | `DEVICE_KEYS` | `cfg.build(local_devices=[...])` raises `BenchValueError: unknown device key` |
+
+**Silent — each needs a deliberate test:**
+
+| File | Change | Silent symptom |
+|---|---|---|
+| `config.py:38` (**file** path) | `DEVICE_KEYS` | `Config.from_dict` logs one WARNING and returns `devices: []`; `mode_for()` then says `"local"`. **A device configured `mode: remote` is served locally.** The flag path raises, the file path does not — that split is the trap |
+| `net/errors.py:141` | every exception class | **this is the silent one.** Missing → round-trips to bare `RuntimeError` with `remote_class='ADU218CommandError'`; `except ADU218CommandError` never matches and nothing reports it. Needs a round-trip test *per class* |
+| `dashboards/fui/view.py:130` | `INSTRUMENTS` row | the rail still draws a row — `kind=generic role=INSTRUMENT`. `view.py:186-215` appends unrecognised keys as INSTRUMENT, so the default is wrong rather than absent |
+| `dashboards/state.py` | `RUN_EVENT_KINDS` | `state.py:1401` is `elif kind in RUN_EVENT_KINDS:` with **no else**, falling through to `log.append()`. The event shows in LOG.MGR while the panel folds no state |
 | `deploy/udev/` | `63-benchctrl-adu218.rules` | **already committed** |
 
-Tests that fail mechanically on a miss: `tests/test_session_config.py:44,119`
-iterate `DEVICE_KEYS`; `tests/test_mcp.py:604` is the parity test to copy.
+**A typo in `codec.py` or `errors.py` is indistinguishable from an omission.**
+Both resolve names via `getattr(module, name, None)` plus a type check
+(`codec.py:52-56`, `errors.py:147-155`), so a misspelled entry is silently
+skipped. Spelling is not self-checking here.
+
+**Correction to my earlier claim: `tests/test_session_config.py:44,119` are NOT
+a mechanical gate.** Both only iterate `DEVICE_KEYS` asserting `mode_for` /
+`is_remote` — assertions that hold for any string. Measured: appending an
+unwired `ontrak_adu218` to `DEVICE_KEYS` leaves that file at 37 passed. **No
+test in the suite fails when a `DEVICE_KEYS` entry is missing.** Stage 4 must
+not rely on one.
+
+`tests/test_mcp.py:604` remains the parity test to copy — but note parity is
+enforced *per driver* by a hand-written test, so a new driver has no parity
+coverage until its copy exists. Convention, not mechanism.
+
+**The real gate in the FUI is a count coupling.** Adding to `INSTRUMENTS`
+without a `discovery.SIGNATURES` entry fails
+`test_the_bus_denominator_excludes_what_no_scan_can_find`
+(`tests/test_dashboard_fui.py:544-551`), which asserts
+`scannable == len(INSTRUMENTS) - 1` — i.e. it hardcodes that **exactly one**
+instrument is unscannable (the QR10x). A second unscannable instrument breaks
+it. See §6.3, which this changes.
+
+**The ordering risk is not file-versus-file.** No commit in any of the four
+driver stacks broke the suite mid-stack; the suite stayed green throughout. The
+instructive case is `b148bd5`, which landed nine registration sites with **zero
+test files** and a green suite — and three of them were wrong. `cd3eaf1` found
+all three 1h44m later, and found them *by writing the tests*, not by running the
+existing ones. So the ordering constraint that actually bites is
+**tests-versus-registration**, and the three defects are worth naming because
+each is available to this driver:
+
+- `frozenset` missing from a codec `isinstance` check. Not a one-getter failure:
+  the property snapshot rides on **every** `device.call` response, so one
+  missing type took out every remote call to the device. The ADU218's own
+  `allowed_relays` would be a frozenset.
+- A discovery probe marker (`"DEV.TYPE"`) that was a substring of its own
+  request, so any echoing device matched — and on hardware **discovery
+  identified a mains switch as a programmable resistor.**
+- A device that could not be probed at all. Probing the PDU wrote
+  authentication failures into its own audit log and silenced the console ~15 s.
+
+## 7a. Test-shape warnings from the same history
+
+Three failures in this repo were invisible for structural reasons rather than
+logic reasons, and all three shapes are available to this driver:
+
+- **Per-driver test files let per-driver bugs recur.** `dc4c3f0`: "The identical
+  bug was already fixed once, in `siglent_sdm4065a`, and the fix was never
+  propagated — the per-driver test shape is what let it survive."
+- **A shared resource torn down by one driver, logged below service level.**
+  `3874f0a`: closing one VISA driver closed the process-wide `ResourceManager`,
+  blinding the agent to all VISA hardware while the dashboard drew NOT FOUND for
+  three connected instruments — and "a total loss of the VISA bus looked exactly
+  like an idle bench." **The ADU218 holds a claimed usbdevfs interface**, so the
+  same shape is reachable: `close()`/`RELEASEINTERFACE` misbehaving under a
+  shared handle would be a silent bench-wide blindness.
+- **Wire-shape bugs pass unit tests on both sides.** `c44ea14`: the panel's two
+  worst defects were "a kind nobody emits (`run_started`) and a payload one level
+  down (the `data` nesting)", and tests on either side passed because each built
+  its own input. **So the watchdog-trace event must be emitted by a real engine
+  in its test**, via the `_real_events` harness — never a hand-built dict. Note
+  `tests/test_dashboard_runs.py:857-861` only sweeps kinds spelled `run_*`, so a
+  kind named `adu218_watchdog_tripped` would sail past it.
 
 ## 8. Stages
 
@@ -393,11 +492,23 @@ Each is independently landable. **Stage 0 is done.**
 ## 9. Simulator
 
 `src/benchctrl/sim/adu218.py`. **It cannot subclass `SimDevice`** — that class
-owns a `SerialLoopback` and every existing sim is pty-backed, whereas this
-device's channel is an 8-byte packet endpoint. The seam is `usbfs.py`'s
-four-method duck type (`write`/`read`/`is_open`/`close`), the same informal
-shape `links.py` uses in the PDU driver, so the sim provides a fake link and
-the real driver drives it unmodified above that line.
+does `self.link = loopback or SerialLoopback()` and its `port` returns
+`self.link.port`, `sim/factories.py:72-74`'s `_asrl()` builds
+`f"ASRL{port}::INSTR"`, and all six existing sims subclass
+`SimDevice`/`ScpiDevice` with a pty behind them. This device's channel is an
+8-byte packet endpoint. The seam is `usbfs.py`'s four-method duck type
+(`write`/`read`/`is_open`/`close`), the same informal shape `links.py` uses in
+the PDU driver, so the sim provides a fake link and the real driver drives it
+unmodified above that line.
+
+**This will be the repo's first simulator that is not a byte stream, and there is
+no precedent to copy.** The related-but-weaker precedent is that
+simulator transport already legitimately differs from hardware transport: the
+SCPI sims run over pyvisa-py's ASRL backend while the real SDM4065A is USB-TMC,
+recorded in `docs/simulation.md:16,58-60` and `CHANGELOG.md:875`. So
+"sim transport ≠ hardware transport" is accepted practice — just never yet with a
+sim that isn't a stream at all. It is **not** in `KNOWN_LIMITATIONS.md`, so this
+driver should add the entry rather than assume the divergence is documented.
 
 It must replay the transcripts, not my reading of the PDF. Specifically it must
 model, because each is a driver bug if unhandled:
