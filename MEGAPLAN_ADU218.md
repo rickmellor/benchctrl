@@ -369,6 +369,56 @@ Notes on the non-obvious choices:
 - **`read_watchdog()` is a read**, so an observer without the writer claim can
   see that the interlock fired. That asymmetry is deliberate.
 
+## 5a. `safety.py`: the PDU's reasoning inverts here, and it needs a decision
+
+Reading `agent/safety.py` for the registration sweep turned up a gap the plan
+did not cover. Both hooks are duck-typed on method *names*, so what the ADU218
+gets is decided entirely by what I choose to call things — silently, with no
+registration step and no test that fires.
+
+**`default_safe_state()`** walks `stop_recording`, `set_output(False)`,
+`set_input(False)`, `set_current_limit_enabled(True)`. The planned surface
+(`set_relay_state`, `set_relay_port`, `reset_relays`, …) implements none of them,
+so on a governor trip **the ADU218 does nothing** — currently inert by accident,
+exactly the state the PDU was in.
+
+**But the PDU's justification does not transfer, and this is the point.** That
+docstring argues inertness is *correct* because cutting mains is itself the
+disruptive act — it de-powers a DUT mid-measurement and drops other instruments'
+sessions. None of that is true here: these are 1 A signal-level SSRs, the DUT rail
+is not on them, and `MK000` costs one 8-byte write. So for this device
+"de-energise on trip" is closer to the ordinary meaning of safe state than it is
+for any mains switch. **`reset_relays()` is a genuine candidate for the trip
+path** — which is the opposite conclusion to §6.2's, and the two must not be
+conflated: staying out of `SWITCHED_PDU_KEYS` is about *run-engine setpoints*,
+not about *trip behaviour*.
+
+Three things to settle before Stage 5, none of which should be decided by
+accident:
+
+1. **Should a trip open the relays?** My inclination is yes, opt-in per relay via
+   an `allowed_relays`-subset argument mirroring `panic_outlets` — the
+   `panic_outlets_of()` duck type ("has this attribute" is the whole contract)
+   already generalises, so this needs no change to `safety.py`. But it is an
+   operator policy question about what is wired, not something a driver should
+   assume. Default empty.
+2. **Do not let `_ARMING_CALLS` catch this device by name.** It maps
+   `set_output`/`enable_output`/`disable_output`/`set_input` to arming state, and
+   energising a signal relay is not "arming an output" — matching would start a
+   deadman countdown on every relay switch. The planned names dodge it, but only
+   because `set_relay_state` is not spelled `set_output`. **That is a naming
+   coincidence holding up a safety behaviour**, so it wants a test asserting the
+   ADU218 surface intersects `_ARMING_CALLS` nowhere, not a comment hoping nobody
+   renames it.
+3. **The watchdog interacts with all of this** and is the reason to keep them
+   apart. If `WD` is armed, a governor trip that *stops issuing commands* already
+   opens every relay within ≤1 s with no software involvement — a better guarantee
+   than any `safe_state_fns` entry. So the honest design is: the watchdog is the
+   real interlock, and a `reset_relays()` trip hook is the belt-and-braces for
+   when it is not armed. Whatever is chosen, `default_safe_state()`'s docstring
+   must say which, because the next reader will otherwise inherit the PDU's
+   reasoning by proximity.
+
 ## 6. Architecture and open design decisions
 
 ```
@@ -558,9 +608,8 @@ Each is independently landable. **Stage 0 is done.**
   into a silently-dropping one. Ships with the synthetic-clock ladder test, a
   `KNOWN_LIMITATIONS.md` entry, and an explicit refusal to auto-feed.
 - **Stage 5 — agent/remote integration.** Registry opener, codec, errors,
-  discovery scanner, `safety.py` exemptions made deliberate (the ADU218
-  implements none of the methods `default_safe_state()` walks, so it is
-  currently inert *by accident* — same trap the PDU had),
+  discovery scanner + `SIGNATURES` (one commit, per §6.3), `safety.py`
+  (see §5a — this needs a decision, not just a comment), and
   `tests/test_remote_ontrak_adu218.py`.
 - **Not planned:** PWM or fast switching (the manual forbids it above 1 CPS at
   full load); `interfaces.Switch` (§6.1); run-engine relay setpoints (§6.2 —
