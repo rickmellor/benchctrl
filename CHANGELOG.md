@@ -141,7 +141,60 @@ because a contactor honouring a 3 s `td_off` physically cannot report
 itself off in time and every trip would otherwise escalate to a transport
 reset. Nothing armed still means nothing cut.
 
-Still to come: run-engine integration so a phase can power-cycle a DUT.
+**A phase can now power-cycle a DUT.** `safety.allowed_outlets` and a
+phase `setpoints.outlets` mapping bring mains into the declarative layer,
+so cold-boot, brownout-recovery and hung-DUT tests are specs rather than
+someone standing at the bench.
+
+Adding fields to the spec had one trap worth naming: `RunSpec.sha256`
+hashes canonical JSON and is the only thing tying an archived result
+bundle to the spec that produced it, so a key emitted unconditionally
+would silently re-hash **every spec ever archived** — including runs with
+nothing to do with mains. Both new fields are emitted only when used, and
+a test pins the hash of an outlet-free spec against a hard-coded value
+captured before any of this existed. Outlet keys normalise to sorted ints
+on construction, because JSON object keys are strings and `{3: true}`
+would otherwise hash differently after a round trip.
+
+Empty `allowed_outlets` means **none**, not unrestricted, and it is
+checked in both directions — de-powering a DUT is as much a state change
+as energising one. Aggregates stay inexpressible (`all`, `b1`, `b2`
+cannot be spelled) and `bool` is refused before `int`, matching the
+driver.
+
+Four engine behaviours, each the answer to a way this could look fine and
+be wrong:
+
+- **A failed switch fails the phase.** The engine goes through
+  `set_outlet_state(..., verify=True)` and lets the exception end the
+  run. Since `oltctrl` acknowledges nothing, the alternative — log it and
+  carry on, in a process nobody is watching — produces a bundle full of
+  data describing a power cycle that never happened.
+- **A spec that switches outlets with no PDU attached is refused at
+  construction**, before the run directory exists. Skipping the switch
+  and completing is the same failure with a worse signature.
+- **Mains first, then the instrument setpoint.** A setpoint applied to a
+  de-powered DUT lands nowhere; energising mains under a live output is
+  how an inductive kick reaches a DUT. The governor's trip path is the
+  same ordering in reverse.
+- **`settle_s` defaults to 3 s, not 0**, so the opening samples of a
+  power-cycle phase are not a supply settling and a DUT booting. It is
+  `Optional` rather than a float defaulting to zero because absent and
+  `0.0` mean opposite things here, and conflating them would make the
+  safe default unreachable. It counts against `max_duration_s`, is
+  refused on a phase that switches nothing, and an abort arriving during
+  one does not wait it out.
+
+A run never cuts mains on its own way out — phase ends, aborts and errors
+all leave outlets where the last phase put them. Every transition is a
+`run_outlet` event carrying the verified read-back state, not the
+requested one.
+
+Remotely this needs the writer claim on **both** device keys. Without
+that check `run.submit` would have been the one path to a mains contactor
+that skipped the gate every other route enforces; the refusal names the
+key to claim. A spec that mentions no outlets needs no PDU claim, even on
+a bench that has one.
 
 ### Serial transport selection — kernel driver first
 

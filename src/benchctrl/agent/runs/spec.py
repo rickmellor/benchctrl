@@ -30,6 +30,14 @@ OPS = ("<", "<=", ">", ">=", "==", "!=")
 
 SEVERITIES = ("debug", "info", "warn", "alarm", "critical")
 
+#: Dead time after a phase switches mains, before that phase starts measuring.
+#: Not tuning — a correctness default. A DUT coming up on mains draws inrush and
+#: then boots, so the first samples after an outlet switch describe a supply
+#: settling rather than the thing under test. Defaulting to zero would make the
+#: opening samples of every power-cycle phase garbage, and garbage that *looks*
+#: like data is worse than a gap. Overridable per phase, including to zero.
+DEFAULT_OUTLET_SETTLE_S = 3.0
+
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
@@ -49,6 +57,87 @@ def _as_float(obj: Any, *fields: str) -> None:
         value = getattr(obj, name)
         if value is not None and not isinstance(value, float):
             object.__setattr__(obj, name, float(value))
+
+
+def _outlet_key(index: Any) -> int:
+    """Coerce one outlet key, rejecting aggregates and bools.
+
+    JSON object keys are always strings, so ``{"3": true}`` from a round-tripped
+    spec has to mean outlet 3 — but ``"all"`` must not become anything at all.
+    A ``bool`` is refused before ``int`` for the reason in
+    :py:func:`_as_outlets`.
+    """
+    if isinstance(index, bool):
+        raise BenchValueError(
+            f"invalid run spec: outlet index {index!r} is a bool; True would "
+            f"silently become outlet 1"
+        )
+    if isinstance(index, str):
+        try:
+            index = int(index)
+        except ValueError:
+            raise BenchValueError(
+                f"invalid run spec: outlet index {index!r} is not a number. "
+                f"Aggregates like 'all', 'b1' and 'b2' are inexpressible on "
+                f"purpose — `oltctrl index all act off` de-powers everything."
+            ) from None
+    if not isinstance(index, int):
+        raise BenchValueError(
+            f"invalid run spec: outlet index {index!r} must be an int"
+        )
+    _require(index >= 1, f"outlet index {index} is not a positive index")
+    return index
+
+
+def _normalise_outlet_setpoints(setpoints: dict) -> None:
+    """Rewrite a phase's ``outlets`` keys to ints, in place.
+
+    JSON object keys are strings, so ``{"outlets": {3: True}}`` serialises as
+    ``{"3": true}`` and comes back with a string key. Left alone, the spec's
+    ``sha256`` would differ before and after a round trip — and that hash is
+    the only thing tying an archived result bundle to the spec that produced
+    it. Normalising on construction makes both spellings converge.
+
+    Also the reason the engine can look up ``outlets[idx]`` by int without
+    caring where the spec came from.
+    """
+    outlets = setpoints.get("outlets")
+    if not isinstance(outlets, dict) or not outlets:
+        return
+    rewritten = {_outlet_key(k): v for k, v in outlets.items()}
+    _require(
+        len(rewritten) == len(outlets),
+        f"phase outlets has duplicate indices after normalisation: "
+        f"{sorted(outlets)}",
+    )
+    setpoints["outlets"] = {k: rewritten[k] for k in sorted(rewritten)}
+
+
+def _as_outlets(value: Any) -> list[int]:
+    """Normalise an outlet collection to sorted, unique, plain ints.
+
+    Sorted and de-duplicated so ``(3, 2, 3)`` and ``(2, 3)`` hash identically
+    — the same stability requirement :py:func:`_as_float` exists for.
+
+    ``bool`` is rejected **before** ``int``, exactly as the driver does:
+    ``True`` is an ``int`` in Python and would silently become outlet 1. A
+    spec that meant "yes, outlets" and got "outlet 1" would authorise cutting
+    a specific piece of hardware nobody named.
+    """
+    outlets: set[int] = set()
+    for item in value or ():
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise BenchValueError(
+                f"invalid run spec: safety.allowed_outlets must contain plain "
+                f"ints, got {item!r}. Aggregates like 'all' are inexpressible "
+                f"on purpose — one line can de-power the whole bench."
+            )
+        _require(
+            item >= 1,
+            f"safety.allowed_outlets: outlet {item} is not a positive index",
+        )
+        outlets.add(item)
+    return sorted(outlets)
 
 
 @dataclass(frozen=True)
@@ -130,6 +219,13 @@ class Safety:
     max_duration_s: float = 86_400.0
     max_board_temp_C: float = 85.0
     abort_if: tuple[Condition, ...] = ()
+    #: Mains outlets a phase in this run may switch. **Empty means none** —
+    #: an allowlist, not a limit, so a run that never mentions outlets cannot
+    #: acquire the ability to cut power through a typo. This is the run-level
+    #: envelope and it is checked *in addition to* the driver's own
+    #: ``allowed_outlets``: the driver says what this deployment may ever
+    #: touch, the spec says what this experiment is allowed to.
+    allowed_outlets: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         _as_float(
@@ -138,6 +234,9 @@ class Safety:
         _require(self.max_voltage_V > 0, "safety.max_voltage_V must be > 0")
         _require(self.max_current_A > 0, "safety.max_current_A must be > 0")
         _require(self.max_duration_s > 0, "safety.max_duration_s must be > 0")
+        object.__setattr__(
+            self, "allowed_outlets", tuple(_as_outlets(self.allowed_outlets))
+        )
 
     def check_setpoints(self, setpoints: dict) -> None:
         """Reject a phase whose setpoints breach the envelope."""
@@ -153,15 +252,56 @@ class Safety:
                 f"phase requests {amps} A but safety.max_current_A is "
                 f"{self.max_current_A} A"
             )
+        self._check_outlets(setpoints.get("outlets"))
+
+    def _check_outlets(self, outlets: Any) -> None:
+        """Reject a phase that switches an outlet outside the envelope.
+
+        Note what is checked: the *keys*, not the values. Switching an outlet
+        **off** is as much a state change as switching it on — it de-powers
+        whatever is plugged in — so an unlisted outlet is refused in either
+        direction. A "you may only turn things off" exemption would be the
+        obvious shortcut and it is wrong.
+        """
+        if not outlets:
+            return
+        if not isinstance(outlets, dict):
+            raise BenchValueError(
+                f"invalid run spec: phase setpoint 'outlets' must be a mapping "
+                f"of outlet index -> bool, got {type(outlets).__name__}"
+            )
+        for index, state in outlets.items():
+            idx = _outlet_key(index)
+            if not isinstance(state, bool):
+                raise BenchValueError(
+                    f"invalid run spec: phase requests outlet {idx} -> "
+                    f"{state!r}; must be a bool. A truthy string would "
+                    f"energise an outlet a spec meant to cut."
+                )
+            if idx not in self.allowed_outlets:
+                raise BenchValueError(
+                    f"phase switches outlet {idx} but safety.allowed_outlets "
+                    f"is {list(self.allowed_outlets)}. Widening this is a "
+                    f"deliberate decision about which mains outlets an "
+                    f"unattended run may switch — not a typo to paper over."
+                )
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "max_voltage_V": self.max_voltage_V,
             "max_current_A": self.max_current_A,
             "max_duration_s": self.max_duration_s,
             "max_board_temp_C": self.max_board_temp_C,
             "abort_if": [c.to_dict() for c in self.abort_if],
         }
+        # Emitted **only when non-empty**, following the precedent in
+        # `RunSpec.to_dict`. `RunSpec.sha256` hashes this dict, and that hash
+        # is what ties an archived result bundle to the spec that produced it.
+        # An unconditional key would silently re-hash every spec ever archived,
+        # breaking that tie for runs that have nothing to do with outlets.
+        if self.allowed_outlets:
+            d["allowed_outlets"] = list(self.allowed_outlets)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> Safety:
@@ -171,6 +311,7 @@ class Safety:
             max_duration_s=float(d.get("max_duration_s", 86_400.0)),
             max_board_temp_C=float(d.get("max_board_temp_C", 85.0)),
             abort_if=tuple(Condition.from_dict(c) for c in d.get("abort_if", ())),
+            allowed_outlets=tuple(d.get("allowed_outlets", ())),
         )
 
 
@@ -228,9 +369,21 @@ class Phase:
     duration_s: float = 0.0
     exit: tuple[Condition, ...] = ()
     emulator: dict = field(default_factory=dict)
+    #: Dead time after this phase's mains transition, before it starts
+    #: measuring. ``None`` means :py:data:`DEFAULT_OUTLET_SETTLE_S`, which is
+    #: **not** zero. ``0.0`` is a distinct, explicit "I know this DUT needs no
+    #: settling" — which is why this is ``Optional`` rather than a float
+    #: defaulting to 0: absent and zero mean opposite things here, and
+    #: conflating them would make the safe default unreachable.
+    settle_s: Optional[float] = None
 
     def __post_init__(self) -> None:
-        _as_float(self, "duration_s")
+        _as_float(self, "duration_s", "settle_s")
+        _require(
+            self.settle_s is None or self.settle_s >= 0,
+            f"phase {self.name!r}: settle_s must be >= 0",
+        )
+        _normalise_outlet_setpoints(self.setpoints)
         _require(bool(self.name), "every phase needs a name")
         _require(
             self.mode in MODES, f"phase {self.name!r}: unknown mode {self.mode!r}"
@@ -239,6 +392,18 @@ class Phase:
             self.duration_s > 0 or self.exit,
             f"phase {self.name!r} has neither a duration nor an exit condition — "
             f"it would run forever",
+        )
+        # A settle window on a phase that switches nothing would be a setting
+        # that silently does nothing — the operator waits for a delay that never
+        # happens and reads the first samples as settled. Rejected rather than
+        # generalised into an all-purpose dwell: `settle_s` means "let mains
+        # come up", and giving it a second meaning would make the power-cycle
+        # case impossible to reason about.
+        _require(
+            self.settle_s is None or bool(self.setpoints.get("outlets")),
+            f"phase {self.name!r} sets settle_s but switches no outlet. "
+            f"settle_s is the dead time after a mains transition; on a phase "
+            f"with no transition it would do nothing at all.",
         )
         if self.mode == "emulator":
             _require(
@@ -268,7 +433,20 @@ class Phase:
         }
         if self.emulator:
             d["emulator"] = dict(self.emulator)
+        # Conditional for the same reason as `Safety.allowed_outlets`: an
+        # unconditional key re-hashes every spec ever archived. Keyed on
+        # `is not None`, not truthiness — an explicit `settle_s=0.0` is a
+        # decision about a DUT and has to survive the round trip.
+        if self.settle_s is not None:
+            d["settle_s"] = self.settle_s
         return d
+
+    @property
+    def effective_settle_s(self) -> float:
+        """The dead time the engine will actually wait. Never negative."""
+        if not self.setpoints.get("outlets"):
+            return 0.0
+        return DEFAULT_OUTLET_SETTLE_S if self.settle_s is None else self.settle_s
 
     @classmethod
     def from_dict(cls, d: dict) -> Phase:
@@ -279,6 +457,9 @@ class Phase:
             duration_s=float(d.get("duration_s", 0.0)),
             exit=tuple(Condition.from_dict(c) for c in d.get("exit", ())),
             emulator=dict(d.get("emulator", {})),
+            settle_s=(
+                float(d["settle_s"]) if d.get("settle_s") is not None else None
+            ),
         )
 
 
@@ -389,7 +570,10 @@ class RunSpec:
         _require(len(names) == len(set(names)), f"phase names must be unique: {names}")
         for phase in self.phases:
             self.safety.check_setpoints(phase.setpoints)
-        total = sum(p.duration_s for p in self.phases)
+        # Settle windows included: they are unattended bench time like any
+        # other, and a run that power-cycles fifty times spends real minutes
+        # there. Excluding them would let a spec exceed its own envelope.
+        total = self.total_duration_s
         _require(
             total <= self.safety.max_duration_s,
             f"phases total {total:g}s but safety.max_duration_s is "
@@ -398,7 +582,30 @@ class RunSpec:
 
     @property
     def total_duration_s(self) -> float:
-        return sum(p.duration_s for p in self.phases)
+        """Wall-clock the phase list asks for, settle windows included.
+
+        A settle window is dead time *added* to a phase, not carved out of its
+        duration: the point of ``duration_s`` is how long the DUT is measured,
+        and shortening that because mains had to come up would quietly change
+        the experiment. But it is still time the bench spends unattended, so it
+        counts against ``safety.max_duration_s``.
+        """
+        return sum(p.duration_s + p.effective_settle_s for p in self.phases)
+
+    @property
+    def switched_outlets(self) -> frozenset[int]:
+        """Every mains outlet any phase in this run switches.
+
+        Derived, never serialised — so it cannot change :py:attr:`sha256`. It
+        exists so the agent can decide *before the run starts* whether this
+        spec needs a PDU and a second writer claim, rather than discovering it
+        at the phase that switches mains.
+        """
+        return frozenset(
+            idx
+            for phase in self.phases
+            for idx in (phase.setpoints.get("outlets") or {})
+        )
 
     def phase(self, index: int) -> Phase:
         return self.phases[index]

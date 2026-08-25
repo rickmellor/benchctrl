@@ -532,3 +532,165 @@ def test_a_remote_config_round_trips_without_a_password():
     assert device.open["host"] == "pdu-benchctrl"
     assert "password" not in device.open
     assert cfg.to_dict()["devices"][KEY]["open"]["allowed_outlets"] == [2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Runs that switch mains
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def remote_bench(tmp_path):
+    """An agent serving **both** a simulated Arc and a simulated PDU.
+
+    Two devices is the point: a run's instrument and its PDU are separate device
+    keys with separate writer claims, and the interesting failure is a session
+    that holds one and switches the other.
+    """
+    from benchctrl.sim.factories import make_pdu41002
+
+    from benchctrl.drivers.otii_arc import OtiiArc
+    from benchctrl.sim import SimulatedOtiiArc
+
+    arc_sim = SimulatedOtiiArc()
+    arc_sim.start()
+    arc = OtiiArc.open(arc_sim.port)
+    pdu = make_pdu41002(allowed_outlets=(2, 3))
+
+    registry = DeviceRegistry()
+    registry.register_open("otii_arc", arc)
+    registry.register_open(KEY, pdu)
+    agent = BenchAgent(
+        registry, token=TOKEN, deadman_s=5.0, heartbeat_s=1.0, runs_dir=tmp_path
+    )
+    server = AgentServer(agent, host="127.0.0.1", port=0).start()
+    endpoint = EndpointConfig(
+        host="127.0.0.1", port=server.port, token=TOKEN,
+        heartbeat_s=1.0, deadman_s=5.0,
+    )
+    client = RemoteClient(endpoint).connect()
+    try:
+        yield type(
+            "RemoteBench",
+            (),
+            {
+                "client": client,
+                "agent": agent,
+                "pdu": pdu,
+                "sim": pdu._benchctrl_sim,
+                "arc": arc,
+            },
+        )
+    finally:
+        try:
+            client.close()
+        finally:
+            server.stop()
+            pdu.close()
+            arc.close()
+            arc_sim.close()
+
+
+def _cycle_spec_dict(outlet=3):
+    return {
+        "name": "remote-cycle",
+        "device": "otii_arc",
+        "safety": {
+            "max_voltage_V": 4.0,
+            "max_current_A": 0.5,
+            "max_duration_s": 600,
+            "allowed_outlets": [outlet],
+        },
+        "sampling": {"channels": ["mv"], "chunk_s": 60,
+                     "metric_period_s": 0.2, "record": False},
+        "phases": [
+            {"name": "cut", "mode": "idle", "duration_s": 1.0, "settle_s": 0.0,
+             "setpoints": {"outlets": {str(outlet): False}}},
+        ],
+    }
+
+
+def test_a_run_that_switches_mains_needs_the_pdus_own_claim(remote_bench):
+    """The gate that stops ``run.submit`` being the one path to a contactor that
+    skips the writer claim.
+
+    A session holding only the Arc can already submit runs. Without this check a
+    spec with an ``outlets`` setpoint would reach mains through a device key the
+    session was never granted — and the refusal has to name the second key, or
+    the operator has no idea what to claim.
+    """
+    from benchctrl.net.errors import PolicyError
+
+    client = remote_bench.client
+    client.call("agent.claim", {"device": "otii_arc"})
+    # Deliberately NOT claiming the PDU.
+    client.call("agent.release", {"device": KEY})
+
+    with pytest.raises(PolicyError) as excinfo:
+        client.call("run.submit", {"spec": _cycle_spec_dict(), "clock_scale": 0.05})
+
+    message = str(excinfo.value)
+    assert KEY in message, "the refusal must name the key to claim"
+    assert "claim" in message.lower()
+    assert remote_bench.sim.outlet_state[3] is True
+
+
+def test_a_run_with_both_claims_switches_mains_over_the_wire(remote_bench):
+    """The control, and the end-to-end proof: spec over the wire, run on the
+    agent, contactor moved. Asserted on the simulator's outlet state, because
+    ``oltctrl`` acknowledges nothing and a run status of 'complete' is not
+    evidence a switch happened."""
+    import time
+
+    client = remote_bench.client
+    client.call("agent.claim", {"device": "otii_arc"})
+    client.call("agent.claim", {"device": KEY})
+
+    result = client.call(
+        "run.submit", {"spec": _cycle_spec_dict(), "clock_scale": 0.05}
+    )
+    run_id = result["run_id"]
+
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        status = client.call("run.status", {"run_id": run_id})
+        if not status.get("running"):
+            break
+        time.sleep(0.1)
+    assert status["status"] == "complete", status
+
+    assert remote_bench.sim.outlet_state[3] is False
+    kinds = [
+        e["kind"]
+        for e in client.call("run.events", {"run_id": run_id, "since_seq": 0})
+    ]
+    assert "run_outlet" in kinds
+
+
+def test_an_ordinary_remote_run_needs_no_pdu_claim(remote_bench):
+    """The control for the gate: the second claim is required by the *spec*, not
+    by the presence of a PDU on the bench. Otherwise every run on a bench with a
+    PDU would need a mains claim it never uses."""
+    import time
+
+    client = remote_bench.client
+    client.call("agent.claim", {"device": "otii_arc"})
+    client.call("agent.release", {"device": KEY})
+    remote_bench.sim.command_log.clear()
+
+    spec = _cycle_spec_dict()
+    spec["safety"].pop("allowed_outlets")
+    spec["phases"][0] = {
+        "name": "soak", "mode": "cv", "duration_s": 1.0,
+        "setpoints": {"voltage_V": 3.0},
+    }
+    run_id = client.call("run.submit", {"spec": spec, "clock_scale": 0.05})["run_id"]
+
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        status = client.call("run.status", {"run_id": run_id})
+        if not status.get("running"):
+            break
+        time.sleep(0.1)
+    assert status["status"] == "complete", status
+    assert not [c for c in remote_bench.sim.command_log if c.startswith("oltctrl")]

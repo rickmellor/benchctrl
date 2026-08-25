@@ -21,6 +21,14 @@ from benchctrl.exceptions import BenchConnectionError, BenchValueError
 
 log = logging.getLogger("benchctrl.agent.registry")
 
+#: Device keys that switch mains. Explicit rather than duck-typed on
+#: ``set_outlet_state``, because deciding *which* device a run's outlet
+#: setpoints refer to has to be answerable **without opening anything** — the
+#: whole point is to refuse a run before a contactor moves. Add a key here when
+#: a second switched PDU lands; a bench with two of them needs the spec to name
+#: one, not a registry that guesses.
+SWITCHED_PDU_KEYS: tuple[str, ...] = ("cyberpower_pdu41002",)
+
 
 @dataclass
 class DeviceEntry:
