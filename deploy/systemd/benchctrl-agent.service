@@ -19,6 +19,20 @@ Type=simple
 # PYTHONPATH in the environment file. A pip/venv install works too — point
 # PYTHON= at the venv interpreter when running install-agent.sh.
 EnvironmentFile=/etc/benchctrl/agent.env
+# Device secrets, kept out of agent.env because that file is 0644 (it holds
+# PYTHONPATH, which the operator wants to read) and this one is 0600. Currently
+# just BENCHCTRL_PDU_PASSWORD for the switched PDU. systemd reads it as root
+# before dropping to `arduino`, so the file need not be readable by the service
+# user — which is the whole reason this belongs here rather than in a shell
+# profile or the config JSON.
+#
+# The `-` goes on the *value*, not the key: `-EnvironmentFile=` is not a
+# directive and systemd logs "Unknown key ... ignoring" and carries on, so the
+# secret silently never loads and the driver fails at open() naming an
+# environment variable that looks like it was set. Optional because a bench with
+# no PDU has no such file, and a missing secret must not stop the agent serving
+# the instruments that need none.
+EnvironmentFile=-/etc/benchctrl/agent.secrets.env
 ExecStart=/usr/bin/python3 -m benchctrl.agent.main --config /etc/benchctrl/agent.json
 
 # The whole point of the unit. A restart otherwise leaves the DUT rail live

@@ -70,6 +70,33 @@ sed "s|^PYTHONPATH=.*|PYTHONPATH=$SRC_DIR|" \
     "$here/systemd/agent.env.example" > "$CONF_DIR/agent.env"
 chmod 0644 "$CONF_DIR/agent.env"
 
+# Device secrets live in a *separate* 0600 file, never in agent.env above:
+# that one is world-readable on purpose (PYTHONPATH is diagnostic information
+# an operator should be able to read without sudo), and a secret must not
+# inherit that. The unit pulls this in with a leading `-`, so a bench with no
+# secret-bearing device works with no file at all.
+#
+# Created empty-but-commented rather than not at all, so the place to put a
+# credential is discoverable on the board instead of only in the docs — and it
+# is never overwritten, because that would silently delete a working password
+# on a re-install.
+if [ ! -e "$CONF_DIR/agent.secrets.env" ]; then
+    cat > "$CONF_DIR/agent.secrets.env" <<'SECRETS'
+# Device credentials for benchctrl-agent. Mode 0600, read by systemd as root
+# before the service drops privileges, so it need not be readable by the
+# service user.
+#
+# No quotes, no `export`, no trailing spaces: systemd parses this itself and a
+# quoted value arrives with the quotes attached.
+#
+# Switched PDU (CyberPower PDU41002). Uncomment and set to enable the network
+# or serial console login; see docs/drivers.md.
+#BENCHCTRL_PDU_PASSWORD=
+SECRETS
+    echo "wrote $CONF_DIR/agent.secrets.env (mode 0600, no secrets set)"
+fi
+chmod 0600 "$CONF_DIR/agent.secrets.env"
+
 # --- unit -----------------------------------------------------------------
 sed -e "s|^ExecStart=/usr/bin/python3 |ExecStart=$PYTHON |" \
     -e "s|^ExecStopPost=/usr/bin/python3 |ExecStopPost=$PYTHON |" \

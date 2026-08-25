@@ -710,6 +710,27 @@ otherwise surfaces only as a unit flapping every 5 s.
 script the docs suggested: the target board has no pip and reaches the
 package through `PYTHONPATH`. `PYTHON=` covers the venv case.
 
+The unit now also reads a **second, optional** environment file,
+`/etc/benchctrl/agent.secrets.env` at 0600, which is where
+`BENCHCTRL_PDU_PASSWORD` lives on a bench board. It could not go in
+`agent.env`: that one is 0644 on purpose, because it carries `PYTHONPATH`
+and an operator should be able to read it without sudo. systemd reads
+both as root before dropping to the service user, so the secrets file
+never has to be readable by `arduino` — the reason this belongs in the
+unit rather than a shell profile. `install-agent.sh` creates it with the
+variable commented out, so the place to put a credential is discoverable
+on the board and not only in the docs, and never rewrites an existing one,
+for the same reason it never regenerates a token.
+
+Optional matters as much as 0600: a bench with no PDU has no such file,
+and a missing secret must not stop the agent serving the instruments that
+need none. The `-` goes on the **value** — `EnvironmentFile=-/path`.
+Writing `-EnvironmentFile=` instead gets you `Unknown key … ignoring` in
+the journal and an agent that starts fine and then fails at `open()`
+naming a variable that looks like it was set; the unit carries a comment
+saying so, because that failure is otherwise indistinguishable from a
+wrong password.
+
 Also `deploy/install-display-hotplug.sh` — a udev-triggered oneshot
 that enables a DP/HDMI output negotiated *after* Xorg's startup probe,
 which is how HDMI-through-a-USB-C-hub behaves on an Uno Q. Verified

@@ -884,6 +884,49 @@ the ssh argv, both of which would expose it in the process list.
 The simulator accepts a configured password, so hardware-free tests
 never need the real one.
 
+#### Under systemd, which is how a bench actually runs
+
+The `read -rs` line above is the interactive case — an operator at a
+shell, driving the SDK by hand. The agent on a bench board is a systemd
+unit with no shell to inherit from, and its existing environment file is
+the wrong place: `/etc/benchctrl/agent.env` is **0644 on purpose**,
+because it holds `PYTHONPATH` and an operator should be able to read
+that without sudo. A secret must not inherit that mode.
+
+So the unit reads a second file, and `install-agent.sh` creates it at
+0600 with the variable present but commented out:
+
+```
+/etc/benchctrl/agent.env          0644  PYTHONPATH and friends
+/etc/benchctrl/agent.secrets.env  0600  BENCHCTRL_PDU_PASSWORD
+```
+
+systemd reads both as root *before* dropping to the service user, so the
+secrets file does not need to be readable by `arduino` — which is the
+whole reason this belongs in the unit rather than in a shell profile.
+Write it with no quotes, no `export` and no trailing space: systemd
+parses the file itself, and a quoted value arrives with the quotes
+attached, so the password silently becomes wrong rather than missing.
+
+Two things about the file are load-bearing:
+
+- **It is optional**, via `EnvironmentFile=-/etc/…`. A bench with no PDU
+  has no such file, and a missing secret must not stop the agent serving
+  the instruments that need none. Note where the `-` goes: it is part of
+  the *value*. `-EnvironmentFile=` is not a directive — systemd logs
+  `Unknown key … ignoring` and carries on, so the secret never loads and
+  the driver fails at `open()` naming a variable that looks like it was
+  set. Confirm with `systemctl show -p EnvironmentFiles benchctrl-agent`,
+  which should list the path with `ignore_errors=yes`.
+- **A re-install never rewrites it.** `install-agent.sh` guards on
+  existence, for the same reason it never regenerates `agent.json`:
+  clobbering a working credential during an upgrade is worse than
+  leaving a stale one.
+
+After editing it, `sudo systemctl restart benchctrl-agent` — an
+`EnvironmentFile` is read at process start, so a running agent keeps the
+old value (or keeps having none).
+
 ### SSH quirks worth knowing (firmware 1.3.4)
 
 Each of these is a fixed flag in `links.py` with a comment; they look
