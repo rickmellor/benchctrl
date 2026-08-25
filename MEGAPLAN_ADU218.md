@@ -122,7 +122,7 @@ would have been a driver bug:
 
 | # | Finding | Consequence for the driver |
 |---|---|---|
-| 1 | **`RI` does not exist.** §5 lists it; §6b calls the same function `PI` in four places. The device answers `PI` and times out on `RI`. Both spellings really are in the PDF, so this is a genuine internal contradiction the hardware settles — cite §6b, never §5 | A driver written from the summary table hangs on *every* input read |
+| 1 | **`RI` times out; `PI` answers.** §5 lists `RI`; §6b calls the same function `PI` in four places. Both spellings really are in the PDF, so this is a genuine internal contradiction the hardware settles — cite §6b, never §5. Stated as measured: silence is also how this device rejects a *valid* command with a bad argument, so a timeout cannot prove a command is unimplemented, only that this one is unusable | A driver written from the summary table hangs on *every* input read |
 | 2 | **PORT A and PORT B are 4 bits each**, not 8. Eight inputs across two isolated ports | Why `PK` returns 3 digits and `PA` returns 2. Indexing inputs 0–7 against one port is wrong |
 | 3 | **Silence is the only error signal.** An unknown command returns nothing — no string, no sentinel | The driver needs a per-command *"expects a response"* table; it cannot discover this at runtime, because correct write-only silence is byte-identical to an error |
 | 4 | **The `0x01` prefix is mandatory and is specifically `0x01`** — bare ASCII, `0x00` and `0x02` are all ignored | A test asserting "byte 0 is non-printable" would pass for two encodings the device rejects |
@@ -133,34 +133,60 @@ which credited a bare-ASCII write with the previous prefixed command's answer.
 That is exactly the "sim agrees with the driver's misreading" failure
 `AGENTS.md` warns about, caught before any code existed.
 
-Also measured, and **still unexplained — but no longer an invalid comparison**:
-closed-contact resistance is **6.14 Ω** against Ontrak's quoted 700 mΩ typ /
-1.1 Ω max. Eight reads spread 0.98 mΩ, so it is systematic; § H-5 bounds this
-bench's lead error at ~79 mΩ, two orders too small.
+Also measured, and **now attributed — it was never the relay**: closed-contact
+resistance read **6.14 Ω** against Ontrak's quoted 700 mΩ typ / 1.1 Ω max.
+Two things closed this, in order.
 
-The Panasonic `ASCTB467E` family catalogue (AQZ207 has no standalone datasheet)
-supplies the test conditions Ontrak's manual strips: on-resistance is specified
-at **`IF = 10 mA`, `IL = Max.`, `Within 1 s`**, and `IL = Max.` is **1.0 A** for
-this part. Ontrak copied the numbers from the correct column of the correct part
-— and dropped the conditions. This bench measured at ~1 mA, three orders of
-magnitude below the specified envelope, so **6.14 Ω cannot violate the 1.1 Ω
-maximum and cannot satisfy it either.** This unit is not out of spec.
+First, the comparison was never valid. The Panasonic `ASCTB467E` family
+catalogue (AQZ207 has no standalone datasheet) supplies the test conditions
+Ontrak's manual strips: on-resistance is specified at **`IF = 10 mA`,
+`IL = Max.`, `Within 1 s`**, and `IL = Max.` is **1.0 A** for this part. Ontrak
+copied the numbers from the correct column of the correct part — and dropped the
+conditions. This bench measured at ~1 mA, three orders of magnitude below the
+specified envelope, so **6.14 Ω cannot violate the 1.1 Ω maximum and cannot
+satisfy it either.** This unit is not out of spec.
 
-Nor is it explained. The tempting story — R_on climbing as load current falls —
-is absent from the datasheet: there is no R_on-vs-current curve at all (R_on is
-plotted only against temperature), and its one lower-current point (0.4 A,
-≈0.65 Ω at 25 °C) sits slightly *below* the 1.0 A typical, trending the wrong
-way. The AC/DC two-MOSFET anti-series topology is real but already inside the
-published 0.7 Ω (~2x against each DC-only sibling), so it adds no factor. 5.44 Ω
-remains unaccounted for. The discriminating experiment is a reading at the
-datasheet's own condition (1.0 A, or 0.4 A for comparison with graph 3-4) — that
-energises a 120 V relay into a real load, so it is an operator decision.
+Second, the excess is now located, by an accident worth keeping: a later session
+read the same closed contact at **10.694 Ω** — a **+4.55 Ω step** — with nothing
+in software touched. `on_resistance_drift.txt` characterised it three ways and
+the value is milliohm-stable on both sides of the step: 3.93 mΩ across ten
+re-actuations (vs 0.12–2.35 mΩ within a single close) and 1.67 mΩ of drift over
+a 28 s hold. That shape eliminates the two remaining candidates and confirms the
+third:
 
-**Driver consequence, unchanged and now better justified: never treat
-on-resistance as a validation threshold, and do not report a contact-resistance
-figure at all** — no in-spec figure exists at any current the driver could know
-about. Key open/closed on the DMM's overload sentinel, where the margin is
-effectively infinite.
+- **Not the relay's R_on.** A semiconductor's on-resistance does not step 74%
+  between sessions and then hold to 4 mΩ across ten actuations. The datasheet's
+  only quantified R_on modifier is temperature, bounded at ~1.5x over 25→85 °C.
+  (The tempting story, R_on climbing as load current falls, was already
+  unsupported: there is no R_on-vs-current curve at all, and the one
+  lower-current point — 0.4 A, ≈0.65 Ω at 25 °C — sits slightly *below* the
+  1.0 A typical, trending the wrong way. The AC/DC two-MOSFET anti-series
+  topology is real but already inside the published 0.7 Ω.)
+- **Not a range-dependent DMM offset**, eliminated independently: pinned 200 Ω
+  vs autoranged differ by **1.353 mΩ** against a 4550 mΩ step.
+- **The series connection outside the relay** — DMM leads, K0 screw terminals,
+  clip joints. A connection that is disturbed or lightly oxidised steps to a new
+  value and holds there, which is exactly the observed shape. Both 6.14 and
+  10.69 are stable readings of a *stable* connection; they are readings of two
+  **different** connections.
+
+Which connection moved is not identifiable from the host — those elements are in
+series and all outside the relay. Separating them needs 4-wire with sense leads
+genuinely attached (KNOWN_LIMITATIONS H-5) and is an operator task. Worth asking
+the operator whether anything was re-seated between sessions rather than assuming
+it.
+
+**Driver consequence, unchanged and now permanent rather than provisional:
+never treat on-resistance as a validation threshold, and do not report a
+contact-resistance figure at all.** The old reason was "the number is
+unexplained"; the real reason is stronger and does not expire — the measurement
+is dominated by series connections the driver cannot see, so any figure it
+reported would be a property of the bench wiring wearing a relay's name. Key
+open/closed on the DMM's overload sentinel, which stepped cleanly through all
+ten actuations and is entirely insensitive to a 4.55 Ω shift in the closed
+value. This is also a live demonstration of why: a driver that had thresholded
+"closed" at `< 10 Ω` from the original 6.14 Ω observation would today report
+every closed relay as open.
 
 ## 3. Relay control is confirmed (the stated goal)
 
@@ -180,6 +206,14 @@ lie consistently. The DMM is on a different bus, so it is the only independent
 evidence the contact physically moved. The bench was left with K0 open, `WD 0`,
 `DB 1`.
 
+The **closed** figures in that column are ~6.14 Ω because these cycles predate
+the series-connection step in §2; a later session reads ~10.69 Ω for the same
+closed contact. That is why the table is read as *"a finite resistance vs the
+overload sentinel"* and not as a resistance measurement — the qualitative
+transition is what was confirmed, and it is what the driver keys on. Ten further
+actuations in `on_resistance_drift.txt` reproduced the same clean transition at
+the new value.
+
 **Safety basis for switching at all:** K0's load side has only DMM leads, so
 there is no load current and the manual's *"1 CPS at full load"* PhotoMOS limit
 (with its 20%-of-rated-current escape clause) does not bind. Switching was
@@ -189,9 +223,21 @@ still kept slow (0.5 s settle) and the cycle count small.
 N.O., **1 A @ 120 VAC / 120 VDC**, and — worth stating because an operator would
 not infer it — **primary insulation only** (the sibling ADU208 is
 double-insulated; this model is not). Confirmed against the part datasheet: the
-AQZ207 is rated 1.0 A continuous at 200 V peak AC/DC, 2500 Vrms isolation, 1
-Form A — every figure Ontrak quotes traces to the right column, so there is no
-variant confusion.
+AQZ207 is rated 1.0 A continuous at 200 V peak AC/DC, 1 Form A — the current and
+voltage figures Ontrak quotes trace to the right column, so there is no variant
+confusion.
+
+**Isolation is deliberately not quoted here, because the figures name different
+barriers.** The part datasheet's 2500 Vrms is the PhotoMOS's own
+**input-to-output** rating — the LED-to-MOSFET gap inside one relay. That is not
+the barrier an operator cares about, which is contact-to-anything-touchable, and
+it is not the web page's 500 V **channel-to-channel** either. Ontrak's manual
+gives 2500 Vrms without saying which barrier it bounds, and its web page gives
+3500 V *and* 500 V, so at least two distinct barriers exist and no single number
+covers them. Treating the part's input-to-output figure as a system isolation
+rating would overstate the barrier that matters by an unknown margin. The rating
+that *is* unambiguous and does constrain use is **primary insulation only**, and
+that is the one the docs should lead with.
 
 The switching-rate ceiling has a **conflict worth honouring conservatively**:
 Ontrak says 1 CPS at full load, Panasonic says **0.5 cps** for the part
@@ -222,7 +268,7 @@ therefore that no WD interval could be trusted without characterisation — a
 reviewer drew exactly that conclusion from it. Re-measured properly by bisecting
 the silence window (stay quiet for exactly T, then one `RPK0` read that
 terminates the window, since polling would refeed the timer): closed at 0.90 s,
-open by 1.10 s. **There is no timing anomaly.** None of the four design
+open by 1.10 s. **There is no timing anomaly.** None of the five design
 consequences below depended on the bad number — they follow from arming coupling
 relay state to call frequency.
 
@@ -237,7 +283,7 @@ silence, so all de-energise the load — with no benchctrl process, no GPIO and
 no kernel driver in the decision path.
 
 **But it is a loaded gun, and the danger is the shape memory already records as
-the "inert governor" trap.** Four consequences, all in `watchdog.txt`:
+the "inert governor" trap.** Five consequences, all in `watchdog.txt`:
 
 1. Arming it makes **every relay's state depend on call frequency**. One
    blocking pyvisa call to another instrument could exceed the interval and
@@ -352,9 +398,41 @@ measured or documented fact rather than taste:
   but the manual bounds `n` to 0..2 and the captures show 0/1/2. The same
   four-option string appears on the ADU208 and ADU228 pages, so it reads as
   shared boilerplate.
-- **200 ms read timeout**, matching all three of Ontrak's examples; with
-  `bInterval` 10 at low speed the round-trip floor is ~10-20 ms, so that is ~10x
-  margin.
+- **200 ms read timeout — now measured on this device, not inferred.** It was
+  originally justified two ways, *neither* a measurement of this hardware:
+  Ontrak's examples all use 200 ms, and `bInterval` 10 at low speed implies a
+  ~10-20 ms floor by arithmetic. Meanwhile every capture the timeout has to
+  survive was taken at **2000 ms** (`errors.txt:5`) or at a value the transcript
+  never recorded (`framing.txt`, trials B–E — the entire evidence base for the
+  `0x01` prefix). Justifying the threshold with one setup and validating it with
+  another is the same mistake as the "3.7 s" watchdog figure and the 1 mA-vs-1 A
+  resistance comparison, and it matters most here because **silence is this
+  device's only error signal**: a premature timeout does not lose a reply, it
+  leaves it queued on EP `0x81` (finding 5), so `verify=True` would report a
+  relay position one command out of date with no exception raised.
+
+  Measured in `latency.txt` and `latency_after_command.txt`:
+
+  | Sample | n | median | p99 | max |
+  |---|---|---|---|---|
+  | `PK`, idle | 200 | 15.99 ms | 16.60 ms | **16.65 ms** |
+  | `RPK0`, idle | 200 | 15.99 ms | 16.55 ms | **16.65 ms** |
+  | `RPK0` read-back, immediately after `SK0`/`RK0` | 40 | 16.18 ms | 16.68 ms | **16.68 ms** |
+
+  So 200 ms carries **12x margin over the worst observed round trip**, the
+  `bInterval` arithmetic was right, and zero short reads occurred in 440
+  transfers. The post-command row is the one that matters and the one the idle
+  sweep would have missed: the driver's critical path is command-then-read-back,
+  so if firmware were busier just after actuating an opto-coupler the deciding
+  latency would be the unsampled one. It is not — 16.68 vs 16.65 ms, and all 40
+  read-backs agreed with the commanded state.
+
+  Re-validated at the shipping value, closing the setup mismatch: every
+  documented silence (`RI`, `XYZ`, `RPK8`, `RPA4`, `DB9`, `MK9999`) still returns
+  `ETIMEDOUT` at a 200 ms timeout, and a following `PK` answered normally with
+  **zero replies left queued** — so the timeout does not desynchronise the
+  pairing. `errors.txt` established those same silences at 2000 ms; they now hold
+  at the value the driver will actually use.
 
 Notes on the non-obvious choices:
 

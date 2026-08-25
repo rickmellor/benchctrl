@@ -1,0 +1,133 @@
+ADU218 K0 closed-contact resistance: it moved. Which candidate?
+===============================================================
+Witness: SDM4065A s/n SDM46A0CA00021 fw 0.0.0.20, on K0
+Wiring: K0 load side -> DMM leads only. No load current. Untouched
+by the operator between the 6.14 ohm captures and now, as far as this
+session knows - that is itself worth confirming with the operator.
+
+Prior readings, all 2-wire, all at ~1 mA test current:
+  on_resistance.txt   6.13992 ohm mean, 0.983 mohm spread, 8 repeats
+  watchdog.txt        6.1390 - 6.1393 ohm, separate script, separate run
+  latency_after_command.txt (today)  10.69 ohm, 0.9 mohm spread,
+                      reproduced at 3 DMM range settings
+
+DMM pinned: autorange=False range=200 ohm
+
+--- 1. does it drift while the contact is held closed? ---
+A thermal or settling story drifts. A contact story sits still at
+whatever value the last actuation happened to land on.
+  t=  0.4s  10.69173 ohm
+  t=  1.8s  10.69099 ohm
+  t=  3.2s  10.69078 ohm
+  t=  4.6s  10.69131 ohm
+  t=  6.0s  10.69117 ohm
+  t=  7.4s  10.69266 ohm
+  t=  8.9s  10.69227 ohm
+  t= 10.3s  10.69188 ohm
+  t= 11.7s  10.69343 ohm
+  t= 13.1s  10.69283 ohm
+  t= 14.5s  10.69376 ohm
+  t= 15.9s  10.69474 ohm
+  t= 17.3s  10.69367 ohm
+  t= 18.7s  10.69367 ohm
+  t= 20.1s  10.69304 ohm
+  t= 21.5s  10.69337 ohm
+  t= 22.9s  10.69337 ohm
+  t= 24.4s  10.69313 ohm
+  t= 25.8s  10.69361 ohm
+  t= 27.2s  10.69340 ohm
+  first 10.69173 -> last 10.69340 ohm, total drift +1.67 mohm over 28 s
+
+--- 2. does RE-ACTUATING the relay change the value? ---
+This is the discriminator. A fixed R_on gives the same number every
+close. A mechanical/contact contribution scatters across closes.
+  close # 1: 10.69460 ohm  (within-close spread  1.73 mohm)  [open state: overload (open)]
+  close # 2: 10.69232 ohm  (within-close spread  2.35 mohm)  [open state: overload (open)]
+  close # 3: 10.69189 ohm  (within-close spread  0.95 mohm)  [open state: overload (open)]
+  close # 4: 10.69310 ohm  (within-close spread  1.25 mohm)  [open state: overload (open)]
+  close # 5: 10.69497 ohm  (within-close spread  1.55 mohm)  [open state: overload (open)]
+  close # 6: 10.69552 ohm  (within-close spread  0.12 mohm)  [open state: overload (open)]
+  close # 7: 10.69535 ohm  (within-close spread  1.28 mohm)  [open state: overload (open)]
+  close # 8: 10.69428 ohm  (within-close spread  0.63 mohm)  [open state: overload (open)]
+  close # 9: 10.69583 ohm  (within-close spread  1.07 mohm)  [open state: overload (open)]
+  close #10: 10.69513 ohm  (within-close spread  0.33 mohm)  [open state: overload (open)]
+  across-close: min 10.69189  max 10.69583  spread 3.93 mohm
+
+  INTERPRETATION KEY
+   across-close spread ~= within-close spread (milliohms) -> the value
+     is repeatable per actuation, so the 4.55 ohm step happened
+     BETWEEN sessions, not per close: a disturbed/oxidised connection
+     or a wiring change, not the relay's R_on and not scatter.
+   across-close spread >> within-close spread -> the contribution is
+     mechanical and per-actuation, which no driver could ever report
+     as a meaningful figure.
+
+--- 3. what the DMM sees with the contact OPEN, for the record ---
+  pinned 200 ohm, K0 open: overload sentinel (over-range)
+  (the sentinel is what the driver keys open/closed on - never a
+   resistance figure, which is exactly why this file changes no code)
+
+restored: WD=0 PK=000 DB=1
+
+CONCLUSION: the excess is in the external connection, not the relay
+-------------------------------------------------------------------
+across-close spread 3.93 mohm, within-close spread 0.12-2.35 mohm. Those
+are the same order. So each actuation lands on the same value to within
+milliohms, and holding the contact closed for 28 s moves it by 1.67 mohm.
+The reading is repeatable three ways: within a close, across ten closes,
+and across a 28 s hold.
+
+Yet it is 10.694 ohm today and was 6.1399 ohm in on_resistance.txt and
+6.139-6.139 ohm in watchdog.txt - a +4.55 ohm step, with milliohm
+stability on BOTH sides of it.
+
+That combination is what discriminates the three candidates left open at
+on_resistance.txt:43-45:
+
+  - "the specific relay's actual on-resistance" -- ELIMINATED. R_on is a
+    fixed property of a semiconductor. It does not step 74% between two
+    sessions and then hold to 4 mohm across ten actuations. Nothing in the
+    AQZ207 datasheet permits this; its only quantified R_on modifier is
+    temperature, bounded at ~1.5x from 25 C to 85 C.
+  - "a range-dependent offset in the 2-wire function" -- ELIMINATED,
+    independently, in latency_after_command.txt section B: pinned 200 ohm
+    vs autoranged differ by 1.353 mohm, and the step is 4550 mohm.
+  - "contact/clip resistance at the terminal block" -- the only candidate
+    that predicts this shape. A screw terminal or clip that is disturbed,
+    re-seated, or lightly oxidised steps to a new value and then holds
+    there. Both 6.14 and 10.69 are stable readings of a stable connection;
+    they are readings of two DIFFERENT connections.
+
+So the ~5 ohm that on_resistance.txt recorded as "unexplained" is now
+attributed, and it was never the relay. That file's caution stands and is
+strengthened.
+
+WHAT THIS DOES NOT SAY
+  - It does not measure the relay's R_on. A 2-wire reading at ~1 mA
+    through an unknown clip contact cannot. The AQZ207 figure is specified
+    at IL = 1.0 A within 1 s (Panasonic ASCTB467E), and neither 6.14 nor
+    10.69 was taken anywhere near that condition, so neither is a
+    violation and neither is a pass.
+  - It does not identify WHICH connection moved. The DMM leads, the K0
+    screw terminals, and the clip-to-lead joints are all in series and all
+    outside the relay. Distinguishing them needs 4-wire with sense leads
+    actually attached (see KNOWN_LIMITATIONS H-5) and is an operator task,
+    not a scripted one.
+  - It is not a claim that the operator disturbed anything. The step is
+    evidence a series connection changed between sessions; the cause is
+    outside what this script can see. Worth asking rather than assuming.
+
+DRIVER CONSEQUENCE (unchanged, now for a better reason)
+The driver must never report or imply a contact-resistance figure, and must
+never use one as a validation threshold. Previously that followed from "the
+number is unexplained." It now follows from something stronger and
+permanent: the measurement is dominated by series connections the driver
+cannot see and cannot know about, so any figure it reported would be a
+property of the bench wiring wearing a relay's name. Open vs closed keys on
+the DMM's overload sentinel, which stepped cleanly in all 10 actuations
+above and is insensitive to a 4.55 ohm shift in the closed value.
+
+This also validates the sentinel choice against a real perturbation: had
+the driver thresholded "closed" at, say, "< 10 ohm" using the 6.14 ohm
+observation as its basis, today's bench would report every closed relay as
+open. The sentinel does not care.

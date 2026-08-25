@@ -51,3 +51,31 @@ process talking through /dev/usb/adutuxN must send the same 0x01-prefixed
 
 That is what licenses one command encoder for both access paths: the framing
 is a property of the device, not of the route to it.
+
+ADDENDUM: this file never recorded its own read timeout
+------------------------------------------------------
+Trials A-F above report TIMEOUT as the evidence that a prefix is
+rejected, but nowhere state the timeout used, and the number is not
+recoverable from the transcript. Since silence is this device's only
+error signal, that value IS the measurement -- too short and a slow
+answer reads as a rejection, which would have made B-E false and the
+mandatory-0x01 conclusion unfounded. Recording the verdict without the
+threshold that produced it left the file's central claim unfalsifiable.
+
+Closed by re-measurement rather than by recollection, in latency.txt:
+
+  - Observed round trip for an ANSWERED command: max 16.65 ms over 400
+    samples (200x PK, 200x RPK0), median 15.99 ms, zero short reads.
+    latency_after_command.txt adds the read-back immediately following
+    relay actuation -- max 16.68 ms over 40 actuations -- so there is no
+    slow path hiding behind a command.
+  - Re-run at a 200 ms timeout, every documented silence still reads as
+    silence (RI, XYZ, RPK8, RPA4, DB9, MK9999 all ETIMEDOUT), and a
+    following PK answered normally with zero replies left queued.
+
+So a rejected prefix does not answer within at least 12x the worst
+observed latency of an accepted one. Whatever timeout these trials
+actually used, the separation between "answers" and "stays silent" is
+three orders of magnitude wider than the measurement noise, so the
+A-F verdicts stand. Any future capture of this kind should state its
+timeout in the transcript.
