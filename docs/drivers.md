@@ -937,6 +937,7 @@ like sloppy security defaults and are not.
 | `key exchange failed!` | group-*exchange* KEX is broken on this firmware | forces `KexAlgorithms=diffie-hellman-group14-sha256` |
 | `Permission denied (keyboard-interactive)` even with the matching key uploaded | device offers keyboard-interactive **only**; pubkey auth is refused | `PubkeyAuthentication=no`, and a pty via `pty.fork()` + `ssh -tt` to type the password |
 | host key reads as all zeros | the exported ed25519 host key is null | `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` — unverifiable either way, so don't poison the operator's `known_hosts` |
+| a command fails with `no prompt … (got 120 bytes)` after a few minutes of quiet | the device hung up on an idle session and the *ssh client* printed its notice; nothing on the far end will ever answer again | matches `Received disconnect from` / `Disconnected from` and raises `PDU41002ConnectionError` saying to reopen |
 
 Login over SSH takes around 7.5 s. It is slow, not stuck.
 
@@ -1073,10 +1074,41 @@ numbering is enumeration-order and a second USB-serial adapter can take
   difference between the transports, and why echo stripping is
   conditional on the link.
 - **Idle logout is a safety hazard, not an annoyance.** After the idle
-  timeout (`devcfg idletime`, default 3 min) a command is consumed *as a
-  username* and silently swallowed. `_cmd()` detects a login prompt in
-  any response, and read-back verification is the second line of
-  defence.
+  timeout a command is consumed *as a username* and silently swallowed.
+  `_cmd()` detects a login prompt in any response, and read-back
+  verification is the second line of defence.
+
+  Two measured corrections to the obvious reading of that. First, the
+  timeout is **not** the manual's 3 minutes: this device reports
+  `Idle Time : 5 Minutes`, and over SSH the connection is dropped earlier
+  still, at ~180 s. Read `devcfg show` rather than trusting the default.
+
+  Second, and more important, **the two transports need opposite
+  handling**:
+
+  | | What the device does | Recovery |
+  |---|---|---|
+  | serial | keeps the port open and drops to `Login Name :` | the driver re-authenticates in place; the caller sees nothing |
+  | ssh | closes the connection; the ssh client prints its disconnect notice and exits | **not recoverable** — the caller must `open()` again |
+
+  So a timed-out SSH session is a `PDU41002ConnectionError` naming the
+  reopen, not a timeout. The distinction is load-bearing: before it
+  existed the symptom was `no prompt after 'sys show' within 12.0s (got
+  130 bytes)`, which reads as a slow device and invites a retry that can
+  never succeed on a link that no longer exists.
+- **`Login Failed` is ambiguous by construction — retry, don't
+  classify.** There are **four** login outcomes, not two: the prompt
+  (success), a `Login Name :` re-prompt, silence, and ~15 s of dots
+  followed by `Login Failed` and then silence with no re-prompt. That
+  fourth shape is emitted **byte-identically** for a wrong password *and*
+  for a correct password submitted within ~15 s of a previous session
+  closing, which the single-session limit makes routine. Nothing on the
+  wire separates them, so the driver retries within a 75 s budget rather
+  than deciding, and only calls it an auth failure when the budget is
+  spent — at which point the error names both possibilities. A driver
+  that classified the first refusal would report "wrong password" for a
+  password that was right, which is the exact misdiagnosis this driver's
+  error types exist to prevent.
 - **A bare `CR` is not inert at the login prompt.** It submits an *empty
   line* to whichever field is current, so repeated CRs walk the
   authentication state machine and end in a ~15 s `Please wait for
@@ -1131,9 +1163,21 @@ immediately by reproducing the hardware's handling of `\x03`, which is
 how that driver bug was found.
 
 Test hooks: `hold_session()` / `release_session()` (single-session
-contention), `force_logout()` (deterministic re-auth, no wall clock),
-`command_log`, `login_log` (records `(user, accepted)` — never
-passwords), `hangup_count` and `inject_error(shape)`.
+contention), `force_logout()` (serial idle logout — deterministic
+re-auth, no wall clock), `drop_ssh_session()` (the SSH idle logout: emits
+the client's disconnect notice and then **stops answering**, because a
+simulator that kept replying would let a driver appear to recover from a
+dead link), `refuse_next_logins` / `refusal_count` (the `Login Failed`
+shape on a *correct* credential), `stall_next_auth` (a device that never
+answers, which must not be reported as a bad password), `ignore_switches`
+(a device that acknowledges `oltctrl` and moves nothing), `command_log`,
+`login_log` (records `(user, accepted)` — never passwords),
+`hangup_count` and `inject_error(shape)`.
+
+The last four exist because the hardware suite found bugs the simulator
+had been agreeing with. Each models a device behaviour the driver had
+been *guessing* at, and each pins a fix that only the real PDU could have
+prompted.
 
 One caveat recorded in the fixture README: the prompt is
 `"CyberPower > "` **with a trailing space** on the wire. The checked-in

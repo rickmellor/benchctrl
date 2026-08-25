@@ -145,16 +145,65 @@ class TestOpen:
         finally:
             sim.close()
 
-    def test_a_wrong_password_raises_auth_error(self):
+    def test_a_wrong_password_raises_auth_error(self, monkeypatch):
+        """And it takes the whole login budget to say so, on purpose.
+
+        The device answers a wrong password and a still-closing session with
+        *identical* bytes, so the driver cannot classify — it retries until the
+        budget runs out and only then concludes "credential". Scaled down here
+        so the test costs a second rather than the real 75 s.
+        """
         from benchctrl.sim.pdu41002 import SimulatedPDU41002
+
+        monkeypatch.setattr(_driver_class(), "_LOGIN_TIMEOUT_S", 2.0)
+        monkeypatch.setattr(_driver_class(), "_LOGIN_RETRY_S", 0.1)
 
         sim = SimulatedPDU41002(password="correct")
         sim.start()
         try:
-            with pytest.raises(PDU41002AuthError):
+            with pytest.raises(PDU41002AuthError, match="BENCHCTRL_PDU_PASSWORD"):
                 _driver_class().open(
                     port=sim.port, allowed_outlets=(1,), password="wrong"
                 )
+            # More than one attempt: the driver has to retry, because on
+            # hardware this same response also means "still busy".
+            assert sim.refusal_count > 1
+        finally:
+            sim.close()
+
+    def test_a_busy_device_refusing_a_correct_password_is_retried(self, monkeypatch):
+        """The bug this shape hid: a *correct* password, refused, then accepted.
+
+        Measured on firmware 1.3.4 — a serial login within ~15 s of a previous
+        session closing prints dots, then "Login Failed", then nothing. It is
+        byte-identical to a wrong password, and it clears on its own.
+
+        The driver used to fall through to "the device did not answer" here,
+        because no re-prompt follows the refusal, and so never retried. A bench
+        that had just switched transports therefore could not reopen its own
+        PDU. This asserts the recovery *and* that the recovery took a second
+        attempt, since a driver that got lucky on the first would pass on the
+        first assertion alone.
+        """
+        from benchctrl.sim.pdu41002 import SimulatedPDU41002
+
+        monkeypatch.setattr(_driver_class(), "_LOGIN_RETRY_S", 0.1)
+
+        sim = SimulatedPDU41002()
+        sim.start()
+        try:
+            sim.refuse_next_logins = 2
+            driver = _driver_class().open(
+                port=sim.port, allowed_outlets=(1,), password=sim.password
+            )
+            try:
+                assert driver.read_identity().model == "PDU41002"
+                assert sim.refusal_count == 2
+                # Every attempt used the right credential; the refusals were
+                # the device being busy, not the password being wrong.
+                assert [ok for _u, ok in sim.login_log] == [True, True, True]
+            finally:
+                driver.close()
         finally:
             sim.close()
 
@@ -672,6 +721,35 @@ class TestSession:
             assert "did not answer" in str(exc.value)
         finally:
             sim.close()
+
+    def test_an_ssh_idle_logout_is_a_connection_error_not_a_timeout(self, pdu):
+        """The network half of the idle timeout, where recovery differs.
+
+        Serial and ssh do not fail the same way and must not be reported the
+        same way. Serial keeps the port and lands on ``Login Name :``, so
+        ``_cmd`` re-authenticates in place (the test above). Over ssh the device
+        closes the connection at ~180 s and the client process exits — there is
+        nothing left to re-authenticate on, and the only thing that works is
+        opening again.
+
+        Until the client's disconnect notice was recognised, this surfaced as
+        "no prompt after 'sys show' within 12.0s": a timeout, which reads as a
+        slow device and invites a retry that can never succeed. Found by the
+        hardware suite, where the 120 bytes of ssh notice matched no marker.
+
+        The message is asserted, not just the type, because the recovery
+        instruction is the entire difference between the two cases.
+        """
+        from benchctrl.drivers.cyberpower_pdu41002 import PDU41002ConnectionError
+
+        assert pdu.read_identity().model == "PDU41002"
+        pdu._benchctrl_sim.drop_ssh_session()
+
+        with pytest.raises(PDU41002ConnectionError) as exc:
+            pdu.read_identity()
+        assert "reopen" in str(exc.value)
+        # And it must not be reported as the device being slow.
+        assert "no prompt" not in str(exc.value)
 
     def test_close_sends_exit(self, pdu):
         """Required, not polite.

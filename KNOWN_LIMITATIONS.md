@@ -561,13 +561,18 @@ Affects: "network alongside serial" means **alternating, not
 concurrent**. `open()` takes exactly one transport and holds one
 session; there is no supported configuration with both links live. An
 abandoned session (a process killed between login and `exit`) locks the
-device out until the idle timeout expires (`devcfg idletime`, default
-3 min).
+device out until the idle timeout expires — **5 minutes** on this unit,
+not the manual's 3 (see F-16).
+
+There is also a shorter tail on an *orderly* close: for roughly 15 s
+after `exit`, a new login is refused with output identical to a wrong
+password. That is F-15, and it is why the driver retries a refusal
+instead of classifying it.
 
 Workaround: none, and none attempted — this is a device limit, not
 something to engineer around. Always use the context manager, and if the
-device appears to reject a correct password, wait out the idle timeout
-before concluding the credentials are wrong.
+device appears to reject a correct password, retry for a minute before
+concluding the credentials are wrong.
 
 Code reference:
 `src/benchctrl/drivers/cyberpower_pdu41002/driver.py` — `close`,
@@ -778,6 +783,80 @@ Code reference:
 `src/benchctrl/drivers/cyberpower_pdu41002/driver.py` —
 `set_outlet_state`, `reset_outlet`, `_verify_outlet`, `_verify_budget_s`;
 `src/benchctrl/sim/pdu41002.py` — `ignore_switches`, `_blank_ack`.
+
+### F-15. `Login Failed` cannot be told apart from a wrong password
+Bench-measured on firmware 1.3.4, and found only because the hardware
+suite was written: the login has **four** outcomes, not two.
+
+| What arrives | Means |
+|---|---|
+| `CyberPower > ` | authenticated |
+| `Login Name :` again | the credential was rejected |
+| nothing at all | the device did not answer — slow or wedged mid-auth |
+| ~15 s of dots, `Login Failed`, then silence with no re-prompt | **either** a wrong password **or** a correct one submitted too soon |
+
+That fourth shape is the problem. Because the CLI is single-session
+(F-9), a session that has just closed keeps the device busy for roughly
+15 more seconds, and a **correct** password offered inside that window is
+refused with output byte-identical to a wrong one. Nothing on the wire
+separates the two cases, so no amount of parsing can classify them.
+
+**The driver therefore retries rather than deciding.** `_LOGIN_TIMEOUT_S`
+is 75 s — several attempts' worth — and `PDU41002AuthError` is raised
+only when that budget is spent, at which point the message names both
+possibilities instead of asserting the credential is wrong.
+
+Two consequences worth knowing:
+
+- **A login can legitimately take over a minute** after another session
+  closed. It is slow, not stuck, and not a bad password.
+- **A device that never answers is a different fault** and must not be
+  reported as an auth failure — it sends the operator to check a
+  credential that was correct. The driver raises
+  `PDU41002TimeoutError` saying "the password was not rejected — the
+  device did not answer", and `SimulatedPDU41002.stall_next_auth` exists
+  to pin that.
+
+Affects: `open()` over both transports, and any operator debugging a
+refused login.
+
+Code reference:
+`src/benchctrl/drivers/cyberpower_pdu41002/driver.py` — `_login_serial`,
+`_LOGIN_TIMEOUT_S`, `_AUTH_WAIT_S`, `_LOGIN_RETRY_S`, `_LOGIN_FAILED`;
+`src/benchctrl/sim/pdu41002.py` — `refuse_next_logins`, `refusal_count`,
+`stall_next_auth`.
+
+### F-16. An idle SSH session is dead, not merely logged out
+The idle timeout is not what the manual implies and does not behave the
+same on both transports. Both facts are measured, not documented.
+
+- The device reports `Idle Time : 5 Minutes`, **not** the 3 minutes the
+  vendor default suggests. Read `devcfg show` rather than assuming.
+- Over **serial** the timeout drops the session to `Login Name :` with
+  the port still open, so the driver re-authenticates in place and the
+  caller never sees it.
+- Over **SSH** the device closes the connection at ~180 s — earlier than
+  its own stated idle time. The ssh client prints
+  `Received disconnect from … user close and disconnect!` and
+  `Disconnected from …`, then exits. There is no longer a far end.
+
+**So the SSH case is not recoverable and the caller must `open()`
+again.** The driver matches those two client notices and raises
+`PDU41002ConnectionError` naming the reopen. Before that check existed
+the symptom was `PDU41002TimeoutError: no prompt after 'sys show' within
+12.0s (got 130 bytes)` — which reads as a slow device and invites a retry
+that can never succeed, on a link that no longer exists.
+
+Affects: any long-lived SSH session with gaps between commands. A bench
+sweep polling more often than every ~3 minutes never sees it, which is
+exactly why it is easy to ship broken.
+
+Code reference:
+`src/benchctrl/drivers/cyberpower_pdu41002/driver.py` —
+`_SSH_DISCONNECT_MARKERS`, `_raise_if_disconnected`, `_round_trip`;
+`src/benchctrl/sim/pdu41002.py` — `drop_ssh_session`, `_gone`;
+`tests/test_hardware_cyberpower_pdu41002.py` —
+`test_an_idle_logout_is_recovered_on_serial_and_fatal_over_ssh`.
 
 ## Harness
 

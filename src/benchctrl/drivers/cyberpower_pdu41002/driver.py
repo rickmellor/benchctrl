@@ -107,6 +107,46 @@ _SSH_DENIED_MARKERS = (
 #: Emitted by the device (or by ssh) when the single CLI session is already held.
 _HANGUP_MARKERS = ("closed by remote host", "Connection to ")
 
+#: The ssh client's notice that the *device* ended the session — which is what
+#: an idle timeout looks like over the network.
+#:
+#: Measured on firmware 1.3.4: after ~180 s idle the PDU disconnects and ssh
+#: prints "Received disconnect from … : user close and disconnect!" followed by
+#: "Disconnected from …". Neither contains any ``_HANGUP_MARKERS`` fragment, so
+#: without this the symptom was a bare "no prompt within 12.0s" — a timeout,
+#: implying the device was slow, when in fact the link was gone.
+#:
+#: The distinction is not cosmetic: **an idle logout is recoverable over serial
+#: and not over ssh.** On serial the session drops to ``Login Name :`` on the
+#: same open port and the driver re-authenticates in place. Over ssh the client
+#: process has exited, so there is nothing left to re-authenticate *on* — the
+#: caller has to open a new session. A timeout invites a retry that can never
+#: work; a connection error tells the truth.
+_SSH_DISCONNECT_MARKERS = ("Received disconnect from", "Disconnected from")
+
+#: The serial console's fourth login outcome, and the awkward one: it means
+#: **either** a wrong credential **or** a correct one the device cannot yet
+#: service, with no way to tell which.
+#:
+#: Measured on firmware 1.3.4. A wrong password and a correct password submitted
+#: within ~15 s of a previous session closing produce *byte-identical* output —
+#: "Please wait for authentication....", a line of dots for ~15 s, then
+#: "Login Failed", and then silence: no re-prompt follows, so a read waiting for
+#: one waits forever.
+#:
+#: That silence is why this needs its own marker rather than falling through to
+#: the timeout: without it the driver reports "the device did not answer" when
+#: the device answered clearly, and the retry that would have worked never
+#: happens.
+#:
+#: The ambiguity is not resolvable from the bytes, so the driver retries within
+#: its budget instead of classifying: a wrong password fails the same way every
+#: time and ends as an auth error when the budget runs out, while a busy device
+#: succeeds on a later attempt. It also means ``close()`` sending ``exit`` gets
+#: the session released *eventually* rather than immediately — the device holds
+#: it for a few seconds more.
+_LOGIN_FAILED = "Login Failed"
+
 #: Outlet indices are plain ints and nothing else. The alias exists to make the
 #: signatures self-documenting, *not* to widen them: see ``_coerce_outlet`` for
 #: why ``"all"``, ``"b1"``, ``"b2"`` and collections are rejected structurally.
@@ -324,16 +364,25 @@ class CyberPowerPDU41002:
     _VERIFY_POLL_S = 0.25
     #: How long to wait for a prompt on an ordinary command.
     _CMD_TIMEOUT_S = 12.0
-    #: Authentication takes ~7.5 s on firmware 1.3.4; allow generous headroom.
-    _LOGIN_TIMEOUT_S = 30.0
+    #: Total login budget. Generous because it has to cover *several* attempts:
+    #: a serial login within ~15 s of a previous session closing answers
+    #: "Login Failed" (see ``_LOGIN_FAILED``) and only succeeds on a retry, and
+    #: each refusal costs the device's full ~15 s authentication attempt. The
+    #: cost of the headroom is that a genuinely wrong password takes this long
+    #: to be reported; the cost of less is a bench that cannot reopen its own
+    #: PDU after switching transports.
+    _LOGIN_TIMEOUT_S = 75.0
     #: Minimum window for the reply to a submitted password, regardless of how
-    #: much of ``_LOGIN_TIMEOUT_S`` earlier retries consumed. The device prints
-    #: "Please wait for authentication...." and means it. A floor rather than a
-    #: share of the remaining budget because the alternative — a read too short
-    #: to see the prompt — is reported as a rejected password, and hunting a
-    #: correct credential is the most expensive wrong answer this driver can
-    #: give.
-    _AUTH_WAIT_S = 10.0
+    #: much of ``_LOGIN_TIMEOUT_S`` earlier attempts consumed. The device prints
+    #: "Please wait for authentication...." and takes up to ~15 s over it. A
+    #: floor rather than a share of the remaining budget because the
+    #: alternative — a read too short to see the verdict — is reported as a
+    #: rejected password, and hunting a correct credential is the most expensive
+    #: wrong answer this driver can give.
+    _AUTH_WAIT_S = 20.0
+    #: Pause after a refusal before trying again. The device is mid-teardown of
+    #: someone else's session; hammering it just burns the budget on refusals.
+    _LOGIN_RETRY_S = 3.0
 
     def __init__(
         self,
@@ -604,6 +653,9 @@ class CyberPowerPDU41002:
         """
         deadline = time.monotonic() + budget
         password = self.__password
+        #: Set when the device answered "Login Failed" at least once, so the
+        #: error raised on exhaustion can say which of the two things happened.
+        refusals = 0
 
         while time.monotonic() < deadline:
             self._link.write(b"\r")
@@ -637,13 +689,27 @@ class CyberPowerPDU41002:
                 # and "refused", so a truncated read is indistinguishable from a
                 # wrong password.
                 after = self._read_until(
-                    [PROMPT, _LOGIN_NAME],
+                    [PROMPT, _LOGIN_NAME, _LOGIN_FAILED],
                     timeout=max(self._AUTH_WAIT_S, deadline - time.monotonic()),
                 )
                 self._raise_if_hungup(after)
                 if PROMPT in after:
                     self._authed = True
                     return
+                if _LOGIN_FAILED in after:
+                    # Ambiguous by construction — see _LOGIN_FAILED. Retry
+                    # rather than classify: a busy device succeeds on a later
+                    # attempt, a wrong password does this every time and falls
+                    # out of the loop below. No re-prompt follows, so start the
+                    # next attempt from scratch rather than waiting for one.
+                    refusals += 1
+                    log.debug(
+                        "serial login refused (attempt %d); retrying within "
+                        "the remaining budget",
+                        refusals,
+                    )
+                    time.sleep(self._LOGIN_RETRY_S)
+                    continue
                 if _LOGIN_NAME in after:
                     # Back at the name prompt is the device's way of saying no.
                     raise PDU41002AuthError(
@@ -663,6 +729,18 @@ class CyberPowerPDU41002:
                     f"{after[-200:]!r}"
                 )
 
+        if refusals:
+            # Every attempt got a definite refusal, so this is a credential
+            # problem far more likely than a slow device — but say both, because
+            # the device emits the same bytes for each and a bench that just
+            # closed a session on the other transport hits this legitimately.
+            raise PDU41002AuthError(
+                f"the device answered {_LOGIN_FAILED!r} to all {refusals} "
+                f"{self._username!r} login attempts over {self._transport} in "
+                f"{budget:.0f}s. Most likely {PASSWORD_ENV} is wrong; the same "
+                f"response also means 'another CLI session is still closing', "
+                f"which clears on its own within ~15s."
+            )
         raise PDU41002TimeoutError(
             f"could not reach a {PROMPT!r} prompt over {self._transport} "
             f"within {budget:.0f}s"
@@ -680,6 +758,32 @@ class CyberPowerPDU41002:
                 "CLI allows only one session at a time, across serial and SSH "
                 "together. Another session is logged in — send 'exit' on it "
                 "(closing its port alone does NOT release the session)."
+            )
+
+    def _raise_if_disconnected(self, text: str) -> None:
+        """Report a vanished ssh session as a connection error, not a timeout.
+
+        This is what an **idle logout over the network** looks like: the device
+        drops the connection after ~180 s and the ssh client says so. The
+        asymmetry with serial is the point and it is not something the driver can
+        paper over — serial keeps the port and lands on ``Login Name :``, so
+        ``_cmd`` re-authenticates in place, whereas here the ssh process is gone
+        and there is nothing to re-authenticate on. Raising a timeout invited a
+        retry that could never succeed; ``PDU41002ConnectionError`` tells the
+        caller the only thing that works, which is to open again.
+        """
+        if any(m in text for m in _SSH_DISCONNECT_MARKERS):
+            # Mark the session dead so a later call fails fast rather than
+            # writing into a pty nobody is reading.
+            self._authed = False
+            raise PDU41002ConnectionError(
+                f"the PDU closed the {self._transport} session (ssh reported "
+                f"{text.strip().splitlines()[0]!r} if it said anything). Over "
+                f"ssh this is most likely the device's idle timeout, which is "
+                f"5 minutes as shipped and *not* recoverable in place: reopen "
+                f"the connection. Over serial the same timeout is recovered "
+                f"automatically, because the session drops to a login prompt "
+                f"rather than dropping the link."
             )
 
     # -- CLI engine ---------------------------------------------------------
@@ -765,8 +869,10 @@ class CyberPowerPDU41002:
         except LinkError as e:
             raise PDU41002ConnectionError(str(e)) from e
         text = self._read_until(
-            [PROMPT, _LOGIN_NAME, _LOGIN_PASSWORD], timeout=timeout
+            [PROMPT, _LOGIN_NAME, _LOGIN_PASSWORD, *_SSH_DISCONNECT_MARKERS],
+            timeout=timeout,
         )
+        self._raise_if_disconnected(text)
         if PROMPT not in text and not any(
             m in text for m in (_LOGIN_NAME, _LOGIN_PASSWORD, *_HANGUP_MARKERS)
         ):

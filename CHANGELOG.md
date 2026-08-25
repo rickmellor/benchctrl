@@ -74,6 +74,46 @@ them:
   verification is worthless — pinned to `/dev/null` rather than
   poisoning the operator's `known_hosts`.
 
+**Three more behaviours were found by the hardware tier itself**, and are
+worth separating because of how they were found: every one had a
+simulator agreeing with the driver's misreading, so the whole
+hardware-free suite passed while the driver was wrong. The tier is
+`tests/test_hardware_cyberpower_pdu41002.py`, run with
+`pytest -m hardware -k pdu41002` against a real PDU over both transports.
+
+- **`Login Failed` is ambiguous by construction.** The login has *four*
+  outcomes, not two, and the fourth — ~15 s of dots, `Login Failed`, then
+  silence with no re-prompt — is emitted **byte-identically** for a wrong
+  password and for a *correct* one submitted within ~15 s of a previous
+  session closing. The single-session limit above makes that routine, so
+  the driver now retries within a 75 s budget rather than classifying,
+  and only calls it `PDU41002AuthError` once the budget is spent, naming
+  both possibilities. Fixing this also meant fixing the simulator, whose
+  tidy `Login Name :` re-prompt on a wrong password is something no
+  firmware does — and the tidiness is precisely what hid the bug.
+- **A device that never answers was reported as a bad password.** The
+  post-password read window was derived from the remaining budget with a
+  2 s floor, and *any* missing prompt was read as a rejection, so a slow
+  serial login surfaced as "check `BENCHCTRL_PDU_PASSWORD`" — the exact
+  misdiagnosis this driver's error types exist to prevent. Now a separate
+  `_AUTH_WAIT_S` floor and a three-way verdict: prompt, explicit
+  rejection, or a `PDU41002TimeoutError` saying the password was *not*
+  rejected and the device did not answer.
+- **An idle SSH session is dead, not logged out.** The idle timeout is
+  5 minutes on this unit rather than the manual's 3, and the two
+  transports need opposite handling: serial keeps the port and drops to a
+  login prompt, so the driver re-authenticates in place, while SSH is
+  disconnected at ~180 s and the ssh client exits, leaving nothing to
+  re-authenticate on. That arrived as `no prompt after 'sys show' within
+  12.0s (got 130 bytes)` — a slow-device symptom inviting a retry that
+  could never work. Now the client's disconnect notice is recognised and
+  raises `PDU41002ConnectionError` naming the reopen as the recovery.
+
+Each of the three is pinned hardware-free by a test that kills a mutant
+reproducing the hardware symptom verbatim, and each measurement lives in
+a code comment rather than only in a session log. See F-15 and F-16 in
+`KNOWN_LIMITATIONS.md`.
+
 **First device in benchctrl that needs a secret.** It is read from
 `BENCHCTRL_PDU_PASSWORD` in the environment of the process that talks to
 the device, never from config and never from `open_kwargs`:

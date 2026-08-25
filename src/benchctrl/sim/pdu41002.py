@@ -162,8 +162,30 @@ class SimulatedPDU41002(SimDevice):
         #: authenticates successfully is then hung up on.
         self._held = False
         self.hangup_count = 0
+        #: Set by :py:meth:`drop_ssh_session`: the link is gone and nothing this
+        #: device would have said ever arrives again. Distinct from
+        #: ``_authed = False``, which is the *serial* logout — there the port is
+        #: still live and a login prompt is waiting.
+        self._gone = False
         #: When set, the next command answers with a forced error shape.
         self.force_next_error: Optional[str] = None
+        #: How many more logins answer ``Login Failed`` before one succeeds.
+        #:
+        #: Models the device's fourth login outcome, measured on firmware 1.3.4:
+        #: a *correct* password submitted within ~15 s of a previous session
+        #: closing is refused with output byte-identical to a wrong one — dots
+        #: for ~15 s, then "Login Failed", then **silence**, with no re-prompt.
+        #: It clears on its own.
+        #:
+        #: Non-zero here is the busy case: the credential is *right* and the
+        #: refusal still happens. A wrong password takes the same path
+        #: unconditionally, and emits the same bytes on purpose — a simulator
+        #: that made the two distinguishable would let the driver "classify"
+        #: something the hardware does not let it classify.
+        self.refuse_next_logins = 0
+        #: Every login refused with the ``Login Failed`` shape, so a test can
+        #: prove a retry happened rather than one lucky attempt.
+        self.refusal_count = 0
         #: When set, the next submitted password gets **no answer at all** — no
         #: prompt, no re-prompt, nothing.
         #:
@@ -204,6 +226,33 @@ class SimulatedPDU41002(SimDevice):
     def release_session(self) -> None:
         """Release the held session (the incumbent sent ``exit``)."""
         self._held = False
+
+    def drop_ssh_session(self) -> None:
+        """Model an idle logout **over ssh**, which kills the link.
+
+        The serial and network cases are genuinely different and the driver has
+        to treat them differently, so the simulator needs both:
+        :py:meth:`force_logout` drops to a login prompt on a live port (serial,
+        recoverable in place), while this emits what the *ssh client* prints when
+        the device hangs up at ~180 s idle — after which no prompt ever arrives.
+
+        As with :py:meth:`hold_session`, the loopback is left open rather than
+        closed: closing it would destroy the pty the driver still holds. The
+        silence is modelled explicitly instead, via :py:attr:`_gone`, because it
+        is the half that matters — a simulator that emitted the notice and then
+        carried on answering would let a driver *appear* to recover from a
+        session that is really dead, which is exactly the false pass this hook
+        exists to prevent.
+        """
+        with self._lock:
+            self._authed = False
+            self._await_password_for = None
+            self._gone = True
+            self._emit(
+                "Received disconnect from 192.168.1.246 port 22:11: "
+                "user close and disconnect!\r\n"
+                "Disconnected from 192.168.1.246 port 22\r\n"
+            )
 
     def force_logout(self) -> None:
         """Drop the session to the login prompt without any wall-clock wait.
@@ -267,6 +316,14 @@ class SimulatedPDU41002(SimDevice):
                 self._handle_line(line.decode("ascii", errors="replace").strip())
 
     def _handle_line(self, line: str) -> None:
+        if self._gone:
+            # The ssh client has exited; there is no longer anything on the far
+            # end to answer. Swallowing the line rather than replying is what
+            # makes the driver's error the *only* possible outcome: with a
+            # simulator that kept answering, a driver missing the disconnect
+            # check would still get its prompt and the test would pass.
+            return
+
         if not self._authed:
             self._handle_login(line)
             return
@@ -302,8 +359,23 @@ class SimulatedPDU41002(SimDevice):
                 self.stall_next_auth = False
                 self._emit("\r\nPlease wait for authentication....\r\n")
                 return
-            if not ok:
-                self._emit("\r\n\r\nLogin Name : ")
+            busy = self.refuse_next_logins > 0
+            if busy:
+                self.refuse_next_logins -= 1
+            if not ok or busy:
+                # One shape for both, because the device has one shape for both:
+                # dots for ~15 s, "Login Failed", and then **silence** — no
+                # re-prompt, so a driver waiting for one waits forever. The
+                # earlier model here emitted a tidy "Login Name :" re-prompt,
+                # which no firmware does, and that gap hid a real bug (a wrong
+                # password and a still-closing session are indistinguishable, so
+                # the driver must retry rather than classify).
+                self.refusal_count += 1
+                self._emit(
+                    "\r\nPlease wait for authentication....\r\n"
+                    + "." * 37
+                    + "\r\n\r\nLogin Failed"
+                )
                 return
             self._authed = True
             self._emit("\r\nPlease wait for authentication....\r\n")
