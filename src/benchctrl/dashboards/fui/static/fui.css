@@ -315,6 +315,93 @@ header {
   padding: 4px 6px;
 }
 
+/* --- MAINS.MGR: core harness, bottom left ------------------------------- */
+
+/* Fixed height, and it takes it from LOG.MGR rather than sharing: the log grows
+   into whatever is left (flex:1 1 auto in the markup) and this panel must not
+   move when it does. An operator glancing down-left for port states should find
+   them in the same place every time — a readout that migrates is one you have to
+   look for, and this is the one nobody should have to hunt for. */
+#mains-panel { flex: none; }
+
+/* Eight chips, two rows of four at the panel's width. A grid rather than flex
+   wrapping, so the columns line up between the rows: a ragged block of ON/OFF is
+   read one chip at a time, and an aligned one is read as a pattern. */
+.ports {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 3px;
+  margin-top: 5px;
+}
+/* No ports reported yet, no empty grid taking up space. Same rule as .slot .act
+   and .ident: this panel's geometry is fixed, and reserving a blank block for
+   rows that may never arrive is furniture. */
+.ports:empty { display: none; }
+
+.port {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 3px;
+  padding: 2px 4px;
+  border: 1px solid var(--chrome);
+  background: rgba(0, 229, 255, 0.02);
+  font-size: 9px;
+}
+/* The outlet number is an identifier, not a reading — dim, so the state word is
+   what the eye picks up when scanning eight chips for a hot one. */
+.port .pi { color: var(--ink-dim); flex: 0 0 auto; }
+.port .ps { font-weight: 700; flex: 0 0 auto; }
+
+/* An energised outlet: amber, with the border and background carrying it too, so
+   a hot port is legible from across the bench without reading the word.
+
+   Amber and not red, deliberately. Red on this display means an armed instrument
+   output — a thing that can hurt a DUT or a person *because someone armed it* —
+   and an outlet with mains on it is the bench's normal resting state: all eight
+   are usually ON with instruments drawing from them. Spending red here would
+   make the rail's armed-output red just another warm colour on the page, which
+   is the one signal this panel must not devalue. Amber is the honest grade:
+   energised, worth knowing, not by itself a reason to act. */
+.port.on {
+  color: var(--amber);
+  border-color: var(--amber);
+  background: rgba(255, 179, 0, 0.08);
+}
+.port.on .ps { text-shadow: var(--glow-amber); }
+.port.on .pi { color: var(--amber); opacity: 0.6; }
+
+/* A de-energised outlet. Deliberately the quietest thing on the panel: an OFF
+   port is the safe state, and the whole point of the colour split is that the eye
+   stops on the hot ones. */
+.port.off { color: var(--ink-dim); }
+.port.off .ps { color: var(--cyan-dim); }
+
+/* A reading nobody has vouched for lately. Dimmed and dashed — NOT recoloured,
+   and specifically not struck through the way .slot.stale is.
+   .slot.stale's line-through works because a stale instrument status is a word
+   you should discount; a stale port state is a word you must still be able to
+   READ, because "this was last seen energised" is exactly the fact that keeps a
+   hand out of an enclosure. So staleness is layered on top of the live colour
+   here, never in place of it. */
+.port.stale { opacity: 0.55; border-style: dashed; }
+.port.stale .ps { text-shadow: none; }
+
+/* One line of why, under the ports. Wraps to two at most — this is the panel's
+   explanation, and clipping the half that says "not current" would be worse than
+   letting it take a second line. */
+.mains-note {
+  margin-top: 4px;
+  font-size: 8.5px;
+  line-height: 1.35;
+  color: var(--cyan-dim);
+  letter-spacing: 0.06em;
+}
+.mains-note.warn { color: var(--amber); }
+/* Nothing to say, no reserved gap. Keeps the panel the same height whether or not
+   a note is present, which is what lets #mains-panel be flex:none above. */
+.mains-note:empty { display: none; }
+
 /* --- centre stage ------------------------------------------------------- */
 
 #dut-panel { flex: 1 1 auto; }

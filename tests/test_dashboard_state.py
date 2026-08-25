@@ -1964,3 +1964,439 @@ def test_folding_open_state_does_not_touch_which_devices_the_agent_serves(live):
     assert not live.slots["eastwood_qr10x"].served, (
         "a status field promoted a device into the agent's served list"
     )
+
+
+# --------------------------------------------------------------------------
+# Mains: the one reading with no poll behind it
+#
+# The dashboard is an observer session and ``device.call`` is not in the agent's
+# OBSERVER_METHODS, so a panel can never read the PDU itself. Everything folded
+# here arrived because the bench pushed it. That is the premise these tests are
+# adversarial about: for every other reading on the panel a stale value is
+# corrected by the next status poll, and for this one there is no next poll.
+#
+# The specific danger is asymmetric. A stale ``ARMED`` over-warns, which is the
+# safe direction. A stale outlet ``OFF`` reads as "the DUT is de-powered" to
+# somebody deciding whether to reach into an enclosure, and that is the worst
+# output this module can produce.
+# --------------------------------------------------------------------------
+
+
+def mains_event(**overrides):
+    """A sweep as ``agent/server.py``'s mains sweep publishes one.
+
+    String outlet keys on purpose: these cross a JSON wire, where object keys are
+    always strings, and a fixture using ints would test a payload the bench cannot
+    actually send.
+    """
+    base = {
+        "kind": "mains",
+        "severity": "read",
+        "device": "cyberpower_pdu41002",
+        "outlets": {"1": True, "2": False},
+        "voltage_V": 121.7,
+        "frequency_Hz": 60.0,
+        "load_A": 0.4,
+        "load_W": 48.0,
+        "transport": "ssh",
+        "changed": True,
+        "first": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_a_sweep_is_the_only_way_outlet_state_arrives(live):
+    """The baseline: nothing is known until the bench says something.
+
+    Asserted rather than assumed because ``known`` is what the view turns the
+    whole panel on with, and a default that read as "known, all off" would be a
+    fabricated de-energised bench.
+    """
+    assert not live.mains.known
+    assert live.mains.outlets == {}
+    assert live.mains.voltage_V is None
+
+    live.apply_event(mains_event(), now=101.0)
+
+    assert live.mains.known
+    assert live.mains.outlets == {1: True, 2: False}
+    assert live.mains.energised == 1
+
+
+def test_outlet_keys_arrive_as_strings_and_are_stored_as_ints(live):
+    """JSON has no integer keys, so ``{1: True}`` round-trips as ``{"1": true}``.
+
+    Coerced at the boundary rather than downstream: the view sorts these to lay
+    out a row of outlets, and a map mixing ``1`` with ``"1"`` would either raise on
+    the render path or draw outlet 1 twice.
+    """
+    live.apply_event(mains_event(outlets={"1": True, "10": False, "2": True}), now=101.0)
+
+    assert live.mains.outlets == {1: True, 10: False, 2: True}
+    assert sorted(live.mains.outlets) == [1, 2, 10], "not sorted numerically"
+
+
+def test_an_outlet_key_that_is_not_a_number_is_dropped_not_kept(live):
+    """A malformed key costs its own outlet and nothing else.
+
+    Keeping it as a string would put a non-int in a map the renderer sorts, so the
+    failure would land one frame later in the process that draws the screen —
+    turning a malformed event into a blank display.
+    """
+    live.apply_event(
+        mains_event(outlets={"1": True, "b1": False, "2": False}), now=101.0
+    )
+
+    assert live.mains.outlets == {1: True, 2: False}
+
+
+def test_a_sweep_replaces_the_outlet_map_rather_than_merging_it(live):
+    """A sweep is a complete statement about every outlet at one instant.
+
+    Merging would let an outlet the PDU stopped reporting keep its last value
+    forever — a reading with nothing behind it, indistinguishable from a current
+    one, on the panel where that matters most.
+    """
+    live.apply_event(mains_event(outlets={"1": True, "2": True, "3": True}), now=101.0)
+    assert live.mains.energised == 3
+
+    live.apply_event(mains_event(outlets={"1": True}), now=102.0)
+
+    assert live.mains.outlets == {1: True}, "an unreported outlet kept its old state"
+    assert live.mains.energised == 1
+
+
+def test_a_metering_field_that_did_not_parse_leaves_the_last_number_alone(live):
+    """The PDU prints ``----`` for a figure it cannot measure at zero load.
+
+    Coercing that to 0.0 would put "0.0 V" on a panel about a live mains supply,
+    which is not a degraded reading — it is a different and alarming claim.
+    """
+    live.apply_event(mains_event(voltage_V=121.7), now=101.0)
+
+    live.apply_event(mains_event(voltage_V="----"), now=102.0)
+
+    assert live.mains.voltage_V == 121.7, "an unparseable figure overwrote a real one"
+
+
+def test_an_unchanged_sweep_still_updates_liveness_without_logging(live):
+    """Same discipline as the presence sweep: publish every time, log only news.
+
+    The panel needs the unchanged sweeps — they are the evidence mains state is
+    still being watched — but 24 log rows of "mains unchanged" would evict the
+    bookkeeping the log exists to show.
+    """
+    live.apply_event(mains_event(changed=True), now=101.0)
+    logged_after_change = len(live.log)
+
+    live.apply_event(mains_event(changed=False), now=102.0)
+
+    assert live.mains.sweeps == 2, "an unchanged sweep was not folded"
+    assert len(live.log) == logged_after_change, "an unchanged sweep reached the log"
+
+
+def test_a_malformed_sweep_leaves_the_previous_reading_in_place(live):
+    """No poll will correct this, so a bad frame must not blank a good reading.
+
+    The opposite of the rule for pollable readings: there, discarding is safe
+    because the next status snapshot rebuilds them. Here, discarding would leave
+    the panel with nothing until the next sweep ~10 s later.
+    """
+    live.apply_event(mains_event(), now=101.0)
+
+    live.apply_event(mains_event(outlets="not a map"), now=102.0)
+
+    assert live.mains.outlets == {1: True, 2: False}
+    assert live.mains.sweeps == 1, "a malformed frame counted as a sweep"
+
+
+def test_a_run_switching_an_outlet_is_folded_between_sweeps(live):
+    """The sweep samples every ~10 s and a power-cycle phase is faster than that.
+
+    A cut and restore inside one interval renders as "on, on" from the sweep
+    alone: the transition the whole test is about, invisible. The engine's event
+    fires *at* the switch, which is why it is folded in addition to the sweep.
+    """
+    live.apply_event(mains_event(outlets={"1": True, "3": False}), now=101.0)
+
+    live.apply_event(
+        {
+            "kind": "run_outlet",
+            "severity": "warn",
+            "device": "cyberpower_pdu41002",
+            "outlet": 3,
+            "state": True,
+            "requested": True,
+            "run_id": "r1",
+        },
+        now=102.0,
+    )
+
+    assert live.mains.outlets[3] is True
+    assert live.mains.transitions == 1
+    assert live.mains.last_transition == {"outlet": 3, "state": True}
+
+
+def test_a_transition_is_read_from_the_verified_state_never_the_request(live):
+    """``oltctrl`` acknowledges nothing, which is why the engine reads back.
+
+    ``requested`` is precisely the field carrying no evidence. An event with no
+    ``state`` is not a transition this panel can believe, and falling back to the
+    request would defeat the verification the driver exists to do.
+    """
+    live.apply_event(mains_event(outlets={"1": False}), now=101.0)
+
+    live.apply_event(
+        {
+            "kind": "run_outlet",
+            "device": "cyberpower_pdu41002",
+            "outlet": 1,
+            "requested": True,
+            "run_id": "r1",
+        },
+        now=102.0,
+    )
+
+    assert live.mains.outlets[1] is False, "an unverified request became a reading"
+    assert live.mains.transitions == 0
+
+
+def test_a_transition_nested_under_data_is_still_folded(live):
+    """The run engine puts payload fields under ``data`` (``store.Event.to_dict``).
+
+    The shape that reaches a dashboard through ``run.events`` differs from the one
+    that arrives live, and a fold that only handled the flat form would work
+    perfectly against hand-built events and see nothing from the real engine.
+
+    The frame below is the engine's own: ``RunEngine._emit`` sends
+    ``{"run_id": ..., **event.to_dict()}``, so ``run_id`` is at the top level and
+    everything the phase reported is one level down under ``data``.
+    """
+    live.apply_event(
+        {
+            "run_id": "r1",
+            "kind": "run_outlet",
+            "severity": "info",
+            "source": "engine",
+            "data": {"outlet": 4, "state": True, "requested": True},
+        },
+        now=101.0,
+    )
+
+    assert live.mains.outlets == {4: True}
+    assert live.mains.last_transition == {"outlet": 4, "state": True}
+
+
+def test_a_transition_with_no_run_id_is_not_folded(live):
+    """The engine always sends one, and a frame without it is not a run event.
+
+    Not a nicety: ``_apply_run_event`` returns early on a missing ``run_id``, so
+    this pins that the mains fold sits *inside* the run branch and inherits that
+    gate rather than being reachable from any frame that happens to say
+    ``run_outlet``. Written after a hand-built fixture omitted ``run_id`` and made
+    the fold look broken when it was the fixture that was wrong.
+    """
+    live.apply_event(
+        {"kind": "run_outlet", "outlet": 4, "state": True}, now=101.0
+    )
+
+    assert live.mains.outlets == {}, "a frame with no run reached the mains model"
+
+
+def test_a_settle_window_is_distinguishable_from_a_stalled_phase(live):
+    """After a power cycle a run deliberately does nothing while the DUT boots.
+
+    No samples, no events, nothing moving — identical to a hung run unless the
+    bench says which it is.
+    """
+    live.apply_event(mains_event(), now=101.0)
+
+    live.apply_event(
+        {
+            "kind": "run_outlet_settle",
+            "device": "cyberpower_pdu41002",
+            "settle_s": 3.0,
+            "run_id": "r1",
+        },
+        now=102.0,
+    )
+
+    assert live.mains.settling_s == 3.0
+
+
+def test_a_completed_sweep_ends_the_settle_note(live):
+    """The bench has answered about *now*, so a note about waiting is over.
+
+    Left set, the panel would claim a DUT was still booting through every
+    subsequent sweep of the rest of the run.
+    """
+    live.apply_event(
+        {"kind": "run_outlet_settle", "run_id": "r1", "settle_s": 3.0}, now=101.0
+    )
+    assert live.mains.settling_s == 3.0
+
+    live.apply_event(mains_event(), now=102.0)
+
+    assert live.mains.settling_s is None
+
+
+def test_a_disconnect_drops_the_outlet_map_outright(live):
+    """The one reading dropped on disconnect rather than kept and marked stale.
+
+    Everywhere else this module keeps the last value: a stale ``ARMED`` errs
+    toward over-warning, which is the safe direction, and the next status poll
+    corrects it. An outlet map errs in both directions, the bad one is a stale
+    ``OFF`` read as "the DUT is de-powered" — the reassurance that precedes
+    somebody reaching into an enclosure — and there is no correcting poll for
+    mains at all. So it goes.
+    """
+    live.apply_event(mains_event(), now=101.0)
+    assert live.mains.known
+
+    live.apply_disconnected("link lost")
+
+    assert not live.mains.known
+    assert live.mains.outlets == {}
+    assert live.mains.voltage_V is None
+    assert live.mains.frequency_Hz is None
+    assert live.mains.load_A is None
+    assert live.mains.load_W is None
+
+
+def test_a_disconnect_keeps_which_pdu_it_was_and_how_it_was_reached(live):
+    """Identity survives; readings do not.
+
+    The device key and transport are facts about the bench's configuration rather
+    than about its state, and holding them is what lets the panel say "a PDU we
+    have not heard from" instead of falling back to "no PDU here" — two states
+    with very different next actions.
+    """
+    live.apply_event(mains_event(), now=101.0)
+
+    live.apply_disconnected("link lost")
+
+    assert live.mains.device == "cyberpower_pdu41002"
+    assert live.mains.transport == "ssh"
+
+
+def test_a_reconnect_that_hears_nothing_does_not_restore_the_old_reading(live):
+    """A fresh socket says nothing about what the contactors are doing.
+
+    Same rule as ``unsafe_latch``: reconnecting is not evidence. The panel stays
+    silent about mains until a sweep actually arrives.
+    """
+    live.apply_event(mains_event(), now=101.0)
+    live.apply_disconnected("link lost")
+
+    live.apply_connected(WELCOME, now=110.0)
+    live.apply_status(status_payload({"otii_arc": idle()}), now=110.0)
+
+    assert not live.mains.known
+    assert live.mains.outlets == {}
+
+
+def test_a_bench_with_no_pdu_is_not_a_bench_with_everything_off(live):
+    """The distinction the whole panel turns on, pinned at the model layer.
+
+    "No PDU on this bench" and "a PDU reporting eight outlets off" both produce a
+    map with nothing energised, and only one of them means the DUT has no mains.
+    ``known`` is what separates them, which is why it is computed here rather than
+    inferred from emptiness by the renderer.
+    """
+    assert live.mains.energised == 0, "premise: nothing energised either way"
+    assert not live.mains.known
+
+    live.apply_event(mains_event(outlets={"1": False, "2": False}), now=101.0)
+
+    assert live.mains.energised == 0, "premise: still nothing energised"
+    assert live.mains.known, "a reported all-off bench is not an unreported one"
+
+
+def test_the_snapshot_carries_mains_as_its_own_block_not_as_an_instrument(live):
+    """Core harness, and shaped like it.
+
+    A PDU has no arm state, no run enrolls it as a source, and nothing measures
+    with it. Putting it in ``devices`` or ``slots`` would hand it the instrument
+    rail's vocabulary — STANDBY, OPEN, IN RUN — none of which says anything true
+    about a mains contactor.
+    """
+    live.apply_event(mains_event(), now=101.0)
+
+    snap = live.to_dict()
+
+    assert "cyberpower_pdu41002" not in snap["devices"]
+    block = snap["mains"]
+    assert block["known"] is True
+    assert block["energised"] == 1
+    # String keys on the way out as well as in: this block is serialised to JSON
+    # for the browser, and an int-keyed map would silently become string-keyed
+    # there — better that the shape the renderer sees is the shape asserted here.
+    assert block["outlets"] == {"1": True, "2": False}
+    assert block["voltage_V"] == 121.7
+
+
+def test_the_snapshot_reports_the_age_of_the_reading_not_its_timestamp(live):
+    """A monotonic from this process is meaningless in a browser.
+
+    Mains runs on a ~10 s clock of its own, so it goes stale while the rest of the
+    panel is current — an age is the only form of this the renderer can act on.
+    """
+    live.apply_event(mains_event(), now=101.0)
+
+    snap = live.to_dict()
+
+    assert snap["mains"]["age_s"] is not None
+    assert snap["mains"]["age_s"] >= 0.0
+
+
+def test_the_run_outlet_kinds_are_registered_as_run_events(live):
+    """A kind the model does not know reaches the log as an unclassified row.
+
+    Both of these are run-scoped and belong in the run timeline; without the
+    registration they would fall through to the branch that overwrites the run's
+    step description, so a power cycle would erase whatever the run said it was
+    doing.
+    """
+    from benchctrl.dashboards.state import RUN_EVENT_KINDS
+
+    assert "run_outlet" in RUN_EVENT_KINDS
+    assert "run_outlet_settle" in RUN_EVENT_KINDS
+
+
+def test_a_power_cycle_is_folded_without_disturbing_the_run(live):
+    """The consequence of the registration above, asserted behaviourally.
+
+    Pinned this way and not by the constant alone because the constant's presence
+    proves nothing about which branch actually handles the event: without the
+    ``elif``, ``run_outlet`` falls into the ``else`` and the membership test above
+    still passes.
+
+    Both halves are asserted because the interesting one is not the obvious one. A
+    mutation removing the branch was run: the step survived (the ``else`` writes
+    ``fields.get("step", "") or view.step``, which preserves it when there is no
+    ``step``) and the *outlet map stayed empty*. So the real cost of losing the
+    branch is the entire mains fold going silent — a run power-cycling a DUT with
+    every port still reading as it did before the switch — and the outlet
+    assertion below is the one doing the work.
+    """
+    live.apply_event(
+        {"kind": "run_step", "run_id": "r1", "step": "soak · measuring"},
+        now=101.0,
+    )
+    before = live.runs["r1"].step
+    assert before == "soak · measuring", "premise: the run said what it was doing"
+
+    live.apply_event(
+        {
+            "kind": "run_outlet",
+            "run_id": "r1",
+            "device": "cyberpower_pdu41002",
+            "outlet": 2,
+            "state": False,
+        },
+        now=102.0,
+    )
+
+    assert live.mains.outlets[2] is False, "the switch was not folded at all"
+    assert live.runs["r1"].step == before, "an outlet switch rewrote the run's step"

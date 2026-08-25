@@ -195,6 +195,65 @@ that check `run.submit` would have been the one path to a mains contactor
 that skipped the gate every other route enforces; the refusal names the
 key to claim. A spec that mentions no outlets needs no PDU claim, even on
 a bench that has one.
+
+**MAINS.MGR on the FUI, and the PDU is deliberately not on the instrument
+rail.** It is core harness, like the Arduino hosting the agent — not
+something a run measures with, but the thing deciding whether the rest of
+the bench has power. A rail row would have described mains switching in
+the rail's vocabulary (`ARMED`, `IDLE`, the arm counter), and "outlet 3 is
+energised" is not an armed output. The exclusion is explicit because the
+rail's membership rule appends any key it does not recognise as an unknown
+instrument, so serving the PDU put it on the rail immediately: the default
+was the wrong treatment. A test pins it, and the panel's words are
+asserted disjoint from the rail's.
+
+The panel sits bottom-left with voltage, frequency, load and per-outlet
+state. Everything about it follows from one constraint: the dashboard is an
+observer session and `device.call` is not an observer method, so a display
+**cannot** read the PDU — reading one means write-grade access to the
+device that switches mains. State arrives only because the bench pushes
+it: a periodic `mains` sweep in the agent, plus the engine's `run_outlet`
+events folded in between sweeps. The sweep publishes every time and logs
+only a *changed* one, following the presence sweep, and it never opens the
+PDU itself — a display connecting must not be why the bench logs into a
+mains switch.
+
+Which means there is **no correcting poll**, so the panel keeps its own
+clock: a sweep older than 30 s (three intervals) is flagged aged-out. The
+global `STALE` banner cannot cover this, because status frames keep
+arriving while the sweep is dead — a fault only this panel can detect.
+
+Three ways to have nothing to show, kept apart because two are identical
+in the data and the operator's next move differs: `NO PDU` (no mains
+control on this bench — the panel hides itself, and it is the only
+self-hiding panel), `NOT REPORTED` (served, unheard: ordinary on an idle
+bench *and* exactly what a broken sweep looks like), and a live reading,
+where `DUT SETTLING` outranks `MAINS LIVE` as the more specific claim about
+the same instant.
+
+Staleness degrades the opposite way to the rail's, and that asymmetry is
+the point. A stale `ARMED` over-warns, which is safe; a stale outlet `OFF`
+reads as "the DUT is de-powered" to somebody deciding whether to reach into
+an enclosure. So a stale port keeps its live colour and is dimmed, never
+struck through and never recoloured; the outlet map is dropped outright on
+disconnect and a reconnect does not restore it; only outlets actually
+reported get rows; and the energised count is summed from the rows drawn,
+so the tally cannot disagree with the screen. `.port.on` is amber rather
+than red — all eight outlets are normally on, and spending red on the
+steady state would devalue the one red reserved for an armed output.
+
+`tests/test_mains_end_to_end.py` closes the gap the unit tests structurally
+cannot. Mains has two publishers in modules that share no code
+(`server._mains_sweep` and `RunEngine._switch_outlets`) and a consumer that
+imports nothing from `benchctrl.agent` by design, so a renamed event key is
+a compile-clean silent blanking with no correcting poll to recover from it.
+These nine tests run the whole stack — production driver over a pty, worker,
+agent, HMAC wire, real observer session, shipped `build_view`, fetched over
+HTTP from the URL the browser uses — and assert only against the display.
+Verified by mutation: renaming one published metering key fails here and
+nowhere else in the suite, as does putting the PDU back on the rail or
+letting the sweep open the PDU on a display's behalf.
+
 ### Verifiable source sync to a board (`deploy/sync-board.sh`)
 
 Development tooling, not part of installation. It exists because the FUI

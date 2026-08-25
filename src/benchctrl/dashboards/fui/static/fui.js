@@ -656,6 +656,134 @@ function renderUnclaimed(items) {
   }
 }
 
+/* One port chip's classes. A pure function for the same reason slotClasses is,
+ * and here the stakes are the reason rather than the convention: this decides
+ * whether an outlet reads as energised, and getting it backwards is the worst
+ * output this display can produce.
+ *
+ * `on` wins over `stale`. An energised outlet whose reading has aged is still an
+ * outlet that was last seen energised, and the amber-strikethrough treatment the
+ * rail uses for a stale value would drop it to something an eye scanning for hot
+ * ports skips over. Stale gets its own dimming on top (see .port.stale in
+ * fui.css), never in place of the live colour. */
+function portClasses(p, stale) {
+  return 'port ' + (p.on ? 'on' : 'off') + (stale ? ' stale' : '');
+}
+
+/* MAINS.MGR — the bench's mains and its outlets.
+ *
+ * Core harness. This panel exists because the dashboard is an OBSERVER session
+ * and `device.call` is not in the agent's OBSERVER_METHODS, so a display can
+ * never read the PDU itself: everything here arrived because the *bench* pushed
+ * it (agent/server.py's mains sweep, plus the run engine's run_outlet events at
+ * each verified switch). Nothing on this panel is polled, which is why staleness
+ * gets its own treatment — there is no correcting read to fall back on.
+ *
+ * Hides itself when the bench has no PDU, and only then. See the comment on
+ * #mains-panel in index.html for why this one panel is allowed to disappear when
+ * every other absent readout stays on screen saying NO LINK. */
+function renderMains(m) {
+  const panel = $('mains-panel');
+  if (!m || (!m.served && !m.known)) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  const verdict = $('mains-verdict');
+  verdict.textContent = m.status;
+  // A verdict earns amber for being unvouched-for, not for being bad news: an
+  // outlet map nobody has confirmed lately is the case an operator must not
+  // trust, whereas MAINS LIVE with a current reading is the ordinary state of a
+  // working bench. Red is not used here at all — reserved, per fui.css's header,
+  // for states needing action, and a PDU sitting there powering the bench is not
+  // one.
+  verdict.className = 'val' + (!m.known || m.stale ? ' warn' : '');
+
+  const setReading = (id, text) => {
+    const el = $(id);
+    el.textContent = text;
+    // Every figure is either a number the bench sent or the literal NO LINK; the
+    // view builder guarantees there is no third case, and the class follows the
+    // text rather than being decided again here.
+    el.className = 'v' + (text === 'NO LINK' ? ' bad' : m.stale ? ' warn' : '');
+  };
+  setReading('mains-voltage', m.voltage);
+  setReading('mains-frequency', m.frequency);
+  // Amps and watts on one line: they are two views of the same quantity, and the
+  // panel is narrow. Both or neither — a bare "48 W" beside a missing current
+  // reading invites the arithmetic that would recover a number nobody measured.
+  setReading('mains-load',
+    m.load_A === 'NO LINK' && m.load_W === 'NO LINK'
+      ? 'NO LINK' : `${m.load_A} · ${m.load_W}`);
+
+  renderPorts(m);
+
+  // The note line carries whichever single fact most changes what the operator
+  // does next, worst first. Only one, because a panel this small with three lines
+  // of explanation is one nobody reads.
+  const note = $('mains-note');
+  if (!m.known) {
+    // Both routes here are ordinary on a healthy idle bench: no sweep has landed
+    // yet, or nothing has opened the PDU. Worth saying which, because "the bench
+    // has not told us" and "there is a fault" look identical from an empty panel
+    // and only one of them warrants walking over to the rack.
+    note.textContent = 'no mains report from the bench yet';
+    note.className = 'mains-note warn';
+  } else if (m.aged_out) {
+    // The specific fault this panel can detect and no other can: the pushes
+    // stopped while the rest of the display is current. The global staleness
+    // banner cannot see it, because mains runs on a clock of its own.
+    note.textContent = `port states ${Math.round(m.age_s)}s old — not current`;
+    note.className = 'mains-note warn';
+  } else if (m.stale) {
+    note.textContent = 'display is stale — ports not vouched for';
+    note.className = 'mains-note warn';
+  } else if (m.settling_s) {
+    note.textContent = `DUT settling ${m.settling_s}s after switch`;
+    note.className = 'mains-note';
+  } else if (m.last_transition) {
+    // A switch that happened between two sweeps. Sampling at ~10s can step
+    // clean over a power cycle and render it as "on, on", so the engine's
+    // event is the only record that the transition occurred at all.
+    const t = m.last_transition;
+    note.textContent =
+      `last switch: port ${t.outlet} ${t.state ? 'ON' : 'OFF'}`;
+    note.className = 'mains-note';
+  } else {
+    note.textContent = '';
+    note.className = 'mains-note';
+  }
+}
+
+/* The port chips. Rebuilt only when the count changes, matching renderRail's
+ * approach: the labels below churn every sweep and reallocating eight nodes twice
+ * a second on the board's GPU is a cost with nothing to show for it. */
+function renderPorts(m) {
+  const box = $('mains-ports');
+  const ports = m.outlets || [];
+  if (box.childElementCount !== ports.length) {
+    box.textContent = '';
+    for (let i = 0; i < ports.length; i++) {
+      const chip = document.createElement('div');
+      chip.className = 'port';
+      const idx = document.createElement('span');
+      idx.className = 'pi';
+      const state = document.createElement('span');
+      state.className = 'ps';
+      chip.appendChild(idx);
+      chip.appendChild(state);
+      box.appendChild(chip);
+    }
+  }
+  ports.forEach((p, i) => {
+    const chip = box.children[i];
+    chip.className = portClasses(p, m.stale);
+    chip.children[0].textContent = p.index;
+    chip.children[1].textContent = p.label;
+  });
+}
+
 // The class for one sequence node. Extracted as a pure function for the same
 // reason slotClasses is: this is a decision table, and one that needs a DOM to
 // exercise is one nobody tests.
@@ -813,6 +941,7 @@ function render(v) {
     verdict.textContent = v.log.length ? 'ACTIVE' : 'IDLE';
   }
   renderLog(v.log);
+  renderMains(v.mains);
   renderRail(v.instruments);
   renderRailHead(v.bench, v.connected);
   renderUnclaimed(v.unclaimed);

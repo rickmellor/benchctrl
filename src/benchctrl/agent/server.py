@@ -35,7 +35,7 @@ from benchctrl.agent.eventbus import (
     EventSubscriber,
 )
 from benchctrl.agent.recordings import PREVIEW_HZ, IteratorTable, RecordingTable
-from benchctrl.agent.registry import DeviceRegistry
+from benchctrl.agent.registry import SWITCHED_PDU_KEYS, DeviceRegistry
 from benchctrl.agent.runs.engine import RunManager
 from benchctrl.agent.runs.spec import RunSpec
 from benchctrl.agent.safety import SafetyGovernor, TripReason
@@ -183,6 +183,52 @@ PRESENCE_CHANGE_SEVERITY = "warn"
 #: dashboard's own inventory poll already used — so this replaces that work
 #: rather than adding to it.
 PRESENCE_INTERVAL_HEARTBEATS = 6.0
+
+#: Kind for the periodic mains sweep: what the bench's PDU is doing.
+#:
+#: Pushed by the bench for the same reason presence is, and for one more that is
+#: specific to this device. A dashboard is an **observer** session
+#: (:py:data:`OBSERVER_METHODS`), so it cannot call ``device.call`` and cannot
+#: read a PDU for itself — a panel that displayed mains state by polling would
+#: need write-grade access to the one device on the bench that switches mains, to
+#: show a number. Pushing it keeps the display strictly read-only and leaves the
+#: PDU's single CLI session where it belongs: with the bench.
+MAINS_KIND = "mains"
+
+#: Severity for a mains sweep that found no change. Read-grade like presence:
+#: shed first, never logged. A sweep whose *outlet states* differ is emitted at
+#: :py:data:`MAINS_CHANGE_SEVERITY` instead.
+MAINS_SEVERITY = ACTION_SEVERITY_READ
+
+#: Severity for a mains sweep whose outlet states changed. ``warn``, matching a
+#: presence change, because an outlet that switched when nothing asked it to is
+#: the bench fact most likely to explain a DUT that stopped responding — and
+#: because it must outrank the read traffic it competes with for log space.
+#:
+#: Deliberately not higher. A *commanded* switch also lands here (the sweep
+#: cannot tell one from the other; only the run engine and the governor know
+#: intent), and grading an expected power cycle ``alarm`` would train an operator
+#: to ignore the grade.
+MAINS_CHANGE_SEVERITY = "warn"
+
+#: How often the bench reads its PDU, as a multiple of ``heartbeat_s``. 2.0 is a
+#: sweep every ~10 s on a 5 s heartbeat.
+#:
+#: Between the heartbeat and the presence sweep, and for a measured reason: one
+#: ``devsta show`` + ``oltsta show`` pair is a ~0.6 s round trip each on this
+#: device's 9600-baud CLI, so this is far cheaper than a USB enumeration and far
+#: dearer than a liveness check. Mains voltage and load also *drift* — unlike
+#: presence, which changes only when someone moves a cable — so a slower clock
+#: would leave the panel showing a load figure old enough to mislead.
+MAINS_INTERVAL_HEARTBEATS = 2.0
+
+#: Ceiling on one mains sweep's time on the PDU's worker.
+#:
+#: The sweep is a courtesy and must never be the reason a run's switch waits. It
+#: goes onto the same single-threaded worker as everything else for that device,
+#: so this bounds how long a queued switch could sit behind one — two CLI round
+#: trips at ~0.6 s each, with generous margin for a device mid-``oltcfg``.
+MAINS_READ_TIMEOUT_S = 12.0
 
 #: How long one identical action signature keeps its line. A repeated read
 #: inside this window increments a count instead of emitting.
@@ -879,6 +925,12 @@ class BenchAgent:
         # on every connect and disconnect, and a bus scan must not be able to
         # stall those.
         self._presence_lock = threading.Lock()
+        # Mains sweeps, with the same first-sweep-is-not-a-change distinction as
+        # presence above. ``_last_mains_states`` is None until one completes.
+        self._last_mains_mono: Optional[float] = None
+        self._last_mains_states: Optional[dict] = None
+        self._mains_running = False
+        self._mains_lock = threading.Lock()
 
     # --- lifecycle ------------------------------------------------------
 
@@ -922,6 +974,16 @@ class BenchAgent:
                 self._maybe_start_presence_sweep()
             except Exception:  # pragma: no cover
                 log.exception("agent: presence sweep raised")
+            # Handed off for the same reason, and one stronger: a mains read goes
+            # onto the PDU's own worker queue, so running it here would put the
+            # deadman thread behind a device queue it does not control. A run
+            # switching an outlet holds that worker for the length of a verified
+            # switch (up to ~6 s), and the thread that must trip an abandoned
+            # bench cannot be the thread waiting on it.
+            try:
+                self._maybe_start_mains_sweep()
+            except Exception:  # pragma: no cover
+                log.exception("agent: mains sweep raised")
 
     def _maybe_emit_link(self) -> None:
         """Emit a link heartbeat if one is due and anyone is listening.
@@ -1078,6 +1140,162 @@ class BenchAgent:
         finally:
             with self._presence_lock:
                 self._presence_running = False
+
+    def _mains_key(self) -> Optional[str]:
+        """The served PDU whose state the mains sweep reports, if there is one.
+
+        None on a bench with no PDU, which is most benches: the sweep then never
+        runs and no ``mains`` event is ever published, so a consumer's "have I
+        heard from a PDU" test is the honest one.
+
+        Ambiguity is resolved by refusing rather than guessing, exactly as
+        ``_resolve_pdu_key`` does for a run: with two switched PDUs served, a
+        panel showing one of them under a heading that says "MAINS" would be
+        confidently wrong about half the bench. One line in the log and no event
+        is the better failure.
+        """
+        served = [k for k in self.registry.keys if k in SWITCHED_PDU_KEYS]
+        if len(served) != 1:
+            if served:
+                log.warning(
+                    "agent: %d switched PDUs served (%s); no mains sweep, because "
+                    "a single mains readout cannot describe two of them",
+                    len(served),
+                    served,
+                )
+            return None
+        return served[0]
+
+    def _maybe_start_mains_sweep(self) -> None:
+        """Start a mains sweep if one is due, on its own thread.
+
+        Cheap by construction, like its presence sibling: two clocks and a flag.
+
+        **Gated on the PDU already being open, not merely served.** This is the
+        one difference from the presence sweep that matters, and it is deliberate:
+        ``registry.get()`` opens a device on first use, so a sweep that used it
+        would make a *display connecting* the reason the bench logs into a mains
+        PDU and takes its single CLI session. That inverts the project invariant
+        the whole dashboard is built around — the panel must never be the cause of
+        bench activity — and on this device it has a second consequence, because
+        the PDU permits one CLI session across all transports: the display would
+        be holding the session an operator needs for recovery.
+
+        So the panel shows mains state once something with a reason to open the
+        PDU has opened it, and says so plainly until then.
+        """
+        interval = self.heartbeat_s * MAINS_INTERVAL_HEARTBEATS
+        if interval <= 0:
+            return  # mains sweeps disabled by configuration
+        now = time.monotonic()
+        if self._last_mains_mono is not None and now - self._last_mains_mono < interval:
+            return
+        if self.observer_count() <= 0:
+            self._last_mains_mono = now
+            return
+        key = self._mains_key()
+        if key is None:
+            self._last_mains_mono = now
+            return
+        # Never ``registry.get``: see the docstring. A device the agent has not
+        # opened is not a device this courtesy may open.
+        pdu = self.registry.open_devices().get(key)
+        if pdu is None:
+            self._last_mains_mono = now
+            return
+        with self._mains_lock:
+            if self._mains_running:
+                # Not stamped, so the next tick reconsiders promptly rather than
+                # waiting out another full interval behind an already-slow read.
+                return
+            self._mains_running = True
+        self._last_mains_mono = now
+        threading.Thread(
+            target=self._mains_sweep, args=(key, pdu), name="mains-sweep", daemon=True
+        ).start()
+
+    def _mains_sweep(self, key: str, pdu: Any) -> None:
+        """Read the PDU's metering and outlet states, and publish them.
+
+        Runs on its own thread and never raises: a courtesy that took down the
+        agent would be worse than no readout.
+
+        Reads go through the device's **own worker**, not directly. The worker is
+        what serialises access to a single-session CLI, and a background thread
+        writing ``devsta show`` into a link that a run is mid-``oltctrl`` on would
+        interleave two commands on one prompt and desync the session — for a
+        display. The bounded ``timeout`` is the other half: this must yield to a
+        run's switch rather than queue ahead of it, and a sweep that cannot get a
+        turn simply reports nothing this cycle.
+
+        Publishes on every sweep, like presence, so a consumer can tell "still
+        eight outlets on" from "nobody has looked". Only a *changed* sweep is
+        logged.
+        """
+        try:
+            worker = self.workers.get(key)
+
+            def read():
+                # One function on the worker rather than two submissions: the
+                # metering and the outlet states are shown side by side, and two
+                # queued reads could be split by a switch, leaving the panel with
+                # a load figure from before a power cycle beside outlet states
+                # from after it. One trip cannot straddle a transition.
+                return pdu.read_device_status(), pdu.outlet_states()
+
+            if worker is None:  # pragma: no cover - every open device has a worker
+                status, states = read()
+            else:
+                status, states = worker.submit(
+                    read, label="mains_sweep", timeout=MAINS_READ_TIMEOUT_S
+                )
+
+            # Keys normalised to str for the wire: JSON object keys are strings,
+            # so ``{3: True}`` would arrive as ``{"3": true}`` and a consumer
+            # comparing against the previous sweep would see every key change on
+            # the first round trip. Normalising at the source means the change
+            # detection below and the consumer's own agree.
+            outlets = {str(i): bool(v) for i, v in sorted(states.items())}
+            changed = self._last_mains_states is not None and (
+                self._last_mains_states != outlets
+            )
+            first = self._last_mains_states is None
+            self._last_mains_states = outlets
+            self.events.publish(
+                {
+                    "kind": MAINS_KIND,
+                    "severity": (
+                        MAINS_CHANGE_SEVERITY if changed else MAINS_SEVERITY
+                    ),
+                    "device": key,
+                    "outlets": outlets,
+                    # Metering, flattened rather than nested, because a consumer
+                    # in another process reads these with .get and a nested dict
+                    # is one more shape to guard.
+                    "voltage_V": status.voltage_V,
+                    "frequency_Hz": status.frequency_Hz,
+                    "load_A": status.load_A,
+                    "load_W": status.load_W,
+                    # Which transport the reading came over. Recorded for the same
+                    # reason the driver has a ``transport`` property: "which wire
+                    # did that travel on" must be answerable from the record.
+                    "transport": getattr(pdu, "transport", ""),
+                    "changed": bool(changed),
+                    "first": bool(first),
+                }
+            )
+            if changed:
+                log.warning(
+                    "agent: mains outlet states changed — now %s", outlets
+                )
+        except Exception:  # noqa: BLE001 - a background courtesy must not raise
+            # ``info``, not ``warning``: the expected cause is a worker timeout
+            # because a run has the PDU busy, which is this sweep correctly
+            # yielding rather than anything being wrong.
+            log.info("agent: mains sweep failed; no readout this cycle", exc_info=True)
+        finally:
+            with self._mains_lock:
+                self._mains_running = False
 
     def trip(self, reason: TripReason) -> dict:
         return self.governor.trip(
@@ -1798,8 +2016,6 @@ class _Handler(socketserver.BaseRequestHandler):
         cutting power to the wrong DUT — a failure the operator would read as a
         flaky device, not as a wiring question.
         """
-        from benchctrl.agent.registry import SWITCHED_PDU_KEYS
-
         served = [k for k in self.agent.registry.keys if k in SWITCHED_PDU_KEYS]
         if not served:
             raise BenchValueError(

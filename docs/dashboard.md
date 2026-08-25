@@ -303,6 +303,97 @@ What the rail surfaced immediately on the real board is a genuine config gap the
 old five-`NO_LINK` version hid: three instruments identified on the bus at
 `exact` confidence that the agent does not serve.
 
+## MAINS.MGR — the PDU is not an instrument
+
+A switched PDU gets its own panel in the bottom-left column and deliberately
+**no row on the instrument rail**. It is core harness, like the Arduino hosting
+the agent: it is not something a run measures with, it is the thing that decides
+whether the rest of the bench has power at all. Giving it a rail row would put
+mains switching into the rail's vocabulary — `ARMED`, `IDLE`, the arm counter —
+and "outlet 3 is energised" is not an armed output. The exclusion is one line in
+`_rail_specs`, and it needs to be explicit because the rail's membership rule
+(served-or-present, plus *any unrecognised key appended as an unknown
+instrument*) put the PDU on the rail the moment the agent began serving it. The
+default was the wrong treatment, so `PDU_KEYS` is subtracted and a test pins it.
+
+The panel shows the four things an operator wants before reaching into an
+enclosure: **voltage**, **frequency**, **load**, and **per-outlet state**.
+
+### The panel cannot read the PDU, and that shapes everything
+
+The dashboard is an observer session, and `device.call` is not in
+`OBSERVER_METHODS`. A display therefore *cannot* query the PDU — by design, and
+for the reason in "Why event-driven and not polling", one step sharper: reading
+a PDU means write-grade access to the one device on the bench that switches
+mains. So mains state reaches the panel only because the bench **pushes** it:
+the periodic `mains` sweep in `agent/server.py`, and the run engine's
+`run_outlet` events folded in between sweeps.
+
+The consequence worth stating plainly: **there is no correcting poll.** Every
+other reading on the display is refreshed by something the display asked for. If
+the mains sweep stops — the PDU's session is held by a serial login, the sweep
+thread died, the device stopped answering — nothing on the panel changes by
+itself, and the global `STALE` clock does not help, because that is driven by
+status frames that keep arriving. So the panel keeps **its own** age: a sweep
+older than `MAINS_STALE_S` (30 s, three sweep intervals) sets `aged_out`, and
+that is a fault only this panel can detect.
+
+### Three ways to have nothing to show, and they are not the same
+
+Two of them look identical in the data, and the operator's next action differs,
+so they get different words:
+
+- **`NO PDU`** — no switched PDU is served. There is no mains control on this
+  bench. Nothing to wait for; the panel hides itself entirely.
+- **`NOT REPORTED`** — a PDU *is* served and nothing has reported it yet. On an
+  idle bench this is ordinary: the sweep only runs once something with a reason
+  to has opened the PDU, so a display connecting is never what makes the bench
+  log into a mains switch. It is also exactly what a broken sweep looks like,
+  which is why it is a distinct word rather than blanks.
+- **`MAINS LIVE`** / **`DUT SETTLING`** — a sweep has landed. `DUT SETTLING`
+  outranks live because it is more specific about the same instant: an outlet
+  has just switched and measurements taken now are garbage.
+
+These words are deliberately **disjoint from the rail's vocabulary** — a test
+asserts it. `ARMED` on the rail and a port reading `ON` are unrelated facts, and
+sharing a word between them would invite reading one as the other.
+
+### Staleness degrades differently here, and on purpose
+
+The rail strikes through and recolours a stale slot, because a stale `ARMED`
+over-warns and that is the safe direction. Mains is the other way round. A stale
+outlet `OFF` reads as *"the DUT is de-powered"* to somebody deciding whether to
+put a hand in an enclosure — the most dangerous thing this display could imply.
+So:
+
+- a stale port keeps its live colour and is dimmed and dashed, never struck
+  through and never recoloured: "last seen energised" has to stay readable at a
+  minute old;
+- on disconnect the outlet map is **dropped outright** rather than aged, while
+  `device` and `transport` survive — a reconnect does not restore the old map,
+  because a claim about which contactors are closed is worth nothing once the
+  link that established it has died;
+- only outlets that were actually **reported** get rows, and the energised count
+  is summed from the rows on screen, so the tally can never disagree with what is
+  drawn;
+- `.port.on` is **amber, not red.** All eight outlets are normally on; spending
+  red on the steady state would devalue the one red the display reserves for an
+  armed output.
+
+Below the ports is a single note line, chosen worst-first: no report yet → port
+states N seconds old → display stale → DUT settling → last switch. One line,
+because a panel that stacks four caveats is a panel nobody reads.
+
+An aged-out reading and a lost session are treated differently, and the split is
+the point. A silent sweep on a live link still has a bench behind it, so the
+figures are **kept** and only their standing changes. A dead session does not, so
+the map goes. Both are pinned by
+[`tests/test_mains_end_to_end.py`](../tests/test_mains_end_to_end.py), which
+runs the real agent, a real observer session and the shipped view builder, and
+asserts only against what `/api/view` returns — because the two publishers and
+the consumer share no code, and a renamed event key is otherwise a silent
+blanking that every unit test on both sides still passes.
+
 ## E-stop — two independent mechanisms
 
 Both will exist, and they are not redundant copies of each other.

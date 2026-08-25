@@ -63,6 +63,32 @@ LINK_KIND_NAME = "link"
 #: sweep is treated as liveness, not as news.
 PRESENCE_KIND_NAME = "presence"
 
+#: Kind for the bench's periodic mains sweep — the PDU's metering and outlet
+#: states. A literal, like every other kind here, for the reason at the top of
+#: this module.
+#:
+#: Pushed rather than polled, and for this device that is not merely a
+#: preference: a dashboard is an observer session and cannot call ``device.call``
+#: at all, so mains state is knowable to the panel *only* because the bench sends
+#: it. See ``agent.server.MAINS_KIND``.
+MAINS_KIND_NAME = "mains"
+
+#: Kind for one verified outlet transition inside a run, emitted by
+#: :py:class:`~benchctrl.agent.runs.engine.RunEngine`.
+#:
+#: Folded in addition to the periodic sweep because the two carry different
+#: things. The sweep is a sample every ~10 s; a run's power cycle can be shorter
+#: than that, and a panel driven by the sweep alone would show mains on, then
+#: mains on, having silently missed a DUT losing power in between. This event is
+#: emitted *at* the transition and carries the read-back state, so the panel
+#: learns about the cycle that the sampler would have stepped over.
+RUN_OUTLET_KIND_NAME = "run_outlet"
+
+#: Kind for a run's post-switch settle window. Folded so the panel can say that
+#: the bench is deliberately waiting for a DUT to boot, rather than showing a
+#: phase that appears stalled.
+RUN_OUTLET_SETTLE_KIND_NAME = "run_outlet_settle"
+
 #: Kinds that start a run, and kinds that end one — both spellings of each.
 #:
 #: ``run_start``/``run_end`` are what
@@ -89,7 +115,16 @@ RUN_STAGE_KIND_NAME = "run_stage"
 RUN_EVENT_KINDS = (
     RUN_STARTED_KINDS
     | RUN_FINISHED_KINDS
-    | frozenset({"run_step", "run_aborted", "run_error", RUN_STAGE_KIND_NAME})
+    | frozenset(
+        {
+            "run_step",
+            "run_aborted",
+            "run_error",
+            RUN_STAGE_KIND_NAME,
+            RUN_OUTLET_KIND_NAME,
+            RUN_OUTLET_SETTLE_KIND_NAME,
+        }
+    )
 )
 
 #: Run states that mean work is in flight. Taken from
@@ -204,6 +239,75 @@ class DeviceSlot:
 
 
 @dataclass
+class MainsView:
+    """The bench's mains supply and its switched outlets.
+
+    Core harness rather than an instrument, which is why this is its own model
+    and not a :py:class:`DeviceSlot` field. A PDU is not something a test
+    *measures with*; it is what the bench and the DUT are plugged into, peer to
+    the board the agent runs on. An operator reads it to answer "is the DUT
+    powered", and the rail of instruments answers a different question.
+
+    Every field starts unknown, and unknown is a first-class state here for the
+    same reason it is everywhere else in this module — with one extra edge. Mains
+    state is knowable to a dashboard **only** because the bench pushes it: an
+    observer session cannot call ``device.call``, so there is no fallback poll
+    this model could fall back to. So a panel with no ``mains`` event has not
+    failed to display something it could have read; it genuinely has not been
+    told, and it must say so rather than draw a plausible 120 V.
+
+    :py:attr:`outlets` is deliberately ``{}`` when nothing has arrived rather
+    than a map of eight Falses. An outlet map that says "all off" is a claim that
+    the DUT is de-powered, and inventing it would be the most consequential lie
+    on the panel: someone reads "off" and reaches into a live enclosure.
+    """
+
+    #: Which served device these readings came from. Empty until a sweep lands.
+    device: str = ""
+    #: ``{outlet_index: energised}``, from the bench's sweep or a run's verified
+    #: transition. Keys are ints; the wire carries strings and they are coerced
+    #: on the way in.
+    outlets: dict[int, bool] = field(default_factory=dict)
+    voltage_V: Optional[float] = None
+    frequency_Hz: Optional[float] = None
+    load_A: Optional[float] = None
+    load_W: Optional[float] = None
+    #: ``"serial"`` or ``"ssh"`` — which wire the reading came over.
+    transport: str = ""
+    #: How many sweeps have landed. Proves the bench is reporting rather than the
+    #: panel guessing, the same job :py:attr:`BenchStatus.presence_sweeps` does.
+    sweeps: int = 0
+    #: When the last sweep landed, monotonic. Its own mark rather than the
+    #: general freshness one because this reads on a ~10 s clock of its own: a
+    #: mains figure that is two minutes old must be shown as old even while the
+    #: rest of the panel is current.
+    last_sweep_mono: Optional[float] = None
+    #: How many verified outlet transitions a run has reported this session, and
+    #: which outlets they touched. Kept because a power cycle can be shorter than
+    #: the sweep interval, so this is the only evidence the panel has that a DUT
+    #: was cycled at all.
+    transitions: int = 0
+    #: The last transition a run reported, as ``{"outlet": n, "state": bool}``.
+    last_transition: Optional[dict] = None
+    #: Seconds a run is deliberately waiting for a DUT to boot after switching
+    #: mains, from ``run_outlet_settle``. Set when the window opens and cleared
+    #: when anything else about mains arrives — it is a statement about now, and
+    #: a stale one would have the panel claim the bench is waiting when it has
+    #: long since moved on.
+    settling_s: Optional[float] = None
+
+    @property
+    def known(self) -> bool:
+        """Whether anything has reported mains state at all this session."""
+        return self.sweeps > 0 or self.transitions > 0
+
+    @property
+    def energised(self) -> int:
+        """How many known outlets are on. Meaningless unless :py:attr:`known`."""
+        return sum(1 for on in self.outlets.values() if on)
+
+
+@dataclass
 class RunView:
     run_id: str
     name: str = ""
@@ -277,6 +381,12 @@ class BenchStatus:
     #: bench fact is often "something is plugged in that benchctrl cannot
     #: drive", and a rail of five fixed slots structurally cannot say that.
     unclaimed: list[dict] = field(default_factory=list)
+    #: The bench's mains supply, if it has a PDU. Always present as an object and
+    #: empty-by-default inside, so the view never has to guard on None — but see
+    #: :py:attr:`MainsView.known` for the distinction that actually matters:
+    #: "this bench has no PDU" and "this bench has one and we have not heard from
+    #: it" must not render the same way, and neither may render as a reading.
+    mains: MainsView = field(default_factory=MainsView)
     runs: dict[str, RunView] = field(default_factory=dict)
     #: Which device worker threads are executing a call right now, as
     #: ``{device_key: method}``. Folded from ``agent.status``'s ``workers``
@@ -784,6 +894,112 @@ class BenchStatus:
         self.presence_sweeps += 1
         self.last_presence_mono = _mono(now)
 
+    def apply_mains(self, event: object, *, now: Optional[float] = None) -> None:
+        """Fold in a bench-pushed mains sweep: the PDU's metering and outlets.
+
+        The panel's only route to mains state. A dashboard is an observer session
+        and cannot call ``device.call``, so unlike every other reading here there
+        is no poll to fall back on if these events stop — which is why a sweep
+        that fails to parse leaves the previous reading in place rather than
+        blanking it, and why staleness is carried separately (see
+        :py:attr:`MainsView.last_sweep_mono`).
+
+        Outlet keys arrive as strings, because JSON object keys are strings, and
+        are coerced to ints here. A key that is not an integer is dropped rather
+        than kept as a string: the view sorts these to lay out a row of outlets,
+        and a mixed-type key set would raise on the render path — on the frame
+        after a malformed event, in the process that draws the screen.
+
+        The whole outlet map is **replaced**, not merged. A sweep is a complete
+        statement about every outlet at one instant, and merging would let an
+        outlet the PDU stopped reporting keep its last value forever, which is
+        precisely the stale-but-plausible reading this module exists to prevent.
+        """
+        if not isinstance(event, dict):
+            return
+        outlets = event.get("outlets")
+        if not isinstance(outlets, dict):
+            # A malformed sweep costs this update and nothing else — the same rule
+            # apply_presence follows, on the same receive path.
+            return
+        coerced: dict[int, bool] = {}
+        for key, value in outlets.items():
+            try:
+                coerced[int(key)] = bool(value)
+            except (TypeError, ValueError):
+                continue
+        mains = self.mains
+        mains.outlets = coerced
+        device = event.get("device")
+        if isinstance(device, str) and device:
+            mains.device = device
+        transport = event.get("transport")
+        if isinstance(transport, str) and transport:
+            mains.transport = transport
+        # Each read with _as_float and assigned only when it parses: a metering
+        # field the PDU printed as "----" (it does, for power factor at zero load)
+        # must leave the previous number alone rather than turn into 0.0. Zero
+        # volts is a claim about the mains supply and nothing here should be able
+        # to invent it.
+        for attr in ("voltage_V", "frequency_Hz", "load_A", "load_W"):
+            value = _as_float(event.get(attr))
+            if value is not None:
+                setattr(mains, attr, value)
+        mains.sweeps += 1
+        mains.last_sweep_mono = _mono(now)
+        # A completed sweep supersedes any settle window: the bench has answered
+        # about *now*, so a note saying it is waiting for a DUT to boot is either
+        # finished or about to be re-announced by the run.
+        mains.settling_s = None
+
+    def apply_run_outlet(self, event: dict, *, now: Optional[float] = None) -> None:
+        """Fold one verified outlet transition a run reported.
+
+        Folded in addition to the periodic sweep, not instead of it, because the
+        two see different things. The sweep samples every ~10 s; a power-cycle
+        phase can cut and restore mains inside that window, so a panel driven by
+        the sweep alone would show "on, on" across a DUT losing power — the
+        transition that the whole test is about, invisible.
+
+        The engine emits this *after* reading the contactor back, and the
+        ``state`` field is that read-back rather than what was requested. So this
+        is a measurement and is treated as one: it updates the outlet map. A
+        ``requested`` that disagrees with ``state`` never reaches here — the
+        engine raises and fails the phase instead.
+        """
+        nested = event.get("data")
+        fields = {**nested, **event} if isinstance(nested, dict) else event
+        try:
+            index = int(fields["outlet"])
+        except (KeyError, TypeError, ValueError):
+            return
+        # ``state`` only. A missing read-back is not a transition we can believe,
+        # and falling back to ``requested`` would defeat the reason the engine
+        # verifies at all: ``oltctrl`` acknowledges nothing, so the requested
+        # state is exactly the thing that carries no evidence.
+        state = fields.get("state")
+        if not isinstance(state, bool):
+            return
+        mains = self.mains
+        mains.outlets[index] = state
+        mains.transitions += 1
+        mains.last_transition = {"outlet": index, "state": state}
+        mains.settling_s = None
+        mains.last_sweep_mono = _mono(now)
+
+    def apply_run_outlet_settle(self, event: dict) -> None:
+        """Note that a run is waiting for a DUT to come up after switching mains.
+
+        Kept so the panel can distinguish a deliberate dead time from a stalled
+        phase. Without it, the seconds after a power cycle look identical to a
+        run that has hung: no samples, no events, nothing moving.
+        """
+        nested = event.get("data")
+        fields = {**nested, **event} if isinstance(nested, dict) else event
+        value = _as_float(fields.get("settle_s"))
+        if value is not None and value > 0:
+            self.mains.settling_s = value
+
     def forget_inventory(self, reason: str = "") -> None:
         """Discard what only the live session could vouch for: the bus inventory
         and the agent's device table.
@@ -864,6 +1080,34 @@ class BenchStatus:
         # nothing can arrive.
         self.presence_sweeps = 0
         self.last_presence_mono = None
+        # Mains goes with presence — dropped, not kept-and-marked — and it is the
+        # clearest case for that direction on the panel.
+        #
+        # The test everywhere else here is which way a stale claim errs. A kept
+        # ``ARMED`` over-warns and is therefore safe to keep. A kept outlet map
+        # can err *either* way and one of those ways is the worst outcome this
+        # module can produce: an outlet last seen ``off`` reads as "the DUT is
+        # de-powered", which is the reassurance that precedes someone reaching
+        # into an enclosure — and mains may have been restored by a run's next
+        # phase in the very window where nothing can reach the panel to say so.
+        #
+        # There is also no correcting poll. Every other reading here is re-
+        # established by ``agent.status`` on reconnect; mains exists only because
+        # the bench pushes it, so a stale outlet map would persist until the next
+        # sweep of a session that may never come.
+        #
+        # ``device`` and ``transport`` survive: they say *which* PDU and which
+        # wire, which stays true across a reconnect and is not a reading.
+        self.mains.outlets = {}
+        self.mains.voltage_V = None
+        self.mains.frequency_Hz = None
+        self.mains.load_A = None
+        self.mains.load_W = None
+        self.mains.sweeps = 0
+        self.mains.transitions = 0
+        self.mains.last_transition = None
+        self.mains.last_sweep_mono = None
+        self.mains.settling_s = None
         # Dropped with the busy readout for the same reason: "the DMM was reading
         # 2 s ago" is a claim about a session that no longer exists, and on
         # reconnect the ages would be measured from before the gap.
@@ -1060,6 +1304,15 @@ class BenchStatus:
             self.apply_presence(event, now=stamp)
             if not event.get("changed"):
                 return
+        elif kind == MAINS_KIND_NAME:
+            # The bench telling us what its PDU is doing. The same push-not-poll
+            # shape as presence, and the same log discipline: only a sweep whose
+            # outlet states *changed* earns a row, because an unchanged one every
+            # ~10 s would evict the 24 visible rows of real bench actions inside
+            # four minutes. Mains voltage drifting by 0.3 V is not news.
+            self.apply_mains(event, now=stamp)
+            if not event.get("changed"):
+                return
         elif kind == "events_dropped":
             # The agent is telling us our own view has holes. Believe it.
             count = event.get("count")
@@ -1239,6 +1492,26 @@ class BenchStatus:
                 view.stage = stage
             # Deliberately no ``else`` clearing it: a malformed event is not news
             # that the run left its stage.
+        elif kind == RUN_OUTLET_KIND_NAME:
+            # Routed to the mains model rather than the run view. It is folded
+            # here, inside the run branch, because it is a run event and arrives
+            # with a ``run_id`` — but what it says is about the bench's mains, and
+            # the panel shows it in the harness panel, not against the run.
+            #
+            # Its own branch because the ``else`` below folds nothing: it writes
+            # ``view.step``, and these carry no ``step``. Note what that does
+            # *not* mean — the ``else`` is written ``fields.get("step", "") or
+            # view.step``, so falling into it would leave the step intact rather
+            # than blanking it. An earlier version of this comment claimed
+            # otherwise, and a mutation removing the branch proved it wrong: the
+            # step survived and the outlet map stayed empty. So the cost of losing
+            # this branch is the whole mains fold, silently — the panel would show
+            # a run power-cycling a DUT with every port still reading as it did
+            # before the switch. That is the failure to guard against, and it is a
+            # worse one than a blanked step.
+            self.apply_run_outlet(event)
+        elif kind == RUN_OUTLET_SETTLE_KIND_NAME:
+            self.apply_run_outlet_settle(event)
         else:
             view.step = str(fields.get("step", "") or view.step)
         progress = _as_float(fields.get("progress"))
@@ -1334,6 +1607,47 @@ class BenchStatus:
             "inventory_taken": self.inventory_taken,
             "registry_known": self.registry_known,
             "unclaimed": list(self.unclaimed),
+            # Core harness, not an instrument — a flat sub-dict of its own rather
+            # than an entry in ``devices`` or ``slots``, because it is neither a
+            # thing the bench measures with nor a slot on the instrument rail.
+            #
+            # ``known`` is the field the view turns on, and it is computed here
+            # rather than left to the renderer to infer from an empty map: "no PDU
+            # on this bench" and "a PDU we have not heard from" both produce empty
+            # outlets, and the difference decides whether the panel shows a state
+            # or hides itself. Inferring it downstream is how one of those two ends
+            # up rendered as the other.
+            #
+            # ``age_s`` rather than the raw monotonic, matching ``action_age``
+            # above: a monotonic from this process is meaningless to a browser, and
+            # mains reads on a ~10 s clock of its own, so it goes stale while the
+            # rest of the panel is current.
+            "mains": {
+                "known": self.mains.known,
+                "device": self.mains.device,
+                "outlets": {
+                    str(i): on for i, on in sorted(self.mains.outlets.items())
+                },
+                "energised": self.mains.energised,
+                "voltage_V": self.mains.voltage_V,
+                "frequency_Hz": self.mains.frequency_Hz,
+                "load_A": self.mains.load_A,
+                "load_W": self.mains.load_W,
+                "transport": self.mains.transport,
+                "sweeps": self.mains.sweeps,
+                "transitions": self.mains.transitions,
+                "last_transition": (
+                    dict(self.mains.last_transition)
+                    if self.mains.last_transition
+                    else None
+                ),
+                "settling_s": self.mains.settling_s,
+                "age_s": (
+                    max(0.0, stamp - self.mains.last_sweep_mono)
+                    if self.mains.last_sweep_mono is not None
+                    else None
+                ),
+            },
             "runs": {k: r.state for k, r in self.runs.items()},
             # {run_id: stage} for runs that have reported one, as a map alongside
             # ``runs`` rather than folded into it: that one is {id: state}, a bare

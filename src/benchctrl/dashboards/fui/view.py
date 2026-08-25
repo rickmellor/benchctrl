@@ -190,11 +190,20 @@ def _rail_specs(slots: dict) -> list[dict]:
     An empty result is honest and handled: :py:func:`build_view` falls back to the
     full table before a device table arrives, so the panel is populated during
     startup rather than blank.
+
+    **Core harness is excluded.** :py:data:`PDU_KEYS` never earns a row, however
+    served or present it is. This is not cosmetic filtering: the served-or-present
+    rule above appends any key it does not recognise as an unknown instrument, so a
+    switched PDU landed on the rail with the ``INSTRUMENT`` role and the rail's arm
+    vocabulary the moment the agent began serving it — the exact treatment it must
+    not get. It has its own panel (:py:func:`_mains_panel`), and a device shown in
+    both places is one an operator has to reconcile.
     """
     keys = [
         key
         for key, slot in slots.items()
         if isinstance(slot, dict)
+        and key not in PDU_KEYS
         and (slot.get("served") or slot.get("present") or slot.get("open_error"))
     ]
     wanted = set(keys)
@@ -703,6 +712,238 @@ def _slot_state(
     return {**dark, "status": STANDBY, "ready": True}
 
 
+#: Device keys that switch mains, for deciding whether this bench has a mains
+#: panel at all.
+#:
+#: A literal, and deliberately not an import of
+#: :py:data:`benchctrl.agent.registry.SWITCHED_PDU_KEYS`, for the reason recorded
+#: at the top of :py:mod:`benchctrl.dashboards.state`: this display runs against a
+#: *remote* agent over a wire protocol, and a panel that could only be built where
+#: ``agent`` is importable would not be a remote panel. Drift here fails safe — an
+#: unlisted PDU key yields :py:data:`MAINS_NO_PDU` until a sweep arrives, and the
+#: sweep is what actually decides the panel's contents.
+PDU_KEYS: frozenset[str] = frozenset({"cyberpower_pdu41002"})
+
+#: The mains panel's own verdict words. Separate from the instrument rail's
+#: vocabulary on purpose: a PDU's states are not an instrument's, and reusing
+#: ``STANDBY``/``OPEN`` here would invite the renderer to style them alike when
+#: what they mean is unrelated. ``NO PDU`` is the honest word for a bench with no
+#: switched PDU served — an absence of hardware, not a fault.
+MAINS_NO_PDU = "NO PDU"
+
+#: A PDU is served but nothing has reported its state. Reached in two ways that
+#: both leave the panel with nothing to show: the bench has not swept yet, and the
+#: PDU has not been opened by anything with a reason to open it (a display must
+#: never be that reason — see ``agent.server._maybe_start_mains_sweep``). Both are
+#: ordinary on a healthy idle bench, so this must not read as a fault.
+MAINS_UNREPORTED = "NOT REPORTED"
+
+#: Mains state arrived and this is what it says. ``LIVE`` describes the *supply*,
+#: not any outlet: the PDU's input is energised, which is true whenever the bench
+#: can talk to it at all.
+MAINS_LIVE = "MAINS LIVE"
+
+#: A run is holding off measurement while a DUT comes back up. Outranks
+#: :py:data:`MAINS_LIVE` because it is the more specific statement about the same
+#: instant, and because a phase in a settle window otherwise looks stalled.
+MAINS_SETTLING = "DUT SETTLING"
+
+#: Per-outlet words. Short enough for a row of eight on a narrow panel.
+OUTLET_ON = "ON"
+OUTLET_OFF = "OFF"
+
+#: An outlet the PDU did not report in the last sweep. Not ``OFF``: an unreported
+#: outlet is one nobody has heard about, and rendering that as de-energised is the
+#: one mistake on this panel that could put somebody's hand in an enclosure.
+OUTLET_UNKNOWN = "—"
+
+#: How old a mains reading may be before the panel marks it stale, in seconds.
+#:
+#: Derived from the bench's own sweep cadence rather than picked: the agent sweeps
+#: every ``heartbeat_s * MAINS_INTERVAL_HEARTBEATS`` (~10 s on a 5 s heartbeat),
+#: so this is three intervals — the same two-may-be-missed-before-crying-wolf
+#: margin the silence budget uses. Mains readings also arrive *only* by push, so a
+#: panel that failed to notice them stopping would have no other way to find out.
+MAINS_STALE_S = 30.0
+
+
+def _mains_panel(snap: dict, *, trustworthy: bool) -> dict:
+    """The bottom-left harness panel: the bench's mains and its outlets.
+
+    Core harness, and the reason this is a function of its own rather than a row
+    in :py:func:`_rail_specs`. A PDU is not an instrument: nothing measures with
+    it, no run enrolls it as a source, and it has no arm state. It is what the
+    bench and the DUT are plugged into — peer to the board the agent runs on — so
+    it gets a fixed panel that is present whenever the bench has one, rather than
+    a slot that competes for space with the things a test actually reads.
+
+    Three states this must keep apart, because an operator's next action differs
+    for each and two of them look identical from the data:
+
+    ==========================  ==============================================
+    :py:data:`MAINS_NO_PDU`     no switched PDU is served; there is no mains
+                                readout to have
+    :py:data:`MAINS_UNREPORTED` a PDU is served and nothing has reported it —
+                                either no sweep yet or nothing has opened it
+    :py:data:`MAINS_LIVE`       a reading arrived, and these are the numbers
+    ==========================  ==============================================
+
+    The first two both have empty outlet maps, which is why ``known`` is computed
+    in the state model rather than inferred from emptiness here.
+
+    Every number is passed through or replaced by :py:data:`NO_LINK`, never
+    defaulted. That rule is inherited from this module's header and is sharper for
+    this panel than any other: a fabricated ``0.0 A`` reads as "nothing is
+    drawing", and a fabricated outlet ``OFF`` reads as "the DUT is de-powered".
+    Both are read from across a bench by someone deciding whether it is safe to
+    touch something.
+    """
+    mains = snap.get("mains")
+    mains = mains if isinstance(mains, dict) else {}
+    # Served-ness comes from the device table, not from the mains payload: the
+    # panel must be able to say "this bench has a PDU we have not heard from",
+    # which is precisely the case where the payload is empty.
+    slots = snap.get("slots")
+    slots = slots if isinstance(slots, dict) else {}
+    served = any(
+        key in PDU_KEYS
+        and isinstance(slot, dict)
+        and (slot.get("served") or slot.get("present"))
+        for key, slot in slots.items()
+    )
+    known = bool(mains.get("known"))
+    # A reading is its own kind of stale, on its own clock. Both routes count: the
+    # whole view being untrustworthy, and mains alone having gone quiet while the
+    # rest of the panel is current — the second is invisible to the global banner.
+    age = _as_optional_float(mains.get("age_s"))
+    aged_out = age is not None and age > MAINS_STALE_S
+    stale = known and (not trustworthy or aged_out)
+
+    rows = _outlet_rows(mains.get("outlets"))
+    settling = _as_optional_float(mains.get("settling_s"))
+    if not served and not known:
+        status = MAINS_NO_PDU
+    elif not known:
+        status = MAINS_UNREPORTED
+    elif settling is not None and settling > 0:
+        status = MAINS_SETTLING
+    else:
+        status = MAINS_LIVE
+
+    return {
+        "status": status,
+        "known": known,
+        "served": served,
+        "stale": stale,
+        # Distinguished from ``stale`` so the renderer can say *why* — a reading
+        # the bench stopped sending is a different fault from a whole view that
+        # has gone untrustworthy, and only the first points at the PDU.
+        "aged_out": bool(aged_out),
+        "age_s": age,
+        "device": str(mains.get("device") or ""),
+        "transport": str(mains.get("transport") or ""),
+        "voltage": _mains_reading(mains.get("voltage_V"), known, "{:.1f} V"),
+        "frequency": _mains_reading(mains.get("frequency_Hz"), known, "{:.1f} Hz"),
+        "load_A": _mains_reading(mains.get("load_A"), known, "{:.2f} A"),
+        "load_W": _mains_reading(mains.get("load_W"), known, "{:.0f} W"),
+        "outlets": rows,
+        # ``n of m`` for the panel header, where m is how many outlets were
+        # *reported* rather than how many the device has. A PDU that reported six
+        # of eight must not read as "2 off" — that would be inventing two
+        # measurements out of a short payload.
+        #
+        # Counted from the rows just built rather than passed through from the
+        # payload, so the number and the rows beneath it cannot disagree: a
+        # payload whose ``energised`` was computed before an outlet was dropped
+        # for an unparseable index would otherwise show "3 on" above two ON rows.
+        # Not ``_as_count`` — that floors at 1, which is right for a log row's
+        # repeat count and catastrophic here, where zero energised outlets is both
+        # possible and the single most important number on the panel to get right.
+        "energised": sum(1 for r in rows if r["on"]),
+        "reported": len(rows),
+        "settling_s": settling,
+        "transitions": _as_tally(mains.get("transitions")),
+        # The last verified switch a run reported, for the line that says a power
+        # cycle happened between two sweeps. None when no run has switched
+        # anything this session.
+        "last_transition": (
+            mains.get("last_transition")
+            if isinstance(mains.get("last_transition"), dict)
+            else None
+        ),
+    }
+
+
+def _mains_reading(value: object, known: bool, fmt: str) -> str:
+    """One metering figure, formatted, or :py:data:`NO_LINK`.
+
+    ``known`` is checked as well as the value: a payload that carried a number
+    from a previous session must not survive as a reading, and the state model's
+    disconnect path already clears the numbers — this is the second half of the
+    same guarantee, at the point where the string an operator reads is made.
+    """
+    if not known:
+        return NO_LINK
+    number = _as_optional_float(value)
+    if number is None:
+        return NO_LINK
+    return fmt.format(number)
+
+
+def _outlet_rows(outlets: object) -> list[dict]:
+    """One row per outlet the PDU reported, in index order.
+
+    Only reported outlets get a row. The device has eight, and padding to eight
+    would mean inventing rows for outlets nobody has heard about — see
+    :py:data:`OUTLET_UNKNOWN` for why an invented row is worse than a missing one.
+
+    Keys arrive as strings over the wire and are sorted **numerically**, because a
+    lexicographic sort puts outlet 10 between 1 and 2. There is no ten-outlet
+    model in tree today, which is exactly why this would be found the hard way.
+    """
+    if not isinstance(outlets, dict):
+        return []
+    rows = []
+    for key, value in outlets.items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            continue
+        rows.append(
+            {
+                "index": index,
+                "on": bool(value),
+                "label": OUTLET_ON if value else OUTLET_OFF,
+            }
+        )
+    rows.sort(key=lambda r: r["index"])
+    return rows
+
+
+def _as_tally(value: object) -> int:
+    """A running total: an int >= 0, whatever arrived.
+
+    The counterpart to :py:func:`_as_count`, which floors at 1 because a log row
+    always stands for at least one action. A tally of things that happened floors
+    at 0, because "none yet" is a true and common answer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value if value >= 0 else 0
+
+
+def _as_optional_float(value: object) -> Optional[float]:
+    """A float, or None for anything that is not a number.
+
+    ``bool`` is rejected before ``int`` — ``True`` would otherwise render as
+    ``1.0 V``. The same order the drivers' index coercion uses, for the same
+    reason: ``bool`` is a subclass of ``int`` and every naive check passes it.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def _active_stage(runs: dict, stages: Optional[dict] = None) -> Optional[str]:
     """Which flowchart node pulses, if any.
 
@@ -906,6 +1147,14 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
         # benchctrl cannot drive" is a real bench fact — on the development board
         # it is an SDG1032X and a DS1000Z scope with no drivers yet.
         "unclaimed": list(snap.get("unclaimed") or ()),
+        # Core harness, and its own top-level block rather than a sixth entry in
+        # ``instruments``. A PDU is not something a test reads: it has no arm
+        # state, no run enrolls it as a source, and the rail's whole vocabulary
+        # (STANDBY, OPEN, IN RUN) says nothing true about a mains contactor. It is
+        # what the bench is plugged into — peer to the board the agent runs on —
+        # so it gets a fixed panel instead of competing for a rail slot with the
+        # instruments a run actually measures with.
+        "mains": _mains_panel(snap, trustworthy=trustworthy),
         "stages": [
             {
                 "name": name,

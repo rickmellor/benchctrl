@@ -63,6 +63,40 @@
           <div id="log"><div class="empty">no events</div></div>
         </div>
       </section>
+
+      <!-- Core harness, not an instrument. The PDU is what the bench and the DUT
+           are plugged into — peer to the board the agent runs on — so it gets a
+           fixed panel here rather than a row on the INSTRUMENTS rail, whose
+           vocabulary (STANDBY, OPEN, IN RUN) says nothing true about a mains
+           contactor and whose slots belong to the things a test measures with.
+
+           Bottom of #left by request: it is the one readout an operator wants in
+           peripheral vision while working at the bench, and it must not move when
+           the log above it fills.
+
+           `hidden` by default, and the only panel on the page that hides itself.
+           Everywhere else an absent readout still shows NO LINK, because the
+           hardware exists and we have simply not heard from it. A bench with no
+           PDU has no mains readout to have, and a permanently dark MAINS.MGR
+           would train an operator to ignore the panel that matters most on the
+           benches that do have one. renderMains() unhides it the moment the view
+           says a PDU is served. -->
+      <section class="panel" id="mains-panel" hidden>
+        <div class="title"><span>MAINS.MGR</span><span class="val bad" id="mains-verdict">NO LINK</span></div>
+        <div class="body" id="mains-body">
+          <div class="kv"><span class="k">VOLTAGE</span><span class="v bad" id="mains-voltage">NO LINK</span></div>
+          <div class="kv"><span class="k">FREQUENCY</span><span class="v bad" id="mains-frequency">NO LINK</span></div>
+          <div class="kv"><span class="k">LOAD</span><span class="v bad" id="mains-load">NO LINK</span></div>
+          <!-- Per-outlet ports. Built by renderMains(); no placeholder rows,
+               because an invented OFF row is the one output this panel must never
+               produce — it reads as "that outlet is de-energised" to somebody
+               deciding whether to reach into an enclosure. -->
+          <div id="mains-ports" class="ports"></div>
+          <!-- Why the panel is not showing numbers, or what a run just did to an
+               outlet. Empty when there is nothing to say; CSS drops the space. -->
+          <div id="mains-note" class="mains-note"></div>
+        </div>
+      </section>
     </div>
 
     <!-- Centre: DUT hologram, flow, instrument detail -->

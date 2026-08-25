@@ -41,6 +41,11 @@ from benchctrl.dashboards.fui.view import (
     FAULT,
     IN_RUN,
     INSTRUMENTS,
+    MAINS_LIVE,
+    MAINS_NO_PDU,
+    MAINS_SETTLING,
+    MAINS_STALE_S,
+    MAINS_UNREPORTED,
     NO_LINK,
     NOT_SERVED,
     OPEN,
@@ -3577,3 +3582,689 @@ def test_an_unreachable_bench_claims_no_dut_at_all():
     unspecified — it is unknown, which is what NO LINK says everywhere else."""
     got = run_dut_label({"connected": False, "dut_known": True, "dut": "cr2032-cell"})
     assert got == "NO LINK"
+
+
+# --------------------------------------------------------------------------
+# MAINS.MGR — core harness, and the one readout with no poll behind it
+#
+# The user's framing, which the design follows: the PDU "shouldn't be treated
+# like a standard instrument. It's core harness, if present, like the arduino
+# itself." So it gets a fixed panel rather than a rail slot, and none of the
+# rail's vocabulary — STANDBY, OPEN, IN RUN — is reused for it, because none of
+# it says anything true about a mains contactor.
+#
+# What makes this panel harder than the rail: a dashboard is an OBSERVER session
+# and ``device.call`` is not in the agent's OBSERVER_METHODS, so the display can
+# never read the PDU. Everything here arrived because the bench pushed it. There
+# is no correcting poll, which is why staleness gets its own clock and why the
+# three "nothing to show" states below must be told apart rather than collapsed.
+# --------------------------------------------------------------------------
+
+
+def mains_event(**overrides):
+    """A sweep as ``agent/server.py``'s mains sweep publishes one.
+
+    String outlet keys, because JSON object keys are strings and a fixture using
+    ints would be testing a frame the bench cannot send.
+    """
+    base = {
+        "kind": "mains",
+        "severity": "read",
+        "device": "cyberpower_pdu41002",
+        "outlets": {"1": True, "2": False, "3": True},
+        "voltage_V": 121.7,
+        "frequency_Hz": 60.0,
+        "load_A": 0.42,
+        "load_W": 48.0,
+        "transport": "ssh",
+        "changed": True,
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.fixture()
+def pdu_bench():
+    """A live bench that serves a PDU and has reported its mains once.
+
+    The mains sweep is stamped with the **real** monotonic while everything else
+    uses the injected ``now=100.0``. That is not sloppiness: ``to_dict`` derives
+    ``age_s`` from ``time.monotonic()`` and takes no ``now``, so a sweep stamped at
+    100.0 comes out roughly three days old and every port reads stale. Tests that
+    want an aged reading say so by overriding ``age_s`` on the snapshot, which is
+    also the only place the renderer can see it.
+    """
+    s = BenchStatus()
+    s.apply_connected(
+        {**WELCOME, "devices": [{"key": "cyberpower_pdu41002", "open": True}]},
+        now=100.0,
+    )
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+    s.apply_event(mains_event())
+    return s
+
+
+def mains(status) -> dict:
+    return view_of(status)["mains"]
+
+
+def test_the_pdu_is_not_an_instrument_on_the_rail(pdu_bench):
+    """The user's directive, pinned where it can be broken by a one-line edit.
+
+    Adding the PDU to :py:data:`INSTRUMENTS` is the obvious move and the wrong
+    one: it would hand a mains contactor the rail's arm-state vocabulary, put it
+    in competition for a slot with the instruments a run measures with, and make
+    it disappear from the panel on a bench that has one but has not scanned it.
+    """
+    view = view_of(pdu_bench)
+
+    assert not any(
+        i["key"] == "cyberpower_pdu41002" for i in view["instruments"]
+    ), "the PDU took a slot on the instrument rail"
+    assert "cyberpower_pdu41002" not in {i["key"] for i in INSTRUMENTS}
+    assert view["mains"]["known"], "and it is shown as core harness instead"
+
+
+def test_a_bench_with_no_pdu_gets_no_mains_panel():
+    """The only panel on this display allowed to hide itself.
+
+    Everywhere else an absent readout still says NO LINK, because the hardware
+    exists and we have not heard from it. A bench with no PDU has no mains readout
+    to have, and a permanently dark MAINS.MGR would train an operator to ignore
+    the panel that matters most on the benches that do have one.
+    """
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+
+    block = mains(s)
+
+    assert block["status"] == MAINS_NO_PDU
+    assert not block["served"]
+    assert not block["known"]
+
+
+def test_a_served_pdu_nobody_has_heard_from_is_not_a_bench_with_no_pdu():
+    """The distinction that decides whether anybody walks over to the rack.
+
+    Both produce an empty outlet map. One means there is nothing to report; the
+    other means the bench has a switched PDU and has said nothing about it — which
+    is ordinary on an idle bench (no sweep yet, or nothing has opened the device)
+    and is also what a broken sweep looks like.
+    """
+    s = BenchStatus()
+    s.apply_connected(
+        {**WELCOME, "devices": [{"key": "cyberpower_pdu41002", "open": False}]},
+        now=100.0,
+    )
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+
+    block = mains(s)
+
+    assert block["status"] == MAINS_UNREPORTED
+    assert block["served"], "the panel forgot the bench has a PDU"
+    assert not block["known"]
+    assert block["outlets"] == []
+
+
+def test_the_four_readings_the_operator_asked_for_are_all_there(pdu_bench):
+    """Voltage, frequency, load and port status — the panel's stated contents.
+
+    Asserted on the formatted strings rather than the raw numbers because the
+    formatting is what reaches the screen, and a unit dropped from a mains figure
+    is the difference between 121.7 V and a number that could be anything.
+    """
+    block = mains(pdu_bench)
+
+    assert block["voltage"] == "121.7 V"
+    assert block["frequency"] == "60.0 Hz"
+    assert block["load_A"] == "0.42 A"
+    assert block["load_W"] == "48 W"
+    assert [p["index"] for p in block["outlets"]] == [1, 2, 3]
+    assert [p["label"] for p in block["outlets"]] == ["ON", "OFF", "ON"]
+
+
+def test_an_unreported_reading_is_no_link_and_never_a_plausible_zero(pdu_bench):
+    """Same rule as the rail, and sharper here.
+
+    A fabricated ``0.00 A`` reads as "nothing is drawing" and a fabricated
+    ``0.0 V`` reads as "the mains is dead" — both to somebody deciding whether it
+    is safe to touch something. The PDU genuinely prints ``----`` for a figure it
+    cannot measure at zero load, so this path is reached in normal operation.
+    """
+    s = BenchStatus()
+    s.apply_connected(
+        {**WELCOME, "devices": [{"key": "cyberpower_pdu41002", "open": True}]},
+        now=100.0,
+    )
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+    s.apply_event(mains_event(load_A=None, load_W=None, frequency_Hz=None))
+
+    block = mains(s)
+
+    assert block["voltage"] == "121.7 V", "premise: one figure did arrive"
+    assert block["load_A"] == NO_LINK
+    assert block["load_W"] == NO_LINK
+    assert block["frequency"] == NO_LINK
+
+
+def test_an_unreported_pdu_shows_no_numbers_at_all():
+    """``known`` gates every figure, not just the outlet map.
+
+    Belt and braces with the state model's disconnect clearing: this is the second
+    half of the same guarantee, at the point where the string an operator reads is
+    actually made. A number that outlived the session that vouched for it must not
+    be renderable.
+    """
+    s = BenchStatus()
+    s.apply_connected(
+        {**WELCOME, "devices": [{"key": "cyberpower_pdu41002", "open": True}]},
+        now=100.0,
+    )
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+    s.apply_event(mains_event())
+    assert mains(s)["voltage"] == "121.7 V"
+
+    s.apply_disconnected("link lost")
+
+    block = mains(s)
+    assert block["voltage"] == NO_LINK
+    assert block["frequency"] == NO_LINK
+    assert block["load_A"] == NO_LINK
+    assert block["load_W"] == NO_LINK
+    assert block["outlets"] == [], "a stale port map survived the session"
+
+
+def test_a_number_arriving_beside_known_false_is_not_rendered(pdu_bench):
+    """``known`` gates the figures independently of whether they are present.
+
+    Written after a mutation exposed that it did not: deleting the ``known`` check
+    in the reading formatter killed no test, because the state model always clears
+    the numbers and ``known`` together, so every fixture in the suite reached both
+    guards or neither. This is the input only one of them rejects.
+
+    It is reachable, and not merely a contract for its own sake. This block is
+    built by another process — an agent that may be a different version — and the
+    two fields could disagree there for reasons this module cannot see. The output
+    to avoid is specific and self-contradicting: ``121.7 V`` printed under a header
+    that says NOT REPORTED. One of those two is wrong, and the panel has no way to
+    know which, so it must show the one that claims less.
+    """
+    snap = pdu_bench.to_dict()
+    snap["reconnects"] = 0
+    snap["mains"]["known"] = False
+
+    block = build_view(snap, pdu_bench)["mains"]
+
+    assert block["status"] == MAINS_UNREPORTED, "premise: the panel claims nothing"
+    assert block["voltage"] == NO_LINK, "a figure outlived the claim behind it"
+    assert block["frequency"] == NO_LINK
+    assert block["load_A"] == NO_LINK
+    assert block["load_W"] == NO_LINK
+
+
+def test_an_energised_port_is_never_rendered_as_off(pdu_bench):
+    """The worst output this panel can produce, pinned as a property.
+
+    ``on`` and ``label`` are derived from one boolean so they cannot disagree, and
+    the assertion is written over every port rather than by index so a
+    transposition or an off-by-one in the row builder cannot pass it.
+    """
+    block = mains(pdu_bench)
+
+    for port in block["outlets"]:
+        assert port["label"] == ("ON" if port["on"] else "OFF"), port
+
+
+def test_only_reported_ports_get_a_row(pdu_bench):
+    """The device has eight and the sweep reported three.
+
+    Padding to eight would mean inventing five rows for outlets nobody has heard
+    about, and an invented row reads as a measurement: five OFF chips beside three
+    real ones is a claim that five outlets are de-energised.
+    """
+    block = mains(pdu_bench)
+
+    assert block["reported"] == 3
+    assert len(block["outlets"]) == 3
+
+
+def test_the_energised_count_cannot_disagree_with_the_ports_below_it(pdu_bench):
+    """Counted from the rows the panel draws, not passed through from the payload.
+
+    A payload whose ``energised`` was computed before a row was dropped for an
+    unparseable index would show "3 ON" above two ON chips, and the header is what
+    gets read at a glance.
+    """
+    block = mains(pdu_bench)
+
+    assert block["energised"] == sum(1 for p in block["outlets"] if p["on"])
+    assert block["energised"] == 2
+
+
+def test_a_fully_de_energised_bench_reports_zero_and_not_one():
+    """Zero is a real and important answer here.
+
+    The log pane's repeat count floors at 1, because a row always stands for at
+    least one action. Reusing that helper for this number would put "1 ON" on a
+    panel about a bench with every outlet off — the single most dangerous
+    off-by-one available on this display.
+    """
+    s = BenchStatus()
+    s.apply_connected(
+        {**WELCOME, "devices": [{"key": "cyberpower_pdu41002", "open": True}]},
+        now=100.0,
+    )
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+    s.apply_event(mains_event(outlets={"1": False, "2": False}))
+
+    block = mains(s)
+
+    assert block["energised"] == 0
+    assert block["reported"] == 2, "premise: the ports were reported, just all off"
+    assert block["known"], "and this is a reported bench, not an unreported one"
+
+
+def test_ports_are_ordered_numerically_and_not_lexicographically():
+    """Keys arrive as strings, and ``sorted`` on strings puts 10 between 1 and 2.
+
+    There is no ten-outlet model in tree today, which is exactly why this would be
+    found the hard way: the bug is invisible until somebody daisy-chains a second
+    unit, and by then the panel has been trusted for months.
+    """
+    s = BenchStatus()
+    s.apply_connected(
+        {**WELCOME, "devices": [{"key": "cyberpower_pdu41002", "open": True}]},
+        now=100.0,
+    )
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+    s.apply_event(
+        mains_event(outlets={"10": True, "2": False, "1": True, "12": False})
+    )
+
+    assert [p["index"] for p in mains(s)["outlets"]] == [1, 2, 10, 12]
+
+
+def test_a_reading_the_bench_stopped_sending_is_marked_stale(pdu_bench):
+    """The fault only this panel can detect.
+
+    Mains arrives by push on a ~10 s clock of its own, so it can go quiet while
+    every other readout is current — invisible to the global staleness banner,
+    which is driven by the status poll. Without its own age check the panel would
+    show a confident outlet map from an arbitrarily long time ago.
+    """
+    snap = pdu_bench.to_dict()
+    snap["reconnects"] = 0
+    assert not build_view(snap, pdu_bench)["mains"]["aged_out"], "premise: fresh"
+
+    snap["mains"]["age_s"] = MAINS_STALE_S + 1.0
+
+    block = build_view(snap, pdu_bench)["mains"]
+    assert block["aged_out"]
+    assert block["stale"]
+
+
+def test_a_stale_view_makes_the_port_map_stale_too(pdu_bench):
+    """Staleness reaches the ports, not just the banner — the rail's rule.
+
+    Both routes to stale are kept apart by ``aged_out``: a whole view that has
+    gone untrustworthy is a different fault from mains alone having gone quiet,
+    and only the second one points at the PDU.
+    """
+    pdu_bench.apply_disconnected("link lost")
+    pdu_bench.apply_connected(
+        {**WELCOME, "devices": [{"key": "cyberpower_pdu41002", "open": True}]},
+        now=110.0,
+    )
+    pdu_bench.apply_event(mains_event())
+    assert not pdu_bench.trustworthy, "premise: awaiting the first status snapshot"
+
+    block = mains(pdu_bench)
+
+    assert block["stale"], "a port map was vouched for by an untrustworthy view"
+    assert not block["aged_out"], "an untrustworthy view was blamed on the PDU"
+
+
+def test_a_stale_port_keeps_its_state_rather_than_being_dropped(pdu_bench):
+    """Marked, not withheld — the opposite of the rail's activity line.
+
+    A stale instrument status is a word to discount, so the rail drops it. "This
+    outlet was last seen energised" is a fact that keeps a hand out of an
+    enclosure even when it is a minute old, so it stays and is marked instead.
+    """
+    snap = pdu_bench.to_dict()
+    snap["reconnects"] = 0
+    snap["mains"]["age_s"] = MAINS_STALE_S + 1.0
+
+    block = build_view(snap, pdu_bench)["mains"]
+
+    assert block["stale"]
+    assert [p["index"] for p in block["outlets"]] == [1, 2, 3]
+    assert block["energised"] == 2
+
+
+def test_a_settle_window_outranks_the_ordinary_live_verdict(pdu_bench):
+    """The more specific statement about the same instant wins.
+
+    Without it, a phase deliberately waiting for a DUT to boot after a power cycle
+    is indistinguishable from a stalled run: no samples, no events, and MAINS LIVE
+    above them saying everything is fine.
+    """
+    assert mains(pdu_bench)["status"] == MAINS_LIVE
+
+    pdu_bench.apply_event(
+        {"kind": "run_outlet_settle", "run_id": "r1", "settle_s": 3.0}, now=101.0
+    )
+
+    block = mains(pdu_bench)
+    assert block["status"] == MAINS_SETTLING
+    assert block["settling_s"] == 3.0
+
+
+def test_a_power_cycle_between_two_sweeps_is_still_reported(pdu_bench):
+    """Why the run engine's event is folded in addition to the sweep.
+
+    The sweep samples every ~10 s. A cut-and-restore inside one interval renders
+    as "on, on" from the sweep alone — the transition the whole test is about,
+    invisible. The engine emits at the switch, carrying the verified read-back.
+    """
+    pdu_bench.apply_event(
+        {
+            "kind": "run_outlet",
+            "run_id": "r1",
+            "device": "cyberpower_pdu41002",
+            "outlet": 2,
+            "state": True,
+        },
+        now=101.0,
+    )
+
+    block = mains(pdu_bench)
+
+    assert block["transitions"] == 1
+    assert block["last_transition"] == {"outlet": 2, "state": True}
+    assert block["energised"] == 3, "the switch did not reach the port map"
+
+
+def test_no_run_has_switched_anything_reports_no_transition(pdu_bench):
+    """Zero transitions, not one — the same floor problem as ``energised``.
+
+    "last switch: port 1 ON" under a bench nothing has switched would invent a
+    mains transition in a run record, which is the one thing the audit trail must
+    not contain.
+    """
+    block = mains(pdu_bench)
+
+    assert block["transitions"] == 0
+    assert block["last_transition"] is None
+
+
+def test_a_snapshot_with_no_mains_block_at_all_still_renders():
+    """An older agent, or a fixture predating this panel.
+
+    Degrades to "no PDU on this bench" rather than raising and blanking the whole
+    display — the same defensive read every newer field in this module gets, and
+    the reason ``build_view`` uses ``.get`` throughout.
+    """
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+    snap = s.to_dict()
+    snap["reconnects"] = 0
+    del snap["mains"]
+
+    block = build_view(snap, s)["mains"]
+
+    assert block["status"] == MAINS_NO_PDU
+    assert block["outlets"] == []
+
+
+def test_a_malformed_mains_block_costs_the_panel_and_not_the_display():
+    """Anything that is not a dict is treated as absent.
+
+    This block crosses a process boundary from an agent that may be a different
+    version, and the failure mode to avoid is an exception on the render path — in
+    the process that draws the screen, one frame after the bad payload.
+    """
+    s = BenchStatus()
+    s.apply_connected(WELCOME, now=100.0)
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+    snap = s.to_dict()
+    snap["reconnects"] = 0
+
+    for junk in ("mains", [1, 2], 7, None):
+        snap["mains"] = junk
+        view = build_view(snap, s)
+        assert view["mains"]["status"] == MAINS_NO_PDU, junk
+        assert view["headline"], "the whole view degraded, not just the panel"
+
+
+def test_a_port_state_that_is_not_a_boolean_does_not_become_a_reading():
+    """Only ``True`` energises a port; nothing else is coerced into meaning on.
+
+    A truthy string from a malformed payload becoming an ON chip is the fabricated
+    reading this panel exists to prevent, in the direction that matters least — but
+    the reverse, a ``1`` that should read ON rendering as OFF, is the one that puts
+    a hand in an enclosure, so both are pinned by construction: the state model
+    coerces with ``bool()`` at the boundary and the row builder reads that.
+    """
+    s = BenchStatus()
+    s.apply_connected(
+        {**WELCOME, "devices": [{"key": "cyberpower_pdu41002", "open": True}]},
+        now=100.0,
+    )
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+    s.apply_event(mains_event(outlets={"1": 1, "2": 0}))
+
+    ports = mains(s)["outlets"]
+
+    assert ports[0]["on"] is True, "a JSON 1 was not read as energised"
+    assert ports[1]["on"] is False
+
+
+def test_a_true_valued_metering_field_is_not_rendered_as_a_measurement():
+    """``bool`` is a subclass of ``int``, so every naive number check passes it.
+
+    ``True`` reaching the voltage line as "1.0 V" would be a fabricated reading
+    about the mains supply, and the payload it came from is a dict off a wire.
+    """
+    s = BenchStatus()
+    s.apply_connected(
+        {**WELCOME, "devices": [{"key": "cyberpower_pdu41002", "open": True}]},
+        now=100.0,
+    )
+    s.apply_status(status_payload({"otii_arc": dev()}), now=100.0)
+    s.apply_event(mains_event())
+    snap = s.to_dict()
+    snap["reconnects"] = 0
+    snap["mains"]["voltage_V"] = True
+
+    assert build_view(snap, s)["mains"]["voltage"] == NO_LINK
+
+
+def test_the_panel_records_which_pdu_and_which_wire(pdu_bench):
+    """One driver object, two transports, and the run log has to say which.
+
+    The driver refuses to be given both a ``port`` and a ``host`` precisely so
+    "which wire did that switch travel on" stays answerable; the panel carrying
+    the transport is the operator-facing half of that.
+    """
+    block = mains(pdu_bench)
+
+    assert block["device"] == "cyberpower_pdu41002"
+    assert block["transport"] == "ssh"
+
+
+def test_the_mains_verdict_words_are_not_the_rails(pdu_bench):
+    """Separate vocabularies on purpose.
+
+    Reusing STANDBY or OPEN here would invite the renderer to style them alike,
+    when what they mean is unrelated: an instrument's session state and a mains
+    supply's condition have no common scale.
+    """
+    rail_words = {STANDBY, OPEN, IN_RUN, ABSENT, UNDETERMINED, UNSCANNED, NOT_SERVED}
+    mains_words = {MAINS_NO_PDU, MAINS_UNREPORTED, MAINS_LIVE, MAINS_SETTLING}
+
+    assert not (rail_words & mains_words)
+    assert mains(pdu_bench)["status"] in mains_words
+
+
+# --------------------------------------------------------------------------
+# The port chip's classes, run under node
+#
+# The last step the Python view cannot see, and on this panel it is the step that
+# decides whether an outlet reads as energised. Sliced out of the shipped file for
+# the reason the governor tests give: a reimplementation here would pass while the
+# file that actually runs in the page was inverted.
+# --------------------------------------------------------------------------
+
+_PORT_FN_START = "function portClasses(p, stale) {"
+
+
+def port_classes_source() -> str:
+    """The real ``portClasses`` alone, lifted out of the renderer."""
+    src = FUI_JS.read_text(encoding="utf-8")
+    start = src.find(_PORT_FN_START)
+    assert start >= 0, f"portClasses moved in {FUI_JS.name}; this test slices on it"
+    depth = 0
+    for i in range(start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError("unbalanced braces slicing portClasses")
+
+
+def run_port_classes(port: dict, stale: bool) -> str:
+    harness = "\n".join(
+        [
+            port_classes_source(),
+            "console.log(JSON.stringify(portClasses("
+            f"{json.dumps(port)}, {json.dumps(stale)})));",
+        ]
+    )
+    out = subprocess.run(
+        [NODE, "--input-type=module", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert out.returncode == 0, f"node failed:\n{out.stderr}"
+    return json.loads(out.stdout)
+
+
+@needs_node
+def test_the_renderer_never_paints_an_energised_port_as_off():
+    """The one inversion on this display that could put a hand in an enclosure.
+
+    Asserted on the class the CSS keys off rather than on the label, because the
+    colour is what is read from across a bench: ``.port.on`` is amber with a
+    matching border, ``.port.off`` is the panel's quietest text, and swapping them
+    would make a live outlet the thing the eye skips over.
+    """
+    assert "on" in run_port_classes({"index": 1, "on": True, "label": "ON"}, False)
+    off = run_port_classes({"index": 2, "on": False, "label": "OFF"}, False)
+    assert "off" in off
+    assert " on" not in off, "an off port carries the energised class"
+
+
+@needs_node
+def test_the_renderer_keeps_an_energised_port_energised_when_stale():
+    """Staleness is layered on top of the live colour, never in place of it.
+
+    The rail strikes a stale status through, and that is right there — a stale
+    instrument status is a word to discount. "This outlet was last seen energised"
+    is a word that must stay readable at a minute old, because it is the one that
+    keeps somebody out of an enclosure. So a stale hot port keeps its amber and
+    gains the dimming, rather than dropping to the OFF treatment.
+    """
+    got = run_port_classes({"index": 1, "on": True, "label": "ON"}, True)
+
+    assert "on" in got, "a stale energised port lost its energised class"
+    assert "stale" in got
+    assert "off" not in got
+
+
+@needs_node
+def test_the_renderer_marks_a_stale_off_port_rather_than_vouching_for_it():
+    """The direction that matters most: an OFF chip nobody has confirmed lately.
+
+    Left unmarked it is indistinguishable from a current reading, and reads as
+    "the DUT is de-powered" — the reassurance that precedes someone reaching in.
+    """
+    got = run_port_classes({"index": 2, "on": False, "label": "OFF"}, True)
+
+    assert "stale" in got
+    assert "off" in got
+
+
+# --------------------------------------------------------------------------
+# The mains panel end to end, through the HTTP surface
+# --------------------------------------------------------------------------
+
+
+def test_the_view_endpoint_carries_the_mains_block(server):
+    """The block reaches the browser, and reaches it shaped as the renderer reads.
+
+    The fake bench serves no PDU, so this asserts the honest empty case: a panel
+    the renderer will hide, rather than a missing key it would throw on.
+    """
+    body = json.loads(get(server, "/api/view").read())
+
+    assert body["mains"]["status"] == MAINS_NO_PDU
+    assert body["mains"]["outlets"] == []
+    assert body["mains"]["voltage"] == NO_LINK
+
+
+def test_the_page_carries_a_mains_panel_that_starts_dark():
+    """Every data element starts as NO LINK in the markup, by this module's rule.
+
+    If the JS never runs the page must show nothing rather than a reassuring
+    skeleton — and for this panel the skeleton to avoid is a row of OFF chips,
+    which is why the port grid is empty in the markup and built only from a sweep.
+    """
+    html = (pathlib.Path(fui_static.__file__).parent / "static" / "index.html").read_text()
+
+    assert "MAINS.MGR" in html
+    assert 'id="mains-panel"' in html
+    # Hidden until the view says a PDU is served: the one panel allowed to
+    # disappear, because a bench with no PDU has no mains readout to have.
+    assert "hidden" in html.split('id="mains-panel"')[1].split(">")[0]
+    for element in ("mains-voltage", "mains-frequency", "mains-load"):
+        after = html.split(f'id="{element}"')[1].split("</span>")[0]
+        assert NO_LINK in after, element
+    # No placeholder chips. An invented OFF row is a claim about a contactor.
+    ports = html.split('id="mains-ports"')[1].split("</div>")[0]
+    assert "OFF" not in ports and "ON" not in ports
+
+
+def test_the_stylesheet_degrades_a_stale_port_without_recolouring_it():
+    """The CSS half of the rule the renderer tests pin above.
+
+    ``.slot.stale`` strikes through and recolours; ``.port.stale`` must not, or a
+    stale energised outlet would stop looking energised. Asserted here because the
+    two rules live in one file and the obvious edit — making them consistent — is
+    the one that breaks this.
+    """
+    css = FUI_CSS.read_text(encoding="utf-8")
+
+    rule = css.split(".port.stale")[1].split("}")[0]
+    assert "opacity" in rule
+    assert "line-through" not in rule, "a stale port state was struck through"
+    assert "color:" not in rule, "a stale port was recoloured out of its state"
+
+
+def test_the_stylesheet_does_not_spend_red_on_an_energised_outlet():
+    """Red is reserved for an armed instrument output, and this is not one.
+
+    All eight outlets are normally ON with instruments drawing from them, so
+    painting them red would make the rail's armed-output red just another warm
+    colour on the page — devaluing the one signal that has to stay expensive.
+    """
+    css = FUI_CSS.read_text(encoding="utf-8")
+
+    rule = css.split(".port.on {")[1].split("}")[0]
+    assert "--amber" in rule
+    assert "--red" not in rule
