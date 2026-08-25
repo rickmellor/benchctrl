@@ -227,8 +227,20 @@ class SimulatedPDU41002(SimDevice):
         """Release the held session (the incumbent sent ``exit``)."""
         self._held = False
 
-    def drop_ssh_session(self) -> None:
+    def drop_ssh_session(self, *, wording: str = "received_disconnect") -> None:
         """Model an idle logout **over ssh**, which kills the link.
+
+        ``wording`` selects which of the client's two notices is emitted, and
+        having both is the point rather than thoroughness for its own sake: ssh
+        prints either depending on how it notices the close, and the second
+        collided with the driver's single-session check, so an idle logout was
+        reported as "another session is logged in — send 'exit' on it". A hook
+        that only ever emitted the first left that path untested and the
+        hardware suite found it instead.
+
+        - ``"received_disconnect"`` — the device sent a disconnect message, so
+          ssh names it and then says it disconnected.
+        - ``"connection_to"`` — ssh noticed the socket close itself.
 
         The serial and network cases are genuinely different and the driver has
         to treat them differently, so the simulator needs both:
@@ -244,15 +256,24 @@ class SimulatedPDU41002(SimDevice):
         session that is really dead, which is exactly the false pass this hook
         exists to prevent.
         """
+        notices = {
+            # Both captured from the board against firmware 1.3.4.
+            "received_disconnect": (
+                "Received disconnect from 192.168.1.246 port 22:11: "
+                "user close and disconnect!\r\n"
+                "Disconnected from 192.168.1.246 port 22\r\n"
+            ),
+            "connection_to": "Connection to pdu-benchctrl closed by remote host.\r\n",
+        }
+        if wording not in notices:
+            raise ValueError(
+                f"unknown wording {wording!r}; expected one of {sorted(notices)}"
+            )
         with self._lock:
             self._authed = False
             self._await_password_for = None
             self._gone = True
-            self._emit(
-                "Received disconnect from 192.168.1.246 port 22:11: "
-                "user close and disconnect!\r\n"
-                "Disconnected from 192.168.1.246 port 22\r\n"
-            )
+            self._emit(notices[wording])
 
     def force_logout(self) -> None:
         """Drop the session to the login prompt without any wall-clock wait.

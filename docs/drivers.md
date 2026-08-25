@@ -937,7 +937,8 @@ like sloppy security defaults and are not.
 | `key exchange failed!` | group-*exchange* KEX is broken on this firmware | forces `KexAlgorithms=diffie-hellman-group14-sha256` |
 | `Permission denied (keyboard-interactive)` even with the matching key uploaded | device offers keyboard-interactive **only**; pubkey auth is refused | `PubkeyAuthentication=no`, and a pty via `pty.fork()` + `ssh -tt` to type the password |
 | host key reads as all zeros | the exported ed25519 host key is null | `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` — unverifiable either way, so don't poison the operator's `known_hosts` |
-| a command fails with `no prompt … (got 120 bytes)` after a few minutes of quiet | the device hung up on an idle session and the *ssh client* printed its notice; nothing on the far end will ever answer again | matches `Received disconnect from` / `Disconnected from` and raises `PDU41002ConnectionError` saying to reopen |
+| a command fails with `no prompt … (got 130 bytes)` after a few minutes of quiet | the device hung up on an idle session and the *ssh client* printed its notice; nothing on the far end will ever answer again | raises `PDU41002ConnectionError` saying to reopen |
+| an idle session reports `PDU41002SessionError` — "another session is logged in" — when nothing else is | ssh's *other* disconnect wording, `Connection to … closed by remote host.`, is the same text the single-session hangup produces | the hangup markers are only read as contention **during login**; post-login they mean the link died, so `_round_trip` raises the connection error instead |
 
 Login over SSH takes around 7.5 s. It is slow, not stuck.
 
@@ -1090,6 +1091,12 @@ numbering is enumeration-order and a second USB-serial adapter can take
   |---|---|---|
   | serial | keeps the port open and drops to `Login Name :` | the driver re-authenticates in place; the caller sees nothing |
   | ssh | closes the connection; the ssh client prints its disconnect notice and exits | **not recoverable** — the caller must `open()` again |
+
+  ssh prints one of *two* notices for this, and the second
+  (`Connection to … closed by remote host.`) is byte-shared with the
+  single-session hangup, so wording alone cannot tell them apart.
+  Position can: those markers only mean contention *during login*. Past a
+  successful login they mean the link is gone.
 
   So a timed-out SSH session is a `PDU41002ConnectionError` naming the
   reopen, not a timeout. The distinction is load-bearing: before it

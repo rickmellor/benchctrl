@@ -109,6 +109,18 @@ hardware-free suite passed while the driver was wrong. The tier is
   could never work. Now the client's disconnect notice is recognised and
   raises `PDU41002ConnectionError` naming the reopen as the recovery.
 
+  ssh has **two** wordings for that event, and the second is byte-shared
+  with the single-session hangup — so recognising only the first traded
+  the timeout for `PDU41002SessionError`: *"another session is logged in —
+  send 'exit' on it"*, when nothing else was logged in and that advice
+  cannot be followed on a dead link. Wording cannot separate them and a
+  longer list would rot; **position can.** Those markers only mean
+  contention *during login*, so they are matched post-login as
+  `_LINK_GONE_MARKERS` in `_round_trip` and `_raise_if_hungup` is no
+  longer called from `_cmd`. The hardware-free test is parametrised over
+  both wordings, because the one-shape version passed while the device
+  failed.
+
 Each of the three is pinned hardware-free by a test that kills a mutant
 reproducing the hardware symptom verbatim, and each measurement lives in
 a code comment rather than only in a session log. See F-15 and F-16 in

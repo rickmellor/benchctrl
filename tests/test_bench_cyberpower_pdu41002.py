@@ -722,7 +722,10 @@ class TestSession:
         finally:
             sim.close()
 
-    def test_an_ssh_idle_logout_is_a_connection_error_not_a_timeout(self, pdu):
+    @pytest.mark.parametrize("wording", ["received_disconnect", "connection_to"])
+    def test_an_ssh_idle_logout_is_a_connection_error_not_a_timeout(
+        self, pdu, wording
+    ):
         """The network half of the idle timeout, where recovery differs.
 
         Serial and ssh do not fail the same way and must not be reported the
@@ -735,7 +738,16 @@ class TestSession:
         Until the client's disconnect notice was recognised, this surfaced as
         "no prompt after 'sys show' within 12.0s": a timeout, which reads as a
         slow device and invites a retry that can never succeed. Found by the
-        hardware suite, where the 120 bytes of ssh notice matched no marker.
+        hardware suite, where the 130 bytes of ssh notice matched no marker.
+
+        **Parametrised over both of ssh's wordings, and that is the whole
+        point.** Fixing the timeout with only the first one left the second
+        matching ``_HANGUP_MARKERS``, so an idled-out session was reported as
+        ``PDU41002SessionError``: "another session is logged in — send 'exit' on
+        it". Doubly wrong, because nothing else was logged in and that advice
+        cannot work on a link that no longer exists. One wording passed here
+        while the other failed on hardware, which is exactly the gap a
+        single-shape test leaves open.
 
         The message is asserted, not just the type, because the recovery
         instruction is the entire difference between the two cases.
@@ -743,13 +755,16 @@ class TestSession:
         from benchctrl.drivers.cyberpower_pdu41002 import PDU41002ConnectionError
 
         assert pdu.read_identity().model == "PDU41002"
-        pdu._benchctrl_sim.drop_ssh_session()
+        pdu._benchctrl_sim.drop_ssh_session(wording=wording)
 
         with pytest.raises(PDU41002ConnectionError) as exc:
             pdu.read_identity()
         assert "reopen" in str(exc.value)
-        # And it must not be reported as the device being slow.
+        # And it must not be reported as the device being slow...
         assert "no prompt" not in str(exc.value)
+        # ...nor as a session someone else is holding, whose advice ("send
+        # 'exit' on it") is unfollowable here.
+        assert "exit" not in str(exc.value)
 
     def test_close_sends_exit(self, pdu):
         """Required, not polite.

@@ -105,16 +105,21 @@ _SSH_DENIED_MARKERS = (
 )
 
 #: Emitted by the device (or by ssh) when the single CLI session is already held.
+#:
+#: **Only meaningful during login.** ``Connection to `` is what ssh prints when a
+#: session ends for *any* reason, so mid-session it says nothing about
+#: contention — see ``_LINK_GONE_MARKERS``.
 _HANGUP_MARKERS = ("closed by remote host", "Connection to ")
 
 #: The ssh client's notice that the *device* ended the session — which is what
 #: an idle timeout looks like over the network.
 #:
 #: Measured on firmware 1.3.4: after ~180 s idle the PDU disconnects and ssh
-#: prints "Received disconnect from … : user close and disconnect!" followed by
-#: "Disconnected from …". Neither contains any ``_HANGUP_MARKERS`` fragment, so
-#: without this the symptom was a bare "no prompt within 12.0s" — a timeout,
-#: implying the device was slow, when in fact the link was gone.
+#: prints, in one 130-byte burst,
+#: "Received disconnect from … :11: user close and disconnect!" followed by
+#: "Disconnected from …". Without this the symptom was a bare
+#: "no prompt within 12.0s" — a timeout, implying the device was slow, when in
+#: fact the link was gone.
 #:
 #: The distinction is not cosmetic: **an idle logout is recoverable over serial
 #: and not over ssh.** On serial the session drops to ``Login Name :`` on the
@@ -123,6 +128,27 @@ _HANGUP_MARKERS = ("closed by remote host", "Connection to ")
 #: caller has to open a new session. A timeout invites a retry that can never
 #: work; a connection error tells the truth.
 _SSH_DISCONNECT_MARKERS = ("Received disconnect from", "Disconnected from")
+
+#: Everything that means "the link is gone" **after** a successful login.
+#:
+#: Deliberately a superset of ``_SSH_DISCONNECT_MARKERS`` plus the
+#: ``_HANGUP_MARKERS``, and the reason is a bug this cost:
+#: ``_HANGUP_MARKERS`` is only diagnostic *during login*, where the device
+#: hanging up straight after the banner really does mean another session holds
+#: the CLI. ``Connection to `` is simply what ssh prints when a session ends for
+#: **any** reason, and measurement showed the idle logout produces *either*
+#: wording depending on how ssh notices — so a mid-session match on it was
+#: reported as ``PDU41002SessionError``: "another session is logged in — send
+#: 'exit' on it". Which is doubly unhelpful, because nothing else *was* logged
+#: in and the advice cannot work on a link that no longer exists.
+#:
+#: Past login the cause is knowable from position rather than from wording: the
+#: session was established, so anything that ends it now is a dead link and the
+#: recovery is to reopen. Hence one set used in one place
+#: (:py:meth:`_raise_if_disconnected`, called only from :py:meth:`_round_trip`)
+#: rather than a wording contest that a future OpenSSH release would silently
+#: win.
+_LINK_GONE_MARKERS = (*_SSH_DISCONNECT_MARKERS, *_HANGUP_MARKERS)
 
 #: The serial console's fourth login outcome, and the awkward one: it means
 #: **either** a wrong credential **or** a correct one the device cannot yet
@@ -771,19 +797,27 @@ class CyberPowerPDU41002:
         and there is nothing to re-authenticate on. Raising a timeout invited a
         retry that could never succeed; ``PDU41002ConnectionError`` tells the
         caller the only thing that works, which is to open again.
+
+        Matches ``_LINK_GONE_MARKERS`` rather than only ssh's disconnect notice,
+        because ssh has more than one wording for the same event and the other
+        one collided with the single-session check: an idled-out session was
+        reported as "another session is logged in — send 'exit' on it", advice
+        that cannot work on a link that no longer exists. Called only from
+        :py:meth:`_round_trip`, i.e. only *after* a successful login, which is
+        what makes the broader match safe — see ``_LINK_GONE_MARKERS``.
         """
-        if any(m in text for m in _SSH_DISCONNECT_MARKERS):
+        if any(m in text for m in _LINK_GONE_MARKERS):
             # Mark the session dead so a later call fails fast rather than
             # writing into a pty nobody is reading.
             self._authed = False
+            first = next(iter(text.strip().splitlines()), "")
             raise PDU41002ConnectionError(
-                f"the PDU closed the {self._transport} session (ssh reported "
-                f"{text.strip().splitlines()[0]!r} if it said anything). Over "
-                f"ssh this is most likely the device's idle timeout, which is "
-                f"5 minutes as shipped and *not* recoverable in place: reopen "
-                f"the connection. Over serial the same timeout is recovered "
-                f"automatically, because the session drops to a login prompt "
-                f"rather than dropping the link."
+                f"the PDU closed the {self._transport} session, reporting "
+                f"{first!r}. Most likely the device's idle timeout, which is "
+                f"5 minutes as shipped and *not* recoverable in place over "
+                f"ssh: reopen the connection. (Over serial the same timeout "
+                f"is recovered automatically, because the session drops to a "
+                f"login prompt rather than dropping the link.)"
             )
 
     # -- CLI engine ---------------------------------------------------------
@@ -840,7 +874,10 @@ class CyberPowerPDU41002:
                     f"session kept dropping to the login prompt around {command!r}"
                 )
 
-        self._raise_if_hungup(text)
+        # Deliberately not _raise_if_hungup: post-login, the hangup markers mean
+        # "the link died", not "someone else holds the CLI", and _round_trip has
+        # already raised PDU41002ConnectionError for them. Calling it here is
+        # what reported an idle logout as a session conflict.
         body = _strip_echo(text, command, echoes=self._echoes)
         _raise_for_error(command, body, self._outlet_count)
         return body
@@ -869,12 +906,17 @@ class CyberPowerPDU41002:
         except LinkError as e:
             raise PDU41002ConnectionError(str(e)) from e
         text = self._read_until(
-            [PROMPT, _LOGIN_NAME, _LOGIN_PASSWORD, *_SSH_DISCONNECT_MARKERS],
+            [PROMPT, _LOGIN_NAME, _LOGIN_PASSWORD, *_LINK_GONE_MARKERS],
             timeout=timeout,
         )
+        # Before the missing-prompt check below, so a dead link is reported as a
+        # dead link rather than as a slow device.
         self._raise_if_disconnected(text)
+        # No hangup markers here: _raise_if_disconnected covers all of them and
+        # has already raised. Only the login prompts remain as legitimate
+        # non-prompt endings, and _cmd re-authenticates on those.
         if PROMPT not in text and not any(
-            m in text for m in (_LOGIN_NAME, _LOGIN_PASSWORD, *_HANGUP_MARKERS)
+            m in text for m in (_LOGIN_NAME, _LOGIN_PASSWORD)
         ):
             # Leave the session usable: a half-consumed line would otherwise
             # prepend itself to the *next* command, turning one timeout into a

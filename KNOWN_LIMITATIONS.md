@@ -852,11 +852,29 @@ same on both transports. Both facts are measured, not documented.
   `Disconnected from …`, then exits. There is no longer a far end.
 
 **So the SSH case is not recoverable and the caller must `open()`
-again.** The driver matches those two client notices and raises
+again.** The driver matches the client's notice and raises
 `PDU41002ConnectionError` naming the reopen. Before that check existed
 the symptom was `PDU41002TimeoutError: no prompt after 'sys show' within
 12.0s (got 130 bytes)` — which reads as a slow device and invites a retry
 that can never succeed, on a link that no longer exists.
+
+**ssh has two wordings for this, and the second one collides with F-9.**
+Depending on how the client notices the close it prints either
+`Received disconnect from … : user close and disconnect!` +
+`Disconnected from …`, or `Connection to … closed by remote host.` The
+second matches `_HANGUP_MARKERS`, which is how the single-session hangup
+is detected — so recognising only the first left an idle logout reported
+as `PDU41002SessionError`: *"another session is logged in — send 'exit' on
+it."* Wrong twice over: nothing else was logged in, and that advice
+cannot be followed on a link that no longer exists.
+
+The fix is not a longer list of wordings, which a future OpenSSH release
+would defeat. **Position disambiguates where wording cannot:** the hangup
+markers only mean "someone else holds the CLI" *during login*. Past a
+successful login, anything that ends the session means the link is dead
+and the recovery is to reopen. So `_LINK_GONE_MARKERS` is matched in
+`_round_trip` (post-login only) and `_raise_if_hungup` is no longer
+called from `_cmd`.
 
 Affects: any long-lived SSH session with gaps between commands. A bench
 sweep polling more often than every ~3 minutes never sees it, which is
