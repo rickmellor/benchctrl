@@ -771,6 +771,17 @@ Consequences that are not obvious from the vendor manual:
   started, so no read-back distinguishes "cycled" from "never moved". It
   returns `None` rather than implying a guarantee it cannot make. Drive
   `set_outlet_state(n, False)` then `True` if you need the cut proved.
+- **A read within ~0.5 s of `act reboot` still returns the pre-cut
+  state.** Measured 3 times in 6 trials: `reset_outlet` returns, and the
+  next `oltsta` read still says `True` because the cut has not landed yet.
+  So a caller polling for "energised again" can stop on the *pre-cut*
+  `True` and conclude the cycle finished before it started. Wait out
+  `off_delay_s + reboot_duration_s` before believing any `True`. This
+  hazard is unique to `reset_outlet`: it is the only call whose wanted end
+  state equals its start state, so `set_outlet_state`'s verify — which
+  polls for the *opposite* of what it read — can never be satisfied by a
+  stale value. The hardware test made exactly this mistake and failed
+  about half the time in a full run while passing in isolation.
 - **A simulator that always obeys cannot test any of this.** So
   `SimulatedPDU41002` has an `ignore_switches` flag: it accepts and
   acknowledges `oltctrl` byte-for-byte and moves nothing. Without a

@@ -221,16 +221,38 @@ def test_reset_outlet_ends_where_it_started(pdu):
     restores it unprompted, so the observable contract is "energised again
     afterwards" — which is exactly why this method returns ``None`` rather than
     a read-back.
+
+    **Do not poll for ``True`` straight after the command.** Measured on
+    firmware 1.3.4: the contactor is still reading ``True`` for ~0.5 s after
+    ``oltctrl … act reboot`` returns (3 of 6 trials), so an early read cannot be
+    told apart from the restored state — and a poll loop that stops on the first
+    ``True`` stops on the *pre-cut* one, then asserts mid-cut. That is what this
+    test did, and it failed in a full run roughly half the time while passing
+    every time in isolation.
+
+    Waiting out the reboot duration first removes the ambiguity without needing
+    to catch the transient: once the cut has definitely both started and
+    finished, any ``True`` is the restored state. Note this hazard is unique to
+    ``reset_outlet`` — it is the only call whose wanted end state equals its
+    start state, so ``set_outlet_state``'s verify (which polls for the
+    *opposite* of what it read) can never be satisfied by a stale value.
     """
     if not pdu.outlet_state(TEST_OUTLET):
         pdu.set_outlet_state(TEST_OUTLET, True)
 
     reboot_s = pdu.read_outlet_config()[TEST_OUTLET].reboot_duration_s
-    pdu.reset_outlet(TEST_OUTLET)
 
     import time
 
-    deadline = time.monotonic() + reboot_s + 15.0
+    t0 = time.monotonic()
+    pdu.reset_outlet(TEST_OUTLET)
+
+    # Past this instant the cut is over, so a True cannot be the pre-cut read.
+    settled_at = t0 + reboot_s + 3.0
+    while time.monotonic() < settled_at:
+        time.sleep(0.5)
+
+    deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
         if pdu.outlet_state(TEST_OUTLET):
             break
