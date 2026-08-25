@@ -326,6 +326,14 @@ class CyberPowerPDU41002:
     _CMD_TIMEOUT_S = 12.0
     #: Authentication takes ~7.5 s on firmware 1.3.4; allow generous headroom.
     _LOGIN_TIMEOUT_S = 30.0
+    #: Minimum window for the reply to a submitted password, regardless of how
+    #: much of ``_LOGIN_TIMEOUT_S`` earlier retries consumed. The device prints
+    #: "Please wait for authentication...." and means it. A floor rather than a
+    #: share of the remaining budget because the alternative — a read too short
+    #: to see the prompt — is reported as a rejected password, and hunting a
+    #: correct credential is the most expensive wrong answer this driver can
+    #: give.
+    _AUTH_WAIT_S = 10.0
 
     def __init__(
         self,
@@ -621,17 +629,38 @@ class CyberPowerPDU41002:
                 if _LOGIN_PASSWORD not in got:
                     continue
                 self._link.write(password.encode("ascii") + b"\r")
+                # Floored at _AUTH_WAIT_S, not at a token 2s: the device prints
+                # "Please wait for authentication...." and takes seconds over it.
+                # Deriving this window purely from the remaining budget means a
+                # login that started late gets a read too short to ever see the
+                # prompt — and the only two outcomes below are "authenticated"
+                # and "refused", so a truncated read is indistinguishable from a
+                # wrong password.
                 after = self._read_until(
-                    [PROMPT, _LOGIN_NAME], timeout=max(2.0, deadline - time.monotonic())
+                    [PROMPT, _LOGIN_NAME],
+                    timeout=max(self._AUTH_WAIT_S, deadline - time.monotonic()),
                 )
                 self._raise_if_hungup(after)
                 if PROMPT in after:
                     self._authed = True
                     return
-                # Back at the name prompt == credentials refused.
-                raise PDU41002AuthError(
-                    f"device refused the {self._username!r} login over "
-                    f"{self._transport}; check {PASSWORD_ENV}"
+                if _LOGIN_NAME in after:
+                    # Back at the name prompt is the device's way of saying no.
+                    raise PDU41002AuthError(
+                        f"device refused the {self._username!r} login over "
+                        f"{self._transport}; check {PASSWORD_ENV}"
+                    )
+                # Neither marker: the device said something, or nothing, that is
+                # not a verdict. Reporting that as an auth failure sends the
+                # operator hunting for a password that was in fact correct —
+                # which is the same misdiagnosis the single-session hangup
+                # causes, and it has to be kept distinct for the same reason.
+                raise PDU41002TimeoutError(
+                    f"submitted the {self._username!r} password over "
+                    f"{self._transport} and got neither {PROMPT!r} nor a "
+                    f"re-prompt within {self._AUTH_WAIT_S:.0f}s. The password "
+                    f"was not rejected — the device did not answer. Got "
+                    f"{after[-200:]!r}"
                 )
 
         raise PDU41002TimeoutError(

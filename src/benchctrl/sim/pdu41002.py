@@ -164,6 +164,16 @@ class SimulatedPDU41002(SimDevice):
         self.hangup_count = 0
         #: When set, the next command answers with a forced error shape.
         self.force_next_error: Optional[str] = None
+        #: When set, the next submitted password gets **no answer at all** — no
+        #: prompt, no re-prompt, nothing.
+        #:
+        #: Models a device that is slow or wedged mid-authentication rather than
+        #: one that rejects a credential. The two are worth keeping apart
+        #: because they look identical from the driver's side (the prompt does
+        #: not arrive) and lead an operator to opposite places: one to a
+        #: credential that was correct all along, the other to the device. The
+        #: driver reported the first as the second until this hook existed.
+        self.stall_next_auth = False
         #: When set, ``oltctrl`` is accepted and acknowledged but **no outlet
         #: moves** — the device lying by omission.
         #:
@@ -284,6 +294,14 @@ class SimulatedPDU41002(SimDevice):
             self._await_password_for = None
             ok = user == self.username and line == self.password
             self.login_log.append((user, ok))
+            if self.stall_next_auth:
+                # Deliberately before the verdict: the point is a device that
+                # never answers, not one that answers slowly with "no". The
+                # attempt is still logged, so a test can prove the password was
+                # correct and *still* got no prompt.
+                self.stall_next_auth = False
+                self._emit("\r\nPlease wait for authentication....\r\n")
+                return
             if not ok:
                 self._emit("\r\n\r\nLogin Name : ")
                 return

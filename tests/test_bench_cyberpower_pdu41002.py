@@ -623,6 +623,56 @@ class TestSession:
             ("admin", True),
         ]
 
+    def test_a_device_that_never_answers_is_not_reported_as_a_bad_password(
+        self, monkeypatch
+    ):
+        """A silent device and a rejected credential are different diagnoses.
+
+        Both look the same from here — the prompt does not arrive — and they
+        send an operator to opposite places: one to the device, one to a
+        password that was correct all along. The driver reported the silent case
+        as ``PDU41002AuthError`` until this test existed, which is the same
+        misdiagnosis the single-session hangup causes, and it was found on
+        hardware rather than here: a login that started late got a post-password
+        read too short to ever see the prompt, and the failure named the
+        environment variable.
+
+        ``login_log`` is what makes this a test of the distinction rather than
+        of the timeout: the credential the device stayed silent about was the
+        *right* one, so nothing about it justified an auth error.
+        """
+        from benchctrl.drivers.cyberpower_pdu41002 import (
+            CyberPowerPDU41002,
+            PDU41002TimeoutError,
+        )
+        from benchctrl.sim.pdu41002 import SimulatedPDU41002
+
+        # Scaled down, not stubbed out: the *real* budget is 30 s + a 10 s
+        # floor, and waiting that out on every run is what gets a test deleted.
+        # Both are scaled by the same factor so the relationship under test —
+        # the floor outliving the budget — is preserved.
+        monkeypatch.setattr(CyberPowerPDU41002, "_LOGIN_TIMEOUT_S", 3.0)
+        monkeypatch.setattr(CyberPowerPDU41002, "_AUTH_WAIT_S", 1.0)
+
+        sim = SimulatedPDU41002()
+        sim.start()
+        try:
+            sim.stall_next_auth = True
+            with pytest.raises(PDU41002TimeoutError) as exc:
+                CyberPowerPDU41002.open(
+                    port=sim.port,
+                    allowed_outlets=(1,),
+                    password=sim.password,
+                )
+            assert sim.login_log == [("admin", True)], (
+                "the password the device went silent about was correct"
+            )
+            # Naming the variable here is precisely the wrong advice.
+            assert "BENCHCTRL_PDU_PASSWORD" not in str(exc.value)
+            assert "did not answer" in str(exc.value)
+        finally:
+            sim.close()
+
     def test_close_sends_exit(self, pdu):
         """Required, not polite.
 
