@@ -26,11 +26,67 @@ that `transports/ch341.py` requires. Raw `USBDEVFS` ioctls through stdlib
 ```python
 USBDEVFS_CLAIMINTERFACE   = 0x8004550F
 USBDEVFS_RELEASEINTERFACE = 0x80045510
-USBDEVFS_BULK             = 0xC0185502   # works on interrupt EPs despite the name
+USBDEVFS_BULK             = 0xC0185502   # interrupt EPs: supported, not tolerated
 ```
 
 This fully satisfies *"If possible I'd like this to work with no
 dependencies"* — it is a better answer than either option the user offered.
+
+### `USBDEVFS_BULK` on interrupt endpoints is contractual, not emergent
+
+Worth settling before writing code, because if this were an implementation
+accident a kernel update would silently break the only control path to a relay
+board. It is not an accident: **the kernel detects the endpoint type and builds a
+real interrupt URB.** `do_proc_bulk()` in `drivers/usb/core/devio.c` validates
+only that the endpoint exists, sits in a claimed interface, and has nonzero
+`wMaxPacketSize` — there is no comparison against `USB_ENDPOINT_XFER_BULK` — and
+then branches on `USB_ENDPOINT_XFER_INT` to rewrite the pipe to `PIPE_INTERRUPT`
+and call `usb_fill_int_urb()` with the descriptor's own `bInterval` (10 here). So
+writes to `0x01` and reads from `0x81` are genuine interrupt transfers, correctly
+paced. The ioctl name is a misnomer, nothing more.
+
+The citable commitment is `usb_bulk_msg()`'s kerneldoc in
+`drivers/usb/core/message.c`: *"We will take the liberty of creating an interrupt
+URB (with the default interval) if the target is an interrupt endpoint."* Quote
+only that sentence — the same comment opens by claiming `usb_interrupt_msg()`
+does not exist, which is stale (it exists and tail-calls `usb_bulk_msg`, so the
+two are literally the same function). The clause we depend on — that there is no
+`USBDEVFS_INTERRUPT` ioctl — is still true.
+
+Continuously present since **v2.6.15 (2006)**: twenty years, one relocation
+(`ae8709b296d8` moved it from `message.c` into `devio.c` for v5.16, for an
+unrelated syzbot `hung_task` fix, **carrying the branch across verbatim**), no
+removal and no deprecation. Low-speed devices have no bulk endpoints at all, so
+for this whole device class it is the only synchronous path that can ever work.
+
+**Residual risk, stated precisely: the guarantee lives in kerneldoc and in code,
+not in the uapi header or the user-facing ioctl reference.**
+`Documentation/driver-api/usb/usb.rst`'s `USBDEVFS_BULK` entry says "a bulk
+endpoint number" and does not mention interrupt endpoints (that same paragraph
+carries a literal `FIXME` about return semantics), and
+`include/uapi/linux/usbdevice_fs.h` says nothing on transfer type — verified
+locally. The narrative section is supportive though: *"interrupt transfers can
+also be used in a synchronous 'one shot' style"* (`usb.rst:349`), and
+`USBDEVFS_BULK` is the only synchronous non-control transfer ioctl usbfs has.
+
+**`SUBMITURB`/`REAPURB` was considered and rejected.** It is not
+better-specified — the async path carries the *same* accommodation, with its own
+`/* allow single-shot interrupt transfers */` comment, permitting interrupt while
+rejecting control and isoc. Declaring `USBDEVFS_URB_TYPE_INTERRUPT` would express
+intent more cleanly, but: **`struct usbdevfs_urb` has no timeout field** and
+`reap_as()` has no timeout, so the bounded `recv(timeout=…)` that makes the
+invalid-command and watchdog-trip captures work would have to be rebuilt from
+`REAPURBNDELAY` in a hand-rolled poll loop, plus `DISCARDURB` cancellation, plus
+completion-matching by userurb pointer — more state to get wrong in exactly the
+queued-response failure mode already documented in finding 5.
+
+**Architecture caveat for the constant:** `0xC0185502` embeds
+`sizeof(struct usbdevfs_bulktransfer) = 24`, correct for 64-bit userspace
+(aarch64 on the board). 32-bit would be `0xC0105502` — and the header does define
+a separate `USBDEVFS_BULK32` for exactly that reason, so this is a real
+distinction, not a theoretical one. Verified locally: `ctypes.sizeof()` gives 24
+and the ioctl encodes 24. The driver should derive it rather than hardcode, or at
+minimum comment why the literal is safe here.
 
 ### Why the interface is unclaimed, and why that is not luck
 
@@ -271,6 +327,27 @@ measured or documented fact rather than taste:
   including when the host suspends the device because **no handle is open**. So a
   closed handle can coexist with energised outputs indefinitely. Read `PK` and
   report it; drive `MK000` only when explicitly asked.
+- **But suspend cannot happen *under* us mid-session, and the reason is worth
+  knowing.** `usbdev_open()` takes a runtime-PM reference
+  (`usb_autoresume_device()`, `devio.c:1058`) and holds it until release unless
+  userspace issues `USBDEVFS_ALLOW_SUSPEND` — which this driver must never do.
+  `Documentation/driver-api/usb/power-management.rst:94` states it directly: *"a
+  device isn't considered idle so long as a program keeps its usbfs file open,
+  whether or not any I/O is going on."* That final clause is exactly the watchdog
+  scenario — **deliberate silence on the wire does not make the device idle to the
+  PM core**, so arming `WD` and going quiet cannot trigger a suspend. Secondary
+  protection: autosuspend is forbidden by default for all non-hub devices
+  (`hub.c` calls `usb_disable_autosuspend()`; `power-management.rst:253-256`).
+
+  Two consequences. First, **the guarantee comes from holding the fd open**, which
+  is an argument for the long-lived handle this design already has — a
+  close/reopen-per-command driver would give up the reference and fall back to
+  depending on a settable default (`power/control`, `power-management.rst:159-175`;
+  named for understanding, deliberately not configured). Second,
+  **`USBDEVFS_ALLOW_SUSPEND` must never be added as a politeness gesture.** It is
+  a one-line change that looks tidy and would let a board holding a relay closed
+  suspend under us. Worth a comment in `usbfs.py` saying so, since the next reader
+  will not know it was considered.
 - **Three de-bounce settings, not four.** The web page lists a fourth (`NONE`)
   but the manual bounds `n` to 0..2 and the captures show 0/1/2. The same
   four-option string appears on the ADU208 and ADU228 pages, so it reads as
