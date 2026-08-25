@@ -45,3 +45,59 @@ on-resistance, contact/clip resistance at the terminal block, or
 a range-dependent offset in the 2-wire function. Recorded as open
 rather than rationalised. The driver must NOT use the datasheet
 on-resistance as a validation threshold.
+
+FOLLOW-UP: the part datasheet was read, and the comparison this
+file makes is not valid
+------------------------------------------------------------------
+The "700 mohm typical / 1.1 ohm maximum" in the question above is
+quoted from Ontrak's ADU218 manual, which reprints it with NO test
+conditions. Panasonic's own catalogue for the part (ASCTB467E,
+PhotoMOS Power SIL 1 Form A; the AQZ207 has no standalone
+datasheet) states them explicitly in a Condition column:
+
+    IF = 10 mA        LED forward current
+    IL = Max.         load current AT MAXIMUM = 1.0 A for AQZ207
+    Within 1 s        take the reading within 1 s (thermal bound)
+
+So 1.1 ohm is a short-pulse figure at ONE AMP. Every reading in
+this file was taken with the DMM's ohmmeter sourcing on the order
+of 1 mA -- about three orders of magnitude below the specified
+condition, and with indefinite dwell rather than a 1 s pulse.
+
+Therefore: 6.14 ohm neither violates nor satisfies the datasheet
+maximum. There is no applicable limit at this test current. This
+unit must NOT be recorded as out of spec on the strength of this
+file.
+
+It is also still not explained. The natural story -- PhotoMOS R_on
+rising steeply as load current falls -- is NOT supported by the
+datasheet: it contains no R_on-vs-load-current curve at all (R_on
+is plotted only against ambient temperature), and its single
+lower-current data point runs the other way. Graph 3-4 is taken at
+0.4 A and reads about 0.65 ohm at 25 C, slightly BELOW the 0.7 ohm
+typical quoted at 1.0 A. The output I-V curve (graph 9-2) is a
+straight line through the origin with no knee, but at +/-4 A full
+scale it cannot resolve 1 mA either way. Temperature is the only
+R_on modifier the datasheet quantifies and it bounds that at about
+1.5x from 25 C to 85 C. 5.44 ohm remains unaccounted for.
+
+One candidate is now closed: the AC/DC variants really are two
+MOSFETs in anti-series (Panasonic's schematic, and visible in the
+~2x R_on ratio against each DC-only sibling: AQZ107 0.34 ohm ->
+AQZ207 0.7 ohm). But that doubling is ALREADY inside the published
+0.7 ohm. It must not be applied a second time.
+
+CORRECTION to this file's own method, while here: the eight
+repeats above are 2-WIRE. The 4-wire attempt is the line that
+returned -146172 ohm because no sense leads were attached. Any
+later summary of this measurement should say 2-wire. It does not
+change the conclusion -- H-5's ~79 mohm lead bound is still two
+orders of magnitude too small -- but 2-wire does include lead and
+terminal-block contact resistance, which a 4-wire reading would
+have excluded.
+
+The discriminating experiment is a measurement at the datasheet's
+own condition: 1.0 A, expecting <= 1.1 ohm, or 0.4 A for direct
+comparison against graph 3-4's ~0.65 ohm. That energises a
+120 V-rated relay into a real load, so it is an operator decision
+and is deliberately not scripted here.

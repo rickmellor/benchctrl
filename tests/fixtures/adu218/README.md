@@ -142,8 +142,8 @@ and because two of these differ from the vendor's web page.
 | Relay type | Panasonic **AQZ207 PhotoMOS**, form A (N.O.), solid-state |
 | AC rating | **1 A @ 120 VAC** |
 | DC rating | **1 A @ 120 VDC** (the manual's DC row reads "120VAC" — a typo; the web page gives 120 VDC) |
-| On-state R | 700 mΩ typ / **1.1 Ω max**, no test conditions given |
-| Max switching speed | **1 CPS at full load** |
+| On-state R | 700 mΩ typ / **1.1 Ω max** — conditions omitted here; the part datasheet specifies them at `IL = 1.0 A` (see finding 4) |
+| Max switching speed | **1 CPS at full load** — but Panasonic's own limit for the part is **0.5 cps** (see below) |
 | Isolation | 2500 Vrms (manual) — the web page says 3500 V / 500 V channel-to-channel |
 | Safety certification | **primary insulation ONLY** |
 
@@ -156,6 +156,15 @@ Two things to carry into the driver and its docs:
   load-dependent — 1 Hz at 1 A, effectively unbounded at ≤200 mA — and a driver
   cannot enforce it without knowing the load. That makes it a
   `KNOWN_LIMITATIONS.md` entry, not a code check.
+
+  **Ontrak's 1 CPS is twice the part maker's limit.** Panasonic
+  `ASCTB467E` gives max operating frequency as **0.5 cps** for the AQZ207, at
+  `IF = 10 mA, duty = 50 %, IL = Max., VL = Max.` Both figures claim to be "at
+  full load", so they conflict. Ontrak may be derating differently at 120 V
+  against the part's 200 V rating; that is a guess and is not resolved here.
+  **If the driver docs ever state a switching-rate ceiling, use 0.5 CPS** — it is
+  the more conservative and it comes from the component manufacturer rather than
+  the integrator.
 - **`§2` caution, verbatim:** *"The ADU218 provides CSA/UL EN60950-1 2nd edition
   safety certification for **primary insulation only**. For applications using
   an ADU218 requiring double insulation, additional protection should be provided
@@ -215,23 +224,58 @@ differs as above; de-bounce options differ (see below).
    should key on the DMM's overload sentinel, where the margin is effectively
    infinite, not on a resistance limit.
 
-   **Still unexplained after a full read of the manual, deliberately.** Four
-   candidate mechanisms were checked against the document — series protection
-   resistance, a current-sense element, a different specified measurement
-   condition, and PhotoMOS R_on being specified at a load current far above a
-   DMM's ohmmeter drive — and the manual is **silent on all four**. The entire
-   manual contains four resistance-related lines: two input-impedance figures
-   (2700 Ω) and the two on-state numbers, and the on-state numbers are given
-   **with no test conditions at all** — no test current, no temperature, no
-   method. So the manual offers nothing to compare a measurement against, and
-   cannot confirm or refute any of the four. Note the reading is ~5.6x the
-   documented *maximum*, not merely above typical.
+   Four candidate mechanisms were checked against the ADU218 manual — series
+   protection resistance, a current-sense element, a different specified
+   measurement condition, and PhotoMOS R_on being specified at a load current
+   far above a DMM's ohmmeter drive — and the manual is **silent on all four**.
+   The entire manual contains four resistance-related lines: two input-impedance
+   figures (2700 Ω) and the two on-state numbers, and the on-state numbers are
+   given **with no test conditions at all**. So the manual offers nothing to
+   compare against.
 
-   The obvious next source is a different document: the relay is a **Panasonic
-   AQZ207 PhotoMOS**, and Panasonic's datasheet for that part will state the
-   R_on test conditions Ontrak omits. Recorded here as the lead rather than
-   guessed from — an unexplained measurement is more useful than a plausible
-   story.
+   **The part datasheet supplies the missing conditions, and they invalidate the
+   comparison.** Panasonic `ASCTB467E` (PhotoMOS Power SIL 1 Form A family
+   catalogue; AQZ207 has no standalone datasheet) specifies on-resistance in a
+   table with an explicit Condition column: **`IF = 10 mA`, `IL = Max.`,
+   `Within 1 s`**. For the AQZ207, `IL = Max.` resolves to **1.0 A** from the
+   absolute-maximum-ratings row. Ontrak's 700 mΩ / 1.1 Ω are copied verbatim out
+   of that table — correct column, correct part — **but reprinted with the
+   conditions stripped.**
+
+   So the 1.1 Ω maximum is a short-pulse figure at **1.0 A**, and this bench
+   measured at roughly **1 mA**: three orders of magnitude below the specified
+   envelope. "6.14 Ω vs 1.1 Ω max" was never like-for-like, and nothing in the
+   ADU218 manual lets a reader discover that. Consequences for the driver:
+
+   - **This unit is not "out of spec."** There is no datasheet limit a 1 mA
+     reading can violate — nor one it can satisfy. Recording it as a fault would
+     be wrong.
+   - **Nor is it explained.** The tempting story — R_on rises steeply as load
+     current falls — is *not* in the datasheet. There is no R_on-vs-load-current
+     curve anywhere in it (R_on is plotted only against ambient temperature),
+     and the one lower-current point it does give trends the wrong way for that
+     story: graph 3-4 is taken at **0.4 A** and reads ≈0.65 Ω at 25 °C, slightly
+     *below* the 0.7 Ω typical quoted at 1.0 A. The I-V curve (graph 9-2) is a
+     straight line through the origin with no knee, but at ±4 A full scale it
+     cannot resolve 1 mA either way. Temperature is the only R_on modifier the
+     datasheet quantifies, and it bounds that at ~1.5x over 25→85 °C — nowhere
+     near the 5.44 Ω unaccounted for (3.07 Ω per die across the two series
+     MOSFETs, against 0.35 Ω per die implied by the typical).
+   - **The two-MOSFET topology does not add a factor.** The AC/DC variants
+     (AQZ20x) really are two MOSFETs in anti-series — visible in the schematic
+     and quantitatively in the ~2x R_on ratio against each DC-only sibling
+     (AQZ107 0.34 Ω → AQZ207 0.7 Ω). That doubling is **already inside** the
+     published 0.7 Ω. Do not double it again.
+   - **The driver must not report or imply a contact-resistance figure**, because
+     no in-spec figure exists at any current the driver could know about. An
+     open/closed check keys on the DMM's overload sentinel.
+
+   **Status: still unexplained — but for a stated reason rather than a missing
+   document.** The discriminating experiment is a measurement at the datasheet's
+   own condition (1.0 A, expecting ≤1.1 Ω; or 0.4 A for direct comparison with
+   graph 3-4). That energises a 120 V-rated relay into a real load, so it is an
+   operator decision, not something to slip into a probe script. See
+   `on_resistance.txt`.
 
 5. **A queued response outlives the command that caused it.** Interrupt-IN
    replies sit on EP `0x81` until read, so a driver that skips a read (or

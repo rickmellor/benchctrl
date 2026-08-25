@@ -77,12 +77,34 @@ which credited a bare-ASCII write with the previous prefixed command's answer.
 That is exactly the "sim agrees with the driver's misreading" failure
 `AGENTS.md` warns about, caught before any code existed.
 
-Also measured, and **unexplained**: closed-contact resistance is **6.14 Ω**
-against a datasheet 700 mΩ typ / 1.1 Ω max. Eight reads spread 0.98 mΩ, so it
-is systematic; § H-5 bounds this bench's lead error at ~79 mΩ, two orders too
-small. Recorded as open rather than rationalised. **The driver must not use
-datasheet on-resistance as a validation threshold** — key open/closed on the
-DMM's overload sentinel, where the margin is effectively infinite.
+Also measured, and **still unexplained — but no longer an invalid comparison**:
+closed-contact resistance is **6.14 Ω** against Ontrak's quoted 700 mΩ typ /
+1.1 Ω max. Eight reads spread 0.98 mΩ, so it is systematic; § H-5 bounds this
+bench's lead error at ~79 mΩ, two orders too small.
+
+The Panasonic `ASCTB467E` family catalogue (AQZ207 has no standalone datasheet)
+supplies the test conditions Ontrak's manual strips: on-resistance is specified
+at **`IF = 10 mA`, `IL = Max.`, `Within 1 s`**, and `IL = Max.` is **1.0 A** for
+this part. Ontrak copied the numbers from the correct column of the correct part
+— and dropped the conditions. This bench measured at ~1 mA, three orders of
+magnitude below the specified envelope, so **6.14 Ω cannot violate the 1.1 Ω
+maximum and cannot satisfy it either.** This unit is not out of spec.
+
+Nor is it explained. The tempting story — R_on climbing as load current falls —
+is absent from the datasheet: there is no R_on-vs-current curve at all (R_on is
+plotted only against temperature), and its one lower-current point (0.4 A,
+≈0.65 Ω at 25 °C) sits slightly *below* the 1.0 A typical, trending the wrong
+way. The AC/DC two-MOSFET anti-series topology is real but already inside the
+published 0.7 Ω (~2x against each DC-only sibling), so it adds no factor. 5.44 Ω
+remains unaccounted for. The discriminating experiment is a reading at the
+datasheet's own condition (1.0 A, or 0.4 A for comparison with graph 3-4) — that
+energises a 120 V relay into a real load, so it is an operator decision.
+
+**Driver consequence, unchanged and now better justified: never treat
+on-resistance as a validation threshold, and do not report a contact-resistance
+figure at all** — no in-spec figure exists at any current the driver could know
+about. Key open/closed on the DMM's overload sentinel, where the margin is
+effectively infinite.
 
 ## 3. Relay control is confirmed (the stated goal)
 
@@ -108,11 +130,20 @@ there is no load current and the manual's *"1 CPS at full load"* PhotoMOS limit
 still kept slow (0.5 s settle) and the cycle count small.
 
 **Ratings, for sizing the driver's posture:** Panasonic AQZ207 PhotoMOS, form A
-N.O., **1 A @ 120 VAC / 120 VDC**, 1 CPS at full load, and — worth stating
-because an operator would not infer it — **primary insulation only** (the sibling
-ADU208 is double-insulated; this model is not). The 1-CPS limit is
-load-dependent, so it is a `KNOWN_LIMITATIONS.md` entry rather than a code check:
-the driver cannot know what is attached.
+N.O., **1 A @ 120 VAC / 120 VDC**, and — worth stating because an operator would
+not infer it — **primary insulation only** (the sibling ADU208 is
+double-insulated; this model is not). Confirmed against the part datasheet: the
+AQZ207 is rated 1.0 A continuous at 200 V peak AC/DC, 2500 Vrms isolation, 1
+Form A — every figure Ontrak quotes traces to the right column, so there is no
+variant confusion.
+
+The switching-rate ceiling has a **conflict worth honouring conservatively**:
+Ontrak says 1 CPS at full load, Panasonic says **0.5 cps** for the part
+(`IF = 10 mA, duty = 50 %, IL = Max., VL = Max.`). Both claim "full load"; the
+gap is unresolved and may be Ontrak derating at 120 V against a 200 V part. Use
+**0.5 CPS** anywhere the docs state a limit. Either way it is load-dependent, so
+it stays a `KNOWN_LIMITATIONS.md` entry rather than a code check — the driver
+cannot know what is attached.
 
 ## 4. The find that changes more than this driver: the watchdog works
 
