@@ -17,6 +17,9 @@ rather than our reading of the PDF.
 | Endpoints | 8-byte interrupt: EP `0x01` OUT, EP `0x81` IN, `bInterval` 10 |
 | Host | Arduino Uno Q, kernel 6.16.7-g0dd6551ae96b, Python 3.13.5 |
 | Access path | raw `USBDEVFS` ioctls via stdlib `fcntl` + `ctypes` — **no pyusb, no hidapi, no pyserial** |
+| Capture date | 2026-08-25 |
+| Witness DMM | Siglent SDM4065A, s/n `SDM46A0CA00021`, firmware `0.0.0.20` |
+| Wiring | ADU218 relay **K0** load side → SDM4065A input leads. Nothing else attached, so no load current flows and the PhotoMOS CPS limit does not bind. This is the safety basis for every switching capture here |
 
 ### Why no driver binds, and why that is not luck
 
@@ -46,9 +49,6 @@ Two consequences, both load-bearing:
   `read()` returns the payload unmodified, so the framing below is identical on
   both routes. See `framing.txt`. Note `adutux` enforces exclusive open
   (`-EBUSY`), which is a stronger writer guarantee than usbfs gives us.
-| Capture date | 2026-08-25 |
-| Witness DMM | Siglent SDM4065A, s/n `SDM46A0CA00021`, firmware `0.0.0.20` |
-| Wiring | ADU218 relay **K0** load side → SDM4065A input leads. Nothing else attached. |
 
 ## Files
 
@@ -61,7 +61,21 @@ Two consequences, both load-bearing:
   correction: its "3.7 s" is an observation latency, not a trip time.**
 - `watchdog_trip.txt` — the WD1 trip time measured properly, by bisecting the
   silence window: **(0.90, 1.10] s**, i.e. the documented 1 s
-- `on_resistance.txt` — characterisation of the closed-contact reading
+- `on_resistance.txt` — characterisation of the closed-contact reading. **Carries
+  two corrections**: the repeats are 2-wire (not 4-wire), and its comparison
+  against the datasheet maximum was never like-for-like
+- `latency.txt` — write-to-read round-trip latency, 200 samples each of `PK` and
+  `RPK0`: **max 16.65 ms**, which is what justifies the read timeout. Also
+  re-confirms every documented silence at the shipping timeout rather than at the
+  2000 ms the other captures used
+- `latency_after_command.txt` — the same latency for the read-back that
+  *immediately follows relay motion*, which is the path `verify=True` depends on
+  (**max 16.68 ms**, 40 actuations, zero disagreements). §B pins the DMM range,
+  which `on_resistance.txt` never recorded
+- `on_resistance_drift.txt` — the closed-contact reading **stepped +4.55 Ω
+  between sessions** with nothing in software changed, and is milliohm-stable on
+  both sides. This is what attributes the excess to a series connection outside
+  the relay
 
 ## Wire format, as measured
 
@@ -144,7 +158,7 @@ and because two of these differ from the vendor's web page.
 | DC rating | **1 A @ 120 VDC** (the manual's DC row reads "120VAC" — a typo; the web page gives 120 VDC) |
 | On-state R | 700 mΩ typ / **1.1 Ω max** — conditions omitted here; the part datasheet specifies them at `IL = 1.0 A` (see finding 4) |
 | Max switching speed | **1 CPS at full load** — but Panasonic's own limit for the part is **0.5 cps** (see below) |
-| Isolation | 2500 Vrms (manual) — the web page says 3500 V / 500 V channel-to-channel |
+| Isolation | 2500 Vrms (manual) — **but the manual does not say which barrier this bounds**, and the web page's two figures (3500 V, plus 500 V *channel-to-channel*) show at least two distinct barriers exist. A single number cannot describe both, so this row must not be quoted as "the" isolation rating of anything |
 | Safety certification | **primary insulation ONLY** |
 
 Two things to carry into the driver and its docs:
@@ -178,11 +192,18 @@ differs as above; de-bounce options differ (see below).
 
 ## Five findings that would each have been a driver bug
 
-1. **`RI` does not exist.** The manual's command summary (§5) lists `RI` to
-   read both input ports. The command *description* (§6b) calls the same thing
-   `PI`, in four places (prose, command line, and both examples). The device
-   answers `PI` and **times out on `RI`** — the summary table is wrong. A driver
-   written from the summary would hang on every input read.
+1. **`RI` times out; `PI` answers.** The manual's command summary (§5) lists
+   `RI` to read both input ports. The command *description* (§6b) calls the same
+   thing `PI`, in four places (prose, command line, and both examples). The
+   device answers `PI` and **times out on `RI`** — the summary table is
+   unusable. A driver written from it would hang on every input read.
+
+   Phrased as *timed out* rather than *does not exist* deliberately, because
+   finding 3 limits what a timeout can prove: silence is also how this device
+   rejects a valid command carrying a bad argument (`RPK8`, `DB9`), so a timeout
+   establishes only that `RI` is unusable, never that the firmware lacks the
+   opcode. The driver consequence is identical either way, but the record should
+   not claim more than the wire showed.
 
    Both spellings really are in the PDF: `RI` appears exactly once (§5, p10),
    `PI` four times (§6b, p13), confirmed against raw non-layout text extraction
@@ -213,16 +234,37 @@ differs as above; de-bounce options differ (see below).
    without side effect. That is why the next valid command answers — and, less
    comfortably, why an invalid command still feeds the deadman.
 
-4. **Measured on-resistance is ~6.14 Ω, not the datasheet's 700 mΩ typical /
-   1.1 Ω maximum** (specifications table of the vendor manual). Eight repeat
-   readings spread 0.98 mΩ, so this is a stable systematic offset and not
-   noise. It is a 2-wire measurement, so it includes lead and contact
-   resistance — but § H-5 bounds this bench's lead error at ~79 mΩ, two
-   orders of magnitude too small to explain a 5 Ω discrepancy. Cause not yet
-   established; see `on_resistance.txt`. **The driver must not treat the
-   datasheet on-resistance as a validation threshold** — an open/closed check
-   should key on the DMM's overload sentinel, where the margin is effectively
-   infinite, not on a resistance limit.
+4. **The measured closed-contact resistance cannot be compared to the datasheet
+   at all, and the excess is in the bench wiring rather than the relay.** Two
+   separate errors were made reading this and both are now closed; the driver
+   consequence survives both, and is stronger for it.
+
+   The reading was ~6.14 Ω against the manual's 700 mΩ typical / 1.1 Ω maximum.
+   Eight repeats spread 0.98 mΩ, so it was stable and systematic, not noise. It
+   is a **2-wire** measurement (the 4-wire attempt returned −146172 Ω with no
+   sense leads attached), so it includes lead and contact resistance — and § H-5
+   bounds this bench's *lead* error at ~79 mΩ, far too small to explain a 5 Ω
+   discrepancy. That was where the question sat: unexplained.
+
+   It is no longer unexplained. A later session read the same closed contact at
+   **10.694 Ω** with nothing in software changed — a **+4.55 Ω step**, and
+   milliohm-stable on both sides of it (3.93 mΩ across ten re-actuations, against
+   0.12–2.35 mΩ within one close; 1.67 mΩ of drift over a 28 s hold). See
+   `on_resistance_drift.txt`. A semiconductor's R_on does not step 74% between
+   sessions and then hold to 4 mΩ across ten actuations, and a range-dependent
+   DMM offset was eliminated independently (pinned 200 Ω vs autoranged: 1.353 mΩ,
+   against a 4550 mΩ step — `latency_after_command.txt` §B). What *does* produce
+   that shape is a series connection outside the relay — DMM leads, K0 screw
+   terminals, clip joints — disturbed or lightly oxidised, stepping to a new
+   value and holding there. 6.14 Ω and 10.69 Ω are both stable readings of a
+   stable connection; they are readings of two **different** connections.
+
+   **The driver must not treat the datasheet on-resistance as a validation
+   threshold, and must not report a contact-resistance figure at all** — an
+   open/closed check keys on the DMM's overload sentinel, where the margin is
+   effectively infinite, not on a resistance limit. The step demonstrates why
+   directly: a driver that had thresholded "closed" at `< 10 Ω` from the original
+   6.14 Ω observation would today call every closed relay open.
 
    Four candidate mechanisms were checked against the ADU218 manual — series
    protection resistance, a current-sense element, a different specified
@@ -270,12 +312,19 @@ differs as above; de-bounce options differ (see below).
      no in-spec figure exists at any current the driver could know about. An
      open/closed check keys on the DMM's overload sentinel.
 
-   **Status: still unexplained — but for a stated reason rather than a missing
-   document.** The discriminating experiment is a measurement at the datasheet's
-   own condition (1.0 A, expecting ≤1.1 Ω; or 0.4 A for direct comparison with
-   graph 3-4). That energises a 120 V-rated relay into a real load, so it is an
-   operator decision, not something to slip into a probe script. See
-   `on_resistance.txt`.
+   **Status: closed, in the only sense available from the host.** The comparison
+   was invalid, and the excess is attributed to series connections outside the
+   relay. What is *not* identifiable from here is which of those connections
+   moved: the leads, the screw terminals and the clip joints are all in series
+   and all outside the part. Separating them needs 4-wire with sense leads
+   genuinely attached (§ H-5) and is an operator task. Worth asking the operator
+   whether anything was re-seated between sessions rather than assuming it.
+
+   Measuring the relay's *actual* R_on remains out of reach and out of scope: it
+   would need the datasheet's own condition (1.0 A, expecting ≤1.1 Ω; or 0.4 A
+   for direct comparison with graph 3-4), which energises a 120 V-rated relay
+   into a real load. That is an operator decision, not something to slip into a
+   probe script. See `on_resistance.txt` and `on_resistance_drift.txt`.
 
 5. **A queued response outlives the command that caused it.** Interrupt-IN
    replies sit on EP `0x81` until read, so a driver that skips a read (or

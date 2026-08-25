@@ -37,10 +37,16 @@ K0 open (RPK0=0)
 --- DC voltage across the open contact ---
   DCV: 0.000595 V
 
-CONCLUSION: unexplained. Section H-5 bounds this bench's lead
-error at about 79 mohm, two orders of magnitude too small to
-account for a ~5 ohm excess, and the milliohm spread rules out
-noise. Candidates not yet separated: the specific relay's actual
+CONCLUSION: unexplained. The milliohm spread rules out noise.
+(This paragraph originally cited KNOWN_LIMITATIONS H-5's ~79 mohm
+as an upper bound on the series error, which was a mistake of the
+same kind as the datasheet comparison below: H-5's figure was
+measured on a QR10x 100 ohm setpoint with a different lead set and
+different connections, so it bounds THAT path, not this one. It
+also turned out to be wrong by 57x for this path -- see the
+RESOLVED section at the end of this file. H-5's own datasheet
+bound is 0.2 ohm, still far below the excess.) Candidates not yet
+separated: the specific relay's actual
 on-resistance, contact/clip resistance at the terminal block, or
 a range-dependent offset in the 2-wire function. Recorded as open
 rather than rationalised. The driver must NOT use the datasheet
@@ -90,14 +96,61 @@ AQZ207 0.7 ohm). But that doubling is ALREADY inside the published
 CORRECTION to this file's own method, while here: the eight
 repeats above are 2-WIRE. The 4-wire attempt is the line that
 returned -146172 ohm because no sense leads were attached. Any
-later summary of this measurement should say 2-wire. It does not
-change the conclusion -- H-5's ~79 mohm lead bound is still two
-orders of magnitude too small -- but 2-wire does include lead and
-terminal-block contact resistance, which a 4-wire reading would
-have excluded.
+later summary of this measurement should say 2-wire. And 2-wire
+does include lead and terminal-block contact resistance, which a
+4-wire reading would have excluded -- which, per the RESOLVED
+section below, is where the excess turned out to live. (This
+paragraph also leaned on the ~79 mohm bound to argue the
+distinction did not matter. It did matter, and the bound did not
+apply; see the note in the CONCLUSION above.)
 
 The discriminating experiment is a measurement at the datasheet's
 own condition: 1.0 A, expecting <= 1.1 ohm, or 0.4 A for direct
 comparison against graph 3-4's ~0.65 ohm. That energises a
 120 V-rated relay into a real load, so it is an operator decision
 and is deliberately not scripted here.
+
+RESOLVED: the excess is not in the relay
+-----------------------------------------
+This file's CONCLUSION above lists three candidates and declines to
+choose. A later session chose for it, by accident. See
+on_resistance_drift.txt for the data; the short version:
+
+The same closed contact read 10.694 ohm, with nothing in software
+changed -- a +4.55 ohm step from the 6.13992 ohm mean here. The value
+is milliohm-stable on BOTH sides of that step: 3.93 mohm across ten
+re-actuations (vs 0.12-2.35 mohm within a single close), and 1.67 mohm
+of drift over a 28 s hold. So each side of the step is a good
+measurement of something; they are measurements of different things.
+
+Against the three candidates listed at lines 43-45:
+
+  "the specific relay's actual on-resistance"  ELIMINATED. A
+    semiconductor's R_on does not step 74% between sessions and then
+    hold to 4 mohm over ten actuations. The datasheet quantifies only
+    temperature as an R_on modifier, bounded ~1.5x over 25-85 C.
+
+  "a range-dependent offset in the 2-wire function"  ELIMINATED
+    independently, in latency_after_command.txt section B: pinned
+    200 ohm vs autoranged differ by 1.353 mohm against a 4550 mohm
+    step. That measurement also supplies what this file failed to
+    record -- the DMM's range and autorange state, which cannot be
+    recovered from a transcript after the fact.
+
+  "contact/clip resistance at the terminal block"  the only candidate
+    that predicts a step-then-hold. Confirmed by elimination.
+
+So the ~5 ohm this file recorded as unexplained is attributed, and the
+answer is that it was never the relay. Which specific connection moved
+is not identifiable from the host: the DMM leads, the K0 screw
+terminals and the clip joints are in series and all outside the part.
+This is not an accusation that anyone disturbed anything -- it is
+evidence a series connection differs between sessions, and the cause
+is outside what a script can see. Ask the operator.
+
+The driver consequence at line 46-47 stands and is now permanent rather
+than provisional. It used to rest on "the number is unexplained," which
+a later explanation could have dissolved. It now rests on something that
+does not expire: this measurement is dominated by series connections the
+driver cannot see or know about, so any figure it reported would be a
+property of the bench wiring wearing a relay's name.

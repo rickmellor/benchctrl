@@ -123,6 +123,12 @@ inferred later:
    watchdog, so that later reads have a known starting point rather than an
    inherited one.
 
+4. The feed-vs-timeout coupling is exactly the failure mode described in
+   memory as the "inert governor" trap: a watchdog nobody feeds looks identical
+   to a watchdog that works, until the day it should have fired. A test must
+   assert the LADDER - fed stays closed, unfed opens - against a synthetic
+   clock, not just that WD1 is accepted.
+
 5. A status poller silently disables the watchdog. Any command refeeds the
    timer, so a health-check loop that reads PK on a timer keeps the deadman fed
    no matter how wedged the control path is - the exact inert-governor shape
@@ -131,9 +137,3 @@ inferred later:
    mechanism, the feed must live on the CONTROL path and nowhere else, and the
    driver must not expose a background feeder at all. A benchctrl dashboard
    polling device state would be enough to neuter it.
-
-4. The feed-vs-timeout coupling is exactly the failure mode described in
-   memory as the "inert governor" trap: a watchdog nobody feeds looks identical
-   to a watchdog that works, until the day it should have fired. A test must
-   assert the LADDER - fed stays closed, unfed opens - against a synthetic
-   clock, not just that WD1 is accepted.
