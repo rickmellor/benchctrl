@@ -17,7 +17,7 @@ Each driver is independent and optional. Import only what you need.
 | Rigol DL3031A electronic load | `benchctrl.drivers.rigol_dl3031a.RigolDL3031A` | USB-TMC + SCPI via pyvisa | **shipped (v0.9.3)** |
 | Rigol DP2031 triple-output programmable PSU | `benchctrl.drivers.rigol_dp2031.RigolDP2031` | USB-TMC + SCPI via pyvisa | **shipped (v1.1.0)** |
 | Siglent SDM4065A 6½-digit bench DMM | `benchctrl.drivers.siglent_sdm4065a.SiglentSDM4065A` | USB-TMC + SCPI via pyvisa | **shipped (unreleased)** |
-| CyberPower PDU41002 8-outlet switched PDU | `benchctrl.drivers.cyberpower_pdu41002.CyberPowerPDU41002` | vendor CLI over USB-Serial (FTDI) **or** SSH | **reads only (unreleased)** |
+| CyberPower PDU41002 8-outlet switched PDU | `benchctrl.drivers.cyberpower_pdu41002.CyberPowerPDU41002` | vendor CLI over USB-Serial (FTDI) **or** SSH | **shipped (unreleased)** — switches mains |
 
 ## QR10x — programmable resistance
 
@@ -782,10 +782,12 @@ mid-measurement and drop other instruments' sessions. So the default is
 **do not move the contactors**, every switchable outlet is opt-in, and
 `close()` deliberately leaves outlet state alone.
 
-> **This release is reads only.** No method in the current driver can
-> change an outlet. `allowed_outlets` is validated and recorded but not
-> yet used, and the MCP surface says so in
-> `pdu41002_allowed_outlets()`. Switching lands with `set_outlet_state`.
+> **This driver switches real mains power.** `set_outlet_state`,
+> `reset_outlet` and `clear_outlet_command` move contactors on whatever
+> is plugged into the PDU. Nothing switches unless its index is in
+> `allowed_outlets`, and nothing switches implicitly — `close()`,
+> `__exit__` and the governor's default safe state all deliberately
+> leave outlet state alone. See [Switching](#switching).
 
 ### Quick start
 
@@ -912,6 +914,76 @@ individually, so there is no per-outlet current to ask for.
 `power_factor` is `None` at zero load — the device prints `----`, which
 is normal rather than a fault.
 
+### Switching
+
+Three methods move contactors, and there is deliberately **no
+`outlet_on()` / `outlet_off()` pair** — one switching verb means one code
+path to audit.
+
+| Method | CLI verb | Returns |
+|---|---|---|
+| `set_outlet_state(n, on, *, delayed=False, verify=True)` | `oltctrl index n act on\|off\|delayon\|delayoff` | the **verified read-back** state |
+| `reset_outlet(n, *, delayed=False)` | `oltctrl index n act reboot\|delayreboot` | `None` |
+| `clear_outlet_command(n)` | `oltctrl index n act cancel` | `None` |
+
+```python
+with CyberPowerPDU41002.open(port="/dev/benchctrl/pdu41002",
+                             allowed_outlets=(3,)) as pdu:
+    assert pdu.set_outlet_state(3, False) is False   # verified off
+    ...
+    assert pdu.set_outlet_state(3, True) is True     # verified on
+```
+
+**`set_outlet_state` returns the read-back state, not `None`, because
+`oltctrl` reports nothing at all.** Its reply is a blank line and a
+re-prompt — byte-identical whether or not the contactor moved (captured
+in `tests/fixtures/pdu41002/outlet_switch.txt`). There is no other way to
+learn what happened, so read-back is mandatory rather than prudent.
+`verify=False` skips it and logs a warning; the value it returns is the
+state you *asked for*, not the state the outlet is in.
+
+**The verify budget is derived from the device, not hardcoded.** Each
+outlet's `td_on` / `td_off` is operator-configurable (3 s as shipped),
+and `oltcfg` is read to size the wait. A budget picked from the measured
+~0.62 s round trip or ~1.5 s settle looks generous and then flakes on a
+unit whose delay someone raised. If the outlet never agrees,
+`PDU41002ProtocolError` says so and names both possibilities — it did not
+move, or its delay exceeds the budget.
+
+**`reset_outlet` returns `None` on purpose.** A reboot ends where it
+started, so a read-back cannot tell "cycled" from "never moved". The
+transient cut is the point and it is not observable after the fact, so
+the method makes no claim about it. If you need proof of the cut, drive
+`set_outlet_state(n, False)` then `True` and verify each.
+
+**`clear_outlet_command` is gated like a switch**, not like a read.
+Cancelling a scheduled cut leaves mains *on* when an operator expected it
+off — a state change in every sense that matters.
+
+#### Two independent guards, and why the method names matter
+
+Aggregate targeting is impossible **structurally**, not by validation:
+`oltctrl index all act off` is one line that de-powers the whole bench,
+so no signature accepts `"all"`, `"b1"`, `"b2"` or a collection. Two
+separate checks enforce it:
+
+1. `_coerce_outlet` rejects anything that is not a plain in-range `int`
+   — `bool` before `int`, so `True` cannot become outlet 1. That catches
+   a bad *argument*.
+2. Every rendered command is matched against
+   `^oltctrl index \d+ act (on|off|reboot|delayon|delayoff|delayreboot|cancel)$`
+   before a byte is written. That catches a bad *rendering* — a formatting
+   bug or a future edit to the action table — which the first check
+   cannot see.
+
+The switching methods are named `set_`, `reset` and `clear_` because
+`agent/dispatch.py` derives which calls need the writer claim **purely
+from the method name**, with no driver-declared override. A method named
+`outlet_on()` would be remotely callable by any read-only observer:
+mains switching that bypasses the claim gate entirely. Renaming any of
+the three silently removes that protection, which is why the mutator set
+is pinned by an exact-equality test in both directions.
+
 ### Deployment assumptions
 
 **Self-protection here is a cabling invariant, not a software
@@ -1027,7 +1099,14 @@ fixture files lost it to trailing-whitespace stripping, so do not
 
 ### MCP tools
 
-12 tools, prefixed `pdu41002_`, all read-only. `pdu41002_open` takes
-**no password parameter at all** — absent, not defaulted — so a model
-cannot place a credential in a tool-call argument where it would be
-logged in the conversation transcript.
+15 tools, prefixed `pdu41002_`. `pdu41002_open` takes **no password
+parameter at all** — absent, not defaulted — so a model cannot place a
+credential in a tool-call argument where it would be logged in the
+conversation transcript.
+
+Three of them switch mains: `pdu41002_set_outlet_state`,
+`pdu41002_reset_outlet` and `pdu41002_clear_outlet_command`. Each
+docstring opens by saying so and points at `allowed_outlets` as an
+operator decision to *ask about* rather than widen — a model reading only
+the tool description should not be able to mistake these for
+configuration.

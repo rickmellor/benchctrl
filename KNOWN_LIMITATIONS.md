@@ -742,6 +742,43 @@ Code reference:
 `src/benchctrl/discovery.py` — `SERIAL_PROBES` (note), `SYMLINK_KEYS`,
 `identify_by_symlink`, `scan_serial`.
 
+### F-14. `oltctrl` acknowledges nothing, so a switch is unfalsifiable without a read-back
+Bench-measured on firmware 1.3.4, and it is the constraint that shapes the
+whole switching surface. `oltctrl index N act off` answers with a **blank
+line and a re-prompt** — byte-identical whether the contactor moved, the
+index was out of the device's range in a way the parser missed, or the
+session had silently timed out and consumed the command as a username.
+There is no success marker, no failure marker and no error code. The
+transcript is checked in at `tests/fixtures/pdu41002/outlet_switch.txt`.
+
+Consequences that are not obvious from the vendor manual:
+
+- **`set_outlet_state` reads the outlet back and returns *that*, not
+  `None` and not the requested state.** `verify=False` exists but logs a
+  warning and returns the request unconfirmed; there is no honest way to
+  make it return anything better.
+- **The read-back budget must be derived from the device.** Each outlet's
+  `td_on` / `td_off` is operator-configurable, so a hardcoded wait sized
+  from the measured ~0.62 s round trip or ~1.5 s settle time flakes on a
+  unit whose delay someone raised. The driver reads `oltcfg` and adds a
+  margin.
+- **`reset_outlet` cannot be verified at all.** A reboot ends where it
+  started, so no read-back distinguishes "cycled" from "never moved". It
+  returns `None` rather than implying a guarantee it cannot make. Drive
+  `set_outlet_state(n, False)` then `True` if you need the cut proved.
+- **A simulator that always obeys cannot test any of this.** So
+  `SimulatedPDU41002` has an `ignore_switches` flag: it accepts and
+  acknowledges `oltctrl` byte-for-byte and moves nothing. Without a
+  device that can lie, the read-back path has no failing case to catch.
+
+Affects: every switching call, and any caller tempted to treat a returned
+value of `None` from `reset_outlet` as "it didn't work".
+
+Code reference:
+`src/benchctrl/drivers/cyberpower_pdu41002/driver.py` —
+`set_outlet_state`, `reset_outlet`, `_verify_outlet`, `_verify_budget_s`;
+`src/benchctrl/sim/pdu41002.py` — `ignore_switches`, `_blank_ack`.
+
 ## Harness
 
 ### A-1. Emulator + `SMU.record()` deadlock

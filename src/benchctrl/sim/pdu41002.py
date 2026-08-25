@@ -138,8 +138,16 @@ class SimulatedPDU41002(SimDevice):
         self.outlet_name: dict[int, str] = {
             i: f"Outlet{i}" for i in range(1, outlets + 1)
         }
-        #: Pending switch actions: index -> (apply_at_elapsed_s, target_state).
-        self._pending: dict[int, tuple[float, bool]] = {}
+        #: Pending switch actions: index -> [(apply_at_elapsed_s, target), ...].
+        #:
+        #: A **list** per outlet, not a single slot. ``act reboot`` schedules two
+        #: transitions on one outlet — off now, on after the reboot duration —
+        #: and a one-slot-per-outlet model silently drops the first, so the
+        #: transient cut would be unobservable and a reboot would look
+        #: indistinguishable from doing nothing. A test asserting "the outlet
+        #: went off then came back" would then pass against a simulator that
+        #: never cut it.
+        self._pending: dict[int, list[tuple[float, bool]]] = {}
 
         #: Every command line the client sent, post-login. Tests assert against
         #: this to prove the driver never emits `all`, `b1`, `b2` or `guest`.
@@ -156,6 +164,15 @@ class SimulatedPDU41002(SimDevice):
         self.hangup_count = 0
         #: When set, the next command answers with a forced error shape.
         self.force_next_error: Optional[str] = None
+        #: When set, ``oltctrl`` is accepted and acknowledged but **no outlet
+        #: moves** — the device lying by omission.
+        #:
+        #: This models the failure that makes read-back verification mandatory
+        #: rather than prudent. On hardware ``oltctrl`` answers with a blank line
+        #: and a re-prompt whether or not the contactor moved, so a driver that
+        #: trusted the response could not tell this state from success. There is
+        #: no way to test that guarantee without a device that can lie.
+        self.ignore_switches = False
 
         if require_login:
             # The real device greets a fresh serial console with a login prompt
@@ -573,6 +590,12 @@ class SimulatedPDU41002(SimDevice):
             self._blank_ack(line)
             return
 
+        if self.ignore_switches:
+            # Acknowledged exactly as a successful switch is — same blank line,
+            # same prompt — and nothing moves. See `ignore_switches`.
+            self._blank_ack(line)
+            return
+
         targets = {
             "on": True, "off": False,
             "delayon": True, "delayoff": False,
@@ -604,14 +627,20 @@ class SimulatedPDU41002(SimDevice):
         self._prompt()
 
     def _schedule(self, idx: int, state: bool, delay_s: float) -> None:
+        """Schedule a switch, replacing anything already queued for this outlet.
+
+        A plain ``on``/``off`` supersedes a pending action, matching the device:
+        the last instruction wins. Use :py:meth:`_schedule_after` to *add* a
+        transition without discarding the queue, as ``reboot`` does.
+        """
+        self._pending.pop(idx, None)
         self._schedule_after(idx, state, delay_s)
 
     def _schedule_after(self, idx: int, state: bool, delay_s: float) -> None:
         if delay_s <= 0:
             self.outlet_state[idx] = state
-            self._pending.pop(idx, None)
             return
-        self._pending[idx] = (self.elapsed_s + delay_s, state)
+        self._pending.setdefault(idx, []).append((self.elapsed_s + delay_s, state))
 
     # --- tick -----------------------------------------------------------
 
@@ -619,10 +648,20 @@ class SimulatedPDU41002(SimDevice):
         if not self._pending:
             return
         with self._lock:
-            due = [i for i, (at, _) in self._pending.items() if elapsed_s >= at]
-            for i in due:
-                _, state = self._pending.pop(i)
-                self.outlet_state[i] = state
+            for idx in list(self._pending):
+                queue = self._pending[idx]
+                # In scheduled order, so a reboot's off-then-on cannot land
+                # backwards if a slow tick makes both due at once.
+                due = [(at, state) for at, state in queue if elapsed_s >= at]
+                if not due:
+                    continue
+                due.sort(key=lambda item: item[0])
+                self.outlet_state[idx] = due[-1][1]
+                remaining = [item for item in queue if elapsed_s < item[0]]
+                if remaining:
+                    self._pending[idx] = remaining
+                else:
+                    self._pending.pop(idx, None)
 
     # --- fault injection ------------------------------------------------
 

@@ -702,6 +702,9 @@ def test_pdu41002_mcp_tools_cover_the_driver_surface():
         "outlet_states": "outlet_states",
         "outlet_state": "outlet_state",
         "outlet_config": "read_outlet_config",
+        "set_outlet_state": "set_outlet_state",
+        "reset_outlet": "reset_outlet",
+        "clear_outlet_command": "clear_outlet_command",
     }
     #: tools with no single method behind them — they compose properties
     COMPOSED = {"open", "close", "allowed_outlets", "transport"}
@@ -789,21 +792,47 @@ def test_pdu41002_open_takes_no_password_parameter():
         assert not leaky, f"{fn.__name__} accepts credential material: {sorted(leaky)}"
 
 
-def test_pdu41002_has_no_tool_that_switches_an_outlet():
-    """This release is read-only, and that is asserted rather than described.
+def test_pdu41002_exposes_exactly_the_reviewed_switching_tools():
+    """Which tools can move a contactor is pinned in both directions.
 
-    A tool that could move a contactor arriving without review is exactly the
-    thing to catch mechanically. When switching lands, this test is updated
-    deliberately — which is the point.
+    A *new* mains-switching tool arriving without review is exactly the thing to
+    catch mechanically — that was this test's job when the surface was read-only,
+    and it still is now that three switching tools exist. Adding a fourth means
+    updating this list on purpose.
     """
     from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
 
-    for fn in pdu_tools._TOOLS:
-        name = fn.__name__
-        assert "set_outlet" not in name
-        assert "reset" not in name
-        assert "reboot" not in name
-        assert "toggle" not in name
+    switching = {
+        "pdu41002_set_outlet_state",
+        "pdu41002_reset_outlet",
+        "pdu41002_clear_outlet_command",
+    }
+    names = {fn.__name__ for fn in pdu_tools._TOOLS}
+    assert names & switching == switching, "a reviewed switching tool went missing"
+
+    suspicious = {
+        n
+        for n in names - switching
+        if any(w in n for w in ("set_outlet", "reset", "reboot", "toggle", "switch"))
+    }
+    assert not suspicious, (
+        f"unreviewed tool(s) that look like they switch mains: {sorted(suspicious)}"
+    )
+
+
+def test_pdu41002_switching_tools_warn_about_mains_in_their_docstrings():
+    """The docstring *is* the safety interface for an MCP tool — it is what a
+    model reads before deciding to call it.
+
+    So each switching tool must say plainly that it cuts real power. A tool
+    documented as neutrally as a read is one a model will treat as neutral.
+    """
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
+
+    for name in ("set_outlet_state", "reset_outlet"):
+        doc = getattr(pdu_tools, f"pdu41002_{name}").__doc__ or ""
+        assert "mains" in doc.lower(), f"{name} does not mention mains"
+        assert "allowed_outlets" in doc, f"{name} does not point at the allowlist"
 
 
 def test_pdu41002_read_tools_report_a_clear_error_before_open():
@@ -830,12 +859,13 @@ def test_pdu41002_close_is_safe_to_call_when_not_open():
 
 
 def test_pdu41002_tools_work_against_the_simulator():
-    """The read tools end to end, through the module singleton.
+    """The tools end to end, through the module singleton.
 
     Bypasses ``pdu41002_open`` (which would need a real port) by injecting the
     simulator-backed driver, so the tools' own logic is what is under test.
     """
     from benchctrl import mcp as m
+    from benchctrl.drivers.cyberpower_pdu41002 import PDU41002PolicyError
     from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
     from benchctrl.sim.factories import make_pdu41002
 
@@ -860,10 +890,23 @@ def test_pdu41002_tools_work_against_the_simulator():
         cfg = m.pdu41002_outlet_config()
         assert cfg["outlets"]["1"]["on_delay_s"] == 3
 
-        # The policy report must not imply a capability that does not exist.
         policy = m.pdu41002_allowed_outlets()
         assert policy["allowed_outlets"] == [2, 3]
-        assert policy["switching_available"] is False
+        assert policy["switching_available"] is True
+
+        # Switching through the tool layer, on an allowed outlet. `state` is the
+        # verified read-back, so asserting it proves the tool reports what the
+        # device did rather than what was asked of it.
+        result = m.pdu41002_set_outlet_state(2, False)
+        assert result["state"] is False
+        assert result["verified"] is True
+        assert m.pdu41002_outlet_state(2)["on"] is False
+
+        # ...and the allowlist is enforced through the tool layer too, not just
+        # in the SDK. A model calling the tool directly must hit the same wall.
+        with pytest.raises(PDU41002PolicyError):
+            m.pdu41002_set_outlet_state(5, False)
+        assert m.pdu41002_outlet_state(5)["on"] is True
     finally:
         pdu_tools._pdu = None
         driver.close()

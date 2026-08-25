@@ -3,8 +3,8 @@
 Exposes:
 
 - :py:class:`CyberPowerPDU41002` — the device class. Identity, device
-  metering (load / voltage / frequency), per-outlet state and names, and
-  per-outlet switching delays. Outlet *switching* arrives in Stage 2.
+  metering (load / voltage / frequency), per-outlet state and names,
+  per-outlet switching delays, and outlet switching.
 - :py:class:`PDU41002Info` — identity / firmware metadata.
 - :py:class:`PDU41002Status` — device metering snapshot.
 - :py:class:`OutletConfig` — per-outlet on / off / reboot delays.
@@ -22,6 +22,18 @@ live at once; the incumbent session wins and the newcomer is hung up on *after*
 its password is accepted. So "network alongside serial" means alternating, not
 concurrent — and :py:meth:`CyberPowerPDU41002.close` must send ``exit``,
 because closing the port alone does not release the device's session.
+
+**Switching is opt-in per outlet and structurally single-outlet.**
+``allowed_outlets`` is a required argument, not an option with an "all"
+default, so a config typo fails closed. No signature accepts ``"all"``,
+``"b1"``, ``"b2"`` or a collection, and the rendered command is matched against
+a whitelist regex before the write — two independent guards, because one
+catches a bad argument and the other a bad *rendering*. ``oltctrl index all act
+off`` is a single well-formed line that de-powers the whole unit.
+
+Every write is named ``set_``/``reset``/``clear_`` because
+``agent/dispatch.py`` decides what needs a writer claim from the method name
+alone. Renaming one would make mains switching callable without a claim.
 
 The password comes from ``BENCHCTRL_PDU_PASSWORD`` in the environment of the
 host running the driver, never from a config file — see the

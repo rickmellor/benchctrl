@@ -391,6 +391,7 @@ from benchctrl.drivers.siglent_sdm4065a.mcp_tools import (
 # PDU41002 tools — read-only in this build: nothing here switches mains.
 from benchctrl.drivers.cyberpower_pdu41002.mcp_tools import (
     pdu41002_allowed_outlets,
+    pdu41002_clear_outlet_command,
     pdu41002_close,
     pdu41002_info,
     pdu41002_measure_frequency,
@@ -400,6 +401,8 @@ from benchctrl.drivers.cyberpower_pdu41002.mcp_tools import (
     pdu41002_outlet_config,
     pdu41002_outlet_state,
     pdu41002_outlet_states,
+    pdu41002_reset_outlet,
+    pdu41002_set_outlet_state,
     pdu41002_status,
     pdu41002_transport,
 )

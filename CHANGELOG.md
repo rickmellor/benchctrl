@@ -9,15 +9,19 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
-### CyberPower PDU41002 switched PDU — reads, over serial *or* SSH
+### CyberPower PDU41002 switched PDU — over serial *or* SSH
 
-The bench can now see mains: eight-outlet 120 V / 20 A switched PDU,
-whole-device metering, per-outlet state and delays. It is the first
-driver whose device switches mains power and the first with a network
-transport — and, in this release, **nothing in it can move a
-contactor.** Reads land first on purpose, so the parsers, the session
-handling and the allowlist machinery are all proven on hardware before
-any method can cut power.
+The bench can now cut and restore mains: eight-outlet 120 V / 20 A
+switched PDU, whole-device metering, per-outlet state and delays, and
+per-outlet switching. It is the first driver whose device switches mains
+power and the first with a network transport.
+
+Reads landed first on purpose, so the parsers, the session handling and
+the allowlist machinery were all proven on hardware before any method
+could cut power. `allowed_outlets` gates every switch; nothing moves
+implicitly — `close()`, `__exit__` and the governor's default safe state
+all deliberately leave outlet state alone, because for a PDU (unlike
+every other instrument) *cutting* power is itself the disruptive act.
 
 `open(port=...)` selects the serial console, `open(host=...)` selects
 SSH, and supplying both raises rather than silently preferring one:
@@ -35,9 +39,20 @@ dependencies**: serial is `pyserial`, SSH is a `pty.fork()` to
 `/usr/bin/ssh`, so nothing needs a compiled wheel on a board with no
 pip.
 
-Three device behaviours drove design decisions that look odd without
+Four device behaviours drove design decisions that look odd without
 them:
 
+- **`oltctrl` acknowledges nothing.** A switch command answers with a
+  blank line and a re-prompt, byte-identical whether or not the
+  contactor moved. So `set_outlet_state` returns the **verified
+  read-back** state rather than `None`, and the wait for it is sized from
+  the outlet's own configured `td_on` / `td_off` (operator-settable, 3 s
+  as shipped) rather than from a hardcoded number that would flake the
+  moment someone raised it. `reset_outlet` returns `None` and says why:
+  a reboot ends where it started, so no read-back can distinguish
+  "cycled" from "never moved". Testing this needed a simulator that can
+  *lie* — hence `ignore_switches`, which acknowledges a switch and moves
+  nothing.
 - **The CLI is single-session across the whole device**, and the
   incumbent wins. A second login *completes* — banner and all — and is
   then hung up, so the failure is indistinguishable from a bad password
@@ -73,9 +88,22 @@ a credential where it would be logged in a transcript.
 Method names are constrained by the agent's dispatch gate, which derives
 mutators purely from name prefixes: an `outlet_on()` would have been
 remotely callable *without a writer claim*, i.e. mains switching
-bypassing the claim gate. Every future switching method therefore takes
-an existing prefix, and adding `"outlet_"` to the prefix list was
-rejected because it would also capture the reads.
+bypassing the claim gate. So the three switching methods are
+`set_outlet_state`, `reset_outlet` and `clear_outlet_command`, the
+mutator set is pinned by exact-equality tests in both directions
+(locally and against the live agent surface), and adding `"outlet_"` to
+the prefix list was rejected because it would also capture the reads.
+
+Aggregate targeting is impossible structurally rather than by validation
+— `oltctrl index all act off` is one line that de-powers the whole bench.
+Two independent guards: coercion rejects anything that is not a plain
+in-range `int` (catching a bad *argument*, `bool` before `int` so `True`
+cannot become outlet 1), and every rendered command is matched against a
+single-index whitelist regex before a byte is written (catching a bad
+*rendering*, which coercion cannot see). `menumode` and
+`console telnet enable` are unreachable by the same regex — the first is
+a one-way trap that breaks every parser, the second would disable SSH
+from underneath a running test.
 
 Self-protection here is a **cabling invariant, not a software
 guarantee**: the PDU powers bench instruments and DUTs only, with the
@@ -91,8 +119,8 @@ agrees with it. `deploy/udev/62-benchctrl-ftdi.rules` binds
 `ttyUSB0` is enumeration-order and the driver must not open whichever
 cable happened to come up first.
 
-Still to come: outlet switching with mandatory read-back verification,
-and run-engine integration so a phase can power-cycle a DUT.
+Still to come: run-engine integration so a phase can power-cycle a DUT,
+and the governor's opt-in `panic_outlets` cut.
 
 ### Serial transport selection — kernel driver first
 

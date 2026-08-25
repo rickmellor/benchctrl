@@ -36,6 +36,7 @@ from benchctrl.drivers.cyberpower_pdu41002 import (
     PDU41002CommandError,
     PDU41002Info,
     PDU41002PolicyError,
+    PDU41002ProtocolError,
     PDU41002Status,
     PDU41002ValueError,
 )
@@ -733,7 +734,11 @@ class TestDispatchClassification:
             "measure_voltage_V",
             "measure_frequency_Hz",
         }
-        expected_mutators: set[str] = set()  # this release switches nothing
+        expected_mutators = {
+            "set_outlet_state",
+            "reset_outlet",
+            "clear_outlet_command",
+        }
         unclassified = set(surface.methods) - expected_reads - expected_mutators
         assert not unclassified, (
             f"new method(s) {sorted(unclassified)} — is each a read or a "
@@ -742,23 +747,33 @@ class TestDispatchClassification:
             f"without a writer claim."
         )
 
-    def test_this_release_exposes_no_mutators_at_all(self, surface):
-        """The reads-only claim, asserted rather than described.
+    def test_every_switching_method_requires_a_writer_claim(self, surface):
+        """Exact equality, not ``issubset``.
 
-        When switching lands this becomes ``== {"set_outlet_state",
-        "reset_outlet", "clear_outlet_command"}``. Until then, any mutator
-        appearing here is a method that can move a contactor and was not
-        reviewed as such.
+        The set is pinned in both directions on purpose. A missing entry means a
+        contactor can be moved without a writer claim; an *extra* entry means a
+        method that can move a contactor arrived without being reviewed as such.
+        Either way this test is the one that should fail.
         """
-        assert surface.mutators == frozenset()
+        assert surface.mutators == frozenset(
+            {"set_outlet_state", "reset_outlet", "clear_outlet_command"}
+        )
 
-    def test_a_future_switching_name_would_be_classified_as_a_mutator(self):
+    def test_the_switching_methods_are_actually_reachable(self, surface):
+        """A mutator absent from ``methods`` is not protected — it is simply
+        unreachable, which would make the test above pass for the wrong
+        reason."""
+        for name in ("set_outlet_state", "reset_outlet", "clear_outlet_command"):
+            assert name in surface.methods
+
+    def test_the_rejected_switching_names_would_have_bypassed_the_claim(self):
         """Pins the naming decision itself, not the current surface.
 
         ``outlet_on()`` reads naturally and would be **remotely callable
         without a writer claim** — mains switching bypassing the claim gate.
-        ``set_outlet_state()`` matches ``set_``. This test is what makes that
-        difference visible to whoever adds switching next.
+        ``set_outlet_state()`` matches ``set_``. Keeping this after switching
+        landed is the point: it documents why the natural name was rejected, so
+        a later "cleanup" renaming toward it fails here first.
         """
         from benchctrl.agent.dispatch import _MUTATOR_PREFIXES
 
@@ -776,6 +791,329 @@ class TestDispatchClassification:
         # added to the prefix list.
         assert not is_mutator("outlet_state")
         assert not is_mutator("outlet_states")
+
+
+# ---------------------------------------------------------------------------
+# Switching — the methods that move real contactors
+# ---------------------------------------------------------------------------
+
+
+class TestSwitching:
+    """Stage 2. Every test here would move mains on hardware.
+
+    The simulator honours the same per-outlet delay the device reports through
+    ``oltcfg`` (3 s as shipped), so these exercise the *derived* read-back
+    budget rather than a hardcoded sleep.
+    """
+
+    def test_switching_an_outlet_off_reports_the_read_back_state(self, pdu):
+        assert pdu.outlet_state(4) is True
+        assert pdu.set_outlet_state(4, False) is False
+        assert pdu.outlet_state(4) is False
+
+    def test_switching_an_outlet_on_reports_the_read_back_state(self, pdu):
+        pdu.set_outlet_state(4, False)
+        assert pdu.set_outlet_state(4, True) is True
+        assert pdu.outlet_state(4) is True
+
+    def test_the_emitted_command_is_a_single_outlet_oltctrl(self, pdu):
+        pdu.set_outlet_state(5, False)
+        sent = [c for c in pdu._benchctrl_sim.command_log if c.startswith("oltctrl")]
+        assert sent == ["oltctrl index 5 act off"]
+
+    def test_switching_returns_the_devices_answer_not_the_request(self, pdu):
+        """The distinction the whole design turns on.
+
+        ``oltctrl`` acknowledges nothing — its response is byte-identical
+        whether or not the contactor moved — so a method that returned its own
+        argument would report success for a switch that never happened. Here the
+        simulator is told to ignore the switch, and the call must fail rather
+        than echo the request back.
+        """
+        sim = pdu._benchctrl_sim
+        sim.outlet_state[6] = True
+        sim.ignore_switches = True
+        with pytest.raises(PDU41002ProtocolError) as excinfo:
+            pdu.set_outlet_state(6, False)
+        assert "still reads" in str(excinfo.value)
+
+    def test_a_lying_device_is_caught_rather_than_trusted(self, pdu):
+        """The same guarantee stated from the operator's side: if the outlet
+        does not reach the requested state, the caller learns it. Silence here
+        would mean an operator believing mains was cut when it was not."""
+        sim = pdu._benchctrl_sim
+        sim.ignore_switches = True
+        with pytest.raises(PDU41002ProtocolError):
+            pdu.set_outlet_state(2, False)
+        assert sim.outlet_state[2] is True
+
+    def test_verify_false_skips_the_read_back_and_says_so(self, pdu, caplog):
+        """``verify=False`` is supported but must be loud: the returned value is
+        the *request*, and nothing has confirmed it."""
+        import logging
+
+        sim = pdu._benchctrl_sim
+        sim.ignore_switches = True
+        with caplog.at_level(logging.WARNING):
+            assert pdu.set_outlet_state(3, False, verify=False) is False
+        # The outlet never moved, and the call still returned the request —
+        # which is exactly why the warning has to be there.
+        assert sim.outlet_state[3] is True
+        assert any("unconfirmed" in r.getMessage() for r in caplog.records)
+
+    def test_no_read_back_happens_when_verify_is_false(self, pdu):
+        """Not just cosmetic: the point of ``verify=False`` is to skip the
+        traffic, so a version that still polled would be misleading about
+        cost as well as about certainty."""
+        pdu.read_outlet_config()  # warm the cache so it is not counted below
+        sim = pdu._benchctrl_sim
+        sim.command_log.clear()
+        pdu.set_outlet_state(3, True, verify=False)
+        assert not [c for c in sim.command_log if c.startswith("oltsta")]
+
+    def test_delayed_switching_uses_the_delay_verbs(self, pdu):
+        pdu.set_outlet_state(7, False, delayed=True)
+        sent = [c for c in pdu._benchctrl_sim.command_log if c.startswith("oltctrl")]
+        assert sent == ["oltctrl index 7 act delayoff"]
+
+    def test_a_non_bool_on_argument_is_refused(self, pdu):
+        """``set_outlet_state(3, "off")`` is truthy, so a permissive signature
+        would **energise** an outlet the caller was trying to cut. That is the
+        worst available failure: the argument names the intent and the device
+        does the opposite."""
+        with pytest.raises(PDU41002ValueError):
+            pdu.set_outlet_state(3, "off")
+        assert not [
+            c for c in pdu._benchctrl_sim.command_log if c.startswith("oltctrl")
+        ]
+
+    @pytest.mark.parametrize("bad", [1, 0, None, "on"])
+    def test_only_a_real_bool_energises_or_cuts(self, pdu, bad):
+        """``1`` and ``0`` are rejected too. They read as "obviously on/off",
+        but accepting them means accepting ``"on"`` is a mistake away."""
+        with pytest.raises(PDU41002ValueError):
+            pdu.set_outlet_state(3, bad)
+
+    def test_reset_outlet_emits_reboot_and_claims_nothing(self, pdu):
+        """``reset_outlet`` returns ``None`` deliberately: the outlet ends where
+        it started, so no read-back could prove the cut happened."""
+        assert pdu.reset_outlet(4) is None
+        sent = [c for c in pdu._benchctrl_sim.command_log if c.startswith("oltctrl")]
+        assert sent == ["oltctrl index 4 act reboot"]
+
+    def test_a_reboot_actually_cuts_power_before_restoring_it(self, pdu):
+        """The transient off is the *point* of a reboot, and it is the thing a
+        read-back cannot see afterwards.
+
+        This is why the simulator queues multiple pending transitions per
+        outlet: with one slot per outlet the off was overwritten by the on, so a
+        reboot became indistinguishable from doing nothing — and this assertion
+        would have passed against a simulator that never cut the outlet.
+        """
+        sim = pdu._benchctrl_sim
+        assert sim.outlet_state[4] is True
+        pdu.reset_outlet(4)
+
+        # Step the sim's clock past the off delay but not the reboot duration.
+        sim.on_tick(sim.elapsed_s + sim.off_delay_s + 0.1)
+        assert sim.outlet_state[4] is False, "reboot never cut the outlet"
+
+        # ...and past the reboot duration, where it comes back on its own.
+        sim.on_tick(sim.elapsed_s + sim.off_delay_s + sim.reboot_duration_s + 0.1)
+        assert sim.outlet_state[4] is True, "reboot never restored the outlet"
+
+    def test_clear_outlet_command_cancels_a_pending_switch(self, pdu):
+        sim = pdu._benchctrl_sim
+        assert sim.outlet_state[5] is True
+        pdu.set_outlet_state(5, False, delayed=True, verify=False)
+        pdu.clear_outlet_command(5)
+        # Well past the delay: the cancelled switch must never land.
+        sim.on_tick(sim.elapsed_s + sim.off_delay_s + 5.0)
+        assert sim.outlet_state[5] is True
+        sent = [c for c in sim.command_log if c.startswith("oltctrl")]
+        assert sent[-1] == "oltctrl index 5 act cancel"
+
+    def test_cancelling_without_the_cancel_would_have_switched(self, pdu):
+        """The control for the test above. Without it, ``clear_outlet_command``
+        could be a no-op and the cancellation test would still pass, because
+        nothing would prove the pending switch was ever going to fire."""
+        sim = pdu._benchctrl_sim
+        pdu.set_outlet_state(5, False, delayed=True, verify=False)
+        sim.on_tick(sim.elapsed_s + sim.off_delay_s + 5.0)
+        assert sim.outlet_state[5] is False
+
+    def test_the_verify_budget_comes_from_the_devices_configured_delay(self, pdu):
+        """Derived, not hardcoded — the delay is operator-configurable per
+        outlet, and the capture notes record that a budget sized from the
+        observed contactor settle (~1.5 s) flakes on a unit whose ``td_on`` was
+        raised."""
+        sim = pdu._benchctrl_sim
+        sim.on_delay_s = 11
+        sim.off_delay_s = 17
+        pdu.read_outlet_config(refresh=True)
+        margin = type(pdu)._VERIFY_MARGIN_S
+        assert pdu._verify_budget_s(1, True) == pytest.approx(11 + margin)
+        assert pdu._verify_budget_s(1, False) == pytest.approx(17 + margin)
+
+    def test_a_longer_configured_delay_is_waited_out(self, pdu):
+        """The budget is not merely reported — a switch that settles late still
+        succeeds, which is the behaviour the derivation exists for."""
+        sim = pdu._benchctrl_sim
+        sim.off_delay_s = 1
+        pdu.read_outlet_config(refresh=True)
+        assert pdu.set_outlet_state(6, False) is False
+
+    def test_an_unreadable_config_still_allows_the_switch(self, pdu):
+        """The budget is advisory. Failing the switch because an *advisory*
+        read failed would be worse than using the margin alone — the command
+        has already been emitted by then, so refusing would report failure for
+        a switch that did happen."""
+        margin = type(pdu)._VERIFY_MARGIN_S
+
+        def boom(*a, **k):
+            raise PDU41002ProtocolError("oltcfg unreadable")
+
+        pdu.read_outlet_config = boom
+        assert pdu._verify_budget_s(1, True) == pytest.approx(margin)
+
+
+class TestSwitchingAllowlist:
+    """The allowlist is the primary safety control, and it applies to *every*
+    mutator. One unguarded method would make it decorative."""
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda p: p.set_outlet_state(5, False),
+            lambda p: p.set_outlet_state(5, True),
+            lambda p: p.reset_outlet(5),
+            lambda p: p.clear_outlet_command(5),
+        ],
+        ids=["set_off", "set_on", "reset", "clear"],
+    )
+    def test_every_mutator_refuses_an_outlet_outside_the_allowlist(
+        self, narrow_pdu, call
+    ):
+        with pytest.raises(PDU41002PolicyError):
+            call(narrow_pdu)
+        assert not [
+            c
+            for c in narrow_pdu._benchctrl_sim.command_log
+            if c.startswith("oltctrl")
+        ], "a refused call still reached the device"
+
+    def test_an_allowed_outlet_still_switches(self, narrow_pdu):
+        """Otherwise the refusals above would pass against a driver that
+        refused everything."""
+        assert narrow_pdu.set_outlet_state(2, False) is False
+
+    def test_the_refusal_happens_before_any_byte_is_written(self, narrow_pdu):
+        """Ordering matters: a policy check *after* the write would refuse the
+        caller while the contactor had already moved."""
+        sim = narrow_pdu._benchctrl_sim
+        sim.command_log.clear()
+        with pytest.raises(PDU41002PolicyError):
+            narrow_pdu.set_outlet_state(8, False)
+        assert sim.command_log == []
+        assert sim.outlet_state[8] is True
+
+
+class TestForbiddenSwitchingCommands:
+    """The structural guarantees, tested against the emitted bytes and against
+    the guard directly."""
+
+    def test_no_mutator_can_emit_an_aggregate_target(self, pdu):
+        """Exercises every switching path, then inspects everything sent.
+
+        ``oltctrl index all act off`` is one well-formed line that de-powers the
+        entire unit, and the device answers it with the same blank re-prompt a
+        legitimate switch gets.
+        """
+        pdu.set_outlet_state(1, False)
+        pdu.set_outlet_state(1, True)
+        pdu.set_outlet_state(2, False, delayed=True, verify=False)
+        pdu.clear_outlet_command(2)
+        pdu.reset_outlet(3)
+
+        sent = [c for c in pdu._benchctrl_sim.command_log if c.startswith("oltctrl")]
+        assert sent, "no switching commands were emitted — the test proves nothing"
+        for command in sent:
+            lowered = command.lower()
+            for forbidden in (" all", " b1", " b2", "guest", "menumode"):
+                assert forbidden not in lowered, f"{command!r} contains {forbidden!r}"
+
+    def test_every_emitted_switch_matches_the_whitelist(self, pdu):
+        """The whitelist is what the driver actually applies, so assert the
+        emitted bytes against it rather than against a second hand-written
+        pattern that could drift from it."""
+        from benchctrl.drivers.cyberpower_pdu41002.driver import _SAFE_OLTCTRL_RE
+
+        pdu.set_outlet_state(1, False)
+        pdu.reset_outlet(1)
+        pdu.clear_outlet_command(1)
+        for command in pdu._benchctrl_sim.command_log:
+            if command.startswith("oltctrl"):
+                assert _SAFE_OLTCTRL_RE.match(command), f"{command!r} escaped the guard"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "oltctrl index all act off",
+            "oltctrl index b1 act off",
+            "oltctrl index b2 act off",
+            "oltctrl index 1 act off guest 1",
+            "oltctrl guest 1 index 1 act off",
+            "menumode",
+            "console telnet enable",
+            "oltctrl index 1 act off; oltctrl index 2 act off",
+            "oltctrl index 1 act",
+            "oltctrl index 1 act bogus",
+            "oltctrl index -1 act off",
+            "oltctrl index 1 act off\roltctrl index all act off",
+            " oltctrl index 1 act off",
+            "OLTCTRL INDEX ALL ACT OFF",
+        ],
+    )
+    def test_the_guard_rejects_what_the_methods_cannot_construct(self, command):
+        """Tests the guard directly, with strings the driver's own methods
+        cannot produce.
+
+        That is the whole reason ``_assert_safe_command`` is a module-level
+        function. Driving it only through the methods would prove the argument
+        validation works — which is already tested — and prove nothing about
+        whether the guard catches a *rendering* bug, which is the failure it
+        exists for.
+        """
+        from benchctrl.drivers.cyberpower_pdu41002.driver import _assert_safe_command
+
+        with pytest.raises(PDU41002ValueError):
+            _assert_safe_command(command)
+
+    @pytest.mark.parametrize(
+        "action", ["on", "off", "reboot", "delayon", "delayoff", "delayreboot", "cancel"]
+    )
+    def test_the_guard_admits_every_legitimate_single_outlet_action(self, action):
+        """The other half. A guard that rejected everything would pass every
+        test above while making the driver useless."""
+        from benchctrl.drivers.cyberpower_pdu41002.driver import _assert_safe_command
+
+        _assert_safe_command(f"oltctrl index 8 act {action}")
+
+    def test_a_rendering_bug_is_caught_by_the_guard(self, pdu, monkeypatch):
+        """The concrete scenario the guard is for: validation passed, and the
+        command was then rendered wrongly anyway.
+
+        Simulated by corrupting the action map, which is how a real edit would
+        break it. The write must not happen.
+        """
+        from benchctrl.drivers.cyberpower_pdu41002 import driver as drv
+
+        monkeypatch.setitem(drv._SWITCH_ACTIONS, (False, False), "off guest 1")
+        sim = pdu._benchctrl_sim
+        sim.command_log.clear()
+        with pytest.raises(PDU41002ValueError):
+            pdu.set_outlet_state(1, False)
+        assert sim.command_log == []
 
 
 # ---------------------------------------------------------------------------

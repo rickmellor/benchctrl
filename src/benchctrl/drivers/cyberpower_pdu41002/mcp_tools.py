@@ -8,14 +8,16 @@ every PDU41002 tool on the shared :py:class:`FastMCP` server.
 Connection state (``_pdu``) lives in this module. Tests can mutate the singleton
 via this module to inject fakes.
 
-**This is the first driver whose MCP surface can cut mains power** — and, at
-this stage, deliberately cannot. Every tool here is read-only; outlet switching
-arrives with the driver's mutators. Two consequences shape the module:
+**This is the first driver whose MCP surface can cut mains power.** Three tools
+here move real contactors: :py:func:`pdu41002_set_outlet_state`,
+:py:func:`pdu41002_reset_outlet` and :py:func:`pdu41002_clear_outlet_command`.
+Two consequences shape the module:
 
 - The docstrings are the safety interface. They are what a model reads before
-  calling, so each one states plainly what it does *not* do, and
-  :py:func:`pdu41002_open` states that the allowlist is the operator's decision
-  rather than something a model should widen on its own initiative.
+  calling, so each switching tool states in its first line that it cuts mains,
+  says what is *not* recoverable by calling it again, and points at
+  ``allowed_outlets`` as an operator decision to ask about rather than widen.
+  The allowlist is enforced by the driver regardless of what a model believes.
 - ``pdu41002_open`` takes no password parameter at all. Not "defaults to None" —
   absent. A model must not be able to put a credential in a tool-call argument,
   where it would be logged in the conversation transcript. The password comes
@@ -64,10 +66,11 @@ def pdu41002_open(
     always say which wire a command travelled on.
 
     ``allowed_outlets`` is the set of outlet numbers (1-8) this session is
-    permitted to switch **later**, once switching tools exist. It defaults to
-    empty, meaning "switch nothing". Widening it authorises cutting mains to
-    whatever is plugged into those outlets: treat it as an operator decision and
-    ask rather than guessing. Nothing in this module can switch an outlet today.
+    permitted to switch. It defaults to empty, meaning "switch nothing", and it
+    is fixed for the life of the session. Listing an outlet here authorises
+    cutting mains to whatever is plugged into it: treat it as an operator
+    decision, and if a later call needs an outlet that is not listed, ask rather
+    than reopening the session with a wider list.
 
     There is no password parameter. The credential is read from
     ``BENCHCTRL_PDU_PASSWORD`` in the server's environment; if that is unset,
@@ -211,21 +214,101 @@ def pdu41002_outlet_config() -> dict:
 def pdu41002_allowed_outlets() -> dict:
     """Which outlets this session may switch, and which the governor may cut.
 
-    Reports the policy, and states plainly that no switching tool exists yet, so
-    a model cannot conclude from an allowlist that it has a way to use it.
+    Reports the policy. Anything outside ``allowed_outlets`` is refused by the
+    driver, so this is the authoritative answer to "what can I actually
+    switch" — do not infer it from the outlet count.
     """
     pdu = _get_pdu()
     return {
         "allowed_outlets": sorted(pdu.allowed_outlets),
         "panic_outlets": sorted(pdu.panic_outlets),
         "outlet_count": pdu.outlet_count,
-        "switching_available": False,
+        "switching_available": True,
         "note": (
-            "Read-only build: no tool in this server can change outlet state. "
-            "allowed_outlets is set when the session is opened and is an "
-            "operator decision."
+            "Outlets outside allowed_outlets are refused. The allowlist is "
+            "fixed when the session is opened and is an operator decision: ask "
+            "rather than reopening the session to widen it."
         ),
     }
+
+
+def pdu41002_set_outlet_state(
+    index: int, on: bool, delayed: bool = False, verify: bool = True
+) -> dict:
+    """**Switch mains power to one outlet.** This physically cuts or restores AC.
+
+    Setting ``on=false`` de-energises whatever is plugged into that outlet
+    immediately — a DUT mid-measurement will lose power, and an instrument on
+    that outlet will drop its session. This is not reversible by undoing the
+    call: the equipment has already power-cycled.
+
+    Only outlets in ``allowed_outlets`` can be switched; anything else is
+    refused. Check ``pdu41002_allowed_outlets`` first, and if the outlet you
+    want is not listed, **ask the operator** rather than reopening the session
+    with a wider allowlist.
+
+    Args:
+        index: outlet number, 1-8. One outlet per call; there is no way to
+            address several at once, by design.
+        on: ``true`` energises, ``false`` cuts.
+        delayed: honour the outlet's configured delay as a scheduled switch,
+            cancellable via ``pdu41002_clear_outlet_command``.
+        verify: read the outlet back and confirm it moved. Leave this ``true``.
+            The device does not acknowledge switch commands at all, so with
+            ``verify=false`` the reported result is the state that was
+            *requested*, not the state the outlet is in.
+
+    Returns:
+        ``state`` is the **verified** state read from the device, and
+        ``verified`` says whether it was actually checked.
+    """
+    pdu = _get_pdu()
+    state = pdu.set_outlet_state(index, on, delayed=delayed, verify=verify)
+    return {
+        "index": index,
+        "requested": on,
+        "state": state,
+        "verified": bool(verify),
+        "delayed": bool(delayed),
+    }
+
+
+def pdu41002_reset_outlet(index: int, delayed: bool = False) -> dict:
+    """**Power-cycle one outlet**: cut mains, then restore it automatically.
+
+    Whatever is plugged into ``index`` loses power for the outlet's configured
+    reboot duration (5 s as shipped) and comes back cold-booted. Use this for
+    recovering a hung DUT, not for testing whether an outlet works.
+
+    Reports no final state, deliberately: the outlet ends where it started, so
+    reading it back cannot prove the cut happened. If you need proof, switch it
+    off and on with ``pdu41002_set_outlet_state`` and verify each step.
+
+    Restricted to ``allowed_outlets``.
+    """
+    _get_pdu().reset_outlet(index, delayed=delayed)
+    return {
+        "index": index,
+        "action": "delayreboot" if delayed else "reboot",
+        "note": (
+            "The outlet cycles and returns to its previous state. No read-back "
+            "is reported because the end state equals the start state."
+        ),
+    }
+
+
+def pdu41002_clear_outlet_command(index: int) -> dict:
+    """Cancel a *pending delayed* switch on one outlet.
+
+    Only affects a scheduled action that has not fired yet. An outlet that has
+    already moved stays where it is — this does not undo a completed switch.
+
+    Note that cancelling a scheduled cut **leaves mains on** when an operator
+    may be expecting it off, which is why this is restricted to
+    ``allowed_outlets`` like any other state change.
+    """
+    _get_pdu().clear_outlet_command(index)
+    return {"index": index, "action": "cancel"}
 
 
 def pdu41002_transport() -> dict:
@@ -251,6 +334,9 @@ _TOOLS = (
     pdu41002_outlet_state,
     pdu41002_outlet_config,
     pdu41002_allowed_outlets,
+    pdu41002_set_outlet_state,
+    pdu41002_reset_outlet,
+    pdu41002_clear_outlet_command,
     pdu41002_transport,
 )
 

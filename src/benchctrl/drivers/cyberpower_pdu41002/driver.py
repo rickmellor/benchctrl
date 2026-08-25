@@ -112,6 +112,39 @@ _HANGUP_MARKERS = ("closed by remote host", "Connection to ")
 #: why ``"all"``, ``"b1"``, ``"b2"`` and collections are rejected structurally.
 OutletIndex = int
 
+#: The **only** shape of switching command this driver is permitted to emit.
+#:
+#: This is a whitelist applied to the rendered bytes, immediately before the
+#: write, and it is the second of two independent guards — the first being
+#: :py:meth:`CyberPowerPDU41002._coerce_outlet`, which rejects anything that is
+#: not a plain in-range ``int``. Two guards rather than one because they fail
+#: differently: the coercion catches a bad *argument*, this catches a bad
+#: *rendering*, and a format-string bug is exactly the kind of defect that
+#: turns a validated ``int`` back into a dangerous string.
+#:
+#: ``\d+`` is not a laxity here: the index has already been range-checked, and
+#: the point of this pattern is to reject the aggregate spellings the device
+#: accepts — ``index all``, ``index b1``, ``index b2`` — each of which is one
+#: line that moves every contactor on the unit. It also excludes ``guest``
+#: (which addresses a *different physical box* in a daisy chain) and
+#: ``menumode`` (a one-way trap: the manual states returning to the CLI needs a
+#: full logout/login, so every later parse would fail against menu output while
+#: the link still looked healthy).
+_SAFE_OLTCTRL_RE = re.compile(
+    r"^oltctrl index \d+ act "
+    r"(on|off|reboot|delayon|delayoff|delayreboot|cancel)$"
+)
+
+#: Actions accepted by :py:meth:`CyberPowerPDU41002.set_outlet_state`, keyed by
+#: ``(on, delayed)``. Spelled out rather than assembled from fragments so the
+#: emitted verb is greppable and the mapping is auditable at a glance.
+_SWITCH_ACTIONS = {
+    (True, False): "on",
+    (False, False): "off",
+    (True, True): "delayon",
+    (False, True): "delayoff",
+}
+
 
 # ---------------------------------------------------------------------------
 # Exceptions — kept independent of benchctrl.exceptions, as the other drivers
@@ -287,6 +320,8 @@ class CyberPowerPDU41002:
 
     #: Retry margin added on top of the device's configured switching delay.
     _VERIFY_MARGIN_S = 3.0
+    #: Gap between read-back polls while waiting for a contactor to settle.
+    _VERIFY_POLL_S = 0.25
     #: How long to wait for a prompt on an ordinary command.
     _CMD_TIMEOUT_S = 12.0
     #: Authentication takes ~7.5 s on firmware 1.3.4; allow generous headroom.
@@ -854,6 +889,159 @@ class CyberPowerPDU41002:
         self._config_cache = out
         return dict(out)
 
+    # -- writes -------------------------------------------------------------
+    #
+    # Every method here is prefixed `set_`, `reset` or `clear_` — not for
+    # style, but because `agent/dispatch.py` derives which calls require a
+    # writer claim *purely* from the method name, with no driver-declared
+    # override. A switching method named `outlet_on()` would be remotely
+    # callable by any observer: mains switching that bypasses the claim gate.
+    # Renaming anything below silently removes that protection.
+
+    def set_outlet_state(
+        self,
+        index: OutletIndex,
+        on: bool,
+        *,
+        delayed: bool = False,
+        verify: bool = True,
+    ) -> bool:
+        """Switch one outlet and return its **verified** state.
+
+        Args:
+            index: outlet number. Must be a plain int in ``allowed_outlets``.
+            on: ``True`` energises, ``False`` cuts.
+            delayed: use the device's ``delayon``/``delayoff`` actions, which
+                honour the per-outlet delay as a *scheduled* switch.
+            verify: re-read the outlet until it agrees, and raise if it never
+                does. Defaults on, and turning it off means accepting that the
+                return value is a guess — see below.
+
+        Returns:
+            The state read back from the device, not the state requested. With
+            ``verify=False`` the device is not asked, and the requested state is
+            returned unconfirmed.
+
+        Raises:
+            PDU41002PolicyError: ``index`` is not in ``allowed_outlets``.
+            PDU41002ValueError: ``index`` is not a plain in-range int, or ``on``
+                is not a bool.
+            PDU41002ProtocolError: the outlet never reached the requested state
+                within the budget derived from its configured delay.
+
+        This returns the read-back state rather than ``None`` because
+        ``oltctrl`` reports **nothing**: its response is a blank line and a
+        re-prompt, byte-identical whether or not the contactor moved (captured
+        in ``tests/fixtures/pdu41002/outlet_switch.txt``). There is no other way
+        to learn what happened, so mains switching here is never
+        fire-and-forget.
+        """
+        idx = self._coerce_outlet(index)
+        self._require_allowed(idx)
+        if not isinstance(on, bool):
+            # Not pedantry: `set_outlet_state(3, "off")` would otherwise be
+            # truthy and energise an outlet the caller was trying to cut.
+            raise PDU41002ValueError(
+                f"`on` must be a bool, got {on!r}. A truthy string would "
+                f"energise an outlet a caller meant to cut."
+            )
+
+        action = _SWITCH_ACTIONS[(on, bool(delayed))]
+        self._switch(idx, action)
+
+        if not verify:
+            log.warning(
+                "outlet %d switched to %s without read-back; the device does "
+                "not acknowledge oltctrl, so this result is unconfirmed",
+                idx,
+                "on" if on else "off",
+            )
+            return on
+        return self._verify_outlet(idx, on)
+
+    def reset_outlet(self, index: OutletIndex, *, delayed: bool = False) -> None:
+        """Power-cycle one outlet via the device's own ``reboot`` action.
+
+        Returns ``None``, unlike :py:meth:`set_outlet_state`, because the
+        end state is the *same* as the start state — a read-back cannot
+        distinguish "cycled" from "never moved". The transient off is what the
+        caller wants and it is not observable after the fact, so this method
+        makes no claim about it. Callers needing proof of the cut should drive
+        ``set_outlet_state(index, False)`` then ``True`` and verify each.
+
+        The device holds the outlet off for its configured reboot duration
+        (5 s as shipped) and restores it without further instruction.
+        """
+        idx = self._coerce_outlet(index)
+        self._require_allowed(idx)
+        self._switch(idx, "delayreboot" if delayed else "reboot")
+
+    def clear_outlet_command(self, index: OutletIndex) -> None:
+        """Cancel a pending delayed switch on one outlet (``act cancel``).
+
+        Only affects a *scheduled* action; an outlet that has already moved
+        stays where it is. Requires the outlet to be in ``allowed_outlets``:
+        cancelling a scheduled cut leaves mains on when an operator expected it
+        off, which is a state change in every sense that matters.
+        """
+        idx = self._coerce_outlet(index)
+        self._require_allowed(idx)
+        self._switch(idx, "cancel")
+
+    # -- switching internals ------------------------------------------------
+
+    def _switch(self, idx: int, action: str) -> None:
+        """Render, guard and emit one ``oltctrl`` command."""
+        command = f"oltctrl index {idx} act {action}"
+        _assert_safe_command(command)
+        self._cmd(command)
+
+    def _verify_budget_s(self, idx: int, on: bool) -> float:
+        """How long to allow for an outlet to reach ``on``.
+
+        Derived from the device's own ``oltcfg`` delay rather than hardcoded,
+        because that delay is **operator-configurable per outlet**. The capture
+        notes make the failure concrete: the ``oltctrl`` round trip is ~0.62 s
+        and the contactor itself settles in ~1.5 s, so a budget sized from
+        either of those measurements looks generous and then flakes on a unit
+        whose ``td_on`` an operator raised. Falls back to the margin alone if
+        the config cannot be read — a failed read of an advisory value must not
+        block a switch that has already been emitted.
+        """
+        try:
+            config = self.read_outlet_config()
+        except PDU41002Error:
+            log.debug("could not read oltcfg for the verify budget", exc_info=True)
+            return self._VERIFY_MARGIN_S
+        cfg = config.get(idx)
+        if cfg is None:
+            return self._VERIFY_MARGIN_S
+        return float(cfg.on_delay_s if on else cfg.off_delay_s) + self._VERIFY_MARGIN_S
+
+    def _verify_outlet(self, idx: int, want: bool) -> bool:
+        """Poll one outlet until it reads ``want``, or raise.
+
+        Polls rather than sleeping the full budget so the common case (already
+        settled) returns immediately.
+        """
+        budget = self._verify_budget_s(idx, want)
+        deadline = time.monotonic() + budget
+        last: Optional[bool] = None
+        while True:
+            last = self.outlet_state(idx)
+            if last == want:
+                return last
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(self._VERIFY_POLL_S)
+        raise PDU41002ProtocolError(
+            f"outlet {idx} still reads "
+            f"{'on' if last else 'off'} {budget:.1f}s after being switched "
+            f"{'on' if want else 'off'}. The command was accepted — oltctrl "
+            f"never reports failure — so either the outlet did not move or the "
+            f"delay configured for it exceeds this budget."
+        )
+
     # -- validation ---------------------------------------------------------
 
     def _coerce_outlet(self, index: OutletIndex) -> int:
@@ -1091,6 +1279,28 @@ def _parse_optional_suffixed(fields: dict, key: str, suffix: str):
         return float(head)
     except ValueError:
         return None
+
+
+def _assert_safe_command(command: str) -> None:
+    """Refuse to emit any switching command outside :py:data:`_SAFE_OLTCTRL_RE`.
+
+    A module-level function, not a method, so a test can exercise it against
+    hand-written strings the driver's own methods cannot construct — which is
+    the only way to prove the guard catches a *rendering* bug rather than
+    merely restating the argument validation that already happened.
+
+    Deliberately raises :py:class:`PDU41002ValueError` before any byte reaches
+    the wire. The failure mode this prevents is not theoretical: ``oltctrl
+    index all act off`` is a single well-formed line that de-powers every
+    outlet on the unit, and the device answers it with the same blank
+    re-prompt it gives a legitimate switch.
+    """
+    if not _SAFE_OLTCTRL_RE.match(command):
+        raise PDU41002ValueError(
+            f"refusing to emit {command!r}: not a single-outlet oltctrl "
+            f"command. Aggregate targets (all, b1, b2), other units (guest) "
+            f"and menumode are structurally unreachable by design."
+        )
 
 
 def _coerce_outlet_set(values: Iterable[int], label: str) -> set:

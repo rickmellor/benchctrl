@@ -397,25 +397,111 @@ def test_reads_need_no_writer_claim(remote_pdu):
         assert name not in surface.mutators
 
 
-def test_the_live_agent_surface_exposes_no_mutators(remote_pdu):
-    """The reads-only claim, asserted against the agent rather than local
-    introspection — this is the surface a remote caller actually sees.
+def test_the_live_agent_surface_gates_exactly_the_switching_methods(remote_pdu):
+    """Asserted against the agent rather than local introspection — this is the
+    surface a remote caller actually sees, and the two could differ.
 
-    When switching lands, this becomes the list of the three switching methods.
-    Until then, anything appearing here can move a contactor and was not
-    reviewed as such.
+    Pinned in both directions: a missing entry means mains can be switched
+    without a writer claim, an extra one means a contactor-moving method arrived
+    unreviewed.
     """
-    assert remote_pdu.agent.registry.surface_of(KEY).mutators == frozenset()
+    assert remote_pdu.agent.registry.surface_of(KEY).mutators == frozenset(
+        {"set_outlet_state", "reset_outlet", "clear_outlet_command"}
+    )
 
 
-def test_the_remote_surface_offers_no_way_to_switch_an_outlet(remote_pdu):
-    """Belt and braces on the above: no *reachable* method name suggests
-    switching, whatever its dispatch classification."""
+def test_switching_over_the_wire_actually_works(remote_pdu):
+    """The whole point of the network transport for this device.
+
+    Read-back included: the proxy must return the *verified* state, so a wire
+    layer that dropped the return value and handed back ``None`` would be
+    caught here rather than reported to an operator as a successful cut.
+    """
+    assert remote_pdu.proxy.set_outlet_state(2, False) is False
+    assert remote_pdu.proxy.outlet_state(2) is False
+    assert remote_pdu.proxy.set_outlet_state(2, True) is True
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda p: p.set_outlet_state(2, False), id="set_outlet_state"),
+        pytest.param(lambda p: p.reset_outlet(2), id="reset_outlet"),
+        pytest.param(lambda p: p.clear_outlet_command(2), id="clear_outlet_command"),
+    ],
+)
+def test_switching_is_refused_without_the_writer_claim(remote_pdu, call):
+    """The reason the switching methods are named ``set_``/``reset``/``clear_``.
+
+    ``attach()`` claims automatically, so the claim is released first — an
+    observer session is what this device must not let switch mains. A method
+    named ``outlet_on()`` would sail through here, which is exactly the defect
+    the naming convention prevents and the reason to test the gate rather than
+    trust the prefix table.
+
+    All three are exercised: the prefix table is consulted per method name, so
+    one passing says nothing about the others. ``clear_outlet_command`` is the
+    subtle one — it *cancels* a pending switch, which sounds harmless until the
+    pending switch was the thing keeping a DUT from energising.
+    """
+    from benchctrl.net.errors import PolicyError
+
+    remote_pdu.client.call("agent.release", {"device": KEY})
+    try:
+        # ``PolicyError``, distinctly — not ``PDU41002PolicyError``, which means
+        # "that outlet is out of scope". The two refusals have different
+        # remedies (acquire the claim vs. widen the allowlist) and an operator
+        # has to be able to tell them apart from the exception alone.
+        with pytest.raises(PolicyError) as excinfo:
+            call(remote_pdu.proxy)
+        assert "claim" in str(excinfo.value).lower()
+        # And nothing moved: a refusal after the write would be no protection.
+        assert remote_pdu.sim.outlet_state[2] is True
+        assert not any(
+            line.startswith("oltctrl") for line in remote_pdu.sim.command_log
+        )
+    finally:
+        remote_pdu.client.call("agent.claim", {"device": KEY})
+
+
+def test_reads_still_work_without_the_writer_claim(remote_pdu):
+    """The control for the test above: if an unclaimed session could do nothing
+    at all, the refusal there would prove nothing about mutator gating."""
+    remote_pdu.client.call("agent.release", {"device": KEY})
+    try:
+        assert remote_pdu.proxy.outlet_state(2) is True
+        assert remote_pdu.proxy.read_identity().model == "PDU41002"
+    finally:
+        remote_pdu.client.call("agent.claim", {"device": KEY})
+
+
+def test_a_remote_policy_refusal_does_not_move_a_contactor(remote_pdu):
+    """The allowlist must hold at the far end of the wire, not just in-process.
+
+    Outlet 5 is outside this session's allowlist; the refusal has to arrive as
+    ``PDU41002PolicyError`` (a deliberate human decision to widen, not a retry)
+    and the outlet has to be untouched.
+    """
+    from benchctrl.drivers.cyberpower_pdu41002 import PDU41002PolicyError
+
+    with pytest.raises(PDU41002PolicyError):
+        remote_pdu.proxy.set_outlet_state(5, False)
+    assert remote_pdu.sim.outlet_state[5] is True
+
+
+def test_no_remote_method_exposes_the_raw_control_verb(remote_pdu):
+    """Switching is reachable, but only through the three reviewed methods.
+
+    ``oltctrl`` is the device verb that takes ``index all`` — a method exposing
+    it directly (say a passthrough named ``send_oltctrl``) would route around
+    both the allowlist and the command whitelist while still being
+    dispatch-classified as a mutator.
+    """
     surface = remote_pdu.agent.registry.surface_of(KEY)
     for name in surface.methods:
-        assert "ctrl" not in name
-        assert not name.startswith("set_outlet")
-        assert not name.startswith("reset_outlet")
+        assert "ctrl" not in name, f"{name} looks like a raw control passthrough"
+        assert "cmd" not in name
+        assert "raw" not in name
 
 
 # ---------------------------------------------------------------------------
