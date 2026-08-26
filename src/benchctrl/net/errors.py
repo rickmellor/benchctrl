@@ -143,6 +143,22 @@ def _registry() -> dict[str, type]:
              "PDU41002ValueError", "PDU41002AuthError", "PDU41002PolicyError",
              "PDU41002SessionError"),
         ),
+        (
+            "benchctrl.drivers.ontrak_adu218.driver",
+            # No CommandError: this device has no error *reply* to carry. An
+            # unknown command, a bad argument and a write-only command are all
+            # answered with silence, byte-identical, so what would have been a
+            # command error surfaces as ADU218TimeoutError instead — and the
+            # ambiguity is documented on that class rather than hidden by a
+            # type that implies the device said something.
+            #
+            # ADU218PolicyError must survive the wire for the same reason as
+            # the PDU's: a relay refused by allowed_relays is a deliberate
+            # configuration decision, and degrading it to RuntimeError would
+            # make it read as a device fault a retry might clear.
+            ("ADU218Error", "ADU218ConnectionError", "ADU218ProtocolError",
+             "ADU218TimeoutError", "ADU218ValueError", "ADU218PolicyError"),
+        ),
     ):
         try:
             module = __import__(module_path, fromlist=["*"])

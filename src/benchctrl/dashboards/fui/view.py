@@ -133,6 +133,11 @@ INSTRUMENTS: tuple[dict, ...] = (
     {"key": "rigol_dl3031a", "label": "DC LOAD", "kind": "load", "role": "ELEC LOAD"},
     {"key": "siglent_sdm4065a", "label": "DMM", "kind": "dmm", "role": "6.5 DIGIT"},
     {"key": "eastwood_qr10x", "label": "QR10X", "kind": "sensor", "role": "SCANNER"},
+    # Not in PDU_KEYS, deliberately: these are 1 A signal-level SSRs on
+    # instrument leads, not mains contactors, so the rail is the right place for
+    # them and _mains_panel is not. The distinction is the same one that keeps
+    # the ADU218 out of registry.SWITCHED_PDU_KEYS.
+    {"key": "ontrak_adu218", "label": "ADU218", "kind": "switch", "role": "RELAY I/O"},
 )
 
 #: Presentation for a device this build has no entry for. Its slot is still

@@ -79,6 +79,7 @@ def _wire_types() -> dict[str, type]:
         "PDU41002Status",
         "OutletConfig",
     )
+    add("benchctrl.drivers.ontrak_adu218.driver", "ADU218Info")
     add("benchctrl.battery.profile", "BatteryProfile", "DischargeStep")
     add("benchctrl.battery.emulator", "EmulatorState")
 

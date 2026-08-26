@@ -159,6 +159,36 @@ def make_pdu41002(**kwargs) -> Any:
     return _bind_lifetime(driver, sim)
 
 
+def make_adu218(**kwargs) -> Any:
+    """A real ``OntrakADU218`` driving a :py:class:`SimulatedAdu218Link`.
+
+    The only factory that does not create a pty, because the ADU218 is USB HID
+    and has no byte stream to loop back. The simulator subclasses the
+    *production* USBDEVFS link and overrides only the ioctl, so framing, the
+    mandatory ``0x01`` report id, the desync check and ``drain()`` are all still
+    shipping code — see :py:mod:`benchctrl.sim.adu218`.
+
+    ``allowed_relays`` is left at its permissive default rather than being
+    narrowed here: unlike the PDU there are no mains contactors, and the
+    operator's stated policy is that these 1 A SSRs toggle freely with the
+    hardware watchdog as the per-test interlock. A caller can still pass a
+    narrower set to exercise the allowlist itself.
+    """
+    from benchctrl.drivers.ontrak_adu218 import OntrakADU218
+    from benchctrl.sim.adu218 import SimulatedAdu218Link
+
+    sim_kwargs = dict(kwargs.pop("sim", {}))
+    kwargs.pop("port", None)  # there is no port; identity is the descriptor
+    kwargs.pop("path", None)
+    sim = SimulatedAdu218Link(**sim_kwargs)
+    try:
+        driver = OntrakADU218.open(link=sim, **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
 FACTORIES: dict[str, Callable[..., Any]] = {
     "otii_arc": make_otii_arc,
     "eastwood_qr10x": make_qr10x,
@@ -166,6 +196,7 @@ FACTORIES: dict[str, Callable[..., Any]] = {
     "rigol_dp2031": make_dp2031,
     "siglent_sdm4065a": make_sdm4065a,
     "cyberpower_pdu41002": make_pdu41002,
+    "ontrak_adu218": make_adu218,
 }
 
 

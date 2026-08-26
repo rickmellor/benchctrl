@@ -278,6 +278,16 @@ def build_default_registry(
         # password routed through here would have crossed the LAN in clear.
         return CyberPowerPDU41002.open(**kw)
 
+    def _adu(**kw):
+        from benchctrl.drivers.ontrak_adu218 import OntrakADU218
+
+        # No transport argument at all, and no autoserial: this device is USB
+        # HID, not serial. It finds its own node by walking /dev/bus/usb and
+        # matching VID/PID (plus serial= when more than one is present), so
+        # identity comes from the descriptor rather than from a path that
+        # renumbers on re-plug.
+        return OntrakADU218.open(**kw)
+
     openers = {
         "otii_arc": _arc,
         "eastwood_qr10x": _qr,
@@ -285,6 +295,7 @@ def build_default_registry(
         "rigol_dp2031": _dp,
         "siglent_sdm4065a": _dmm,
         "cyberpower_pdu41002": _pdu,
+        "ontrak_adu218": _adu,
     }
 
     for key in keys:
