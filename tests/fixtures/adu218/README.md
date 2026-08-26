@@ -77,6 +77,26 @@ Two consequences, both load-bearing:
   both sides. This is what attributes the excess to a series connection outside
   the relay
 
+Every capture above predates any production code — they were taken with
+throwaway scripts in `/tmp`. The last two are different in kind: they exercise
+the **shipping module**, `src/benchctrl/drivers/ontrak_adu218/usbfs.py`, run
+unmodified.
+
+- `link_hardware.txt` — `Adu218UsbfsLink` on the real unit: enumeration by
+  serial, claim, drain, every read, four K0 actuations, argument rejection,
+  lifecycle. **Its section D is the load-bearing one:** all three documented
+  silences still time out at the shipping 200 ms *and* leave **0 replies
+  queued**, which is what licenses the 10x cut from the 2000 ms evidence base.
+  Section G is deliberately labelled weak — `RPK0` is the device agreeing with
+  itself
+- `link_dmm_witness.txt` — the same link, witnessed by the **SDM4065A** instead
+  of by the device: **6 state changes, 0 disagreements**, with the DMM unable to
+  see the USB bus. Also carries a correction to its own script's summary line
+  ("9 transitions" is the command count, not the transition count), and notes
+  that the repeated-command rows prove the relay commands are **absolute, not
+  toggling**. Third data point for the resistance story: 10.65 Ω, i.e. ~40 mΩ
+  *below* the previous session, with nothing touched in between
+
 ## Wire format, as measured
 
 Commands are ASCII, case-insensitive, in an 8-byte packet:

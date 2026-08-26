@@ -807,6 +807,52 @@ Each is independently landable. **Stage 0 is done.**
   read method. `__init__.py`, `mcp_tools.py`, `sim/adu218.py`, factories,
   `DEVICE_KEYS`, `mcp.py`, FUI, docs. **Zero switching risk — no method here
   moves a contact.** Useful alone: relay and input state reporting.
+
+  **1a. The link seam — DONE.** `usbfs.py` (`Adu218UsbfsLink`,
+  `Adu218Device`, `enumerate_devices`, `find_device`) plus `__init__.py` and
+  `tests/test_usbfs_adu218.py` (61 tests, hardware-free). Verified on the real
+  unit and captured in `tests/fixtures/adu218/link_hardware.txt` and
+  `link_dmm_witness.txt`. Five things came out of building it that the
+  reconnaissance had not settled:
+
+  - **The ioctl constants are computed, not hardcoded.** `USBDEVFS_BULK`
+    embeds `sizeof(struct usbdevfs_bulktransfer)` — 24 on 64-bit, 16 on 32-bit
+    — so the literal `0xC0185502` that the probe scripts used is *correct only
+    on aarch64*. An armhf agent would have got `ENOTTY` from a constant that
+    looks like a fact. Derived via `_ioc()`, and the derivation is pinned to
+    all three measured literals by test, so a struct slip fails on a laptop
+    rather than on a bench.
+  - **Enumeration goes through sysfs, not descriptor parsing.** Cheaper (no
+    device I/O at all) and it is the only place the serial number is
+    available — the raw node exposes binary descriptors, and string
+    descriptors need a control transfer sysfs has already done. So
+    `ADU218Info` will need no control transfers either. Note `bcdDevice` is
+    `0000`: there is **no firmware version to report**, and inventing one from
+    the product string would be a guess dressed as a fact.
+  - **`find_device()` refuses to choose.** Two ADU218s present raises and
+    names both serials rather than returning `devices[0]`, because "the first
+    device" depends on cabling order, and picking wrong energises a different
+    bench. `path=` is honoured even when sysfs did not list it, so a caller who
+    names a node gets a clear `open()` failure instead of "no ADU218 found".
+  - **The drain uses the FULL 200 ms timeout, and the first draft did not.**
+    I wrote it with a short timeout as an optimisation. That is worse than
+    having no drain: it leaves the reply queued *and* reports the queue clean,
+    so the next query still returns the previous command's answer — now with a
+    log line claiming the queue was checked. One 200 ms wait per `open()`.
+    Bounded by `limit=64` so a flooding device cannot hang `open()`.
+  - **The 200 ms timeout survived its own test.** All three documented
+    silences (`RI` absent, `ZZZ` garbage, `RPK9` valid-command-bad-argument)
+    still time out at 200 ms, and `drain()` afterwards finds **0 replies
+    queued** — so the 10x reduction from the 2000 ms evidence base does not
+    convert an error into a stale success. That was the open risk in shrinking
+    it and it is now closed by measurement.
+
+  Also worth recording: `link_dmm_witness.txt` deliberately includes repeated
+  commands (`SK0,SK0` and `RK0,RK0`), which proves the relay commands are
+  **absolute, not toggling** — a driver built on a toggle assumption would
+  have failed exactly those rows. And the script's own "9 transitions" summary
+  line overcounts: only 6 are state changes. The fixture says so rather than
+  quoting the flattering number.
 - **Stage 2 — relay switching.** `set_relay_state`, `set_relay_port`,
   `reset_relays`, the allowlist, read-back verification, and the
   `dispatch.introspect()` test that pins every mutator into `surface.mutators`
