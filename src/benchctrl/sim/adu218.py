@@ -9,11 +9,18 @@ either.
 
 So the seam is one level up, and it is deliberately as thin as the repo allows:
 :py:class:`SimulatedAdu218Link` **subclasses the production link** and overrides
-only :py:meth:`~benchctrl.drivers.ontrak_adu218.usbfs.Adu218UsbfsLink._transfer`
-— the single chokepoint through which every ioctl passes. Everything else stays
-production code: the mandatory ``0x01`` report framing, the 8-byte NUL padding,
-the report-id check that catches a desync, the ``ETIMEDOUT``-to-timeout mapping,
-and ``drain()``. Only the syscall is replaced.
+:py:meth:`~benchctrl.drivers.ontrak_adu218.usbfs.Adu218UsbfsLink._transfer` —
+the single chokepoint through which every ioctl passes — plus the lifecycle
+members that would otherwise open a real device node (``open``, ``close``,
+``is_open``, and ``__repr__`` so the sim is identifiable in a log). Everything
+else stays production code: the mandatory ``0x01`` report framing, the 8-byte
+NUL padding, the report-id check that catches a desync, the
+``ETIMEDOUT``-to-timeout mapping, and ``drain()``. Only the syscall and the
+device node are replaced; the protocol is not.
+
+``test_the_sim_is_the_production_link_with_one_override`` pins that override set
+so it cannot quietly grow — the moment it does, these tests stop covering the
+shipping code they are trusted to cover.
 
 Fixture provenance
 ------------------

@@ -345,8 +345,8 @@ class OntrakADU218:
 
         It is annotated as an :py:class:`Adu218UsbfsLink` rather than a bare
         ``object`` or a Protocol because that is the actual contract: the
-        simulator *subclasses* the production link and overrides only
-        ``_transfer()``, deliberately, so framing and the desync check stay
+        simulator *subclasses* the production link and replaces only the ioctl
+        and the device node, deliberately, so framing and the desync check stay
         shipping code under test. A duck-typed annotation here would let a
         substitute skip that framing and pass type checking while diverging from
         the wire — the exact failure the subclassing was chosen to prevent.

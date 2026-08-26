@@ -101,8 +101,8 @@ enforces it, since a `close_relay()` would be remotely callable with no
 claim. The device key is deliberately absent from `SWITCHED_PDU_KEYS` and
 the FUI's `PDU_KEYS`, which mean "switches mains".
 
-The simulator subclasses the **production** USBDEVFS link and overrides
-only `_transfer()`, so framing, the mandatory `0x01` report id, NUL
+The simulator subclasses the **production** USBDEVFS link and replaces
+only the ioctl and the device node, so framing, the mandatory `0x01` report id, NUL
 padding, the desync check, the timeout mapping and `drain()` all remain
 shipping code paths under test. Its reply widths are asserted against
 `tests/fixtures/adu218/reads.txt` at run time rather than transcribed, so
@@ -112,7 +112,10 @@ Its clock is manual, so the watchdog ladder is deterministic.
 Also included: 18 MCP tools (`adu218_*`), a passive discovery signature
 (VID `0x0A07` / PID `0x00DA`, identified from sysfs — nothing is written
 to the device), full agent/remote registration, and
-`KNOWN_LIMITATIONS.md` entries H-6, H-7 and F-17 through F-20.
+`KNOWN_LIMITATIONS.md` entries H-6, H-7, F-17 through F-20, and A-5 —
+which is not about this device alone: no simulator in the repo reaches its
+instrument's real transport, and writing the ADU218's version of that gap
+was what made the general case worth stating.
 
 There is also a hardware suite (`tests/test_hardware_ontrak_adu218.py`),
 and it earns its keep for one reason: the driver's own verification is the

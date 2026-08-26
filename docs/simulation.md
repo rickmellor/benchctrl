@@ -80,8 +80,9 @@ simulator is a `SimDevice` behind a pty, because every other driver
 talks to a character device. The ADU218 talks USB HID through
 `USBDEVFS` ioctls, and there is no pty that answers an ioctl. So
 `SimulatedAdu218Link` **subclasses the production link** and overrides
-exactly one method — `_transfer()`, the one that would have called
-`fcntl.ioctl`. Everything above it (the eight-byte report framing, the
+`_transfer()` — the one method that would have called `fcntl.ioctl` —
+plus the three lifecycle members that would otherwise open a real device
+node. Everything else (the eight-byte report framing, the
 command whitelist, the width table, the desync check) is shipping code
 running under test rather than a second implementation that has to be
 kept in step with the first.
@@ -186,6 +187,16 @@ driver rather than the device:
 - **A-4** — `Transport.read_chunk` blocks until the buffer fills or
   the 0.5 s timeout expires, so a running recording reports no samples
   for up to half a second.
+
+And one gap that is a property of simulation itself rather than of any
+one device, written up as **A-5**: **no simulator here reaches its
+instrument's real transport.** The SCPI sims answer over pyvisa-py's ASRL
+backend while the hardware is USB-TMC; the ADU218 sim replaces the
+`fcntl.ioctl` call. So a green hardware-free run says nothing about
+whether the USB-TMC endpoint pair can wedge, or whether an ioctl request
+number is right for the running word size — the failures that separate a
+64-bit laptop from a 32-bit board. That boundary is the reason the
+hardware tier is not optional, and A-5 states where exactly it falls.
 
 ## Cost
 

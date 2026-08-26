@@ -1153,6 +1153,51 @@ past this window deliberately.
 Code reference: `src/benchctrl/drivers/otii_arc/transport.py` —
 `read_chunk`, and `device.py` — `_reader_loop`.
 
+### A-5. No simulator exercises the transport its device really uses
+Every simulator models its instrument's wire protocol faithfully, and
+none of them reaches that instrument's real transport. The SCPI sims
+answer over pyvisa-py's ASRL backend while the hardware is USB-TMC, so
+`SimulatedSDM4065A` proves the SCPI grammar and proves nothing about the
+USB-TMC endpoint pair — which is why `clear_device_buffers()`, the
+wedged-endpoint recovery for F-8, has no hardware-free test at all.
+
+The ADU218 is the sharpest case, because its transport *is* most of the
+driver. `SimulatedAdu218Link` subclasses the production
+`Adu218UsbfsLink` and overrides `_transfer()` — the one method that calls
+`fcntl.ioctl` — plus the three lifecycle members that would otherwise
+open a real device node (`open`, `close`, `is_open`). Everything else is
+shipping code under test: the 8-byte report framing, the mandatory `0x01`
+prefix, the NUL trim, the desync check, the `ETIMEDOUT` →
+`Adu218LinkTimeout` mapping, `drain()`. Everything below the seam is the
+kernel, and that is where the coverage stops.
+
+Consequence, stated precisely so it is not over-read: a hardware-free run
+cannot fail because `USBDEVFS_BULK` was the wrong request number, because
+the `usbdevfs_bulktransfer` struct was laid out wrongly for the running
+word size, because an interrupt endpoint rejected a bulk-shaped ioctl, or
+because the interface could not be claimed. Those are exactly the
+failures that separate a 64-bit laptop from a 32-bit board.
+
+Two things narrow it rather than close it. The ioctl request numbers are
+**computed** by `_ioc()` and pinned by test to all three measured
+constants (`0xC0185502` on 64-bit, `0xC0105502` for a 16-byte struct,
+plus the claim/release codes), so a struct-layout slip fails on the
+laptop instead of on the bench. And the kernel side is contractual rather
+than assumed: `devio.c` branches on `USB_ENDPOINT_XFER_INT` and reissues
+the transfer as an interrupt URB, so "bulk ioctl on an interrupt
+endpoint" is a documented kernel path, not a happy accident.
+
+Not fixed because closing it means simulating `fcntl.ioctl` itself, which
+would assert that the model of the kernel matches the model of the kernel.
+The honest substitute is the hardware tier — six tests in
+`tests/test_hardware_ontrak_adu218.py`, one of which checks a relay with
+the SDM4065A rather than with the device's own read-back.
+
+Code reference: `src/benchctrl/sim/adu218.py` — `SimulatedAdu218Link`;
+`src/benchctrl/drivers/ontrak_adu218/usbfs.py` — `_ioc`, `_transfer`;
+`tests/test_usbfs_adu218.py` — its module docstring states the same
+boundary, and `TestIoctlConstants` is the part that guards it.
+
 ## Network (remote mode)
 
 ### N-1. A software deadman cannot guarantee an output goes off
