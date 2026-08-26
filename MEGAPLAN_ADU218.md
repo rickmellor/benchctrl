@@ -172,9 +172,29 @@ third:
 
 Which connection moved is not identifiable from the host — those elements are in
 series and all outside the relay. Separating them needs 4-wire with sense leads
-genuinely attached (KNOWN_LIMITATIONS H-5) and is an operator task. Worth asking
-the operator whether anything was re-seated between sessions rather than assuming
-it.
+genuinely attached (KNOWN_LIMITATIONS H-5) and is an operator task.
+
+**CONFIRMED by the operator, and the confirmation is worth more than the
+inference was.** Asked whether anything on the K0 path had been re-seated, the
+answer was yes: **the probes were re-seated between the two sessions,
+deliberately, to improve connection stability**, and untouched for the two hours
+covering the drift and re-actuation captures. That matches the elimination on
+every axis it could have failed on — the right *element* (probes, not the relay),
+the right *interval* (between sessions, not during one), and the right *quiet
+window* (nothing touched while the milliohm stability was being measured). The
+attribution above was reached before the answer was known and did not depend on
+it; this makes it a confirmed cause rather than a surviving candidate.
+
+Two things follow that the inference alone could not establish. First, **the
+direction is instructive: re-seating for better stability made the reading
+higher, 6.14 Ω → 10.69 Ω.** Stability and magnitude are independent — the new
+joint is *more* stable (3.93 mΩ across ten actuations) and *more* resistive. So
+"the connection was improved" and "the number went up" are both true, and any
+future reading of this figure as a device property would be wrong in a way no
+amount of repeat-measurement precision would reveal. Second, it means the ~5 Ω
+was **probe-path resistance all along, in both sessions** — the 6.14 Ω figure was
+never a relay measurement either. Nothing in the record was ever measuring the
+part.
 
 **Driver consequence, unchanged and now permanent rather than provisional:
 never treat on-resistance as a validation threshold, and do not report a
@@ -483,7 +503,7 @@ Notes on the non-obvious choices:
 - **`read_watchdog()` is a read**, so an observer without the writer claim can
   see that the interlock fired. That asymmetry is deliberate.
 
-## 5a. `safety.py`: the PDU's reasoning inverts here, and it needs a decision
+## 5a. `safety.py`: the PDU's reasoning inverts here — DECIDED, no code needed
 
 Reading `agent/safety.py` for the registration sweep turned up a gap the plan
 did not cover. Both hooks are duck-typed on method *names*, so what the ADU218
@@ -507,8 +527,10 @@ path** — which is the opposite conclusion to §6.2's, and the two must not be
 conflated: staying out of `SWITCHED_PDU_KEYS` is about *run-engine setpoints*,
 not about *trip behaviour*.
 
-Three things to settle before Stage 5. **Two are now settled by reading the code;
-the third is genuinely the user's call.**
+Three things to settle before Stage 5. **All three are now settled** — two by
+reading the code, the third by the user's decision (item 3). The outcome is that
+`safety.py` needs no change for this driver, but the *omission must be
+documented*, which is not the same as leaving it alone.
 
 1. **CORRECTION — reusing `panic_outlets` is not free, as I claimed.** I wrote
    that the `panic_outlets_of()` duck type "already generalises, so this needs no
@@ -551,17 +573,45 @@ the third is genuinely the user's call.**
    the mutator/read split is exactly as above, so a later rename that reclassifies
    a method fails loudly instead of silently ungating a relay.
 
-3. **Should a trip open the relays? Still open — this one is the user's.** My
-   inclination is yes, opt-in per relay, default empty. But the watchdog changes
-   the calculus and is the reason to decide rather than default: if `WD` is armed,
-   a trip that *stops issuing commands* already opens every relay within ≤1 s with
-   no software in the decision — a stronger guarantee than any `safe_state_fns`
-   entry, since it survives a wedged agent, a killed process and an unplugged
-   cable alike. So the honest design is that **the watchdog is the real
-   interlock**, and a `reset_relays()` trip hook is belt-and-braces for when it is
-   not armed. Whatever is chosen, `default_safe_state()`'s docstring must say
-   which and why, because the next reader will otherwise inherit the PDU's
-   reasoning by proximity — which is precisely how this gap was created.
+3. **DECIDED by the user: the watchdog is the interlock. The driver does not
+   open relays on a governor trip.** Default behaviour is plain relay toggling;
+   an operator who wants deadman coverage for a given test enables `WD`
+   explicitly. So the ADU218 stays out of `default_safe_state()` and gets no
+   `panic_relays` property — option (b) in item 1 above is **not built**, and
+   `safety.py` needs **no** change for this driver.
+
+   This is a real simplification, not a deferral, and it is worth being explicit
+   about what it costs and buys:
+
+   - **What it buys.** The trip path stays honest. A `reset_relays()` hook is
+     software in the decision, so it fails exactly when the failures that matter
+     occur — a wedged agent, a killed process, an unplugged cable. `WD` fails
+     *closed* against all three, in (0.90, 1.10] s, measured. Adding a software
+     hook alongside the hardware one would have made the weaker mechanism the
+     more visible one, and §4 already records that the inert-governor trap is
+     about mechanisms that *look* wired.
+   - **What it costs, stated plainly.** With `WD` unarmed — the default — a
+     governor trip leaves the relays exactly as they were. That is the correct
+     reading of this device (1 A signal SSRs, DUT rail not on them), but it must
+     not be *silent*. The inertness the PDU has by accident, the ADU218 will have
+     **on purpose**, and the only thing distinguishing those two states in the
+     codebase is a docstring that says so.
+   - **Therefore the deliverable in Stage 5 is documentation, not code**:
+     `default_safe_state()` gains a comment naming the ADU218, stating that its
+     omission is deliberate, that `WD` is the interlock, and that the PDU's
+     mains-disruption reasoning immediately above it is *not* the reason. Without
+     that, the next reader inherits the PDU's argument by proximity — which is
+     precisely how this gap was created in the first place.
+   - **And `read_watchdog()` carries more weight than before.** It is now the
+     *only* way an observer learns the interlock fired, so it stays a read (no
+     writer claim), and the `WD`-self-cleared-to-0 trace belongs in the run event
+     stream. §4's ambiguity caveat applies: `WD=0` means both "timed out" and
+     "never enabled", so the driver must hold its own armed-state to interpret it.
+
+   Item 1's correction stands as a **record of a real trap rather than work to
+   do**: had the trip hook been built by reusing `panic_outlets`, it would have
+   been selected as a panic target and then raised `AttributeError` on every
+   relay. Anyone who later revisits this decision needs to read item 1 first.
 
 ## 6. Architecture and open design decisions
 
@@ -752,9 +802,12 @@ Each is independently landable. **Stage 0 is done.**
   into a silently-dropping one. Ships with the synthetic-clock ladder test, a
   `KNOWN_LIMITATIONS.md` entry, and an explicit refusal to auto-feed.
 - **Stage 5 — agent/remote integration.** Registry opener, codec, errors,
-  discovery scanner + `SIGNATURES` (one commit, per §6.3), `safety.py`
-  (see §5a — this needs a decision, not just a comment), and
-  `tests/test_remote_ontrak_adu218.py`.
+  discovery scanner + `SIGNATURES` (one commit, per §6.3), `safety.py`, and
+  `tests/test_remote_ontrak_adu218.py`. Per §5a the `safety.py` work is a
+  **documented omission** — a comment in `default_safe_state()` recording that
+  the ADU218 is deliberately absent because `WD` is the interlock, plus the test
+  asserting the surface intersects `_ARMING_CALLS` nowhere. No trip hook, no
+  `panic_relays`, no change to the cut path.
 - **Not planned:** PWM or fast switching (the manual forbids it above 1 CPS at
   full load); `interfaces.Switch` (§6.1); run-engine relay setpoints (§6.2 —
   needs its own decision, not a borrowed one).

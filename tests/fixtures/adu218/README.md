@@ -317,13 +317,22 @@ differs as above; de-bounce options differ (see below).
      no in-spec figure exists at any current the driver could know about. An
      open/closed check keys on the DMM's overload sentinel.
 
-   **Status: closed, in the only sense available from the host.** The comparison
-   was invalid, and the excess is attributed to series connections outside the
-   relay. What is *not* identifiable from here is which of those connections
-   moved: the leads, the screw terminals and the clip joints are all in series
-   and all outside the part. Separating them needs 4-wire with sense leads
-   genuinely attached (§ H-5) and is an operator task. Worth asking the operator
-   whether anything was re-seated between sessions rather than assuming it.
+   **Status: closed, and confirmed off-host.** The comparison was invalid, and
+   the excess is attributed to series connections outside the relay. Which of
+   those connections moved is not identifiable from here — the leads, screw
+   terminals and clip joints are all in series and all outside the part — so the
+   operator was asked, and confirmed it: **the probes were re-seated between the
+   two sessions, deliberately, to improve connection stability**, then left
+   untouched for the two hours spanning the drift and re-actuation captures. The
+   attribution was reached before that answer was known and did not depend on it.
+
+   Two consequences the host-side evidence could not have supplied. **The
+   direction is counterintuitive: re-seating for better stability made the
+   reading higher** (6.14 → 10.69 Ω) — the new joint is simultaneously more
+   stable and more resistive, so stability and magnitude are independent and
+   milliohm repeatability is no evidence a figure describes the relay. And
+   **6.14 Ω was never a relay measurement either**: both numbers are probe-path
+   resistance, so nothing in this fixture set ever measured the part.
 
    Measuring the relay's *actual* R_on remains out of reach and out of scope: it
    would need the datasheet's own condition (1.0 A, expecting ≤1.1 Ω; or 0.4 A
@@ -385,9 +394,20 @@ This matters beyond the driver: `KNOWN_LIMITATIONS.md` § N-1 says a software
 deadman cannot guarantee an output goes off, and `ROADMAP.md`'s "Hardware
 interlock for unattended runs" is open work. The relay opens because the host
 went *quiet*, so a wedged agent, a killed process, an unplugged cable and a
-panicking kernel all de-energise the load. See `watchdog.txt` for the four
+panicking kernel all de-energise the load. See `watchdog.txt` for the five
 design consequences, chiefly that arming the watchdog makes every relay's state
 depend on call frequency and must therefore never be implicit.
+
+**Design decision resting on this capture (operator's call):** the watchdog *is*
+the interlock, and the driver adds no software trip hook — a governor trip does
+not open the relays. Default behaviour is plain relay toggling; deadman coverage
+is enabled per test by arming `WD`. The reasoning is the asymmetry this file
+measured: a software hook is software in the decision path, so it fails in
+exactly the scenarios that matter, while `WD` fails closed against all of them in
+(0.90, 1.10] s. Consequence for anyone reading `agent/safety.py` later: the
+ADU218's absence from `default_safe_state()` is **deliberate**, not the accidental
+inertness the PDU had, and `read_watchdog()` is the only way an observer learns
+the interlock fired.
 
 ## What the manual adds that measurement could not
 

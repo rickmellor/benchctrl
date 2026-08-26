@@ -148,6 +148,27 @@ This is not an accusation that anyone disturbed anything -- it is
 evidence a series connection differs between sessions, and the cause
 is outside what a script can see. Ask the operator.
 
+CONFIRMED BY THE OPERATOR (asked, not assumed): the probes were
+re-seated between the two sessions, deliberately, to improve
+connection stability -- and left untouched for the two hours spanning
+the drift and re-actuation captures. That is the right element, the
+right interval, and the right quiet window, so the elimination above
+is a confirmed cause rather than a surviving candidate.
+
+Note the direction, which is the counterintuitive part and the reason
+this is worth a paragraph rather than a footnote: re-seating the probes
+FOR BETTER STABILITY made the reading HIGHER, 6.14 -> 10.69 ohm. The
+new joint is both more stable (3.93 mohm across ten actuations) and
+more resistive. Stability and magnitude are independent here, so
+precision is no defence -- a figure can be milliohm-repeatable and
+still be measuring the probes.
+
+Which also means the 6.14 ohm mean at the top of this file was never a
+relay measurement either. Both numbers are probe-path resistance. This
+file's original question -- "is the extra resistance in the relay, in
+the leads, or in the measurement?" -- is answered: the leads, in every
+session, including the one that produced the eight repeats above.
+
 The driver consequence at line 46-47 stands and is now permanent rather
 than provisional. It used to rest on "the number is unexplained," which
 a later explanation could have dissolved. It now rests on something that

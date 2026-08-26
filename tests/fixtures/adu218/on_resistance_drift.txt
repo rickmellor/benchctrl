@@ -117,6 +117,23 @@ WHAT THIS DOES NOT SAY
     evidence a series connection changed between sessions; the cause is
     outside what this script can see. Worth asking rather than assuming.
 
+ANSWERED, after this capture was written
+  The operator was asked and confirmed: the probes were re-seated between
+  the two sessions, deliberately, to improve connection stability, and
+  untouched for the two hours covering this capture. Right element, right
+  interval, right quiet window -- so the elimination above is a confirmed
+  cause, not a surviving candidate. The prediction this file made before
+  the answer was known ("a disturbed/oxidised connection BETWEEN sessions,
+  not per close", line 59) is what held.
+
+  The direction is the part worth carrying forward: re-seating FOR
+  STABILITY raised the reading, 6.14 -> 10.69 ohm. The new joint is both
+  more stable and more resistive, so stability and magnitude are
+  independent -- a figure here can be milliohm-repeatable and still be
+  measuring the probe path. Which is also the answer to the first bullet
+  above: 6.14 ohm was not a relay measurement either. Both numbers are
+  probe-path resistance.
+
 DRIVER CONSEQUENCE (unchanged, now for a better reason)
 The driver must never report or imply a contact-resistance figure, and must
 never use one as a validation threshold. Previously that followed from "the
