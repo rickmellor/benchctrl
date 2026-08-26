@@ -508,3 +508,85 @@ class TestDispatchSurface:
         assert "set_line_asserted" in surface.mutators
         assert "trigger_reset_pulse" in surface.mutators
         assert "read_levels" not in surface.mutators
+
+
+# ----- parity: every driver capability is reachable over MCP ---------------
+
+
+def test_cp2112_mcp_tools_cover_the_driver_surface():
+    """Every public driver method has a tool, except a documented few.
+
+    This is the test that fails when a method is added to the driver and the
+    tool is forgotten — the failure mode that leaves a capability working
+    locally and invisible to an agent.
+    """
+    from benchctrl.drivers.silabs_cp2112 import mcp_tools as cp_tools
+    from benchctrl.drivers.silabs_cp2112.driver import CP2112
+
+    # Deliberately not exposed:
+    #   open              — cp2112_open is the tool; the classmethod is internal
+    #   read_identity     — cp2112_info is the tool name, matching the other
+    #                       drivers' naming rather than the method's
+    #   read_gpio_config  — the raw four register bytes. cp2112_line_states
+    #                       decodes them per pin, which is what an agent can act
+    #                       on; a bare 0x84 invites the mask arithmetic to be
+    #                       redone by the caller, wrongly.
+    #   read_levels       — likewise raw; the decoded form carries the caveat
+    #                       that an undriven pin latches 1, which the bare
+    #                       bitmask does not.
+    #   line_is_asserted  — sugar over read_line_state, whose tool already
+    #                       returns `asserted`
+    exempt = {
+        "open",
+        "read_gpio_config",
+        "read_levels",
+        "line_is_asserted",
+    }
+    # Tool names drop the read_/set_ prefixes, matching how the other drivers'
+    # MCP surfaces read (sdm4065a_info, not sdm4065a_read_identity). Normalise
+    # rather than exempt: exempting a method because its tool is named
+    # differently would silently stop checking whether the tool exists at all,
+    # which is the entire point of this test.
+    aliases = {
+        "read_identity": "info",
+        "read_line_state": "line_state",
+        "read_line_states": "line_states",
+    }
+
+    def tool_name(method: str) -> str:
+        return aliases.get(method, method)
+
+    methods = {
+        tool_name(name)
+        for name in vars(CP2112)
+        if not name.startswith("_") and callable(getattr(CP2112, name))
+    } - exempt
+    tools = {fn.__name__[len("cp2112_"):] for fn in cp_tools._TOOLS}
+
+    missing = methods - tools
+    assert not missing, f"driver methods with no MCP tool: {sorted(missing)}"
+
+
+def test_every_cp2112_tool_is_registered_and_re_exported():
+    """A tool absent from mcp.py is invisible to an agent even though it exists."""
+    import benchctrl.mcp as m
+    from benchctrl.drivers.silabs_cp2112 import mcp_tools as cp_tools
+
+    for fn in cp_tools._TOOLS:
+        assert hasattr(m, fn.__name__), f"{fn.__name__} not re-exported from mcp.py"
+
+
+def test_no_mcp_tool_offers_the_alternate_function_override():
+    """allow_alternate_function is an operator observation, not a model's call.
+
+    The driver accepts the override because a human can confirm the alternate
+    function is off. A model cannot, so the tool must not offer the parameter —
+    otherwise the gate is one plausible-sounding argument away from bypassed.
+    """
+    import inspect
+
+    from benchctrl.drivers.silabs_cp2112 import mcp_tools as cp_tools
+
+    for fn in cp_tools._TOOLS:
+        params = inspect.signature(fn).parameters
+        assert "allow_alternate_function" not in params, fn.__name__

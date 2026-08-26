@@ -278,6 +278,16 @@ def build_default_registry(
         # password routed through here would have crossed the LAN in clear.
         return CyberPowerPDU41002.open(**kw)
 
+    def _cp2112(**kw):
+        from benchctrl.drivers.silabs_cp2112 import CP2112
+
+        # allowed_lines has no default and is not injected here. The driver
+        # cannot know whether a pin is wired to a DUT's reset, to an enable, or
+        # to nothing, so the opt-in has to come from whoever wired the bench.
+        # A missing allowed_lines is a loud TypeError at open(), which is the
+        # intended failure -- quieter than discovering it by toggling a pin.
+        return CP2112.open(**kw)
+
     openers = {
         "otii_arc": _arc,
         "eastwood_qr10x": _qr,
@@ -285,6 +295,7 @@ def build_default_registry(
         "rigol_dp2031": _dp,
         "siglent_sdm4065a": _dmm,
         "cyberpower_pdu41002": _pdu,
+        "silabs_cp2112": _cp2112,
     }
 
     for key in keys:
