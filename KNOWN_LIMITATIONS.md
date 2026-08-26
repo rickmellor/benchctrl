@@ -122,6 +122,51 @@ Code reference:
 `measure_resistance` docstring; `docs/drivers.md` § "2-wire vs 4-wire";
 `tests/test_cross_validate_sdm4065a_qr10x.py`.
 
+### H-6. ADU218 relays are 1 A signal switches, not power contactors
+
+The eight relays are solid-state (PhotoMOS) devices rated **1 A at 120 V
+AC or DC**. They are not a substitute for the PDU41002's mains outlets and
+must not be treated as one: switching a bench instrument's supply through
+one would exceed the rating, and inrush on an inductive or capacitive load
+exceeds it by more than the steady-state figure suggests.
+
+They are also **solid-state**, so there is no audible click and no
+mechanical confirmation that a switch happened. The only confirmation is
+the read-back the driver performs — and because the device acknowledges no
+write, a switch without a read-back is unfalsifiable.
+
+Related consequence: relay switching is deliberately absent from
+`agent/safety.py`'s `_ARMING_CALLS`. Closing a signal relay is not arming
+an output, and treating it as one would start a governor countdown on every
+switch — a second, weaker software deadman layered over the device's own
+hardware watchdog.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `set_relay_state`;
+`src/benchctrl/agent/safety.py` — the comment after `_ARMING_CALLS`;
+`docs/drivers.md` § "Safety" under the ADU218.
+
+### H-7. ADU218 relay state survives a host reset
+
+Power-on relay state is undocumented by Ontrak, and USB autosuspend holds
+the outputs in whatever state they were last commanded to. So a relay can
+be conducting before any software runs — after a host reboot, after the
+agent is killed, after the cable is unplugged from the *host* end.
+
+`open()` therefore **reads and warns** rather than assuming, naming any
+relay it found energised. It does not de-energise them: the driver cannot
+know whether an energised relay is holding something that must not be
+interrupted.
+
+The mitigation that actually works across a host reset is the device's own
+watchdog (`set_watchdog`), which drops the relays without any host
+involvement — see F-18 and F-19 for what it costs.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `_connect`;
+`tests/test_bench_adu218.py` — `test_open_reports_relays_it_found_energised`.
+
+
 ## Driver / firmware interactions
 
 ### F-1. DL3031A `:SOUR:LIST:STEP 4` fires no steps (firmware bug)
@@ -886,6 +931,144 @@ Code reference:
 `src/benchctrl/sim/pdu41002.py` — `drop_ssh_session`, `_gone`;
 `tests/test_hardware_cyberpower_pdu41002.py` —
 `test_an_idle_logout_is_recovered_on_serial_and_fatal_over_ssh`.
+
+### F-17. ADU218 reports no error, ever
+
+The Ontrak ADU218 has **no error reply**. Three different failures are
+byte-identical on the wire — nothing comes back:
+
+- an unknown command
+- a valid command with an out-of-range argument (`RPK8`, `RPA4`, `MK256`)
+- a write-only command working exactly as intended (`SKn`, `RKn`, `MKddd`,
+  `DBn`, `WDn`)
+
+So `ADU218TimeoutError` is **ambiguous by construction** and its message
+says so. It cannot distinguish "the command was wrong" from "the device is
+gone", and no amount of driver work can make it: the information is not on
+the wire.
+
+What the driver does instead of pretending:
+
+- a whitelist of every command it can render, checked before the write, so
+  a format-string slip is caught host-side rather than becoming silence
+- an explicit per-command `responsive: bool` table, never inferred — the
+  trap is `RKn`, which is write-only despite starting with `R` while every
+  other `R` command answers, and is the most-called command on the device
+- an explicit per-command reply *width*, so a desynced reply raises
+  `ADU218ProtocolError` instead of returning a plausible number
+- read-back verification on every relay write, since an accepted-and-ignored
+  command is otherwise invisible
+
+**The mitigating half:** unlike the SDM4065A, an ignored command does not
+poison the session. There is no error queue to surface on the next read —
+the next valid command answers normally.
+
+Affects: every command. Diagnosing a silent ADU218 means checking the
+command against the manual by hand; the driver's whitelist is the closest
+thing to a syntax error available.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `_COMMAND_SPECS`,
+`command_spec`, `_send`; `tests/fixtures/adu218/errors.txt`;
+`tests/test_bench_adu218.py` — `TestSilence`.
+
+### F-18. ADU218 `WD` cannot distinguish "timed out" from "never enabled"
+
+Reading `WD` returns `0` in both cases. A watchdog that fired self-clears
+to 0, which is also exactly what a watchdog that was never armed reports.
+So a trip leaves **no trace the device can be asked about** — the only
+evidence is a disagreement between the device's answer and what the host
+last commanded.
+
+Consequences the driver accepts rather than hides:
+
+- it holds its own armed state, and `read_watchdog_tripped()` compares the
+  two. Latched once: detecting a trip clears the held expectation, so the
+  same trip is not re-reported.
+- it writes `WD0` at `open()` unless told otherwise, because a fresh
+  process has no expectation to compare against and would inherit the
+  ambiguity from whatever ran before it. `disarm_watchdog=False` preserves
+  an inherited setting at the cost of that ambiguity, and the driver's held
+  expectation is then 0 — which is a lie it cannot avoid telling.
+- **a trip that happens while no benchctrl process is running is
+  undetectable.** The relays will have dropped and nothing will say why.
+
+Affects: any use of the hardware watchdog across a process restart.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `_watchdog_setting`,
+`read_watchdog_tripped`, `_connect`; `tests/test_bench_adu218.py` —
+`TestWatchdog`.
+
+### F-19. Any ADU218 command refeeds the watchdog, so a poller neuters it
+
+The hardware watchdog is fed by **any** command reaching the device —
+including a plain state read, and including a command the device rejects.
+There is no dedicated keep-alive command and no way to read state without
+feeding.
+
+That makes two reasonable-looking patterns silently wrong:
+
+1. **A status-polling loop keeps an armed watchdog alive indefinitely.**
+   Measured on the simulator's synthetic clock: with `WD2` (10 s) armed,
+   ten rounds of *advance 9 s, then read the relay states* held a relay
+   energised across 90 s with **zero** trips. Eleven seconds of real
+   silence dropped it. A dashboard refreshing a panel is enough to defeat
+   the interlock it is displaying.
+2. **A background keep-alive thread is worse than no watchdog.** It would
+   keep the timer fed precisely while the failure the watchdog guards
+   against was happening — wedged control logic, a hung test, a process
+   that is alive but no longer doing anything. The interlock would be inert
+   and indistinguishable from a working one.
+
+So benchctrl ships **no keep-alive helper for this device**, and a test
+asserts no such method exists. The feed has to come from whatever is
+actually controlling the test, which is the only thing whose silence means
+something.
+
+Affects: any use of the watchdog alongside monitoring. If a dashboard or
+an agent presence sweep is polling this device, the watchdog is not
+protecting you.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — module docstring,
+`set_watchdog`; `src/benchctrl/drivers/ontrak_adu218/mcp_tools.py` —
+`adu218_set_watchdog`, `adu218_watchdog`; `tests/test_bench_adu218.py` —
+`test_any_command_refeeds_the_timer`.
+
+### F-20. ADU218 out of scope, deliberately
+
+Three capabilities the device has that this driver does not expose, each
+because getting it wrong is worse than not having it:
+
+**Power-on relay state.** Undocumented, and USB suspend holds outputs in
+their last state, so a relay can be conducting before any software runs.
+`open()` reads the port and **warns**, naming any energised relay, rather
+than driving `MK000` — the driver cannot know whether an energised relay is
+holding something that must not be interrupted. `reset_relays()` is one
+explicit call away.
+
+**No firmware version.** `bcdDevice` is `0000` on the bench unit, so there
+is nothing to report and `ADU218Info` has no firmware field. An
+always-`None` field would invite a caller to read its absence as "old
+firmware"; deriving one from the product string would be a guess wearing a
+measurement's name.
+
+**No `interfaces.Switch` Protocol.** Per `CONTRIBUTING.md` convention 3, a
+Protocol lands with the *second* instance. The PDU41002 is 1-indexed mains
+outlets with configurable switch delays; this is 0-indexed signal relays
+with a hardware watchdog. A Protocol generalised from those two would fit a
+third device — a real signal multiplexer — badly.
+
+Related: the device key is deliberately absent from
+`registry.SWITCHED_PDU_KEYS` and the FUI's `PDU_KEYS`, both of which mean
+"switches mains". Tests pin both exclusions.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `_connect`,
+`ADU218Info`; `src/benchctrl/drivers/ontrak_adu218/__init__.py`;
+`tests/test_bench_adu218.py` — `TestLifecycle`, `TestDispatchGate`.
+
 
 ## Harness
 
