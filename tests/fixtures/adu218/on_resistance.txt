@@ -155,13 +155,27 @@ the drift and re-actuation captures. That is the right element, the
 right interval, and the right quiet window, so the elimination above
 is a confirmed cause rather than a surviving candidate.
 
-Note the direction, which is the counterintuitive part and the reason
-this is worth a paragraph rather than a footnote: re-seating the probes
-FOR BETTER STABILITY made the reading HIGHER, 6.14 -> 10.69 ohm. The
-new joint is both more stable (3.93 mohm across ten actuations) and
-more resistive. Stability and magnitude are independent here, so
-precision is no defence -- a figure can be milliohm-repeatable and
-still be measuring the probes.
+Note the direction: re-seating the probes made the reading HIGHER,
+6.14 -> 10.69 ohm. And note what the probes actually are -- clamped
+into a screw terminal, so the contact point quality is not guaranteed
+by construction. The operator's stated improvement is MECHANICAL (the
+probe moves less than it did), which is a different quantity from
+electrical contact resistance and does not bound it.
+
+A claim made here in an earlier pass -- that the new joint is "both
+more stable and more resistive" -- was withdrawn: it compared this
+session's ACROSS-close spread (3.93 mohm) with the earlier session's
+WITHIN-close spread (0.983 mohm), which are different quantities. The
+only like-for-like pair is within-close, 0.983 mohm before against
+0.12-2.35 mohm after: comparable, arguably slightly worse, and no
+across-close data exists from the earlier session at all. The
+comparison cannot be made in either direction.
+
+What stands is that the reading is stable IN ABSOLUTE TERMS over the
+measured window, which is all the elimination argument needed, and that
+it went up by 4.55 ohm. So repeat precision is no evidence a figure
+describes the relay: this one is milliohm-repeatable and measures a
+screw clamp.
 
 Which also means the 6.14 ohm mean at the top of this file was never a
 relay measurement either. Both numbers are probe-path resistance. This

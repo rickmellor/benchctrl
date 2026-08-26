@@ -185,16 +185,34 @@ window* (nothing touched while the milliohm stability was being measured). The
 attribution above was reached before the answer was known and did not depend on
 it; this makes it a confirmed cause rather than a surviving candidate.
 
-Two things follow that the inference alone could not establish. First, **the
-direction is instructive: re-seating for better stability made the reading
-higher, 6.14 Ω → 10.69 Ω.** Stability and magnitude are independent — the new
-joint is *more* stable (3.93 mΩ across ten actuations) and *more* resistive. So
-"the connection was improved" and "the number went up" are both true, and any
-future reading of this figure as a device property would be wrong in a way no
-amount of repeat-measurement precision would reveal. Second, it means the ~5 Ω
-was **probe-path resistance all along, in both sessions** — the 6.14 Ω figure was
+Two things follow that the inference alone could not establish. First, **the ~5 Ω
+was probe-path resistance all along, in both sessions** — the 6.14 Ω figure was
 never a relay measurement either. Nothing in the record was ever measuring the
-part.
+part. Second, and more useful for the driver: the probes are **clamped into a
+screw terminal, so the contact point quality is not guaranteed by construction.**
+The operator's stated change is *mechanical* — the probe moves less than it did —
+which is a different quantity from electrical contact resistance and does not
+bound it.
+
+**CORRECTION to my own claim, made one message earlier: I wrote that the
+re-seated joint was "more stable (3.93 mΩ across ten actuations)" as well as more
+resistive.** That is unsupported, and it is this branch's recurring error shape
+for the **fifth** time — I compared the new session's *across-close* spread
+(3.93 mΩ) against the old session's *within-close* spread (0.983 mΩ). Different
+quantities. The only like-for-like pair available is within-close: **0.983 mΩ
+before vs 0.12–2.35 mΩ after**, which is comparable at best and arguably slightly
+worse. There is no across-close data from the earlier session at all, so the
+comparison cannot be made in either direction. Noting where this one happened:
+inside the paragraph congratulating the branch on having caught the shape four
+times.
+
+What survives is narrower and still enough. The new joint is stable **in absolute
+terms over the measured window** — 3.93 mΩ across ten actuations, 1.67 mΩ over a
+28 s hold — which is what licensed the elimination of R_on and of a range
+artefact. It is *not* established to be more stable than before, and the reading
+went **up** by 4.55 Ω. So repeat-measurement precision is no evidence that a
+figure describes the relay: this one is milliohm-repeatable and measures a screw
+clamp.
 
 **Driver consequence, unchanged and now permanent rather than provisional:
 never treat on-resistance as a validation threshold, and do not report a

@@ -126,13 +126,26 @@ ANSWERED, after this capture was written
   the answer was known ("a disturbed/oxidised connection BETWEEN sessions,
   not per close", line 59) is what held.
 
-  The direction is the part worth carrying forward: re-seating FOR
-  STABILITY raised the reading, 6.14 -> 10.69 ohm. The new joint is both
-  more stable and more resistive, so stability and magnitude are
-  independent -- a figure here can be milliohm-repeatable and still be
-  measuring the probe path. Which is also the answer to the first bullet
-  above: 6.14 ohm was not a relay measurement either. Both numbers are
-  probe-path resistance.
+  The direction is the part worth carrying forward: re-seating raised the
+  reading, 6.14 -> 10.69 ohm. And the probes are clamped into a screw
+  terminal, so contact point quality is not guaranteed by construction --
+  the operator's stated improvement is MECHANICAL (the probe moves less),
+  which is not the same quantity as contact resistance and does not bound
+  it. Which also answers the first bullet above: 6.14 ohm was not a relay
+  measurement either. Both numbers are probe-path resistance.
+
+  WITHDRAWN, and worth keeping as an example of this file's own trap: an
+  earlier pass claimed the new joint was "both more stable and more
+  resistive." The stability half compared THIS session's across-close
+  spread (3.93 mohm, line 54) against the earlier session's within-close
+  spread (0.983 mohm, on_resistance.txt line 20) -- the exact pairing the
+  INTERPRETATION KEY at lines 56-62 exists to keep separate, since the
+  whole discriminator is that those two quantities mean different things.
+  Like-for-like within-close is 0.983 mohm before vs 0.12-2.35 mohm after:
+  comparable, arguably slightly worse. No across-close data exists from
+  the earlier session, so the comparison is unavailable in either
+  direction. The absolute stability measured HERE is untouched by this and
+  is all the elimination above relied on.
 
 DRIVER CONSEQUENCE (unchanged, now for a better reason)
 The driver must never report or imply a contact-resistance figure, and must

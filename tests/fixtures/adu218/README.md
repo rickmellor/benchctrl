@@ -326,13 +326,24 @@ differs as above; de-bounce options differ (see below).
    untouched for the two hours spanning the drift and re-actuation captures. The
    attribution was reached before that answer was known and did not depend on it.
 
-   Two consequences the host-side evidence could not have supplied. **The
-   direction is counterintuitive: re-seating for better stability made the
-   reading higher** (6.14 → 10.69 Ω) — the new joint is simultaneously more
-   stable and more resistive, so stability and magnitude are independent and
-   milliohm repeatability is no evidence a figure describes the relay. And
-   **6.14 Ω was never a relay measurement either**: both numbers are probe-path
-   resistance, so nothing in this fixture set ever measured the part.
+   Two consequences the host-side evidence could not have supplied. **6.14 Ω was
+   never a relay measurement either** — both numbers are probe-path resistance, so
+   nothing in this fixture set ever measured the part. And **the probes are
+   clamped into a screw terminal, so contact point quality is not guaranteed by
+   construction**; the operator's stated improvement is *mechanical* (the probe
+   moves less than it did), which is a different quantity from contact resistance
+   and does not bound it.
+
+   A claim made in an earlier pass — that the re-seated joint was "more stable" as
+   well as more resistive — was **withdrawn**: it compared the later session's
+   across-close spread (3.93 mΩ) against the earlier session's within-close spread
+   (0.983 mΩ), which are different quantities. Like-for-like within-close is
+   0.983 mΩ before vs 0.12–2.35 mΩ after — comparable, arguably slightly worse —
+   and no across-close data exists from the earlier session. What stands is
+   absolute stability over the measured window, which is all the elimination
+   needed, plus a reading that went **up** 4.55 Ω. Repeat precision is therefore
+   no evidence a figure describes the relay: this one is milliohm-repeatable and
+   measures a screw clamp.
 
    Measuring the relay's *actual* R_on remains out of reach and out of scope: it
    would need the datasheet's own condition (1.0 A, expecting ≤1.1 Ω; or 0.4 A
