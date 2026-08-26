@@ -59,6 +59,7 @@ from benchctrl.battery import (
 )
 from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as _pdu41002_tools
 from benchctrl.drivers.eastwood_qr10x import mcp_tools as _qr10x_tools
+from benchctrl.drivers.ontrak_adu218 import mcp_tools as _adu218_tools
 from benchctrl.drivers.otii_arc import mcp_tools as _arc_tools
 from benchctrl.drivers.rigol_dl3031a import mcp_tools as _dl3031a_tools
 from benchctrl.drivers.rigol_dp2031 import mcp_tools as _dp2031_tools
@@ -80,6 +81,7 @@ _dl3031a_tools.register_mcp_tools(mcp)
 _dp2031_tools.register_mcp_tools(mcp)
 _sdm4065a_tools.register_mcp_tools(mcp)
 _pdu41002_tools.register_mcp_tools(mcp)
+_adu218_tools.register_mcp_tools(mcp)
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +407,30 @@ from benchctrl.drivers.cyberpower_pdu41002.mcp_tools import (
     pdu41002_set_outlet_state,
     pdu41002_status,
     pdu41002_transport,
+)
+
+# ADU218 tools. Switching here is signal-level (1 A SSRs on instrument leads),
+# not mains — but adu218_set_watchdog arms a hardware interlock that
+# de-energises every relay on silence, so it is not a read-only surface either.
+from benchctrl.drivers.ontrak_adu218.mcp_tools import (
+    adu218_allowed_relays,
+    adu218_clear_counter,
+    adu218_close,
+    adu218_counter,
+    adu218_counters,
+    adu218_debounce,
+    adu218_info,
+    adu218_input_state,
+    adu218_input_states,
+    adu218_open,
+    adu218_relay_state,
+    adu218_relay_states,
+    adu218_reset_relays,
+    adu218_set_debounce,
+    adu218_set_relay_port,
+    adu218_set_relay_state,
+    adu218_set_watchdog,
+    adu218_watchdog,
 )
 
 
