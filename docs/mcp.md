@@ -5,7 +5,7 @@ exposes your whole bench as tools any MCP-aware client (Claude Code,
 Claude Desktop, Cursor, custom agents) can call. Built on the official
 `mcp` Python SDK.
 
-**292 tools**, registered per driver:
+**313 tools**, registered per driver:
 
 | Source | Tools |
 |---|---|
@@ -14,9 +14,10 @@ Claude Desktop, Cursor, custom agents) can call. Built on the official
 | Rigol DL3031A | 45 |
 | Rigol DP2031 | 134 |
 | Siglent SDM4065A | 54 |
-| CyberPower PDU41002 | 12 |
+| CyberPower PDU41002 | 15 |
+| Ontrak ADU218 | 18 |
 | Cross-driver (battery, recording I/O, connection) | 13 |
-| **Total** | **292** |
+| **Total** | **313** |
 
 Each driver registers its own surface via `register_mcp_tools(mcp)`;
 `benchctrl.mcp` is the orchestrator that wires them together. A driver
@@ -69,7 +70,7 @@ BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_TOKEN=... benchctrl-mcp
 BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_LOCAL_DEVICES=otii_arc benchctrl-mcp
 
 # no hardware at all
-BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a,cyberpower_pdu41002 benchctrl-mcp
+BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a,cyberpower_pdu41002,ontrak_adu218 benchctrl-mcp
 ```
 
 With nothing configured everything is local. See
@@ -152,7 +153,8 @@ their SDK methods, which are documented in [`drivers.md`](drivers.md):
 | `dl3031a_*` | Rigol DL3031A | 45 |
 | `dp2031_*` | Rigol DP2031 | 134 |
 | `sdm4065a_*` | Siglent SDM4065A | 54 |
-| `pdu41002_*` | CyberPower PDU41002 | 12 |
+| `pdu41002_*` | CyberPower PDU41002 | 15 |
+| `adu218_*` | Ontrak ADU218 | 18 |
 
 The DP2031 set is the large one, covering source/measure, protection,
 IEEE 488.2 status, channel pairing and tracking, the Arb timer
@@ -185,6 +187,30 @@ that way *after* the password is accepted; and `pdu41002_close` must be
 called, because closing the connection without it leaves the PDU
 unreachable from the other transport. See
 [`drivers.md`](drivers.md#cyberpower-pdu41002--8-outlet-switched-pdu).
+
+The `adu218_*` set switches relays, and unlike the PDU set it is **not**
+read-only — `adu218_set_relay_state` really does close a contact. Three
+things about it are unusual enough to be worth reading first:
+
+- **`adu218_open` takes an `allowed_relays` list and there is no
+  "all".** A relay outside it is refused by
+  `adu218_set_relay_state(..., on=True)` and *permitted* by the same
+  call with `on=False`, because a narrow allowlist must never make the
+  de-energised state unreachable.
+- **The device never reports an error.** An unknown command, a valid
+  command with a bad argument, and a write-only command are
+  byte-identical on the wire — all silence. So every write is confirmed
+  by reading the state back, and `adu218_set_relay_state` returns the
+  *read-back* value rather than the value it was asked for. If a tool
+  answers, the device answered.
+- **`adu218_set_watchdog` changes what silence means,** and **any**
+  command refeeds the timer — so a model that polls state in a loop
+  silently prevents the watchdog from ever tripping. Arm it for a test
+  that needs the interlock and disarm it when that test ends.
+  `adu218_watchdog` returning 0 is ambiguous: it means either
+  "timed out" or "never enabled", and the device cannot tell them apart.
+
+See [`drivers.md`](drivers.md#ontrak-adu218--8-relays-8-digital-inputs-no-dependencies).
 
 Four of its tools exist because of documented firmware defects rather
 than because the SCPI surface needed them: `sdm4065a_command_error`

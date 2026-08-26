@@ -254,10 +254,61 @@ Things that look wrong (would surprise a maintainer):
 - **End-of-response**: no delimiter; driver uses ~60 ms quiet window heuristic
 - **Safety**: device-enforced `RLIMIT` clamps any setpoint at or above the configured value. Set it for the source voltage you're working with: `V**2 / P_max` (1 W rating gives ~12 Ω at 3.2 V, ~25 Ω at 5 V)
 
+### CyberPower PDU41002
+
+- **Not SNMP.** One line-oriented CLI, reached over serial *or* SSH, and
+  the two are byte-identical in output — measured, which is what licenses
+  one engine over two links
+- **The device permits exactly one CLI session across all transports,**
+  and the second one fails *after* the password is accepted. It reads as
+  an auth error and is not one
+- **`close()` must send `exit`** — closing the port leaves the device
+  session held, so the *other* transport then fails that same way
+- **SSH needs a forced KEX** (`diffie-hellman-group14-sha256`; group
+  *exchange* is broken on FW 1.3.4) and offers only
+  `keyboard-interactive`, so pubkey auth and `BatchMode` can never work
+- **Read to the prompt, never to a blank line** — the unknown-verb error
+  carries a ~30-line verb dump and the blank-line count varies by error
+  shape
+- **`menumode` is a one-way trap**: returning to the CLI needs a full
+  logout. No method emits it; the emitted-command assertion rejects it
+- **Password comes from `BENCHCTRL_PDU_PASSWORD`** in the agent's
+  environment, never from config — `DeviceConfig.to_dict()` emits `open`
+  verbatim and the RPC wire is authenticated but not encrypted
+
+### Ontrak ADU218
+
+- **USB IDs**: VID `0x0A07`, PID `0x00DA`. EP `0x81` IN / `0x01` OUT,
+  both **interrupt**, `wMaxPacketSize` 8, `bInterval` 10
+- **Zero dependencies.** USB HID via raw `USBDEVFS` ioctls —
+  `fcntl`/`ctypes`/`os` only. `usbhid` ignores Ontrak on purpose
+  (`hid_ignore_list` in `hid-quirks.c`), so `CLAIMINTERFACE` succeeds
+  with no driver to detach
+- **Compute the ioctl numbers, never hardcode them.** `USBDEVFS_BULK`
+  embeds `sizeof(struct usbdevfs_bulktransfer)`: 24 on 64-bit, 16 on
+  32-bit. A literal works on the laptop and fails on the board
+- **`USBDEVFS_BULK` on an interrupt endpoint is contractual** —
+  `devio.c` rewrites the pipe to `PIPE_INTERRUPT` and calls
+  `usb_fill_int_urb()` with `bInterval`
+- **The device never reports an error.** Absent command, valid command
+  with a bad argument, and write-only command are byte-identical:
+  silence. Hence an explicit per-command `responsive` flag and reply
+  width, never inferred from the mnemonic — `RKn` starts with `R` and is
+  write-only, and is the most-called command
+- **Three index ranges**: relays `0..7`, input *lines* `0..3` (ports A
+  and B are four bits each), counters `0..7`
+- **`RPy` replies MSB-first** — the leftmost character is line 3. Reads
+  plausibly wrong if you assume otherwise
+- **Any command refeeds the watchdog**, so a polling loop silently
+  prevents it ever tripping. `WD` reads 0 for both "timed out" and
+  "never enabled"
+- **Relay state survives a host reset** — USB suspend holds the outputs
+
 ### Remote mode
 
 - **Default port**: 9737. Device keys: `otii_arc`, `eastwood_qr10x`,
-  `rigol_dl3031a`, `rigol_dp2031`
+  `rigol_dl3031a`, `rigol_dp2031`, `siglent_sdm4065a`,
+  `cyberpower_pdu41002`, `ontrak_adu218`
 - **Auth is HMAC-SHA256 challenge-response** — the token never
   crosses the wire, but traffic is **not encrypted**. SSH tunnel on an
   untrusted network

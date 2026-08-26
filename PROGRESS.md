@@ -12,19 +12,23 @@ firmware caps see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 ## Status snapshot
 
 - **Version**: 1.2.0
-- **Branch**: `feat/siglent-sdm4065a` off `master`
-- **Tests**: 1333 hardware-free + 173 hardware-marked. Hardware-free
-  suite runs in ~10 minutes with nothing plugged in.
-- **MCP tools**: 280 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
-  SDM4065A 54, cross-driver 13
+- **Branch**: `feat/ontrak-adu218` off `master`
+- **Tests**: 2316 hardware-free + 201 hardware-marked. Hardware-free
+  suite runs in ~22 minutes with nothing plugged in.
+- **MCP tools**: 313 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
+  SDM4065A 54, PDU41002 15, ADU218 18, cross-driver 13
 - **Drivers**: Otii Arc / Arc Pro (SMU), Eastwood QR10x (programmable
   resistor), Rigol DL3031A (electronic load), Rigol DP2031
-  (triple-output PSU), Siglent SDM4065A (6½-digit DMM)
+  (triple-output PSU), Siglent SDM4065A (6½-digit DMM), CyberPower
+  PDU41002 (8-outlet switched PDU), Ontrak ADU218 (8 relays + 8
+  digital inputs)
 - **Scenarios captured**: 27 — 11 QR10x + 11 DL3031A standard + 3 hires
   + 2 dynamic-list
 - **Entry points**: `benchctrl`, `benchctrl-mcp`, `benchctrl-agent`
-- **Hardware**: Arc Pro, DL3031A, DP2031, QR10x, SDM4065A. Outputs off
-  between runs; hardware tests skip cleanly when a device is absent.
+- **Hardware**: Arc Pro, DL3031A, DP2031, QR10x, SDM4065A, PDU41002,
+  ADU218. Outputs off between runs; hardware tests skip cleanly when a
+  device is absent. The PDU's outlets and the ADU218's relays are left
+  de-energised, and the PDU's DUT rail stays down.
 
 ## Where things stand
 
@@ -41,7 +45,7 @@ and the device filesystem.
 profiler, and the 100 Hz host-side emulator. Vendor-agnostic — works
 against any conforming driver.
 
-**MCP server**. 280 tools. SDK ↔ MCP parity is a review gate, not an
+**MCP server**. 313 tools. SDK ↔ MCP parity is a review gate, not an
 aspiration.
 
 **Scenario harness**. Three kinds (static, dynamic, dynamic-list) with
@@ -67,6 +71,60 @@ outputs off when host contact is lost.
 with a durable event log (SQLite WAL + fsync'd ndjson mirror), and an
 advisory LLM supervisor confined to eight allowlisted tools that
 cannot energise anything.
+
+### On `feat/ontrak-adu218`, unreleased
+
+**Ontrak ADU218 driver** — 8 relays, 8 digital inputs with event
+counters, de-bounce control and a hardware watchdog. 18 MCP tools, a
+simulator, full remote support, 196 tests. **Zero dependencies** — the
+only driver in the tree that imports nothing outside the standard
+library. The device is USB HID with no kernel driver bound (Ontrak is in
+the kernel's `hid_ignore_list`), so it is driven by raw `USBDEVFS`
+ioctls through `fcntl`/`ctypes`/`os`. Two kernel facts make that work,
+and both are contractual rather than incidental: `USBDEVFS_BULK` on an
+*interrupt* endpoint is handled by `devio.c`, which rewrites the pipe
+and calls `usb_fill_int_urb()`; and the ioctl numbers must be
+**computed**, because `USBDEVFS_BULK` embeds
+`sizeof(struct usbdevfs_bulktransfer)` — 24 on 64-bit, 16 on 32-bit, so
+a hardcoded constant works on the laptop and fails on the board.
+
+The device's defining property is that **it never reports an error**. An
+absent command, a valid command with a bad argument, and a write-only
+command are byte-identical on the wire: silence. That is what shaped the
+driver — an explicit per-command `responsive` flag and reply-width table
+rather than anything inferred from the mnemonic (`RKn` starts with `R`
+and is write-only, and is also the most-called command), and every write
+confirmed by reading state back, with the setters returning the
+*read-back* value.
+
+Three device behaviours are documented in `KNOWN_LIMITATIONS` because
+they will otherwise be rediscovered as bugs: any command refeeds the
+watchdog, so a polling loop silently neuters it (F-19); `WD` reads 0 for
+both "timed out" and "never enabled" (F-18); and relay state survives a
+host reset, because USB suspend holds the outputs (H-7).
+
+Hardware status: run against the real device (serial E02246) with relay
+K0 wired across the SDM4065A. **6 hardware tests passing**, and the set
+is the first in the repo to use a second instrument as a *witness* — the
+driver's own read-back is the device talking about itself, so the DMM is
+what would catch a driver reporting a switch that never happened. A
+closed contact reads a number, an open one raises the `9.9E37` overload
+sentinel, and no amount of probe-contact drift can confuse those two.
+Deliberately no resistance threshold is asserted: the same closed relay
+measured 6.14–10.69 Ω across four sessions, all of it probe seating.
+The suite was proved able to fail — patching `set_relay_state` to return
+its own argument without touching the device fails 3 of the 6.
+
+Mutation testing found four guards that could be deleted with the whole
+suite green, two of them on `reset_relays()` and `set_relay_port()` —
+the calls an operator makes to *believe* the bench is de-energised.
+17/17 mutants killed after closing them.
+
+No `Switch` Protocol was introduced. The PDU switches mains outlets and
+this switches signal contacts; generalising one interface from two
+shapes that disagree would produce something that fits neither. Also
+deliberately absent from `registry.SWITCHED_PDU_KEYS` and the FUI's
+mains panel, for the same reason.
 
 ### On `feat/siglent-sdm4065a`, unreleased
 
@@ -136,10 +194,17 @@ the docs.
 
 Ordered roughly by how much they'd change if picked up next.
 
-1. **Hardware interlock for unattended runs.** `KNOWN_LIMITATIONS` N-1
-   says plainly that a software deadman cannot guarantee an output
-   goes off through a wedged driver. Overnight runs deserve a relay on
-   the same timer. Scoped in `ROADMAP.md`.
+1. **Hardware interlock for unattended runs — the parts now exist,
+   nothing wires them together yet.** `KNOWN_LIMITATIONS` N-1 says
+   plainly that a software deadman cannot guarantee an output goes off
+   through a wedged driver. The ADU218 is the missing hardware: its
+   watchdog de-energises every relay after a measured silence with no
+   host involvement at all, which is exactly the property a software
+   deadman cannot have. What is *not* built is the connection between
+   the run engine's `Governor` and that watchdog, and there is a real
+   design problem in the way: **any** command refeeds the timer, so the
+   obvious implementation — a background thread that keeps the device
+   armed — silently guarantees it never trips. Scoped in `ROADMAP.md`.
 2. **DP2031 as a source in the scenario harness.** The driver shipped
    in 1.1 but `scenarios/` still only models the load side, so
    cell-charging scenarios aren't expressible yet.
@@ -192,8 +257,8 @@ Ordered roughly by how much they'd change if picked up next.
 cd ~/repos/benchctrl
 git log --oneline -20
 
-pytest -m "not hardware" -q     # 1333 tests, ~10 min, no hardware
-pytest -m hardware -q           # 173 tests, needs the bench on USB
+pytest -m "not hardware" -q     # 2316 tests, ~22 min, no hardware
+pytest -m hardware -q           # 201 tests, needs the bench on USB
 pytest -q                       # both
 
 benchctrl discover              # what's on this bench
@@ -203,6 +268,6 @@ benchctrl info                  # smoke test against a live Arc
 No hardware to hand:
 
 ```bash
-BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a benchctrl-mcp
+BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a,cyberpower_pdu41002,ontrak_adu218 benchctrl-mcp
 benchctrl-agent --simulate
 ```

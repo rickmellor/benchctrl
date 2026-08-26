@@ -58,6 +58,8 @@ free-running thread.
 | `SimulatedRigolDL3031A` | Rigol DL3031A | SCPI over ASRL, incl. the `:SOUR:FUNC` set-as-`CURRent`/read-as-`CC` quirk |
 | `SimulatedRigolDP2031` | Rigol DP2031 | SCPI over ASRL, three channels, register model |
 | `SimulatedSDM4065A` | Siglent SDM4065A | SCPI over ASRL, per-function range/NPLC/null state, autoranging, the `9.9E37` overload sentinel, `CONFigure`'s reset side effects, and Siglent's colon-less headers |
+| `SimulatedPDU41002` | CyberPower PDU41002 | The line-oriented CLI over a pty: the login handshake, the `CyberPower > ` prompt, per-outlet state / names / delays, the three distinct error shapes, and `menumode` as the one-way trap it is |
+| `SimulatedADU218` | Ontrak ADU218 | The USB HID report pair, **not** a pty: relays, the two four-bit input ports, event counters, de-bounce, the watchdog ladder against an injectable clock, and — most importantly — the device's *silence*, since an unknown command and a write-only one are byte-identical |
 
 The SCPI simulators use a generic register model that covers the bulk
 of the ~254 distinct SCPI strings across the two Rigols; measurement,
@@ -73,11 +75,30 @@ modelled only the happy path would have agreed with a driver that got
 the null ordering backwards. This one does not — a test pins that the
 naive ordering genuinely fails against it.
 
+The ADU218 simulator is the one structural exception here: every other
+simulator is a `SimDevice` behind a pty, because every other driver
+talks to a character device. The ADU218 talks USB HID through
+`USBDEVFS` ioctls, and there is no pty that answers an ioctl. So
+`SimulatedAdu218Link` **subclasses the production link** and overrides
+exactly one method — `_transfer()`, the one that would have called
+`fcntl.ioctl`. Everything above it (the eight-byte report framing, the
+command whitelist, the width table, the desync check) is shipping code
+running under test rather than a second implementation that has to be
+kept in step with the first.
+
+That matters most for the thing the device does not do: **it never
+reports an error.** An absent command, a valid command with a bad
+argument and a write-only command all produce the same nothing. A
+simulator that answered "unknown command" would have made a whole class
+of driver bug invisible, so this one stays silent in exactly the cases
+the hardware does — which is why the driver has an explicit
+`responsive` flag per command instead of guessing from the mnemonic.
+
 ## Sim mode — no code changes
 
 `benchctrl.session` resolves each device to `local`, `remote` or `sim`
 independently, so you can simulate part of a bench and leave the rest
-real. Nothing above the seam changes — all 280 MCP tools are unaware.
+real. Nothing above the seam changes — all 313 MCP tools are unaware.
 
 ```bash
 # whole bench simulated
@@ -89,7 +110,7 @@ BENCHCTRL_SIM_DEVICES=otii_arc,siglent_sdm4065a benchctrl-mcp
 
 Device keys are the canonical ones from `benchctrl.config.DEVICE_KEYS`:
 `otii_arc`, `eastwood_qr10x`, `rigol_dl3031a`, `rigol_dp2031`,
-`siglent_sdm4065a`.
+`siglent_sdm4065a`, `cyberpower_pdu41002`, `ontrak_adu218`.
 
 Or in a config file:
 

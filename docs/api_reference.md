@@ -333,6 +333,10 @@ logger. Sub-loggers:
 - `benchctrl.drivers.eastwood_qr10x` — QR10x AT command traffic
 - `benchctrl.drivers.rigol_dl3031a` — DL3031A SCPI traffic
 - `benchctrl.drivers.siglent_sdm4065a` — SDM4065A SCPI traffic
+- `benchctrl.drivers.cyberpower_pdu41002.driver` — PDU CLI traffic
+  (`.links` for the byte pipes below it)
+- `benchctrl.drivers.ontrak_adu218` — ADU218 commands
+  (`.usbfs` for the raw ioctl layer below it)
 - `benchctrl.mcp` — MCP server lifecycle + tool warnings
 
 Enable hex dumps:
@@ -475,6 +479,8 @@ from benchctrl.drivers.eastwood_qr10x import QR10x, QR10xInfo, QR10xError
 from benchctrl.drivers.rigol_dl3031a import RigolDL3031A, RigolDLInfo, RigolDLError
 from benchctrl.drivers.rigol_dp2031 import RigolDP2031, RigolDP2031Info, RigolDP2031Error
 from benchctrl.drivers.siglent_sdm4065a import SiglentSDM4065A, SDM4065AInfo, SDM4065AError
+from benchctrl.drivers.cyberpower_pdu41002 import CyberPowerPDU41002, PDU41002Info, PDU41002Error
+from benchctrl.drivers.ontrak_adu218 import OntrakADU218, ADU218Info, ADU218Error
 ```
 
 Each driver lives in its own subpackage, so importing one never pulls
@@ -493,6 +499,33 @@ sentinel). Its accuracy traps — `MEASure?` discarding a null, the
 2 kΩ default range, null-state-before-null-value — are documented in
 [`drivers.md`](drivers.md#siglent-sdm4065a--6-digit-bench-dmm) and
 worth reading before trusting a reading from it.
+
+The PDU41002 and the ADU218 are the two drivers that **switch** rather
+than source or measure, so neither conforms to
+`SourceMeasurementUnit` — or to each other. Both add a fifth exception
+for a refusal that is *policy* rather than a bad value
+(`PDU41002PolicyError`, `ADU218PolicyError`): the index was perfectly
+valid for the hardware and the driver declined anyway, which a caller
+catching `ValueError` must not swallow. Both take an allowlist at
+`open()`, and in both, de-energising is permitted for an outlet or relay
+the allowlist does not cover — a narrow allowlist must never put the safe
+state out of reach. They differ on the default, and the difference is the
+device rather than the design: `allowed_outlets` is **mandatory** with no
+"all", because a typo on a mains PDU de-powers the bench, while
+`allowed_relays` defaults to every relay, because these are 1 A
+signal-level SSRs on instrument leads and the bench they were built for
+wants them to toggle freely. Narrow it when an ADU218 is wired to
+something that must not switch.
+
+The ADU218 is the only driver in the package with **no dependency at
+all**: it speaks USB HID through raw `USBDEVFS` ioctls using
+`fcntl`/`ctypes`/`os`. Its one behaviour to internalise before calling
+anything is that the device **never reports an error** — silence is the
+only failure signal, and an unknown command is byte-identical to a
+write-only one. Every write is therefore confirmed by reading state
+back, and the setters return the *read-back* value rather than what they
+were asked for. See
+[`drivers.md`](drivers.md#ontrak-adu218--8-relays-8-digital-inputs-no-dependencies).
 
 ### `QR10x` — Eastwood Tech programmable resistor
 
@@ -709,7 +742,8 @@ from benchctrl import config
 
 config.DEVICE_KEYS   # ("otii_arc", "eastwood_qr10x",
                      #  "rigol_dl3031a", "rigol_dp2031",
-                     #  "siglent_sdm4065a")
+                     #  "siglent_sdm4065a", "cyberpower_pdu41002",
+                     #  "ontrak_adu218")
 config.MODES         # ("local", "remote", "sim")
 config.DEFAULT_PORT  # 9737
 

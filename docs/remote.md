@@ -66,13 +66,14 @@ Mode resolves **per device key**, which is what lets you split a bench:
     "eastwood_qr10x": {"mode": "remote", "endpoint": "bench"},
     "rigol_dl3031a":  {"mode": "local"},
     "rigol_dp2031":   {"mode": "local"},
-    "siglent_sdm4065a": {"mode": "remote", "endpoint": "bench"}
+    "siglent_sdm4065a": {"mode": "remote", "endpoint": "bench"},
+    "ontrak_adu218":    {"mode": "remote", "endpoint": "bench"}
   }
 }
 ```
 
-Arc, QR10x and the DMM on the bench, both Rigols plugged into the
-laptop, one MCP server driving all five.
+Arc, QR10x, the DMM and the relay interface on the bench, both Rigols
+plugged into the laptop, one MCP server driving all six.
 
 Agent side, `/etc/benchctrl/agent.json` (mode 0640):
 
@@ -315,6 +316,18 @@ scp -O -r staged/. board:/home/arduino/benchctrl-1.2.0/src/
 
 `libusb-1.0.so.0` itself is a system library and was already present on the
 Uno Q.
+
+### The ADU218 needs no wheels — but it does need a udev rule
+
+The Ontrak ADU218 is the one instrument with nothing to vendor. It speaks USB
+HID through raw `USBDEVFS` ioctls using only `fcntl`, `ctypes` and `os`, so
+`sync-board.sh` carrying the package is the whole install.
+
+It still needs `deploy/udev/63-benchctrl-adu218.rules`, because the kernel
+creates `/dev/bus/usb/BBB/DDD` `root:root 0664` and interrupt transfers need
+**write** access. That failure is honest, at least: `open()` raises and names
+the rules file, rather than reporting the device as absent the way the USB-TMC
+case does.
 
 Then install `deploy/udev/61-benchctrl-usbtmc.rules`, or the instruments are
 **invisible rather than unopenable** — `discover()` returns `[]` and the driver

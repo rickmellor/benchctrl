@@ -225,11 +225,32 @@ from benchctrl.drivers.eastwood_qr10x import QR10x          # programmable resis
 from benchctrl.drivers.rigol_dl3031a import RigolDL3031A    # electronic load
 from benchctrl.drivers.rigol_dp2031 import RigolDP2031      # triple-output PSU
 from benchctrl.drivers.siglent_sdm4065a import SiglentSDM4065A  # 6½-digit DMM
+from benchctrl.drivers.cyberpower_pdu41002 import CyberPowerPDU41002  # switched PDU
+from benchctrl.drivers.ontrak_adu218 import OntrakADU218      # relays + digital I/O
 ```
 
 They share the conventions you've already seen — `open()` as a context
 manager, `set_*` methods for writes, properties for cached reads.
 → [`drivers.md`](drivers.md)
+
+The last two switch things rather than sourcing or measuring them, and
+both take an allowlist of what they may energise. They differ on the
+default, deliberately: the PDU switches **mains**, so
+`allowed_outlets` is mandatory with no "all". The ADU218's relays are
+1 A signal-level SSRs, so they toggle freely unless you narrow them.
+
+```python
+# Optional here — pass it when the relays are wired to something that
+# must not switch. Listed or not, de-energising is always permitted.
+with OntrakADU218.open(allowed_relays=(0,)) as adu:
+    adu.set_relay_state(0, True)     # returns the *read-back* state
+    adu.reset_relays()               # de-energise everything, verified
+```
+
+The read-back is not belt-and-braces. The ADU218 does not acknowledge a
+write and never reports an error at all, so the only way to know a relay
+moved is to ask what state it is in — which is why the setter returns
+that rather than the value you passed. → [`drivers.md`](drivers.md)
 
 Battery emulation, profiling, and life calculation work against *any*
 driver conforming to `benchctrl.interfaces.SourceMeasurementUnit`, not
@@ -268,15 +289,15 @@ benchctrl stream 10                             # live print
 Two more entry points ship with the package:
 
 ```bash
-benchctrl-mcp                    # MCP server — 280 tools for LLM agents
+benchctrl-mcp                    # MCP server — 313 tools for LLM agents
 benchctrl-agent --token <token>  # bench-side server for remote mode
 ```
 
 ## Next steps
 
 - [`api_reference.md`](api_reference.md) — every class and method
-- [`drivers.md`](drivers.md) — the QR10x, DL3031A, DP2031 and
-  SDM4065A drivers
+- [`drivers.md`](drivers.md) — the QR10x, DL3031A, DP2031, SDM4065A,
+  PDU41002 and ADU218 drivers
 - [`battery.md`](battery.md) — emulation, profiling, life calculation
 - [`output_formats.md`](output_formats.md) — where your samples can go
 - [`simulation.md`](simulation.md) — working without hardware
