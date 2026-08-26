@@ -192,11 +192,16 @@ The `adu218_*` set switches relays, and unlike the PDU set it is **not**
 read-only — `adu218_set_relay_state` really does close a contact. Three
 things about it are unusual enough to be worth reading first:
 
-- **`adu218_open` takes an `allowed_relays` list and there is no
-  "all".** A relay outside it is refused by
-  `adu218_set_relay_state(..., on=True)` and *permitted* by the same
-  call with `on=False`, because a narrow allowlist must never make the
-  de-energised state unreachable.
+- **`adu218_open`'s `allowed_relays` is optional, and omitting it allows
+  every relay** — the opposite of `pdu41002_open`, where the allowlist is
+  mandatory. The difference is the device: a mains typo de-powers the
+  bench, whereas these are 1 A signal SSRs on instrument leads that the
+  bench wants to toggle freely. Pass it when the relays are wired to
+  something that must not switch. Listed or not, *de-energising is always
+  permitted*: an unlisted relay is refused by
+  `adu218_set_relay_state(..., on=True)` and accepted by the same call
+  with `on=False`, because an allowlist must never make the safe state
+  unreachable.
 - **The device never reports an error.** An unknown command, a valid
   command with a bad argument, and a write-only command are
   byte-identical on the wire — all silence. So every write is confirmed
