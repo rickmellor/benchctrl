@@ -3,14 +3,15 @@
 8 PhotoMOS solid-state relays (Panasonic AQZ207, 120 V AC / DC rated) and 8
 optically-isolated digital inputs, on one USB device.
 
-Exposes, so far:
+Exposes:
 
+- :py:class:`OntrakADU218` — the device. Relays, inputs, counters, watchdog.
+- :py:class:`ADU218Info` — identity, from the USB descriptor rather than a
+  command. This device has no ``*IDN?`` equivalent.
+- the ``ADU218*Error`` hierarchy.
 - :py:class:`Adu218UsbfsLink` — the transport. A stdlib-only USB link.
 - :py:class:`Adu218Device` — one enumerated unit: where it is, which one it is.
 - :py:class:`Adu218LinkError` / :py:class:`Adu218LinkTimeout` — transport faults.
-
-The device class itself is not here yet; this package currently ships the link
-seam alone. See ``MEGAPLAN_ADU218.md`` for the staging.
 
 **It is USB HID, not a serial device.** There is no tty, no ``/dev/hidraw*``
 node, and no vendor driver that runs on this board — so the transport is raw
@@ -53,6 +54,16 @@ Protocol. Per ``CONTRIBUTING.md`` convention 3 a Protocol arrives with the
 either a mains PDU or an SSR I/O board would fit the other one badly.
 """
 
+from benchctrl.drivers.ontrak_adu218.driver import (
+    ADU218ConnectionError,
+    ADU218Error,
+    ADU218Info,
+    ADU218PolicyError,
+    ADU218ProtocolError,
+    ADU218TimeoutError,
+    ADU218ValueError,
+    OntrakADU218,
+)
 from benchctrl.drivers.ontrak_adu218.usbfs import (
     Adu218Device,
     Adu218LinkError,
@@ -63,10 +74,18 @@ from benchctrl.drivers.ontrak_adu218.usbfs import (
 )
 
 __all__ = [
+    "ADU218ConnectionError",
+    "ADU218Error",
+    "ADU218Info",
+    "ADU218PolicyError",
+    "ADU218ProtocolError",
+    "ADU218TimeoutError",
+    "ADU218ValueError",
     "Adu218Device",
     "Adu218LinkError",
     "Adu218LinkTimeout",
     "Adu218UsbfsLink",
+    "OntrakADU218",
     "enumerate_devices",
     "find_device",
 ]
