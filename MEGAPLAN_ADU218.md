@@ -1,12 +1,18 @@
 # benchctrl game plan — Ontrak ADU218 relay I/O driver
 
 **Branch:** `feat/ontrak-adu218` (off `master` @ `2eb0003`)
-**State as of:** 2026-08-25
-**Stage 0 status:** **complete and committed** (`1044910`). Relay control is
-confirmed on hardware with an independent DMM witness. No production code yet.
+**State as of:** 2026-08-26 — **all stages landed, 24 commits pushed at
+`d28c242`.** Sections 1-12 below were written *before* the code and are kept as
+the design record; where the built driver diverges, §5 and §13 say so. **Read
+§13 first on return** — it carries the vendor manual's findings, the PA3 signal
+measurements, and the two committed-but-never-run bench tests.
 
-**Resume by reading:** this file, then `tests/fixtures/adu218/README.md` (the
-measured device behaviour — believe it over the PDF), then `AGENTS.md`.
+Remaining: open the PR (the operator's, since `gh` here has READ only), then the
+two gated hardware tests and PORT B's counter map.
+
+**Resume by reading:** §13 of this file, then
+`tests/fixtures/adu218/README.md` (the measured device behaviour — believe it
+over the PDF), then `AGENTS.md`.
 
 ---
 
@@ -358,31 +364,47 @@ instance. The full list is `set_ enable_ disable_ write_ start_ stop_ reset
 clear_ program_ trigger apply commit abort incr decr take_`.
 
 So a method named `close_relay()` would be **remotely callable with no writer
-claim**. Every mutator must therefore take an existing prefix. Proposed:
+claim**. Every mutator must therefore take an existing prefix. **As built** —
+this replaces the original proposal, which under-counted the reads and had three
+mutators returning `None` where they now return a verified read-back:
 
 ```python
 # reads (deliberately no mutator prefix)
 is_open -> bool  (the LINK, not a contact — see below);  relay_count -> int (8)
-input_count -> int (8)
-allowed_relays -> frozenset[int]
+input_count -> int (8)   # 8 TOTAL, across two FOUR-bit ports
+allowed_relays -> frozenset[int];  watchdog_setting -> int  # driver-held expectation
 read_identity() -> ADU218Info          # from the USB descriptor, not a command
 relay_state(index) -> bool             # RPKn — True == ENERGISED (conducting)
 relay_states() -> dict[int, bool]      # PK, one round trip
+relay_mask() -> int                    # PK as the raw mask
 input_state(port, index) -> bool       # RPyn
 input_states() -> dict[str, tuple]     # RPA + RPB
+input_mask() -> int                    # PI — PORT A is the LOW nibble
 read_counter(index) -> int             # REn
-read_debounce() -> int                 # DB
+read_counters() -> dict[int, int]      # all eight
+read_debounce() -> int                 # DB — the SETTING NUMBER, 0..2
+read_debounce_ms() -> float            # what the setting MEANS: 10.0 / 1.0 / 0.1
 read_watchdog() -> int                 # WD  <- also how a fired timeout is seen
+read_watchdog_tripped() -> bool        # WD read against watchdog_setting
 
 # writes (all prefix-matched)
 set_relay_state(index, on, *, verify=True) -> bool
 set_relay_port(mask, *, verify=True) -> int          # MKddd
-set_debounce(setting) -> None                        # DBn
-set_watchdog(setting) -> None                        # WDn
+set_debounce(setting) -> int                         # DBn, returns the read-back
+set_watchdog(setting) -> int                         # WDn, returns the read-back
 clear_counter(index) -> int                          # RCn — reads AND clears
-reset_relays() -> None                               # MK000, the safe state
+reset_relays(*, verify=True) -> int                  # MK000, the safe state
 close(); __enter__; __exit__
 ```
+
+Two notes on that surface that only became clear later:
+
+- **`read_debounce_ms()` exists because the setting number is actively
+  misleading.** The manual's §6c gives `0 = 10 ms, 1 = 1 ms, 2 = 100 µs`, so a
+  *higher* setting is a *shorter* filter. It is a read, and it starts with
+  `read_`, so the dispatch gate classifies it correctly with no special case.
+- **`clear_counter()` is the only responsive command that mutates state**, so it
+  must never be retried — a retry silently discards counts.
 
 ### RESOLVED: `is_open` keeps its framework meaning, and relay state never uses it
 
@@ -861,6 +883,9 @@ Each is independently landable. **Stage 0 is done.**
   `RCn`, `DBn`. Needs no new hardware, but the inputs are unwired, so the
   simulator carries the load and the hardware tier can only assert "reads a
   well-formed zero".
+  **Superseded on 2026-08-26:** the operator put a manual square wave on PA3
+  from the SDG1032X, so the inputs are no longer unwired and the hardware tier
+  now asserts real counting. See §13.
 - **Stage 4 — the watchdog, on its own.** Deliberately last and deliberately
   separate, because §4 makes it the one feature that can turn a working bench
   into a silently-dropping one. Ships with the synthetic-clock ladder test, a
@@ -985,3 +1010,95 @@ Not this driver's work, but tracked so it is not lost — from WIP commit
 Also still outstanding: `sudo chown rick:rick /home/rick/pdu_creds.txt` — mode
 is 600 but owner is `root:root`, so `rick` cannot read their own credential
 file. `chown` is blocked in the sandbox, so this one needs the operator.
+
+## 13. Addendum, 2026-08-26 — the manual, and the signal on PA3
+
+Two things arrived after §1-§12 were written, and both changed conclusions rather
+than merely adding detail.
+
+### The vendor manual was in the repo the whole time
+
+`references/adu208218v2.pdf`, gitignored (copyrighted, binary), read with
+`pdftotext -layout`. An earlier claim in this session that `references/` held no
+ADU file was simply wrong. What it settled:
+
+- **§6c gives the de-bounce settings as DURATIONS, and the ordering is
+  INVERTED**: `0 = 10 ms`, `1 = 1 ms` (default), `2 = 100 µs`. So the highest
+  setting is the *weakest* filter. `DEBOUNCE_SETTINGS = (0, 1, 2)` on its own
+  invited two wrong inferences — that 0 means "off", and that a bigger number
+  means more filtering — and **no millisecond value existed anywhere in the
+  repo**. This was a real footgun in my own driver, fixed by adding
+  `DEBOUNCE_MS`, `read_debounce_ms()`, `debounce_ms` alongside `debounce` in the
+  MCP returns, a `docs/drivers.md` table, limitation F-21, and a test asserting
+  the **strict ordering** `ms[0] > ms[1] > ms[2]` so the values cannot be
+  silently re-sorted into "sensible" order by a later reader.
+- **"Count low to high transitions" (§6c)** — once per cycle, not once per edge.
+- **Max Frequency 1 kHz**, above which the count under-reports **silently**. The
+  driver cannot detect the overrun, which is what makes the ceiling worth a
+  named constant (`COUNTER_MAX_FREQUENCY_HZ`) rather than a docstring aside.
+
+And one thing it conspicuously did *not* settle: **Table 1, the counter↔input
+map, is an IMAGE.** `pdftotext` drops it entirely, leaving blank space between
+the caption and the next paragraph. So that mapping is measurable or it is
+unknown — there is no third option, and no amount of re-reading the text helps.
+
+### The signal on PA3 settled what the document could not
+
+The operator drove PA3 manually from the SDG1032X. Measured, at two frequencies
+an order of magnitude apart:
+
+| source | 0.5 Hz | 10 Hz |
+|---|---|---|
+| device counter | 0.500 /s | **10.030 /s** |
+| host level-sampling, rising | 0.500 Hz | 9.997 Hz |
+| host level-sampling, falling | — | 9.997 Hz |
+| ratio | 1.000 | **1.003** |
+
+**Cycles, not edges** — both-edges counting would have given 2.0, not 1.003. The
+two methods fail in different ways, so their agreement is evidence rather than
+one measurement repeated. Also: `input_mask()` → `0b00001000` (the first `1` ever
+read on an input line on this bench), **counter 3 alone moved** across all eight,
+which measures the Table 1 mapping, and `RC3` is genuinely read-and-clear
+(`RE3` 98 → `RC3` returned 98 → `RE3` 0).
+
+One harness artifact worth naming so it is not re-diagnosed as a device problem:
+the 10 Hz run flagged 63 single-sample runs, which reads like contact bounce. It
+is **host-sampler aliasing** — roughly 3 samples per 50 ms half-period. The
+0.5 Hz run, sampling the same way, had zero.
+
+### B4 was a negative result, and it stays recorded as one
+
+Varying only `DB` against the fixed 10 Hz wave, 20 s each: 10.042 / 9.992 /
+9.992 counts/s. A 0.5 % spread — indistinguishable. That is **expected**, not a
+failure: every filter width is far shorter than a 50 ms half-period, so none has
+anything to reject. The scope, stated rather than glossed: **a passing de-bounce
+round-trip proves acceptance, not effect.** Discriminating the three settings
+needs roughly 100-500 Hz, against counters rated to only 1 kHz with silent
+under-reporting above that, so the useful window is narrow and I did not push
+toward the ceiling unattended.
+
+### What is still unwitnessed
+
+- **PORT B's counter map.** Only PA3 has been driven, so counters 4-7 → PB0-PB3
+  still rests entirely on the Table 1 image.
+- **De-bounce's effect**, per the above.
+- **Seven of the eight relays, independently.** The bench has one DMM and it is
+  across K0. The committed all-eight test cross-references each `SKn` against the
+  whole-port `PK` mask, which is the device agreeing with itself — a weaker claim
+  than K0's, and the test says so in its own docstring rather than letting the
+  green tick imply parity.
+
+### Two tests are written, committed, and have never run
+
+`test_all_eight_relays_switch_on_the_real_device` and
+`test_the_watchdog_trips_and_the_dmm_sees_the_contact_open` are gated on
+`BENCHCTRL_ADU218_SWEEP_ALL=1` and `BENCHCTRL_ADU218_ARM_WATCHDOG=1`. Both flags
+are defined, by the wording of their own skip messages, as *the operator* stating
+they know what is attached. An attempt to set the first one from this side was
+correctly blocked — `AGENTS.md`: a route that bypasses a gate is not the same as
+satisfying it. They are handed over, not worked around.
+
+Design note on the watchdog test that is easy to lose: **the DMM is the witness
+precisely because it sends nothing to the ADU218** and therefore cannot feed the
+timer. Any ADU218 read would refeed it, so the obvious instrument is the wrong
+one.
