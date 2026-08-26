@@ -1,0 +1,48 @@
+# Grant the bench user access to a Silicon Labs CP2112 HID USB-to-SMBus bridge.
+#
+# Unlike 63-benchctrl-adu218.rules, the route in here is /dev/hidraw*, not
+# raw USBDEVFS. Two facts make that the right choice on this board, and both
+# were measured rather than assumed:
+#
+#   1. `usbhid` DOES claim this device (1-1.2.3.2.3:1.0 appears under
+#      /sys/bus/usb/drivers/usbhid/), so a hidraw node exists — hidraw2 on
+#      this unit, named "Silicon Laboratories CP2112 HID USB-to-SMBus Bridge".
+#      Contrast the ADU218, which usbhid deliberately ignores via
+#      hid_ignore_list, leaving no node and forcing the usbfs path.
+#
+#   2. `hid-cp2112` is NOT built for this kernel (nothing matching *cp2112*
+#      under /lib/modules). That matters: where that module IS present it
+#      binds the chip and exposes it as a kernel i2c adapter instead, and
+#      /dev/hidraw would then be contested by a driver that thinks it owns
+#      the SMBus engine. Here nothing competes for it.
+#
+# The kernel creates hidraw nodes root:root 0600, so without this rule
+# os.open("/dev/hidraw2", O_RDWR) fails with EACCES before any protocol work
+# happens. The GPIO commands are HID **feature** reports (HIDIOCSFEATURE /
+# HIDIOCGFEATURE ioctls), which need write access even for a get.
+#
+# Scoped to this one VID/PID rather than a blanket hidraw rule — that scoping
+# is the whole point. A blanket `SUBSYSTEM=="hidraw", MODE="0660"` would also
+# expose the attached USB KEYBOARD (hidraw0/hidraw1 here) to the bench user,
+# which is a keylogging surface, not a bench instrument. Do not widen this.
+#
+# 10c4 is Silicon Labs; ea90 is specifically the CP2112. Note 10c4:ea60 is the
+# far more common CP210x UART bridge — a different chip with a different
+# protocol that presents a tty, and it must not match this rule.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea90", \
+    MODE="0660", GROUP="dialout"
+
+# A stable symlink IS offered here, unlike for the ADU218.
+#
+# The reason is that hidrawN numbering is assigned in HID-enumeration order
+# across every HID device on the system, so it moves when an unrelated
+# keyboard is re-plugged — hidraw2 today was hidraw1 before the keyboard was
+# attached. That is a worse race than the ADU218's, because the neighbouring
+# nodes are input devices: opening the wrong one reads keystrokes.
+#
+# The CP2112 reports a real USB serial number (00EC63C9 on this unit), so the
+# link is per-instrument rather than per-adapter and stays correct with two
+# bridges attached. The driver still verifies the serial from the descriptor
+# after opening; the symlink is a convenience, never the identity check.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea90", \
+    SYMLINK+="benchctrl/cp2112-$attr{serial}"
