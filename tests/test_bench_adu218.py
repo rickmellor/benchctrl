@@ -25,6 +25,8 @@ Two shapes of past defect drive most of what is here:
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 from benchctrl.drivers.ontrak_adu218 import driver as driver_module
@@ -315,6 +317,55 @@ class TestRelays:
         assert adu.set_relay_state(2, False) is False
         assert model.relay_state(2) is False
 
+    @pytest.mark.parametrize("index", range(8))
+    def test_every_relay_switches_individually(self, adu, model, index):
+        """All eight, one at a time — not just as part of a port mask.
+
+        Relays 6 and 7 previously appeared **only** inside ``MKddd`` mask tests,
+        so an ``SKn``/``RKn`` command builder that was wrong at the top of the
+        range (an off-by-one, or a table with six entries) would have been
+        caught by nothing: the mask path builds a different command entirely and
+        would keep passing.
+
+        The neighbour assertions are the point. Asserting only that relay 6
+        closed cannot distinguish "closed 6" from "closed 6 and 7", which is the
+        exact failure a shift-by-one command builder produces.
+        """
+        assert adu.set_relay_state(index, True) is True
+        assert model.relay_state(index) is True
+        assert adu.relay_state(index) is True
+        assert adu.relay_mask() == 1 << index, "exactly one relay, and the right one"
+
+        for other in range(8):
+            if other != index:
+                assert model.relay_state(other) is False, (
+                    f"switching relay {index} also moved relay {other}"
+                )
+
+        assert adu.set_relay_state(index, False) is False
+        assert model.relay_state(index) is False
+        assert adu.relay_mask() == 0
+
+    def test_the_relays_are_addressed_by_a_distinct_command_each(self, adu, model):
+        """The command actually put on the wire, per relay.
+
+        ``relay_mask()`` proves the *outcome* is right; this proves the driver
+        got there by naming the relay rather than by any path that happens to
+        agree. ``SKn``/``RKn`` are write-only and unacknowledged, so the command
+        log is the only witness to what was sent.
+        """
+        model.command_log.clear()
+        for index in range(8):
+            adu.set_relay_state(index, True, verify=False)
+        sent = [c for c in model.command_log if c.startswith(("SK", "RK"))]
+        assert sent == [f"SK{i}" for i in range(8)]
+
+        model.command_log.clear()
+        for index in range(8):
+            adu.set_relay_state(index, False, verify=False)
+        sent = [c for c in model.command_log if c.startswith(("SK", "RK"))]
+        assert sent == [f"RK{i}" for i in range(8)]
+
     def test_relay_commands_are_absolute_not_toggling(self, adu, model):
         """Established on hardware by the DMM witness, which recorded three
         *holds* among nine commands: ``SK0,SK0`` left the relay closed rather
@@ -559,6 +610,63 @@ class TestCounters:
         assert adu.clear_counter(index) == 2
         assert adu.read_counter(index) == 0
 
+    def test_a_counter_wraps_at_65535_rather_than_growing(self, adu, model):
+        """16 bits, then rollover to 00000 (manual §6c).
+
+        The wrap matters to callers, not just to the wire: the only safe way to
+        use these counters is to difference successive reads, and a consumer
+        that subtracts naively gets a large negative number exactly once per
+        65536 events. Asserting the boundary is what makes that documentable.
+        """
+        model.counters[0] = driver_module.COUNTER_MAX
+        assert adu.read_counter(0) == 65535
+
+        model.set_input("A", 0, True)  # one more rising edge
+        assert adu.read_counter(0) == 0, "must roll over, not saturate or overflow"
+
+        model.set_input("A", 0, False)
+        model.set_input("A", 0, True)
+        assert adu.read_counter(0) == 1, "counting continues past the wrap"
+
+    def test_the_wrap_is_why_a_naive_difference_goes_negative(self, adu, model):
+        """The failure mode the wrap causes, stated as a test so nobody has to
+        rediscover it. ``after - before`` is negative across a rollover; the
+        correct form adds the modulo back."""
+        model.counters[3] = 65530
+        before = adu.read_counter(3)
+        for _ in range(10):
+            model.set_input("A", 3, True)
+            model.set_input("A", 3, False)
+        after = adu.read_counter(3)
+
+        assert before == 65530
+        assert after == 4
+        assert after - before < 0, "the naive difference is negative here"
+        assert (after - before) % 65536 == 10, "the modulo form recovers the count"
+
+    def test_a_count_above_the_16_bit_maximum_is_rejected_not_returned(self, adu):
+        """The device cannot report more than 65535 in five digits, so a larger
+        value means the reply was corrupted or misframed — a queued response
+        from a *different* command being read as this one is the observed
+        failure mode on this device. Returning it would launder a framing bug
+        into a plausible measurement.
+        """
+        with (
+            mock.patch.object(type(adu), "_send", autospec=True, return_value="99999"),
+            pytest.raises(ADU218ProtocolError, match="above the 65535"),
+        ):
+            adu.read_counter(0)
+
+    def test_a_non_numeric_counter_reply_is_rejected(self, adu):
+        """The other half of the same guard: silence is this device's only error
+        signal, so a reply that is present but not a number is a framing fault
+        rather than a value."""
+        with (
+            mock.patch.object(type(adu), "_send", autospec=True, return_value="00O23"),
+            pytest.raises(ADU218ProtocolError, match="not a decimal number"),
+        ):
+            adu.read_counter(0)
+
     def test_the_driver_never_retries_a_destructive_read(self, adu, monkeypatch):
         """A lost reply after the device has already cleared loses the count
         permanently, and a retry would report 0 — indistinguishable from "no
@@ -589,6 +697,33 @@ class TestDebounce:
         assert driver_module.DEBOUNCE_SETTINGS == (0, 1, 2)
         with pytest.raises(ADU218ValueError):
             adu.set_debounce(3)
+
+    def test_a_higher_setting_is_a_shorter_filter(self, adu):
+        """The mapping is inverted, and that is the whole point of ``DEBOUNCE_MS``.
+
+        Manual §6c: ``0 = 10ms, 1 = 1ms (Default), 2 = 100us``. So the intuitive
+        readings are both wrong — 0 is not "off", it is the *longest* filter,
+        and 2 does not filter hardest, it filters least. An operator chasing
+        maximum contact de-bounce would pick 2 and get 100 µs.
+
+        Asserted as a strict ordering rather than three equalities so that a
+        future edit cannot keep the values and quietly re-sort them.
+        """
+        ms = driver_module.DEBOUNCE_MS
+        assert ms == {0: 10.0, 1: 1.0, 2: 0.1}
+        assert ms[0] > ms[1] > ms[2], "setting number and filter width must be inverted"
+        assert set(ms) == set(driver_module.DEBOUNCE_SETTINGS)
+
+    def test_read_debounce_ms_reports_the_width_not_the_setting(self, adu):
+        """The two reads must not be interchangeable, or the inverted mapping
+        would be invisible at the call site."""
+        assert adu.set_debounce(0) == 0
+        assert adu.read_debounce() == 0
+        assert adu.read_debounce_ms() == 10.0, "setting 0 is the 10 ms filter"
+
+        assert adu.set_debounce(2) == 2
+        assert adu.read_debounce() == 2
+        assert adu.read_debounce_ms() == 0.1, "setting 2 is the 100 us filter"
 
     def test_the_simulator_does_not_default_it_to_zero(self):
         """The hardware reported ``DB`` = 1 out of the box (``reads.txt``).
@@ -924,6 +1059,7 @@ class TestDispatchGate:
             "read_counter",
             "read_counters",
             "read_debounce",
+            "read_debounce_ms",
             "read_watchdog",
             "read_watchdog_tripped",
             "read_identity",

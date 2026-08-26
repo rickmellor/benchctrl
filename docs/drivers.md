@@ -1473,6 +1473,47 @@ boilerplate. The bench unit reported `DB` = 1 out of the box, which is
 also the simulator's default so that a driver returning a hardcoded 0
 would be caught.
 
+**A higher setting is a *shorter* filter.** Manual §6c:
+
+| setting | filter width |
+|---|---|
+| 0 | 10 ms |
+| 1 | 1 ms (device default) |
+| 2 | 100 µs |
+
+Both intuitive readings are wrong: 0 is not "off" — it is the *longest*
+filter — and 2 does not filter hardest, it filters least. Somebody wanting
+maximum contact de-bounce would reach for 2 and get 100 µs. Hence
+`read_debounce_ms()` alongside `read_debounce()`, and `DEBOUNCE_MS` in the
+driver; the raw setting number is not a duration and should not be printed
+as though it were.
+
+The practical consequence is that **the setting is unobservable at low
+frequencies.** Measured on this bench against a 10 Hz square wave on PA3,
+20 s per setting: DB0 10.042, DB1 9.992, DB2 9.992 counts/s — a 0.5 %
+spread, i.e. indistinguishable. That is the expected result, not a fault:
+every filter width is far shorter than the 50 ms half-period, so there is
+nothing for any of them to reject. Telling the three apart needs a
+stimulus whose period approaches 10 ms — a few hundred Hz — and the
+counters are rated to only 1 kHz (`COUNTER_MAX_FREQUENCY_HZ`), so the
+usable discrimination window is narrow. Above that rating the count
+under-reports **silently**; the driver cannot detect it.
+
+### Counters count cycles, not edges
+
+The counters count **low-to-high transitions only** — one count per cycle.
+Verified on hardware rather than assumed: at 10 Hz the device counter read
+10.030 counts/s while host level-sampling independently saw 9.997 rising
+*and* 9.997 falling edges per second. Counting both edges would have given
+a ratio of 2.0; the measured ratio was 1.003.
+
+Counters are 16-bit and **roll over from 65535 to 0**. Differencing
+successive reads is the only correct way to use them, and the difference
+must be taken modulo 65536 — a naive `after - before` goes sharply negative
+exactly once per 65536 events. `read_counter()` and differencing is
+preferred over `clear_counter()`, which destroys the only copy of what it
+returns.
+
 ### API
 
 ```python
@@ -1487,7 +1528,8 @@ input_state(port, index) -> bool            # port "A"/"B", index 0-3
 input_states() -> dict[str, tuple[bool, ...]]
 input_mask() -> int
 read_counter(index) -> int;  read_counters() -> dict[int, int]
-read_debounce() -> int
+read_debounce() -> int                      # the setting, 0-2
+read_debounce_ms() -> float                 # the filter width; see the table
 read_watchdog() -> int;  read_watchdog_tripped() -> bool
 
 # writes (all prefix-matched, so the writer-claim gate catches them)

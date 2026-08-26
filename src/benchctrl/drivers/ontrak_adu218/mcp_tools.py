@@ -25,6 +25,7 @@ import threading
 from typing import Optional
 
 from benchctrl.drivers.ontrak_adu218 import OntrakADU218
+from benchctrl.drivers.ontrak_adu218.driver import DEBOUNCE_MS
 
 _adu218: Optional[OntrakADU218] = None
 _adu218_lock = threading.RLock()
@@ -312,21 +313,32 @@ def adu218_clear_counter(index: int) -> dict:
 
 
 def adu218_debounce() -> dict:
-    """The input de-bounce setting: 0, 1 or 2.
+    """The input de-bounce setting: 0, 1 or 2, plus what it means in ms.
+
+    **A higher setting is a shorter filter**: 0 = 10 ms, 1 = 1 ms (default),
+    2 = 100 us. ``debounce_ms`` is returned alongside the raw setting because
+    the number on its own reads backwards.
 
     Three settings, not the four Ontrak's web page lists — that page's fourth
     option is shared boilerplate across several products.
     """
-    return {"debounce": _get_adu218().read_debounce()}
+    setting = _get_adu218().read_debounce()
+    return {"debounce": setting, "debounce_ms": DEBOUNCE_MS[setting]}
 
 
 def adu218_set_debounce(setting: int) -> dict:
     """Set the input de-bounce filter. ``setting`` is 0, 1 or 2.
 
+    **Higher means a shorter filter**: 0 = 10 ms, 1 = 1 ms (default),
+    2 = 100 us. To de-bounce a noisy contact as hard as possible, pass 0, not 2.
+
     Affects how the digital inputs and their event counters respond to fast
-    transitions. Returns the verified read-back.
+    transitions. Note the setting has no observable effect on a clean signal
+    slower than a few hundred Hz — every filter width is shorter than such a
+    signal's half-period. Returns the verified read-back.
     """
-    return {"debounce": _get_adu218().set_debounce(setting)}
+    actual = _get_adu218().set_debounce(setting)
+    return {"debounce": actual, "debounce_ms": DEBOUNCE_MS[actual]}
 
 
 def adu218_watchdog() -> dict:

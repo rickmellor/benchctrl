@@ -533,3 +533,103 @@ ADU218:
   same physical circuit (6.006 Ω vs 6.140 Ω). Consistent with continuity using
   a different range, but it means the two are not interchangeable as a witness.
   The switching fixture uses `measure_resistance()` throughout.
+
+---
+
+## Addendum, 2026-08-26: the vendor manual, and the counters under a real signal
+
+Two things changed after the captures above: the manual PDF was located
+(`references/adu208218v2.pdf`, gitignored — copyrighted and binary), and the
+operator put a real square wave on **PA3** from a Siglent SDG1032X. Until then
+no ADU218 input line had ever been driven to a `1` on this bench, so the entire
+input/counter/de-bounce half of the device was implemented but unwitnessed.
+
+Stimulus: operator-driven square wave, PA3, ~50 % duty. Counter read over the
+benchctrl agent via RPC. No relay switched, watchdog left disarmed.
+
+### Counters count cycles, not edges — measured, not assumed
+
+At 10 Hz over a 30.010 s window:
+
+| Method | Result |
+|---|---|
+| A — device counter `RE3` | 301 counts → **10.030 counts/s** |
+| B — host level-sampling of `RPA3` | 300 rising **and** 300 falling → **9.997 Hz** |
+| A / B | **1.003** |
+
+Counting both edges would have put A/B at 2.0. The manual agrees in words —
+§6c, "The event counters count low to high transitions" — but the ratio is the
+evidence, and it is now a driver comment on `COUNTER_COUNT`.
+
+Two supporting details from the same run. Duty cycle 53.6 % (905/1687 samples
+high), consistent with a square wave. Run lengths: 301 high runs averaging
+~53 ms, 300 low averaging ~46 ms. There were **63 single-sample runs**, which
+the harness flags as possible bounce — at 10 Hz that is the *host sampler*
+aliasing, not the signal: mean sample interval was 17.8 ms against a 50 ms
+half-period, so only ~3 samples land per half-cycle and boundary samples land
+in a run of 1 routinely. The device counter is unaffected and is the method to
+trust here; at 0.5 Hz (~57 samples per half-cycle) the same harness reported 0
+single-sample runs.
+
+Earlier, at 0.5 Hz: A = 0.500 counts/s, B = 0.500 Hz, A/B = 1.000. Two
+frequencies an order of magnitude apart both give one count per cycle.
+
+### PA3 → counter 3 confirmed by measurement
+
+`input_states()` → `{'A': (False, False, False, True), 'B': (...)}` and
+`input_mask()` → `0b00001000`. Reading all eight counters twice, **only counter
+3 moved** (97 → 98 in 2 s; the other seven flat at 0).
+
+This matters because the counter-to-input map is documented **only in a Table 1
+image** that the PDF's text extraction drops entirely — `pdftotext` renders the
+table as blank space between "Table 1: Event Counter Port Assignments" and the
+next paragraph. So the mapping used by the driver (counters 0-3 → PA0-PA3,
+4-7 → PB0-PB3) could not be read from the manual at all. It is now measured for
+PA3 → counter 3.
+
+`clear_counter(3)` also verified genuinely read-and-clear on the device:
+`RE3` 98 → `RC3` returned 98 → `RE3` 0.
+
+### De-bounce: the manual gives the milliseconds, and the ordering is inverted
+
+**Manual §6c is explicit and was previously missing from this repo entirely:**
+
+```
+DBn    Sets de-bounce time of event counters (n=0, 1 or 2)
+       (0 =10ms,     1 = 1ms (Default),    2 = 100us)
+```
+
+The spec table confirms: "Programmable Debounce — 10ms, 1ms, or 100us", and
+"Max Frequency — 1KHz" for the event counters.
+
+**A higher setting is a shorter filter.** This inverts both intuitive readings:
+0 is not "off" (it is the *longest* filter) and 2 does not filter hardest (it is
+the weakest). Hence `DEBOUNCE_MS` and `read_debounce_ms()` in the driver — the
+raw setting number is actively misleading on its own.
+
+It also settles the "three settings, not four" question from a second direction:
+the manual bounds `n` to 0..2 *and* names exactly three durations, so the web
+page's fourth `NONE` option is boilerplate, as suspected.
+
+### B4 negative result, stated with its scope
+
+Varying **only** `DB` against the fixed 10 Hz stimulus, 20 s per setting:
+
+| setting | filter | counts | rate |
+|---|---|---|---|
+| DB0 | 10 ms | 201 | 10.042 /s |
+| DB1 | 1 ms | 200 | 9.992 /s |
+| DB2 | 100 µs | 200 | 9.992 /s |
+
+Spread 0.5 % — **indistinguishable**. That is the *expected* result and not
+evidence the setting is inert: at 10 Hz the half-period is 50 ms, so all three
+filter widths (10 ms, 1 ms, 100 µs) are shorter than the interval between
+transitions and none of them has anything to reject.
+
+Scope of this negative: it shows only that **a clean 10 Hz signal cannot
+discriminate the three settings**, not that `DB` has no effect. Telling them
+apart needs a period approaching 10 ms, i.e. a few hundred Hz — and the
+counters are rated to only 1 kHz, so the usable discrimination window is
+roughly 100–500 Hz. Above the rating the count under-reports **silently**; the
+driver cannot detect an overrun. Deliberately not attempted with the counter
+near its rated limit while nobody is watching the bench.

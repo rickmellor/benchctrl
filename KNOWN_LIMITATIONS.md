@@ -1069,6 +1069,69 @@ Code reference:
 `ADU218Info`; `src/benchctrl/drivers/ontrak_adu218/__init__.py`;
 `tests/test_bench_adu218.py` — `TestLifecycle`, `TestDispatchGate`.
 
+### F-21. ADU218 de-bounce settings run backwards, and are unobservable below a few hundred Hz
+
+Two separate traps in one setting, and the first is the kind of thing that
+silently does the opposite of what an operator intended.
+
+**A higher setting is a *shorter* filter.** Manual §6c: `0 = 10ms`,
+`1 = 1ms` (default), `2 = 100us`. Both intuitive readings are wrong — `0`
+is not "off", it is the *longest* filter, and `2` does not filter hardest,
+it filters least. Somebody chasing maximum contact de-bounce on a noisy
+input reaches for `2` and gets 100 µs, the weakest setting available. The
+driver therefore exposes `read_debounce_ms()` and `DEBOUNCE_MS` alongside
+the raw setting, and the MCP tools return `debounce_ms` next to `debounce`,
+because handing a caller the bare number invites the wrong inference.
+
+**The setting has no observable effect on a clean slow signal.** Measured
+on a 10 Hz square wave into PA3, 20 s per setting: `DB0` 10.042, `DB1`
+9.992, `DB2` 9.992 counts/s — 0.5 % spread, i.e. indistinguishable. That
+is not a fault: every filter width is far shorter than the 50 ms
+half-period, so none has anything to reject. The consequence for testing is
+that **a passing de-bounce round-trip proves acceptance, not effect**, and
+the hardware test says so rather than implying more.
+
+Discriminating the three needs a period approaching 10 ms — a few hundred
+Hz — against event counters rated to only **1 kHz** ("Max Frequency 1KHz").
+Above that rating the count under-reports **silently**; there is no
+overrun flag and the driver cannot detect it, so a frequency read off a
+counter driven past 1 kHz is wrong with no indication. The usable
+discrimination window is therefore roughly 100–500 Hz.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `DEBOUNCE_MS`,
+`COUNTER_MAX_FREQUENCY_HZ`, `read_debounce_ms`;
+`tests/fixtures/adu218/counters_live_signal.txt`;
+`tests/test_bench_adu218.py` — `TestDebounce`.
+
+### F-22. ADU218 counter-to-input map exists only as an image, and counters wrap silently
+
+**The map is not in the manual's text.** Counter-to-input assignments live
+in a "Table 1: Event Counter Port Assignments" **image**, which `pdftotext`
+drops entirely — the extraction renders blank space between the caption and
+the following paragraph. So the mapping the driver relies on (counters 0-3
+→ PA0-PA3, 4-7 → PB0-PB3) could not be read from the document at all. It
+is measured instead: driving PA3 moved counter 3 and only counter 3, with
+the other seven flat. The PORT B half remains unwitnessed on hardware.
+
+**Counters count cycles, not edges** — one count per low-to-high
+transition. Verified rather than assumed, because the two hypotheses differ
+by exactly 2× and a factor-of-two frequency error looks plausible forever:
+at 10 Hz the device counted 10.030/s while host sampling independently saw
+9.997 rising *and* 9.997 falling edges/s (ratio 1.003, not 2.0).
+
+**They wrap from 65535 to 0 with no flag.** The only correct use is
+differencing successive reads *modulo 65536*; a naive `after - before` goes
+sharply negative exactly once per 65536 events. `clear_counter()` (`RCn`)
+is read-and-clear and must never be retried — a lost reply loses the count
+permanently and a retry returns 0, indistinguishable from "no events".
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `COUNTER_COUNT`,
+`COUNTER_MAX`, `clear_counter`;
+`tests/fixtures/adu218/counters_live_signal.txt`;
+`tests/test_bench_adu218.py` — `TestCounters`.
+
 
 ## Harness
 

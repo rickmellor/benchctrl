@@ -246,6 +246,7 @@ def test_every_read_method_is_exposed_over_the_wire(remote_adu):
         "read_counter",
         "read_counters",
         "read_debounce",
+        "read_debounce_ms",
         "read_watchdog",
         "read_watchdog_tripped",
     ):

@@ -959,6 +959,11 @@ def test_adu218_mcp_tools_cover_the_driver_surface():
     #                  a separate tool would be a second round trip for a value
     #                  the model already has
     #   input_mask   — same, folded into adu218_input_states
+    #   read_debounce_ms — same, folded into adu218_debounce, which returns both
+    #                  ``debounce`` and ``debounce_ms``. Returning them together
+    #                  is the point: the setting number runs *backwards* to the
+    #                  filter width (0 = 10 ms, 2 = 100 us), so a tool handing a
+    #                  model the bare number invites "2 filters hardest"
     #   read_watchdog_tripped — folded into adu218_watchdog, and deliberately:
     #                  it *clears* the driver-held expectation when it detects a
     #                  trip, so a standalone tool would let a model consume the
@@ -972,6 +977,7 @@ def test_adu218_mcp_tools_cover_the_driver_surface():
         "close",
         "relay_mask",
         "input_mask",
+        "read_debounce_ms",
         "read_watchdog_tripped",
         "watchdog_setting",
     }
@@ -1127,7 +1133,17 @@ def test_adu218_tools_work_against_the_simulator():
         assert m.adu218_relay_state(0)["on"] is False
         assert m.adu218_allowed_relays()["allowed_relays"] == [0, 1]
         assert m.adu218_counters()["counters"]["0"] == 0
-        assert m.adu218_debounce()["debounce"] == 1
+
+        # The de-bounce tool must carry the *width* as well as the setting,
+        # because the two run in opposite directions: setting 1 is 1 ms, but
+        # setting 0 is the longest filter (10 ms) and 2 the shortest (100 us).
+        # This is what licenses read_debounce_ms's parity exemption above.
+        debounce = m.adu218_debounce()
+        assert debounce["debounce"] == 1
+        assert debounce["debounce_ms"] == 1.0
+        assert m.adu218_set_debounce(0) == {"debounce": 0, "debounce_ms": 10.0}
+        assert m.adu218_set_debounce(2) == {"debounce": 2, "debounce_ms": 0.1}
+        m.adu218_set_debounce(1)
 
         # Switching through the tool layer. `state` is the verified read-back, so
         # asserting it proves the tool reports what the device did rather than

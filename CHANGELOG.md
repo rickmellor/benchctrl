@@ -133,6 +133,58 @@ confuse the two. The suite was then verified to fail on the defect it
 exists for: a `set_relay_state` patched to return its own argument without
 touching the device fails three of the six tests.
 
+The input, counter and de-bounce half of the device was implemented and
+simulator-covered long before any input line was ever driven to a `1`,
+which meant no counter had ever incremented on hardware. A square wave into
+PA3 closed that gap and produced two findings:
+
+- **Counters count cycles, not edges.** Cross-checked against host level
+  sampling, whose failure mode is different: at 10 Hz the device counted
+  10.030/s while the host saw 9.997 rising *and* 9.997 falling edges/s —
+  ratio 1.003, where counting both edges would give 2.0. Confirmed again at
+  0.5 Hz. This matters because the two hypotheses differ by exactly 2× and a
+  doubled frequency looks plausible indefinitely.
+- **The counter-to-input map is only an image.** Counter assignments live in
+  a "Table 1" *image* that the manual's text layer omits entirely, so the
+  mapping the driver uses was unverifiable from the document. Driving PA3
+  moved counter 3 and nothing else, with the other seven flat.
+
+The vendor manual also supplied what no capture had: **de-bounce settings
+are durations, and they run backwards** — `0` = 10 ms, `1` = 1 ms
+(default), `2` = 100 µs. So the *highest* setting is the *weakest* filter,
+and an operator chasing maximum de-bounce would pick `2` and get the least.
+`read_debounce_ms()` and `DEBOUNCE_MS` exist for that reason, and the MCP
+tools now return `debounce_ms` beside the raw setting.
+
+Measuring the ladder against a real signal produced a **negative result
+worth recording with its scope**: at 10 Hz all three settings counted
+identically (10.042 / 9.992 / 9.992 counts/s, 0.5 % spread). That is
+expected rather than broken — every filter width is far shorter than a
+50 ms half-period, so none has anything to reject — but it means a passing
+de-bounce round-trip proves acceptance, *not* effect. Telling the settings
+apart needs a few hundred Hz against counters rated to only 1 kHz, above
+which the count under-reports silently. New entries F-21 and F-22.
+
+The hardware suite grew from 6 tests to 12: the inputs, the counters, the
+cycles-not-edges cross-check and the de-bounce round trip now run against
+the real device (**10 passed, 1 skipped** with a live 10 Hz stimulus). Two
+are opt-in behind environment variables, because their default should not
+be to act: `BENCHCTRL_ADU218_SWEEP_ALL` for the all-eight-relay sweep,
+which previously existed only as an uncodified ad-hoc run so nothing would
+have caught a regression on relays 1-7, and `BENCHCTRL_ADU218_ARM_WATCHDOG`
+for the witnessed trip. Both energise outputs the operator has not
+otherwise nominated, and per `AGENTS.md` that is the operator's call to
+make, not a default.
+
+Hardware-free coverage closed the two gaps that inspection had found and
+nothing asserted: the 65535 → 0 counter wrap (including the negative
+`after - before` it produces, since differencing is the only correct way to
+use these counters) and the reply-above-maximum protocol error. Relays 6
+and 7 also previously appeared *only* inside port-mask tests, so all eight
+now switch individually with the emitted `SKn`/`RKn` commands asserted —
+each verified against a deliberately shifted command builder, which the
+per-index test kills at exactly index 7.
+
 Fixed along the way: `scan_usbfs()` now returns `[]` rather than raising
 when the USB bus cannot be enumerated. `enumerate_devices()` raising is
 correct for a driver about to open a device and wrong for a scan, and

@@ -148,16 +148,42 @@ INPUT_LINES_PER_PORT = 4
 INPUT_COUNT = len(INPUT_PORTS) * INPUT_LINES_PER_PORT
 
 #: Event counters, one per digital input.
+#:
+#: Counters count **low-to-high transitions only** — one count per cycle, not
+#: one per edge (manual §6c). Measured on this unit against a 10 Hz square wave
+#: on PA3: the counter read 10.030 counts/s while host level-sampling saw 9.997
+#: rising *and* 9.997 falling edges per second. Had it counted both edges the
+#: ratio would have been 2.0, not 1.003.
 COUNTER_COUNT = 8
 
 #: The widest value a counter reports: ``REn`` returns 5 digits, ``00000``.
 COUNTER_MAX = 65535
+
+#: The highest input frequency the counters are rated for (manual, Event
+#: Counters spec table). Above this the count is not trustworthy, and the driver
+#: cannot detect the overrun — a too-fast signal simply under-counts silently.
+#: Relevant to :py:data:`DEBOUNCE_MS`: the 100 µs setting cannot be told apart
+#: from the 1 ms one below about 500 Hz, so its effect is only observable in the
+#: top of this range.
+COUNTER_MAX_FREQUENCY_HZ = 1000
 
 #: De-bounce settings. **Three, not four.** Ontrak's web page lists a fourth
 #: (``NONE``) but the manual bounds ``n`` to 0..2 and the captures show 0/1/2.
 #: The same four-option string appears on the ADU208 and ADU228 pages, so it
 #: reads as shared boilerplate rather than a per-product spec.
 DEBOUNCE_SETTINGS = (0, 1, 2)
+
+#: What each de-bounce setting actually *means*, in milliseconds (manual §6c).
+#:
+#: **The ordering is inverted: a higher setting is a SHORTER filter.** This is
+#: the whole reason the mapping is spelled out here rather than left to the
+#: device. ``DEBOUNCE_SETTINGS`` alone invites two wrong guesses — that 0 means
+#: "off" (it is the *longest* filter, 10 ms) and that a bigger number filters
+#: harder (2 is the *weakest*, 100 µs). An operator wanting maximum contact
+#: de-bounce would reach for 2 and get the least filtering available.
+#:
+#: 1 (1 ms) is the device default and what this unit reported out of the box.
+DEBOUNCE_MS = {0: 10.0, 1: 1.0, 2: 0.1}
 
 #: Watchdog settings, and the timeout each selects.
 #:
@@ -792,12 +818,31 @@ class OntrakADU218:
     # -- de-bounce ----------------------------------------------------------
 
     def read_debounce(self) -> int:
-        """The de-bounce setting, 0..2."""
+        """The de-bounce setting, 0..2.
+
+        This is the device's raw setting number, not a duration. Use
+        :py:meth:`read_debounce_ms` if what you want is the filter width —
+        the two run in *opposite* directions.
+        """
         value = self._send_int("DB", maximum=max(DEBOUNCE_SETTINGS))
         return value
 
+    def read_debounce_ms(self) -> float:
+        """The de-bounce filter width in milliseconds: 10.0, 1.0 or 0.1.
+
+        Provided because the setting number is actively misleading on its own:
+        **0 is the longest filter (10 ms) and 2 the shortest (100 µs)**, so
+        reaching for the biggest number to get the most de-bouncing does the
+        opposite. See :py:data:`DEBOUNCE_MS`.
+        """
+        return DEBOUNCE_MS[self.read_debounce()]
+
     def set_debounce(self, setting: int) -> int:
         """Set the input de-bounce. Returns the verified read-back.
+
+        ``setting`` is the device's number, not a duration, and **higher means
+        a shorter filter**: 0 = 10 ms, 1 = 1 ms (default), 2 = 100 µs. See
+        :py:data:`DEBOUNCE_MS`.
 
         Three settings, not the four Ontrak's web page lists — see
         :py:data:`DEBOUNCE_SETTINGS`.
