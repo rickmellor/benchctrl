@@ -2,22 +2,30 @@
 
 **Branch:** `feat/ontrak-adu218` (off `master` @ `2eb0003`)
 **State as of:** 2026-08-27 — **all stages landed, every bench claim witnessed,
-everything pushed.** Get the commit count from
+the PR open, everything pushed.** Get the commit count from
 `git rev-list --count master..HEAD` rather than from here; it was carried forward
 by hand for several addenda and was wrong by two. **Not linear:** `97b1e1b` is a
 two-parent merge that brought master's CP2112 driver in, so `--no-merges` gives
 one fewer. Sections 1-12 below were written
 *before* the code and are kept as the design record; where the built driver
-diverges, §5 and §13 say so. **Read §17, then §16, first on return** — those are
-the bench results; §13 carries the vendor manual's findings and the PA3 signal
-measurements.
+diverges, §5 and §13 say so. **Read §18, then §17, then §16, first on return** —
+those are the bench results; §13 carries the vendor manual's findings and the PA3
+signal measurements.
 
-Remaining: **open the PR** — and that is genuinely all. `gh` here now has
-`push` (the operator added `generac-rick` as a collaborator on 2026-08-27), so
-it is no longer the operator's to run. **Every bench item is done.** §16 closed
-the counter map and the eight relays by walking the bench; §17 closed the
-watchdog trip, the last one. The all-eight sweep remains opt-in and optional:
-all it uniquely adds is the simultaneous whole-port mask write.
+**The PR is open:** https://github.com/rickmellor/benchctrl/pull/1, the repo's
+first, `OPEN` and `MERGEABLE`. It was never blocked on the work — `gh` here is
+authed as `generac-rick`, which had pull-only, while `git push` uses the personal
+key and always worked; the operator added `generac-rick` as a collaborator on
+2026-08-27 and the API flipped to `{"push":true}`. Note `gh pr edit` now fails on
+this repo with a deprecated-GraphQL error (`projectCards`); patch the body over
+REST instead (`gh api -X PATCH repos/…/pulls/1`).
+
+Remaining: **nothing that is mine.** **Every bench item is done.** §16 closed the
+counter map and the eight relays by walking the bench; §17 closed the watchdog
+trip, the last one; §18 is the leftover-sweep that followed and found a real
+coverage regression. The all-eight sweep remains opt-in and optional: all it
+uniquely adds is the simultaneous whole-port mask write, and its gate is the
+operator's to set.
 
 **Resume by reading:** §13 of this file, then
 `tests/fixtures/adu218/README.md` (the measured device behaviour — believe it
@@ -1270,7 +1278,9 @@ check.
 
 - `BENCHCTRL_ADU218_INPUT` now defaults to **`B2`**, tracking the bench the way
   `BENCHCTRL_ADU218_RELAY` tracks K7. A stale default skips with the line named,
-  so it cannot silently pass.
+  so it cannot silently pass. **← this last sentence was wrong, and §18 is what
+  it cost.** It closes the *correctness* half only: it cannot silently pass, but
+  it can silently stop running. The default was stale within the hour.
 - The `counted` fixture's spec parsing was **defensive-guard bugged**: it did
   `int(spec[1:])` *before* the `pytest.skip` that exists for a malformed value,
   so `BENCHCTRL_ADU218_INPUT=XY` raised `ValueError` from the fixture instead of
@@ -1521,3 +1531,81 @@ a 7-passed baseline established the witness worked *before* anything was armed.
 The agent was confirmed not holding interface 0, so nothing could refeed the
 timer. Both probe scripts removed from host and board; every run ended `WD0` with
 all relays de-energised.
+
+---
+
+## 18. Addendum, 2026-08-27 — an accurate skip that silently un-ran three tests
+
+Commits `4d3b2d1` (the fix) and `3ee021b` (the record). Found by sweeping for
+leftovers *after* the PR was open, which is worth noting on its own: there was no
+failing test, no error, and nothing in the diff pointing at it.
+
+### What happened
+
+Run the hardware file with the bench fully wired and **no environment variables
+set at all**, which is how anyone else will run it:
+
+```
+7 passed, 5 skipped        # expected 10 passed, 2 skipped
+```
+
+Three input/counter tests had stopped running. `BENCHCTRL_ADU218_INPUT` still
+defaulted to `B2` — where the generator sat *mid*-walk in §16 — and the walk had
+ended on **PB3**. So the fixture skipped, correctly, with `PB2 is not toggling`.
+
+### Why the skip being accurate is the defect, not the defence
+
+§15 recorded, in as many words: *"A stale default skips with the line named, so it
+cannot silently pass."* That is true and it is not enough. It closes the
+**correctness** half — a stale default cannot assert something false — and leaves
+the **coverage** half wide open. Nothing was red. Nothing was misconfigured.
+
+The message is the reason it hid. **"PB2 is not toggling" is equally true when
+the generator is unplugged and when it is one terminal over**, and only the
+second was the case. A skip whose text cannot distinguish "moved" from "absent"
+reads as a *bench fact* — "no generator today, fine" — rather than as a default
+nobody moved. So the more accurately it described PB2, the more convincingly it
+argued for being ignored.
+
+### The general shape
+
+A default that tracks a **physical bench position** (`INPUT` → a terminal,
+`RELAY` → K7) goes stale *every time the bench moves*, which on this project was
+eight times in one afternoon. Such a default needs a diagnostic that separates
+those two cases, or it degrades into a green run with less coverage than it
+claims. That is a different requirement from "fail rather than false-pass", and
+having satisfied the second is not evidence about the first.
+
+### Fixed two ways
+
+1. **The default is now `B3`, found by discovery rather than assumption.** A probe
+   sampled all eight lines for 6 s and reported the observed level set per line;
+   exactly one showed `{False, True}`. Reading the walk's notes would have given
+   the same answer, but sampling is what makes it a measurement — and the whole
+   failure here came from trusting a written-down position.
+2. **The skip now names the line that IS toggling.** The fixture sweeps the whole
+   port (the device is already open, so it costs one extra pass) and says
+   `…but PB3 is toggling, so set BENCHCTRL_ADU218_INPUT to that (or update the
+   default)`, or, when nothing moves, `no input line is toggling, so the generator
+   is off or unwired`. The next drift diagnoses itself.
+
+Proven by pointing `INPUT` at an undriven `A1`: the skip fires and names PB3.
+
+### Two stale docstrings found in the same pass
+
+- The module docstring still said the watchdog trip had been *"bisected by hand
+  into a fixture"* — true before §17, and §17 is precisely what made it false. It
+  now quotes the measured bracket, because the trip is asserted by a committed
+  test rather than by a note about a past session.
+- The counter docstring said the `+ 4` PORT B offset *"rests on PB2"*. After the
+  walk it rests on **three** independent readings (PB0 → 4, PB2 → 6, PB3 → 7).
+  Understating the evidence invites someone to re-run the weakest version of it.
+
+### Verification
+
+**10 passed / 2 skipped with no environment variables** (was 7/5), the two skips
+being the operator gates; **11 passed / 1 skipped** with the watchdog armed;
+hardware-free 12 deselected; `test_bench_adu218.py` 115 passed; ruff clean; board
+`IN SYNC`, 105 files identical. Recorded in the CHANGELOG — which had to
+**correct its own earlier claim** — and in F-26. The discovery probe was removed
+from host and board.
