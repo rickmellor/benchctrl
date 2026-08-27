@@ -950,9 +950,10 @@ model, because each is a driver bug if unhandled:
 
 - `~/bench-test/.venv/bin/python -m pytest -m "not hardware"` — the only env
   with pytest (python3.12). Baseline at `2eb0003`: **2111 passed, 6 skipped**.
-- `pytest -m hardware -k adu218` against the real unit, DMM on K0.
+- `pytest -m hardware -k adu218` against the real unit, DMM across whichever
+  relay `BENCHCTRL_ADU218_RELAY` names — K0 originally, **K7 since 2026-08-27**.
 - **Cross-check that is the real proof:** command a relay, then verify with the
-  DMM — the device's own `RPK0` is not independent evidence.
+  DMM — the device's own `RPKn` is not independent evidence.
 - Mutation tests per memory's rules: **assert the test count** (rc=0 with
   nothing collected reads as a pass), hold mutated files outside the module,
   check for equivalent mutants first. Priority mutants: inverting the
@@ -1082,11 +1083,12 @@ toward the ceiling unattended.
 - **PORT B's counter map.** Only PA3 has been driven, so counters 4-7 → PB0-PB3
   still rests entirely on the Table 1 image.
 - **De-bounce's effect**, per the above.
-- **Seven of the eight relays, independently.** The bench has one DMM and it is
-  across K0. The committed all-eight test cross-references each `SKn` against the
-  whole-port `PK` mask, which is the device agreeing with itself — a weaker claim
-  than K0's, and the test says so in its own docstring rather than letting the
-  green tick imply parity.
+- **Seven of the eight relays, independently.** The bench has one DMM and it sits
+  across a single relay — `TEST_RELAY`, which is K7 since 2026-08-27. The
+  committed all-eight test cross-references each `SKn` against the whole-port
+  `PK` mask, which is the device agreeing with itself — a weaker claim than the
+  witnessed relay's, and the test says so in its own docstring rather than
+  letting the green tick imply parity.
 
 ### Two tests are written, committed, and have never run
 
@@ -1102,3 +1104,68 @@ Design note on the watchdog test that is easy to lose: **the DMM is the witness
 precisely because it sends nothing to the ADU218** and therefore cannot feed the
 timer. Any ADU218 read would refeed it, so the obvious instrument is the wrong
 one.
+
+## 14. Addendum, 2026-08-27 — the meter moved to K7
+
+The operator moved the DMM off the CP2112 and onto **K7**. That un-blocked the
+three witnessed tests — the suite went from 8 passed / 4 skipped to **10 passed /
+2 skipped**, the only remaining skips being the two operator gates above — and it
+immediately falsified two assertions that had been calibrated on K0's wiring.
+Fixed in `d981d07`.
+
+### Closed-contact resistance is a property of the wiring, not the relay
+
+`TEST_RELAY` was 0 and is now **7**, and that single change surfaced the finding
+that matters beyond this driver:
+
+| observation | figure |
+|---|---|
+| K0 closed | 9.483 Ω |
+| K7 closed, same meter and session, identical PhotoMOS parts | **36.02–36.22 Ω** |
+| the same relay across four sessions (probes re-seated) | 6.14 / 10.69 / 10.65 / 9.40 Ω |
+| K7 within one session, 15 back-to-back runs of one test | **62 → 127 → 61 Ω** |
+
+Nearly 4× between two relays on the same device, because the excess is lead and
+clip resistance *outside* the relay. **Any `< 10 Ω` "closed" rule derived from K0
+calls a perfectly good K7 open.** §3's decision to read that table as *"a finite
+resistance vs the overload sentinel"* rather than as a measurement is what
+survived the re-wiring — a categorical distinction rather than a quantitative
+one. This is the single most load-bearing decision in the hardware file, and it
+is now recorded as **F-27** in `KNOWN_LIMITATIONS.md`.
+
+### Within-session stability was also a wiring property, and it was a latent flake
+
+`hi < lo * 2` on the two closed readings carried the comment *"the within-session
+spread is milliohms"* — true of K0's screw clamps, false of K7's spring clips.
+Measured over 15 back-to-back runs of the exact test sequence, the worst
+within-trial ratio was **1.80 against a limit of 2.00**, so it failed roughly one
+suite run in seven. Diagnosed by *measuring the contact drift*, not by re-running
+until green.
+
+Now `hi < lo * 10`, with what that gives up stated at the assertion rather than
+implied: a K7→K0 lead move is a ratio of 3.81 and K0→K7 is 6.64, and neither
+trips it any more. That coverage was already illusory — a bound the clips can
+breach unaided reports lead movement that did not happen, and no threshold
+separates 3.81 from a 1.80 the hardware produces on its own. What genuinely
+catches a lead on the wrong relay is the pair of relay assertions below.
+
+### The volts gate has a blind spot that reproduces the bug it was written for
+
+The DC-volts wiring gate added in B9 catches leads left on a *powered* net
+(3.392 V, the CP2112 case). It cannot catch leads across a **different dry
+contact**: another open contact reads ~0 V exactly like the right one, so a stale
+`BENCHCTRL_ADU218_RELAY` *fails* rather than skips, and the failure still accused
+the relay. Both witnessed assertions now name both causes — "either that relay is
+not switching, or the leads are not across it" — and print the device's own
+read-back so the operator knows which to go and look at. The `reset_relays`
+control assertion had no message at all and now has one, because that assertion
+failing is precisely what makes the open-contact claim beneath it unfalsifiable.
+
+Verified by pointing the suite at **K5 while the leads sat on K7**: both
+witnessed tests fail, and their messages name the wiring rather than the relay.
+That is what makes the K7 passes mean something.
+
+Verification of the whole change: **6 consecutive full hardware runs at 10 passed
+/ 2 skipped**, ruff rule/count profile identical to `HEAD` for the changed file,
+the file still collecting hardware-free (12 skipped), and the board `--check`
+IN SYNC at 105 files identical.
