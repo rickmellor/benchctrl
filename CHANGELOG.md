@@ -185,6 +185,29 @@ claim held. What was broken was bench wiring quality — not the driver's claim,
 not visible to it, and a ceiling would be exactly the
 threshold-on-a-wiring-property F-27 exists to forbid.
 
+**The hardware watchdog was armed on the bench and allowed to trip**, which is
+the claim the whole watchdog design rests on and the last thing here that had
+only ever been tested against a synthetic clock. Armed at `WD2`, the DMM held
+17.471–17.474 Ω across 24 consecutive readings spanning 9.86 s after arming,
+then read the overload sentinel — the trip brackets to **(9.86, 10.83] s**
+against a 10.0 s nominal, one meter read wide. The *device* de-energised its own
+relays, with no benchctrl process, no GPIO and no kernel driver in the decision
+path.
+
+Running it exposed a hole in the test making the claim, and closed it. The
+original form armed `WD1` (1 s), waited 1.5 s and asserted the contact was open
+— which is satisfied by two different hypotheses: that the relay opens when the
+timer **expires**, or that it opens as a side effect of **arming at all**. The
+second would make the interlock useless, since it would drop the load the moment
+it was enabled. `WD1` cannot separate them, because one meter read costs ~0.41 s
+and the entire window is 1 s, leaving no room to sample inside it. The test now
+arms `WD2` and asserts the contact is **still closed** early in the window,
+guarded by a check that the early sample really landed early — a slow VISA round
+trip would otherwise silently degrade it back into the form that cannot tell the
+difference. Proven by mutation in both directions: de-energising the relay right
+after arming fails the `WD2` form on the early assertion and **passes** the
+`WD1` form, so the added coverage is measured rather than asserted.
+
 The same run witnessed **PORT B's bit ordering for the first time**, across
 all four input commands, which had only ever been checked against PORT A —
 `RPy`'s MSB-first text reversal, `Py`'s LSB weighting, `PI` placing PORT B in

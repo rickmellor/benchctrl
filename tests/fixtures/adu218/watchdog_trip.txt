@@ -34,3 +34,48 @@ WD1 armed, silent 2.0 s: RPK0=0  WD=0  DMM: overload sentinel (OPEN)
  contact physically moved.)
 
 restored: WD=0 PK=000 DB=1
+
+=== WD2 (10 s), 2026-08-27: does it trip on TIMEOUT or on ARMING? ===
+Witness: SDM4065A, on K7 (TEST_RELAY default since 2026-08-27).
+Standing DC volts before the run: 0.0004 V (leads dry, so the volts
+gate cannot be masking a lead on a powered net).
+
+The WD1 measurement above cannot answer this question, and neither
+could the committed test. Both establish "armed, waited, contact
+open" -- which is satisfied by two different hypotheses:
+
+  H1  the relay opens when the timer EXPIRES        (the claim)
+  H2  the relay opens as a side effect of ARMING    (would be useless)
+
+At WD1 there is no room to sample between the two: one DMM read costs
+~0.41 s and the whole window is 1 s. WD2 gives 10 s, so the contact
+can be read EARLY, where H1 and H2 disagree.
+
+Method: close K7, read the DMM continuously (it sends the ADU218
+nothing, so it cannot refeed the timer), arm WD2, keep reading.
+
+  t after arming (s)   DMM
+  ------------------   ---
+  0.00 .. 9.45         17.471 - 17.474 ohm   (24 readings, all CLOSED)
+  9.86                 17.473 ohm            (last closed)
+  10.83 .. 13.71       overload sentinel     (9 readings, all OPEN)
+
+  read_watchdog()         -> 0     (self-cleared by the trip)
+  read_watchdog_tripped() -> True
+
+Bracket: still closed at 9.86 s, open by 10.83 s.
+So the WD2 trip lies in (9.86, 10.83] s of silence, against a 10.0 s
+nominal. The gap is one DMM read.
+
+=> H1. The contact stayed closed for 9.86 s AFTER arming, across 24
+   consecutive readings that vary by 3 milliohms. Arming does not
+   de-energise; the timeout does.
+
+The hardware test now uses WD2 for exactly this reason and asserts the
+early sample, with a guard that the sample landed < 8 s after arming --
+a slow VISA round trip would otherwise silently degrade it back into
+the WD1 form. Proven by mutation both ways: opening the relay right
+after arming (simulating H2) FAILS the WD2 test on the early assertion
+and PASSES the old WD1 test. That is the coverage the change adds.
+
+restored: WD=0, all relays de-energised.

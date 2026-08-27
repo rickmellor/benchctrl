@@ -1137,10 +1137,29 @@ Consequences the driver accepts rather than hides:
 
 Affects: any use of the hardware watchdog across a process restart.
 
+**The interlock itself is now witnessed on hardware** (2026-08-27), which is
+worth separating from the ambiguity above: the ambiguity is about *reading* a
+trip, not about whether the trip happens. Armed at `WD2`, the DMM held
+17.471–17.474 Ω across 24 consecutive readings spanning 9.86 s after arming,
+then read the overload sentinel — bracketing the trip to **(9.86, 10.83] s**
+against a 10.0 s nominal, the gap being one meter read. So the *device*
+de-energises its own relays with no benchctrl process, no GPIO and no kernel
+driver in the decision path.
+
+That measurement also closed a hole in the test that asserted it. The original
+form armed `WD1` (1 s), waited 1.5 s and asserted the contact was open — which
+is satisfied both by "opens on timeout" and by "opens as a side effect of
+arming". The second would make the interlock useless, since it would drop the
+load the moment it was enabled, and `WD1` is too short to sample between the two
+(one meter read costs ~0.41 s). The test now uses `WD2` and asserts the contact
+is **still closed** early in the window, with a guard that the early sample
+really landed early. Confirmed by mutation in both directions: de-energising
+right after arming fails the `WD2` form and **passes** the `WD1` form.
+
 Code reference:
 `src/benchctrl/drivers/ontrak_adu218/driver.py` — `_watchdog_setting`,
 `read_watchdog_tripped`, `_connect`; `tests/test_bench_adu218.py` —
-`TestWatchdog`.
+`TestWatchdog`; `tests/fixtures/adu218/watchdog_trip.txt` — both brackets.
 
 ### F-23. Any ADU218 command refeeds the watchdog, so a poller neuters it
 

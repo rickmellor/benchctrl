@@ -837,26 +837,63 @@ def test_the_watchdog_trips_and_the_dmm_sees_the_contact_open(adu, witness, arma
     the trip without perturbing it. It is the only independent evidence the
     contact physically moved.
 
-    Uses ``WD1`` (1 s, trip bracketed to (0.90, 1.10] s in
-    ``fixtures/adu218/watchdog_trip.txt``) so the silent window is short.
+    Uses ``WD2`` (10 s) rather than ``WD1`` (1 s), and the reason is the whole
+    point of the test. ``WD1``'s window is too short to sample *inside*, because
+    one DMM read costs ~0.4 s — so "armed, waited, contact open" is all it can
+    say, and that is satisfied by two different hypotheses:
+
+    * the relay opens when the timer **expires** (the claim), or
+    * the relay opens as a side effect of **arming at all**.
+
+    The second would make the interlock useless — it would drop the load the
+    moment you enabled it — and a ``WD1`` test goes green either way. At 10 s
+    there is room to read the contact **early**, where the two disagree: still
+    closed at 2 s rules out arming-de-energises, and open after the window is
+    the trip. Measured on hardware 2026-08-27: 24 consecutive readings at
+    17.47 Ω spanning 9.86 s after arming, then open, bracketing the trip to
+    (9.86, 10.83] s against a 10.0 s nominal. See
+    ``fixtures/adu218/watchdog_trip.txt``, which brackets ``WD1`` to
+    (0.90, 1.10] s by the same method.
     """
     adu.reset_relays()
     assert adu.set_relay_state(TEST_RELAY, True) is True
     assert witness() is not None, "control failed: the contact did not close"
 
     try:
-        assert adu.set_watchdog(1) == 1
+        armed = time.monotonic()
+        assert adu.set_watchdog(2) == 2
 
-        # SILENCE. Not one command to the ADU218 — including any read — or the
-        # timer is refed and the thing under test cannot happen. The DMM read
-        # below is what consumes the window, and it takes ~0.7 s on its own, so
-        # this sleep plus that latency comfortably exceeds the 1.1 s bound.
-        time.sleep(1.5)
+        # SILENCE from here. Not one command to the ADU218 — including any read —
+        # or the timer is refed and the thing under test cannot happen. Reading
+        # the DMM is free: it is on a separate bus and sends the ADU218 nothing.
+        #
+        # The early sample is the discriminator, so it must land comfortably
+        # inside the window: assert on the elapsed time rather than trusting the
+        # sleep, because a slow VISA round trip here would silently turn this
+        # into the WD1 test that cannot tell the hypotheses apart.
+        time.sleep(2.0)
+        early = witness()
+        elapsed = time.monotonic() - armed
+        assert elapsed < 8.0, (
+            f"the early sample landed {elapsed:.2f} s after arming, too close to "
+            f"the 10 s timeout to distinguish 'opens on timeout' from 'opens on "
+            f"arming'; the meter is answering far slower than the ~0.4 s measured"
+        )
+        assert early is not None, (
+            f"the contact was already open {elapsed:.2f} s into a 10 s watchdog "
+            f"window, so arming the watchdog de-energised the relay by itself "
+            f"rather than the timeout doing it. That would make the interlock "
+            f"useless — it would drop the load the moment it was enabled — and "
+            f"the shorter WD1 form of this test could not tell the difference"
+        )
 
+        # Now let the window expire.
+        time.sleep(9.0)
         assert witness() is None, (
-            "the watchdog was armed at WD1 and 1.5 s of silence elapsed, but "
-            "the DMM still measures a closed contact — the interlock did not "
-            "fire, and nothing else in this suite would have caught that"
+            "the watchdog was armed at WD2 and more than 10 s of silence "
+            "elapsed, but the DMM still measures a closed contact — the "
+            "interlock did not fire, and nothing else in this suite would have "
+            "caught that"
         )
 
         # Only now talk to the device again. The setting must have self-cleared:
@@ -864,7 +901,7 @@ def test_the_watchdog_trips_and_the_dmm_sees_the_contact_open(adu, witness, arma
         # also why WD=0 is ambiguous and must be read against a held expectation.
         assert adu.read_watchdog() == 0, "a trip must reset the setting to WD0"
         assert adu.read_watchdog_tripped() is True, (
-            "the driver held WD1 as expected and the device reports 0, which is "
+            "the driver held WD2 as expected and the device reports 0, which is "
             "a trip; read_watchdog_tripped() must report it"
         )
         # It clears the held expectation as it reports, so a second call is False
