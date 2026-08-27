@@ -86,7 +86,11 @@ def dmm():
     from benchctrl.net.client import RemoteClient
 
     try:
-        cfg = json.load(open("/etc/benchctrl/agent.json"))
+        # Read inside the process that consumes it, and close it immediately:
+        # this file holds the agent's shared-secret token, so the handle should
+        # not outlive the parse.
+        with open("/etc/benchctrl/agent.json") as fh:
+            cfg = json.load(fh)
     except OSError:
         pytest.skip("no local agent config; this test runs on the bench board")
     ep = EndpointConfig(

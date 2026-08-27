@@ -18,6 +18,7 @@ Each driver is independent and optional. Import only what you need.
 | Rigol DP2031 triple-output programmable PSU | `benchctrl.drivers.rigol_dp2031.RigolDP2031` | USB-TMC + SCPI via pyvisa | **shipped (v1.1.0)** |
 | Siglent SDM4065A 6½-digit bench DMM | `benchctrl.drivers.siglent_sdm4065a.SiglentSDM4065A` | USB-TMC + SCPI via pyvisa | **shipped (unreleased)** |
 | CyberPower PDU41002 8-outlet switched PDU | `benchctrl.drivers.cyberpower_pdu41002.CyberPowerPDU41002` | vendor CLI over USB-Serial (FTDI) **or** SSH | **shipped (unreleased)** — switches mains |
+| Silicon Labs CP2112 GPIO control lines | `benchctrl.drivers.silabs_cp2112.CP2112` | USB HID feature reports over `hidraw` | **shipped (unreleased)** — open-drain reset lines |
 
 ## QR10x — programmable resistance
 
@@ -1204,3 +1205,264 @@ docstring opens by saying so and points at `allowed_outlets` as an
 operator decision to *ask about* rather than widen — a model reading only
 the tool description should not be able to mistake these for
 configuration.
+
+## Silicon Labs CP2112 — open-drain control lines
+
+[Silicon Labs CP2112](https://www.silabs.com/interface/usb-bridges) — a
+USB HID-to-SMBus bridge with eight general-purpose I/O pins. benchctrl
+uses **only the GPIO**, and only in one mode: **open-drain outputs, for
+asserting and releasing a target's reset line.**
+
+The purpose is narrow and worth stating plainly. During the i.MX8 Zephyr
+bring-up, an Otii Arc Pro was tied up doing nothing but toggling a reset
+pin — a precision SMU acting as a switch. The CP2112 is a ~$15 board that
+does exactly that job, which frees the SMU for measurement.
+
+> **This driver drives a line that holds a DUT in reset.**
+> `set_line_asserted(i, True)` **latches** — the target stays held until
+> something releases it. Prefer `trigger_reset_pulse`, which cannot leave
+> a line asserted. Nothing is driven unless its index is in
+> `allowed_lines`, and `open()` drives nothing at all.
+
+### Quick start
+
+```python
+from benchctrl.drivers.silabs_cp2112 import CP2112
+
+# allowed_lines is required. There is no "all" default: the driver cannot
+# know what GPIO.3 is wired to, and the answer lives on the bench.
+with CP2112.open(allowed_lines=(3,)) as gpio:
+    print(gpio.read_identity())            # part 0x0C, revision, USB serial
+
+    gpio.set_line_mode(3, output=True)     # open-drain; push-pull is not offered
+    gpio.trigger_reset_pulse(3, duration_s=0.1, settle_s=0.5)
+```
+
+On exit the as-found GPIO configuration is restored, which **releases**
+anything the driver was holding.
+
+### Vocabulary: asserted and released, never high and low
+
+Reset lines are active-low, so "set the line high" is ambiguous exactly
+where a mistake holds a DUT in reset indefinitely. The whole API says
+`asserted` instead:
+
+| term | electrically | effect on an active-low reset |
+|---|---|---|
+| **asserted** | the pin pulls the net to 0 V | the target is **held in reset** |
+| **released** | the pin is high-Z; the net floats to VIO | the target **runs** |
+
+`CP2112LineState.asserted` is therefore `not level`, and it is `None` for
+an input, because an input asserts nothing.
+
+### Open-drain is the only drive mode, and that is a safety property
+
+The CP2112 can drive push-pull. This driver **cannot**, and the
+restriction is enforced rather than documented:
+
+- `set_line_mode` clears the push-pull bit on every call, even if another
+  program had set it.
+- `set_line_asserted` refuses a pin that is configured push-pull.
+- No public method takes a `push_pull` parameter — a test asserts this, so
+  the property cannot be lost to a well-meaning "make it configurable"
+  change.
+
+Two reasons, both physical:
+
+1. **It cannot fight the target.** An open-drain pin pulls a net low and
+   releases it, but never *sources* into it. A push-pull output at 3.3 V
+   wired to a 1.8 V reset net back-feeds the target's rail through its
+   ESD diodes. Open-drain makes that failure mode structurally impossible
+   rather than merely unlikely.
+2. **It fails safe on unplug.** Pull the USB cable and the chip reverts
+   every pin to an input (datasheet §7), which for an open-drain reset
+   line *is* released. A push-pull pin holding 0 V would leave the DUT in
+   reset with no software left to notice.
+
+Logic high comes from the CP2112's own internal pull-up to VIO, so a
+released line needs no external resistor — though the datasheet allows an
+external pull-up to 5 V if the target needs a stronger one.
+
+### A level identifies nothing; a level you can *change* does
+
+This cost real bench time and is the single most useful thing to know
+about the device. Commissioning it produced two readings that looked
+contradictory:
+
+- the CP2112 reported every pin as an input latching **1**
+- a DMM on the same net read a flat **0.0002 V**
+
+Both were correct, and nothing was broken. An undriven CP2112 pin is
+**high-impedance**: a ~10 MΩ voltmeter drags the floating net to nearly
+0 V while the chip's input buffer still latches a 1. Neither instrument
+was lying; the pin simply was not being driven by anything.
+
+The consequence for anyone trying to work out which pin a probe is on:
+**reading a level tells you nothing.** `read_levels()` on an unconfigured
+device returns `0xFF` regardless of what is attached. The only
+identification that means anything is a level you can make *move* — drive
+one pin at a time and watch which one the meter follows.
+
+The same logic is why the hardware tests use a DMM rather than the chip's
+own read-back. Reading a pin back through the CP2112 that just drove it
+proves the *latch* changed, not that any voltage did.
+
+### GPIO.0, GPIO.1 and GPIO.7 carry chip functions
+
+Three pins have alternate functions the CP2112 can drive itself
+(datasheet Table 10):
+
+| GPIO | package pin | alternate function |
+|---|---|---|
+| 0 | 23 | TX Toggle |
+| 1 | 22 | RX Toggle |
+| 7 | 12 | Clock Output |
+
+`set_line_mode` refuses these unless the caller passes
+`allow_alternate_function=True`, which is the operator saying they have
+checked the alternate function is off. **GPIO.7 is stricter:** if the
+clock output is actually running, the refusal stands regardless of the
+override, because that is a fact the driver can read rather than a claim
+it has to take on trust.
+
+The MCP surface **does not expose the override at all**. A model cannot
+walk to the bench and confirm a pin is idle, so offering the parameter
+would leave the gate one plausible-sounding argument away from bypassed.
+
+### GPIO is not for real-time signalling
+
+Every transition is a separate USB control transfer, so timing is bounded
+by bus scheduling rather than by the chip — the datasheet says as much.
+`trigger_reset_pulse` refuses durations below 5 ms rather than silently
+stretching them; anything needing sub-millisecond edges needs a different
+instrument. For reset lines, where hold times are specified in
+milliseconds, this is not a constraint that matters.
+
+### Transport: hidraw, not usbfs
+
+Unlike the ADU218 — which the kernel's `usbhid` ignores, leaving usbfs as
+the only route — the CP2112 is claimed by `usbhid` and appears as
+`/dev/hidraw*`. Both halves of that were measured on the board rather than
+assumed:
+
+1. `usbhid` **does** bind it, so a hidraw node exists.
+2. `hid-cp2112` is **not built** for the Uno Q kernel, so no in-kernel
+   I²C adapter competes for the device.
+
+GPIO commands are HID **feature reports**, carried by `HIDIOCSFEATURE` /
+`HIDIOCGFEATURE` ioctls rather than endpoint writes. Two consequences:
+
+- The node must be opened `O_RDWR` **even to read**, because a feature
+  *get* is a `GET_REPORT` over the control pipe and needs write access.
+- The ioctl request numbers embed the payload size, so they are computed
+  with the `_IOC` macro rather than hardcoded. A constant lifted from a
+  64-bit header would be wrong on a 32-bit userland, and `hidraw.py` has
+  a test that pins the arithmetic against independently-derived values.
+
+Still zero new dependencies: `os`, `fcntl` and `ctypes`.
+
+### The udev rule is VID/PID-scoped for a security reason
+
+`deploy/udev/64-benchctrl-cp2112.rules` matches `10c4:ea90` specifically:
+
+```
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea90", \
+    MODE="0660", GROUP="dialout"
+```
+
+The tempting shortcut — a blanket `SUBSYSTEM=="hidraw", MODE="0660"` —
+would also hand the bench user the **attached USB keyboard**, which on
+this board is `hidraw0`/`hidraw1`. That is a keylogging surface, not a
+bench instrument. Serial nodes have no equivalent hazard, which is why
+this rule is narrower than the FTDI one next to it.
+
+Note that `10c4:ea60` is the CP210x *UART* bridge, a different chip
+entirely, and must not match.
+
+This driver is also the reason a `SYMLINK+=` is offered here when other
+drivers do without: `hidrawN` numbering shifts whenever a keyboard is
+replugged, and its neighbours are input devices, so a stable
+`/dev/benchctrl/cp2112-<serial>` path is worth having.
+
+### Method surface
+
+Every pin-moving method carries a name prefix that `agent/dispatch.py`
+recognises as a mutator (`set_`, `trigger`, `reset`). That is not a style
+choice: the mutator set is derived **purely from name prefixes**, with no
+driver-declared override, so a method named `assert_line` would be
+remotely callable **without the writer claim**. A test asserts every
+pin-mover is in `surface.mutators` and every read is not.
+
+```python
+# reads
+info; is_open; path; serial; line_count; allowed_lines
+read_identity()  -> CP2112Info
+read_gpio_config() -> CP2112GpioConfig
+read_levels()    -> int                      # 8-bit image; see the caveat above
+read_line_state(i) / read_line_states()
+line_is_asserted(i) -> bool
+
+# writes
+set_line_mode(i, *, output, allow_alternate_function=False) -> CP2112LineState
+set_line_asserted(i, asserted, *, verify=True)             -> CP2112LineState
+trigger_reset_pulse(i, *, duration_s=0.1, settle_s=0.0)    -> CP2112LineState
+reset_lines()                                              -> CP2112GpioConfig
+
+close(*, restore=True); __enter__; __exit__
+```
+
+- **`open()` is observational.** It configures nothing and drives nothing,
+  and it records the as-found configuration so `close()` can put it back.
+  Re-opening the device therefore cannot disturb a reset line another
+  process is holding.
+- **`set_line_asserted` verifies by default** and returns the read-back
+  state. An open-drain pin cannot pull a net that something stronger is
+  holding high, and a caller needs to know that happened rather than get
+  a silent success.
+- **`trigger_reset_pulse` releases in a `finally`**, so an interrupt during
+  the hold cannot strand a DUT in reset.
+- **`reset_lines()`** returns every allowed line to an input. High-Z is the
+  chip's own power-on state, so this is "as the hardware would come up"
+  rather than an invented safe state — and for an open-drain reset line,
+  high-Z *is* released.
+- **`close()` restores, best-effort, and never raises**, because a failure
+  there must not mask the exception that prompted the close.
+
+Writes are read-modify-write against a **single shared config register**,
+so the other seven pins are preserved on every call. That register is also
+why there is exactly one driver object per device
+(`KNOWN_LIMITATIONS.md` §N-4): two objects would clobber each other's
+read-modify-write.
+
+### Simulator
+
+`benchctrl.sim.cp2112.SimulatedCP2112` substitutes at the **link seam**,
+not behind a pty like every other simulator in the tree — a pty cannot
+implement HID ioctls. It models the behaviours that actually bite: writes
+to a pin configured as an input are silently ignored; an open-drain pin
+cannot force a net high against an external pull-down; a floating input
+latches 1; and a device reset reverts every pin to an input.
+
+What a green suite therefore does **not** prove: the ioctl encoding (which
+`tests/test_cp2112_hidraw.py` covers separately, against independently
+derived request numbers), and that any voltage moved on any wire. That is
+what `tests/test_hardware_cp2112.py` and a DMM are for.
+
+### MCP tools
+
+10 tools, prefixed `cp2112_`. Two of them can hold a DUT in reset, and
+their docstrings open by saying so: `cp2112_set_line_asserted` names the
+release call explicitly rather than assuming the caller infers it, and
+`cp2112_trigger_reset_pulse` is described as the tool that *cannot* leave
+a line held.
+
+No tool exposes `allow_alternate_function`, for the reason given above.
+
+### Out of scope
+
+**SMBus / I²C is not implemented**, despite being the chip's headline
+feature. benchctrl wants the GPIO. Adding a bus master would mean device
+address handling, clock configuration and transfer-status polling — a
+second protocol with its own failure modes, for a capability nothing on
+the bench currently needs. The report IDs are documented in `driver.py`
+if that changes.

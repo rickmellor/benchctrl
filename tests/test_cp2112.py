@@ -8,6 +8,8 @@ interrupted, and that close() cannot strand a target in reset.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from benchctrl.drivers.silabs_cp2112 import (
@@ -453,8 +455,16 @@ class TestGpioConfig:
         assert CP2112GpioConfig(0, 0, 0x01, 0).clock_output_enabled
 
     def test_config_is_frozen(self) -> None:
+        """A register image a caller could edit in place would be a trap: the
+        edit would not reach the chip, so the object and the hardware would
+        disagree silently.
+
+        ``FrozenInstanceError`` specifically, not bare ``Exception`` -- the
+        broad form passes if the assignment fails for any reason at all,
+        including a typo in the attribute name.
+        """
         cfg = CP2112GpioConfig(0, 0, 0, 0)
-        with pytest.raises(Exception):
+        with pytest.raises(dataclasses.FrozenInstanceError):
             cfg.direction = 1  # type: ignore[misc]
 
 
