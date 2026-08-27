@@ -358,6 +358,43 @@ catch the low half, so a single read fails about half the time) and asserts
 the union equals exactly the driven bit, so the bit-position claim a wrong
 shift would break is still tested. 6 of 6 after.
 
+**"Simultaneous" said six times without saying which claim it was.** Asked
+what the gated all-eight test needs and whether it wanted a logic analyzer,
+the honest answer turned out to require a distinction the docs never drew.
+`MKddd` being *indivisible* is a claim about the **command**: eight
+`SKn`/`RKn` writes are eight USB transfers, so the port really does pass
+through `0b10101000` en route to `0b10101010`, and one `MKddd` does not —
+which is the whole basis for `set_relay_port` enforcing the allowlist on the
+entire mask. Contact-to-contact **skew inside that one command is unmeasured
+and now says so**, in the driver, the MCP tool description and
+`docs/drivers.md`: verification is a `PK` read-back of the landed state,
+which cannot see timing, and the manual gives no per-relay switching time to
+compare against. The previous wording would have been cited as evidence for
+make-before-break ordering it does not support.
+
+Two vendor specs surfaced while looking for that switching time, neither
+recorded anywhere. `RELAY_MAX_SWITCH_HZ = 1.0` carries the spec table's
+*1 CPS at full load* and the CAUTION that PhotoMOS dissipation rises with
+switching speed — the ADU218 is explicitly not for PWM. It is **documented
+and deliberately not enforced**, because the figure is qualified *at full
+load* and nothing in USB, HID or the ADU command set reports what a contact
+is switching, so a limiter would throttle the dry-contact sweeps that are
+most of this bench's use on a condition it cannot observe. The inversion is
+worth knowing: the ADU208's *mechanical* relays manage 10 CPS, so the
+solid-state part is the slower one to cycle. The test pins the absence of a
+limiter on **elapsed time rather than on "it returned"**, since a throttle
+has two shapes and only one raises — a version that sleeps to pace the
+writes leaves every state assertion passing, just slowly. A
+`sleep(1/RELAY_MAX_SWITCH_HZ)` mutant held outside the module fails it at
+8.00 s against a 2.0 s ceiling.
+
+And on-state resistance, **700 mΩ typical / 1.1 Ω maximum** (Panasonic
+AQZ207), added to F-27 — which corroborates that entry independently of this
+bench. Every reading in the eight-relay walk is **15× to 41× the vendor
+maximum**, so the relay accounts for under 4 % of even the lowest one. The
+wiring conclusion had rested on "the spread has no relation to index", an
+inference from a single bench.
+
 ### `net/errors.py` — a constructor that accepts the message but does not store it
 
 Found by that witness, over the real RPC wire: a `SDM4065AOverloadError`
