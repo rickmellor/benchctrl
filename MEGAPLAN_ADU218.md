@@ -1029,7 +1029,7 @@ ADU file was simply wrong. What it settled:
   means more filtering — and **no millisecond value existed anywhere in the
   repo**. This was a real footgun in my own driver, fixed by adding
   `DEBOUNCE_MS`, `read_debounce_ms()`, `debounce_ms` alongside `debounce` in the
-  MCP returns, a `docs/drivers.md` table, limitation F-21, and a test asserting
+  MCP returns, a `docs/drivers.md` table, limitation F-25, and a test asserting
   the **strict ordering** `ms[0] > ms[1] > ms[2]` so the values cannot be
   silently re-sorted into "sensible" order by a later reader.
 - **"Count low to high transitions" (§6c)** — once per cycle, not once per edge.

@@ -109,7 +109,7 @@ shipping code paths under test. Its reply widths are asserted against
 it replays the device instead of agreeing with a reading of the manual.
 Its clock is manual, so the watchdog ladder is deterministic.
 
-Also included: 18 MCP tools (`adu218_*`), a passive discovery signature
+Also included: 19 MCP tools (`adu218_*`), a passive discovery signature
 (VID `0x0A07` / PID `0x00DA`, identified from sysfs — nothing is written
 to the device), full agent/remote registration, and
 `KNOWN_LIMITATIONS.md` entries H-6, H-7, F-21 through F-24, and A-5 —
@@ -184,6 +184,31 @@ and 7 also previously appeared *only* inside port-mask tests, so all eight
 now switch individually with the emitted `SKn`/`RKn` commands asserted —
 each verified against a deliberately shifted command builder, which the
 per-index test kills at exactly index 7.
+
+A late audit of the command whitelist against the public method surface
+found the driver **documenting a capability it could not use**. `PA`/`PB` —
+one input port's nibble — was whitelisted, given a hardware-measured reply
+width, modelled by the simulator and written into a `docs/drivers.md` table
+row, while no method could send it. The whitelist serves double duty here,
+as the safety gate and as the response-width table, and an unreachable
+entry satisfies both, so nothing in the suite objected. The SDK ↔ MCP
+parity test guards the opposite direction and was silent too.
+
+Closed with `input_port_mask(port)` and `adu218_input_port_mask`, which are
+worth having rather than a fourth spelling of the same read: `Py` is the
+only input read whose reply is **LSB-weighted decimal**, so bit 0 is line 0
+with no reordering, where `RPy` is MSB-first text and `PI` packs both ports
+into one byte. It is also a *different* answer from a masked `PI` — one
+port, with the other port's state absent rather than masked off.
+
+The general guard matters more than the method:
+`test_every_whitelisted_command_is_reachable_from_the_sdk` drives the
+public surface and asserts no whitelist entry goes unsent, so the next
+command documented as present and absent at once fails a test instead of
+shipping. It drives the surface rather than grepping the source, because a
+grep passes on a method that renders a command and is never called — and it
+asserts a floor on the number of distinct commands sent first, since a
+reachability test that exercises nothing passes trivially.
 
 Fixed along the way: `scan_usbfs()` now returns `[]` rather than raising
 when the USB bus cannot be enumerated. `enumerate_devices()` raising is

@@ -939,6 +939,7 @@ def test_adu218_mcp_tools_cover_the_driver_surface():
         "reset_relays": "reset_relays",
         "input_states": "input_states",
         "input_state": "input_state",
+        "input_port_mask": "input_port_mask",
         "counters": "read_counters",
         "counter": "read_counter",
         "clear_counter": "clear_counter",
@@ -958,7 +959,14 @@ def test_adu218_mcp_tools_cover_the_driver_surface():
     #                  per-relay map, the energised list and the mask together;
     #                  a separate tool would be a second round trip for a value
     #                  the model already has
-    #   input_mask   — same, folded into adu218_input_states
+    #   input_mask   — same, folded into adu218_input_states. Note this is *not*
+    #                  the same read as adu218_input_port_mask, which does get a
+    #                  tool of its own: input_mask is ``PI``, both ports packed
+    #                  into one byte, and the folded dict already carries it.
+    #                  input_port_mask is ``Py``, one port, and is the only input
+    #                  read whose bits need no reordering — a model asking about
+    #                  one port should not have to mask a two-port value and get
+    #                  the nibble order right to do it
     #   read_debounce_ms — same, folded into adu218_debounce, which returns both
     #                  ``debounce`` and ``debounce_ms``. Returning them together
     #                  is the point: the setting number runs *backwards* to the

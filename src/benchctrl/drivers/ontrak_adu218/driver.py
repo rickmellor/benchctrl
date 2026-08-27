@@ -781,6 +781,24 @@ class OntrakADU218:
             states[letter] = tuple(character == "1" for character in reversed(reply))
         return states
 
+    def input_port_mask(self, port: str) -> int:
+        """One input port's four lines as a nibble via ``Py`` — 0..15.
+
+        The per-port counterpart to :py:meth:`relay_mask`, and the reason it
+        exists is narrower than "completeness": ``Py`` is the only input read
+        whose reply is **LSB-weighted decimal**, so bit 0 of the returned value
+        is line 0 with no reordering. Every other per-port form needs a
+        transformation — ``RPy`` is MSB-first text (see :py:meth:`input_states`)
+        and ``PI`` packs both ports into one byte. A caller that wants one
+        port's bits and wants to trust their positions should use this.
+
+        ``PI`` is still the right call for all eight lines at once; this is not
+        a cheaper route to the same answer, it is a *different* answer — one
+        port, with the other port's state absent rather than masked off.
+        """
+        letter = _coerce_port(port)
+        return self._send_int(f"P{letter}", maximum=15)
+
     def input_mask(self) -> int:
         """Both input ports as one byte via ``PI`` — **PORT A is the low nibble**.
 

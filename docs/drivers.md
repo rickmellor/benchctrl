@@ -1639,6 +1639,23 @@ line 0. Indexing the reply string directly is an off-by-three that reads
 correctly for the all-zero case every unwired bench produces, which is why
 the test for it asserts an asymmetric pattern.
 
+**Three commands read the inputs, and their bit orders disagree.** That is
+the reason `input_port_mask()` exists alongside `input_states()` and
+`input_mask()`, rather than being a redundant fourth spelling of the same
+read:
+
+| Method | Command | What the bits do |
+|---|---|---|
+| `input_states()` | `RPA` / `RPB` | MSB-first *text*; the driver reverses it |
+| `input_port_mask(port)` | `PA` / `PB` | LSB-weighted decimal — bit 0 **is** line 0 |
+| `input_mask()` | `PI` | both ports in one byte, PORT A in the low nibble |
+
+So `Py` is the only input read needing no transformation, and a caller that
+wants one port's bits and wants to trust their positions should use it. `PI`
+remains the right call for all eight lines at once — `input_port_mask` is
+not a cheaper route to the same answer but a *different* answer, one port,
+with the other port's state absent rather than masked off.
+
 Index coercion rejects `bool` **before** `int`, since `bool` is an `int`
 subclass: `relay_state(True)` would silently mean relay 1, and
 `set_watchdog(True)` would arm a one-second hardware deadman on a bench
@@ -1801,7 +1818,8 @@ relay_states() -> dict[int, bool]           # one command, one instant
 relay_mask() -> int
 input_state(port, index) -> bool            # port "A"/"B", index 0-3
 input_states() -> dict[str, tuple[bool, ...]]
-input_mask() -> int
+input_port_mask(port) -> int                 # Py — one port's nibble, LSB = line 0
+input_mask() -> int                          # PI — both ports, A in the low nibble
 read_counter(index) -> int;  read_counters() -> dict[int, int]
 read_debounce() -> int                      # the setting, 0-2
 read_debounce_ms() -> float                 # the filter width; see the table
@@ -1915,7 +1933,7 @@ is deterministic rather than a race.
 
 ### MCP tools
 
-18 tools, prefixed `adu218_`. The surface is **not** read-only: three of
+19 tools, prefixed `adu218_`. The surface is **not** read-only: three of
 them move physical contacts (`adu218_set_relay_state`,
 `adu218_set_relay_port`, `adu218_reset_relays`) and `adu218_set_watchdog`
 arms a hardware interlock whose effect outlives the connection. Each of

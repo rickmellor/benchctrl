@@ -190,6 +190,74 @@ class TestCommandTable:
         assert {"PK", "RPK0", "SK7", "RK0", "MK255", "PA", "RPB", "RPA3",
                 "PI", "RE0", "RC7", "DB", "DB2", "WD", "WD3"} <= accepted
 
+    def test_every_whitelisted_command_is_reachable_from_the_sdk(self):
+        """No entry in the table is a capability the driver cannot actually use.
+
+        The whitelist is read two ways elsewhere -- as a safety gate (nothing
+        unlisted is emitted) and as the response-width table -- and both of those
+        are satisfied by an entry no method ever sends. That asymmetry is what
+        this closes, and it caught a real one: ``P[AB]`` was whitelisted, given a
+        hardware-measured width, modelled by the simulator and documented in a
+        ``docs/drivers.md`` table row, while no public method emitted it. The
+        per-port nibble read was, in effect, documented as present and absent.
+
+        Driving the surface rather than reading the source, because a grep for
+        the command strings would pass on a method that renders one and never
+        gets called.
+        """
+        link = SimulatedAdu218Link()
+        adu = OntrakADU218.open(link=link)
+        sent: list[str] = []
+        original = adu._send
+        adu._send = lambda command: (sent.append(command), original(command))[1]
+        try:
+            adu.read_identity()
+            for index in range(8):
+                adu.relay_state(index)
+                adu.set_relay_state(index, True)
+                adu.set_relay_state(index, False)
+                adu.read_counter(index)
+                adu.clear_counter(index)
+            adu.relay_states()
+            adu.relay_mask()
+            adu.set_relay_port(0)
+            adu.reset_relays()
+            for port in ("A", "B"):
+                adu.input_port_mask(port)
+                for line in range(4):
+                    adu.input_state(port, line)
+            adu.input_states()
+            adu.input_mask()
+            adu.read_debounce()
+            adu.read_debounce_ms()
+            for setting in (0, 1, 2):
+                adu.set_debounce(setting)
+            adu.read_watchdog()
+            adu.read_watchdog_tripped()
+            _ = adu.watchdog_setting
+            # Ascending then back to 0, so the surface is left disarmed.
+            for setting in (1, 2, 3, 0):
+                adu.set_watchdog(setting)
+        finally:
+            adu._send = original
+            adu.close()
+
+        # Guard against the vacuous pass: if the exercise above sent nothing,
+        # every "unreached" check below would be trivially satisfied.
+        assert len(set(sent)) >= 60, f"only {len(set(sent))} distinct commands sent"
+
+        unreached = [
+            spec.what
+            for spec in driver_module._COMMAND_SPECS
+            if not any(spec.pattern.match(command) for command in sent)
+        ]
+        assert unreached == [], (
+            f"whitelisted but unreachable from any public method: {unreached}. "
+            f"Either add the method or drop the entry -- a command the driver "
+            f"admits, measures a width for and simulates, but cannot send, "
+            f"reads as a supported capability that is not one."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Argument validation: two ranges, never one
@@ -584,6 +652,39 @@ class TestInputs:
         assert adu.input_state("B", 2) is True
         assert adu.input_states()["B"][2] is True
         assert adu.input_state("B", 1) is False
+
+    def test_the_port_nibble_needs_no_reordering(self, adu, model):
+        """``Py`` is LSB-weighted decimal, unlike ``RPy``'s MSB-first text.
+
+        Asserted asymmetrically on purpose: line 0 set and line 3 clear on port
+        A, then the mirror on port B. A driver that reversed this one the way
+        ``input_states`` correctly reverses ``RPy`` would return 8 rather than 1,
+        and a symmetric fixture could not tell the two apart.
+        """
+        model.set_input("A", 0, True)
+        model.set_input("B", 3, True)
+        assert adu.input_port_mask("A") == 0b0001
+        assert adu.input_port_mask("B") == 0b1000
+
+    def test_the_port_nibble_is_one_port_only(self, adu, model):
+        """``Py`` reports its own port and says nothing about the other one.
+
+        The distinction from ``PI`` that justifies a separate method: masking
+        ``PI`` down to a nibble would give the same number here, but only
+        because both ports are read in the same round trip. This asserts port A
+        is unmoved by port B's lines, which a "cheaper PI" implementation would
+        fail.
+        """
+        model.set_input("B", 0, True)
+        model.set_input("B", 1, True)
+        assert adu.input_port_mask("A") == 0
+        assert adu.input_port_mask("B") == 0b0011
+        # ...and PI carries both, with port B in the high nibble.
+        assert adu.input_mask() == 0b00110000
+
+    def test_the_port_nibble_rejects_a_bad_port(self, adu):
+        with pytest.raises(ADU218ValueError):
+            adu.input_port_mask("C")
 
 
 class TestCounters:

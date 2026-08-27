@@ -13,22 +13,23 @@ firmware caps see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 
 - **Version**: 1.2.0
 - **Branch**: `feat/ontrak-adu218` off `master`
-- **Tests**: 2316 hardware-free + 201 hardware-marked. Hardware-free
+- **Tests**: 2450 hardware-free + 213 hardware-marked. Hardware-free
   suite runs in ~22 minutes with nothing plugged in.
-- **MCP tools**: 313 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
-  SDM4065A 54, PDU41002 15, ADU218 18, cross-driver 13
+- **MCP tools**: 324 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
+  SDM4065A 54, PDU41002 15, ADU218 19, CP2112 10, cross-driver 13
 - **Drivers**: Otii Arc / Arc Pro (SMU), Eastwood QR10x (programmable
   resistor), Rigol DL3031A (electronic load), Rigol DP2031
   (triple-output PSU), Siglent SDM4065A (6½-digit DMM), CyberPower
-  PDU41002 (8-outlet switched PDU), Ontrak ADU218 (8 relays + 8
-  digital inputs)
+  PDU41002 (8-outlet switched PDU), Silicon Labs CP2112 (8 open-drain
+  control lines), Ontrak ADU218 (8 relays + 8 digital inputs)
 - **Scenarios captured**: 27 — 11 QR10x + 11 DL3031A standard + 3 hires
   + 2 dynamic-list
 - **Entry points**: `benchctrl`, `benchctrl-mcp`, `benchctrl-agent`
 - **Hardware**: Arc Pro, DL3031A, DP2031, QR10x, SDM4065A, PDU41002,
-  ADU218. Outputs off between runs; hardware tests skip cleanly when a
-  device is absent. The PDU's outlets and the ADU218's relays are left
-  de-energised, and the PDU's DUT rail stays down.
+  CP2112, ADU218. Outputs off between runs; hardware tests skip cleanly
+  when a device is absent. The PDU's outlets and the ADU218's relays are
+  left de-energised, the CP2112's lines released to inputs, and the PDU's
+  DUT rail stays down.
 
 ## Where things stand
 
@@ -75,7 +76,7 @@ cannot energise anything.
 ### On `feat/ontrak-adu218`, unreleased
 
 **Ontrak ADU218 driver** — 8 relays, 8 digital inputs with event
-counters, de-bounce control and a hardware watchdog. 18 MCP tools, a
+counters, de-bounce control and a hardware watchdog. 19 MCP tools, a
 simulator, full remote support, 196 tests. **Zero dependencies** — the
 only driver in the tree that imports nothing outside the standard
 library. The device is USB HID with no kernel driver bound (Ontrak is in
@@ -99,8 +100,8 @@ confirmed by reading state back, with the setters returning the
 
 Three device behaviours are documented in `KNOWN_LIMITATIONS` because
 they will otherwise be rediscovered as bugs: any command refeeds the
-watchdog, so a polling loop silently neuters it (F-19); `WD` reads 0 for
-both "timed out" and "never enabled" (F-18); and relay state survives a
+watchdog, so a polling loop silently neuters it (F-23); `WD` reads 0 for
+both "timed out" and "never enabled" (F-22); and relay state survives a
 host reset, because USB suspend holds the outputs (H-7).
 
 Hardware status: run against the real device (serial E02246) with relay
@@ -257,7 +258,7 @@ Ordered roughly by how much they'd change if picked up next.
 cd ~/repos/benchctrl
 git log --oneline -20
 
-pytest -m "not hardware" -q     # 2316 tests, ~22 min, no hardware
+pytest -m "not hardware" -q     # 2450 tests, ~22 min, no hardware
 pytest -m hardware -q           # 201 tests, needs the bench on USB
 pytest -q                       # both
 
@@ -268,6 +269,6 @@ benchctrl info                  # smoke test against a live Arc
 No hardware to hand:
 
 ```bash
-BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a,cyberpower_pdu41002,ontrak_adu218 benchctrl-mcp
+BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a,cyberpower_pdu41002,silabs_cp2112,ontrak_adu218 benchctrl-mcp
 benchctrl-agent --simulate
 ```

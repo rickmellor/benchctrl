@@ -276,6 +276,40 @@ Things that look wrong (would surprise a maintainer):
   environment, never from config — `DeviceConfig.to_dict()` emits `open`
   verbatim and the RPC wire is authenticated but not encrypted
 
+### Silicon Labs CP2112
+
+- **USB IDs**: VID `0x10C4`, PID `0xEA90`. Transport is **`hidraw`**,
+  not usbfs — measured both ways: `usbhid` *does* claim this chip, unlike
+  the ADU218 below
+- **GPIO commands are HID *feature reports***, so the node needs `O_RDWR`
+  even to read a pin — a feature *get* is a `GET_REPORT` over the control
+  pipe. Read-only would be a `PermissionError` that reads as a udev
+  problem
+- **Compute the ioctl request numbers with `_IOC`.** `HIDIOCSFEATURE`
+  embeds the payload length, so a constant lifted from a header is wrong
+  at another length or another word size
+- **A level identifies nothing.** An undriven pin is high-impedance:
+  `read_levels()` returns `0xFF` regardless of wiring, while a 10 MΩ
+  meter reads ~0 V on the same net. Both are correct. A pin is identified
+  only by a level you can make *move* — so never diagnose CP2112 wiring
+  from `cp2112_line_states`
+- **Open-drain is the only drive mode, deliberately.** Push-pull is
+  unreachable through the public API and enforced three ways; a 3.3 V
+  push-pull pin on a 1.8 V reset net back-feeds the target's rail. There
+  is no `push_pull` parameter to find
+- **All eight pins revert to inputs on reset or re-plug**, so every write
+  is a read-modify-write against the live config register, never a cached
+  copy. Configuration does not survive a re-enumeration
+- **Pulses below 5 ms are refused.** Every transition is its own USB
+  transfer, so the datasheet rules the pins out for real-time signalling;
+  refusing beats silently stretching one and reporting success
+- **Never write a blanket `SUBSYSTEM=="hidraw"` udev rule** — on the
+  bench board that also matches the USB keyboard. The shipped rule is
+  scoped to `10c4:ea90`. Note `10c4:ea60` is the CP210x *UART* bridge, a
+  different chip
+- **`hidrawN` numbering is not stable**; use the udev symlink or let the
+  driver find the device by VID/PID
+
 ### Ontrak ADU218
 
 - **USB IDs**: VID `0x0A07`, PID `0x00DA`. EP `0x81` IN / `0x01` OUT,
@@ -308,7 +342,7 @@ Things that look wrong (would surprise a maintainer):
 
 - **Default port**: 9737. Device keys: `otii_arc`, `eastwood_qr10x`,
   `rigol_dl3031a`, `rigol_dp2031`, `siglent_sdm4065a`,
-  `cyberpower_pdu41002`, `ontrak_adu218`
+  `cyberpower_pdu41002`, `silabs_cp2112`, `ontrak_adu218`
 - **Auth is HMAC-SHA256 challenge-response** — the token never
   crosses the wire, but traffic is **not encrypted**. SSH tunnel on an
   untrusted network

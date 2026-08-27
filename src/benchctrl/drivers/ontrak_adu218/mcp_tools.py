@@ -279,6 +279,23 @@ def adu218_input_state(port: str, index: int) -> dict:
     }
 
 
+def adu218_input_port_mask(port: str) -> dict:
+    """One input port's four lines as a nibble, 0-15. ``port`` is ``"A"`` or ``"B"``.
+
+    Bit 0 is line 0 — this is the one input read that needs no reordering, which
+    is why it is offered separately from ``adu218_input_states``. Use that tool
+    for all eight lines; use this when you want one port's bits and want to
+    trust their positions.
+    """
+    letter = port.upper()
+    value = _get_adu218().input_port_mask(port)
+    return {
+        "port": letter,
+        "mask": value,
+        "lines": [bool(value & (1 << line)) for line in range(4)],
+    }
+
+
 def adu218_counters() -> dict:
     """Every input's event counter, **without clearing any of them**.
 
@@ -429,6 +446,7 @@ _TOOLS = (
     adu218_allowed_relays,
     adu218_input_states,
     adu218_input_state,
+    adu218_input_port_mask,
     adu218_counters,
     adu218_counter,
     adu218_clear_counter,

@@ -15,9 +15,10 @@ Claude Desktop, Cursor, custom agents) can call. Built on the official
 | Rigol DP2031 | 134 |
 | Siglent SDM4065A | 54 |
 | CyberPower PDU41002 | 15 |
-| Ontrak ADU218 | 18 |
+| Silicon Labs CP2112 | 10 |
+| Ontrak ADU218 | 19 |
 | Cross-driver (battery, recording I/O, connection) | 13 |
-| **Total** | **313** |
+| **Total** | **324** |
 
 Each driver registers its own surface via `register_mcp_tools(mcp)`;
 `benchctrl.mcp` is the orchestrator that wires them together. A driver
@@ -70,7 +71,7 @@ BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_TOKEN=... benchctrl-mcp
 BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_LOCAL_DEVICES=otii_arc benchctrl-mcp
 
 # no hardware at all
-BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a,cyberpower_pdu41002,ontrak_adu218 benchctrl-mcp
+BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a,cyberpower_pdu41002,silabs_cp2112,ontrak_adu218 benchctrl-mcp
 ```
 
 With nothing configured everything is local. See
@@ -154,7 +155,7 @@ their SDK methods, which are documented in [`drivers.md`](drivers.md):
 | `dp2031_*` | Rigol DP2031 | 134 |
 | `sdm4065a_*` | Siglent SDM4065A | 54 |
 | `pdu41002_*` | CyberPower PDU41002 | 15 |
-| `adu218_*` | Ontrak ADU218 | 18 |
+| `adu218_*` | Ontrak ADU218 | 19 |
 
 The DP2031 set is the large one, covering source/measure, protection,
 IEEE 488.2 status, channel pairing and tracking, the Arb timer

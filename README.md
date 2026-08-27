@@ -10,7 +10,7 @@ bench to LLM agents. Cross-platform (Windows / Linux / macOS) via
 The bench doesn't have to be on the same machine as the agent, and it
 doesn't have to exist: `benchctrl.net` puts the instruments on a
 remote host and `benchctrl.sim` replaces them with wire-protocol
-simulators — the same 313 MCP tools drive all three cases unchanged.
+simulators — the same 324 MCP tools drive all three cases unchanged.
 
 Driver-symmetric architecture: every instrument lives under
 `benchctrl.drivers.<vendor_model>/`, the Otii Arc included. Battery
@@ -21,11 +21,11 @@ slots in.
 | | |
 |---|---|
 | **Version** | 1.2.0 |
-| **Tests** | 2316 hardware-free + 201 hardware-marked |
-| **MCP tools** | 313 |
+| **Tests** | 2450 hardware-free + 213 hardware-marked |
+| **MCP tools** | 324 |
 | **License** | MIT |
 | **Python** | 3.9 – 3.13 |
-| **Hardware (today)** | Qoitech Otii Arc / Arc Pro (SMU), Eastwood Tech QR10x (resistor), Rigol DL3031A (load), Rigol DP2031 (PSU), Siglent SDM4065A (DMM), CyberPower PDU41002 (switched PDU), Ontrak ADU218 (relays / digital I/O) |
+| **Hardware (today)** | Qoitech Otii Arc / Arc Pro (SMU), Eastwood Tech QR10x (resistor), Rigol DL3031A (load), Rigol DP2031 (PSU), Siglent SDM4065A (DMM), CyberPower PDU41002 (switched PDU), Ontrak ADU218 (relays / digital I/O), Silicon Labs CP2112 (open-drain control lines) |
 | **No hardware?** | Every driver has a wire-protocol simulator — `--simulate` runs the whole stack |
 
 [otii]: https://www.qoitech.com/otii/
@@ -48,6 +48,9 @@ or two, and you want to:
 - Switch things: mains outlets on a CyberPower PDU41002, or signal-level
   relays and digital inputs on an Ontrak ADU218 — so a test can
   power-cycle a hung DUT, or cut a single signal line mid-measurement.
+- Hold a DUT's reset line low from a ~$15 Silicon Labs CP2112 breakout,
+  the cheap way to bring a board up under test without tying up an SMU
+  pin to do it.
 - Hand a real bench to an LLM agent through the [Model Context
   Protocol][mcp] without writing your own tool surface.
 - Save reproducible test scenarios you can re-run as regression checks.
@@ -65,7 +68,7 @@ benchctrl is all of that, in one package.
 
 ```
             +-----------------------------------------+
-            |  MCP server (benchctrl.mcp)             |   313 tools — drives every driver
+            |  MCP server (benchctrl.mcp)             |   324 tools — drives every driver
             |    orchestrates per-driver registration |   from Claude Code / Desktop / etc
             +-----------------------------------------+
                                  |
@@ -80,11 +83,13 @@ benchctrl is all of that, in one package.
         | Otii Arc  | | QR10x   | | DL3031A  | | DP2031  | | SDM4065A |  Drivers (peers)
         | driver    | | driver  | | driver   | | driver  | | driver   |
         +-----------+ +---------+ +----------+ +---------+ +----------+
-        +-----------+ +---------+   ...and two more peers that switch
-        | PDU41002  | | ADU218  |   rather than source or measure, so
-        | driver    | | driver  |   neither conforms to the Protocol
-        +-----------+ +---------+   below. No Switch Protocol until the
-                                    two shapes agree on one.
+        +-----------+ +---------+ +----------+  ...and three more peers that
+        | PDU41002  | | ADU218  | | CP2112   |  switch or drive a line rather
+        | driver    | | driver  | | driver   |  than source or measure, so none
+        +-----------+ +---------+ +----------+  conforms to the Protocol below.
+                                                No Switch or ControlLine
+                                                Protocol until the shapes
+                                                agree on one.
               ^            ^            ^           ^
               |            |            |           |         (measure-only —
         +-----+------------+------------+-----------+-----+     sources nothing,
@@ -103,7 +108,7 @@ benchctrl is all of that, in one package.
 Two seams make the rest optional. `session.resolve()` decides
 per device whether you get real hardware, a proxy to another machine
 (`benchctrl.net`), or a wire-protocol simulator (`benchctrl.sim`) —
-and the 313 tools above it cannot tell the difference. The
+and the 324 tools above it cannot tell the difference. The
 `SourceMeasurementUnit` Protocol means battery, scenarios, and the run
 engine never name a concrete driver.
 
@@ -181,6 +186,7 @@ Each driver lives in its own subpackage; import only what you have.
 | Siglent SDM4065A | `benchctrl.drivers.siglent_sdm4065a.SiglentSDM4065A` | USB-TMC + SCPI via pyvisa | 6½-digit DMM — measure-only reference; 4-wire resistance, null/Ref, NPLC control |
 | CyberPower PDU41002 | `benchctrl.drivers.cyberpower_pdu41002.CyberPowerPDU41002` | CLI over serial **or** SSH, one engine | Switched PDU — 8 mains outlets, cold-boot and brownout-recovery testing |
 | Ontrak ADU218 | `benchctrl.drivers.ontrak_adu218.OntrakADU218` | USB HID, raw USBDEVFS ioctls — **no dependencies** | 8 relays + 8 digital inputs / event counters, hardware watchdog |
+| Silicon Labs CP2112 | `benchctrl.drivers.silabs_cp2112.CP2112` | USB HID feature reports over `hidraw` | 8 open-drain control lines — hardware reset / boot-strap pins |
 
 ```python
 from benchctrl.drivers.eastwood_qr10x import QR10x
@@ -203,9 +209,9 @@ with RigolDL3031A.open() as dl:        # auto-discover by Rigol VID/PID
 
 ### `benchctrl.mcp` — Model Context Protocol server
 
-313 tools exposing the whole SDK to MCP-aware clients (Claude Code,
+324 tools exposing the whole SDK to MCP-aware clients (Claude Code,
 Claude Desktop, etc) — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
-SDM4065A 54, PDU41002 15, ADU218 18, plus 13 cross-driver. Each driver
+SDM4065A 54, PDU41002 15, ADU218 19, CP2112 10, plus 13 cross-driver. Each driver
 registers its own tools via
 `register_mcp_tools(mcp)` and the orchestrator wires them together.
 Lets an LLM agent run real measurements: "discover the Arc, set
@@ -225,7 +231,7 @@ arguments.
 
 ### `benchctrl.net` + `benchctrl.agent` — remote mode
 
-Instruments on one machine, agent on another — the 313 MCP tools are
+Instruments on one machine, agent on another — the 324 MCP tools are
 unchanged and cannot tell the difference.
 
 ```bash
@@ -357,7 +363,7 @@ More: [`docs/getting_started.md`](docs/getting_started.md).
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Driver-symmetric layout, Protocol contract, registration model |
 | [`docs/design.md`](docs/design.md) | Arc driver internals + design decisions |
 | [`docs/battery.md`](docs/battery.md) | Battery profile / emulator / profiler / life calculator |
-| [`docs/drivers.md`](docs/drivers.md) | QR10x + DL3031A + DP2031 + SDM4065A + PDU41002 + ADU218 drivers, firmware modes |
+| [`docs/drivers.md`](docs/drivers.md) | QR10x + DL3031A + DP2031 + SDM4065A + PDU41002 + ADU218 + CP2112 drivers, firmware modes |
 | [`docs/mcp.md`](docs/mcp.md) | MCP server setup + tool inventory |
 | [`docs/simulation.md`](docs/simulation.md) | Running the stack with no hardware attached |
 | [`docs/remote.md`](docs/remote.md) | Remote mode — instruments on one machine, agent on another |
@@ -413,7 +419,7 @@ public method has a test, firmware bugs get documented in
 git clone https://github.com/rickmellor/benchctrl
 cd benchctrl
 pip install -e ".[dev,mcp,bench-visa,science]"
-pytest -m "not hardware"                 # 2316 tests, ~22 min, no device needed
+pytest -m "not hardware"                 # 2450 tests, ~22 min, no device needed
 pytest                                    # full suite (bench on USB)
 ```
 

@@ -227,17 +227,20 @@ from benchctrl.drivers.rigol_dp2031 import RigolDP2031      # triple-output PSU
 from benchctrl.drivers.siglent_sdm4065a import SiglentSDM4065A  # 6½-digit DMM
 from benchctrl.drivers.cyberpower_pdu41002 import CyberPowerPDU41002  # switched PDU
 from benchctrl.drivers.ontrak_adu218 import OntrakADU218      # relays + digital I/O
+from benchctrl.drivers.silabs_cp2112 import CP2112            # open-drain control lines
 ```
 
 They share the conventions you've already seen — `open()` as a context
 manager, `set_*` methods for writes, properties for cached reads.
 → [`drivers.md`](drivers.md)
 
-The last two switch things rather than sourcing or measuring them, and
-both take an allowlist of what they may energise. They differ on the
-default, deliberately: the PDU switches **mains**, so
-`allowed_outlets` is mandatory with no "all". The ADU218's relays are
-1 A signal-level SSRs, so they toggle freely unless you narrow them.
+The last three switch or drive things rather than sourcing or measuring
+them, and all three take an allowlist of what they may energise. The ADU218
+is the only one where it is *optional*, and that is the device rather than
+the design: `allowed_outlets` and `allowed_lines` are mandatory with no
+"all", because the PDU switches **mains** and a CP2112 line is wired to
+whatever a DUT put on that pin, whereas the ADU218's relays are 1 A
+signal-level SSRs that the bench wants to toggle freely.
 
 ```python
 # Optional here — pass it when the relays are wired to something that
@@ -251,6 +254,29 @@ The read-back is not belt-and-braces. The ADU218 does not acknowledge a
 write and never reports an error at all, so the only way to know a relay
 moved is to ask what state it is in — which is why the setter returns
 that rather than the value you passed. → [`drivers.md`](drivers.md)
+
+The CP2112 holds a DUT's reset line low — a ~$15 breakout doing a job that
+would otherwise tie up an SMU pin. Its lines are **open-drain**: it pulls a
+net low and releases it, and never sources into it, which is what makes it
+safe on a 1.8 V reset net.
+
+```python
+with CP2112.open(allowed_lines=(3,)) as gpio:
+    gpio.set_line_mode(3, output=True)              # open-drain is the only mode
+    gpio.trigger_reset_pulse(3, duration_s=0.050)   # ≥5 ms; shorter is refused
+```
+
+Three of the eight lines (0, 1 and 7) carry an alternate function the chip
+can drive itself, and `set_line_mode` refuses those rather than put two
+drivers on one net — deliberately, so it is a decision you make knowingly.
+
+One thing to know before you try to find your pin in software: **a level
+read back from the chip identifies nothing.** An undriven pin is
+high-impedance, so `read_levels()` reports every pin as a latched 1 no
+matter what is attached — while a meter on the same net reads ~0 V. Both are
+correct. The only way to identify a pin is a level you can make *move*:
+assert one line at a time and watch which one the meter follows.
+→ [`drivers.md`](drivers.md)
 
 Battery emulation, profiling, and life calculation work against *any*
 driver conforming to `benchctrl.interfaces.SourceMeasurementUnit`, not
@@ -289,7 +315,7 @@ benchctrl stream 10                             # live print
 Two more entry points ship with the package:
 
 ```bash
-benchctrl-mcp                    # MCP server — 313 tools for LLM agents
+benchctrl-mcp                    # MCP server — 324 tools for LLM agents
 benchctrl-agent --token <token>  # bench-side server for remote mode
 ```
 
@@ -297,7 +323,7 @@ benchctrl-agent --token <token>  # bench-side server for remote mode
 
 - [`api_reference.md`](api_reference.md) — every class and method
 - [`drivers.md`](drivers.md) — the QR10x, DL3031A, DP2031, SDM4065A,
-  PDU41002 and ADU218 drivers
+  PDU41002, ADU218 and CP2112 drivers
 - [`battery.md`](battery.md) — emulation, profiling, life calculation
 - [`output_formats.md`](output_formats.md) — where your samples can go
 - [`simulation.md`](simulation.md) — working without hardware

@@ -335,6 +335,8 @@ logger. Sub-loggers:
 - `benchctrl.drivers.siglent_sdm4065a` — SDM4065A SCPI traffic
 - `benchctrl.drivers.cyberpower_pdu41002.driver` — PDU CLI traffic
   (`.links` for the byte pipes below it)
+- `benchctrl.drivers.silabs_cp2112` — CP2112 GPIO feature reports
+  (`.hidraw` for the ioctl layer below it)
 - `benchctrl.drivers.ontrak_adu218` — ADU218 commands
   (`.usbfs` for the raw ioctl layer below it)
 - `benchctrl.mcp` — MCP server lifecycle + tool warnings
@@ -480,6 +482,7 @@ from benchctrl.drivers.rigol_dl3031a import RigolDL3031A, RigolDLInfo, RigolDLEr
 from benchctrl.drivers.rigol_dp2031 import RigolDP2031, RigolDP2031Info, RigolDP2031Error
 from benchctrl.drivers.siglent_sdm4065a import SiglentSDM4065A, SDM4065AInfo, SDM4065AError
 from benchctrl.drivers.cyberpower_pdu41002 import CyberPowerPDU41002, PDU41002Info, PDU41002Error
+from benchctrl.drivers.silabs_cp2112 import CP2112, CP2112Info, CP2112Error
 from benchctrl.drivers.ontrak_adu218 import OntrakADU218, ADU218Info, ADU218Error
 ```
 
@@ -500,9 +503,10 @@ sentinel). Its accuracy traps — `MEASure?` discarding a null, the
 [`drivers.md`](drivers.md#siglent-sdm4065a--6-digit-bench-dmm) and
 worth reading before trusting a reading from it.
 
-The PDU41002 and the ADU218 are the two drivers that **switch** rather
-than source or measure, so neither conforms to
-`SourceMeasurementUnit` — or to each other. Both add a fifth exception
+The PDU41002, the ADU218 and the CP2112 are the three drivers that
+**switch or drive a line** rather than source or measure, so none conforms
+to `SourceMeasurementUnit` — or to each other. The first two are described
+together below because they share the allowlist shape; the CP2112 follows. Both add a fifth exception
 for a refusal that is *policy* rather than a bad value
 (`PDU41002PolicyError`, `ADU218PolicyError`): the index was perfectly
 valid for the hardware and the driver declined anyway, which a caller
@@ -526,6 +530,20 @@ write-only one. Every write is therefore confirmed by reading state
 back, and the setters return the *read-back* value rather than what they
 were asked for. See
 [`drivers.md`](drivers.md#ontrak-adu218--8-relays-8-digital-inputs-no-dependencies).
+
+The CP2112 drives eight **open-drain** control lines, for holding a DUT's
+reset or boot-strap pin. It takes the same kind of allowlist
+(`allowed_lines`, and `CP2112PolicyError` for a refusal), but the fact to
+internalise before calling it is different and it is easy to get wrong:
+**a level read back from the chip identifies nothing.** An undriven pin is
+high-impedance, so `read_levels()` returns `0xFF` regardless of what is
+attached, while a voltmeter on the same net reads ~0 V. Both are correct.
+A pin is identified only by a level you can make *move*, which is why the
+hardware tests are witnessed by a DMM rather than by the chip's own
+read-back — that read-back is downstream of the thing under test. Push-pull
+is unreachable on purpose, so a control line that must be driven *high* is
+a different instrument's job. See
+[`drivers.md`](drivers.md#silicon-labs-cp2112--open-drain-control-lines).
 
 ### `QR10x` — Eastwood Tech programmable resistor
 
@@ -743,7 +761,7 @@ from benchctrl import config
 config.DEVICE_KEYS   # ("otii_arc", "eastwood_qr10x",
                      #  "rigol_dl3031a", "rigol_dp2031",
                      #  "siglent_sdm4065a", "cyberpower_pdu41002",
-                     #  "ontrak_adu218")
+                     #  "silabs_cp2112", "ontrak_adu218")
 config.MODES         # ("local", "remote", "sim")
 config.DEFAULT_PORT  # 9737
 
