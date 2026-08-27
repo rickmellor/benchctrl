@@ -1302,7 +1302,17 @@ diverge.
 
 Point `BENCHCTRL_ADU218_INPUT` at whichever line the generator is on; the
 fixture skips with the line named if it is not toggling, so a stale setting
-cannot false-pass.
+cannot false-pass. **It can still quietly cost coverage, though, and did.**
+The default tracks the bench, so it goes stale whenever the bench moves: the
+walk left the generator on PB3 while the default still said `B2`, and the
+suite ran 7 passed / 5 skipped instead of 10 / 2 with nothing misconfigured
+and nothing red. "PB2 is not toggling" is equally true when the generator is
+unplugged and when it is one terminal over. The skip now sweeps the whole
+port and names the line that *is* toggling, which is the only version of
+that message that distinguishes the two. Worth generalising: a
+bench-tracking default needs a diagnostic that separates "moved" from
+"absent", or an accurate skip becomes a silent reduction in what the suite
+actually checks.
 
 **Counters count cycles, not edges** — one count per low-to-high
 transition. Verified rather than assumed, because the two hypotheses differ

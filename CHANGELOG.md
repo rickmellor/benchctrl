@@ -216,9 +216,21 @@ union with an equality assertion, because a single read of a 10 Hz line is
 exactly the coin flip that made an earlier test flaky, and "ever high" would
 pass on a reply with every bit set. The earlier sweep's "no PORT B line ever
 high" was an absence of evidence — nothing was attached there — not evidence
-the ordering was right. `BENCHCTRL_ADU218_INPUT` now defaults to `B2` to
-match the bench; a stale value skips with the line named rather than
-false-passing, verified against an undriven B1.
+the ordering was right.
+
+**A skip that names the right line can still hide a stale default.**
+`BENCHCTRL_ADU218_INPUT` defaulted to `B2`, and skipping with the line named
+rather than false-passing was treated as sufficient. It is not: the bench walk
+left the generator on **PB3**, so with the bench fully wired and nothing
+misconfigured, this file ran 7 passed / 5 skipped instead of 10 / 2 and three
+input/counter tests silently stopped running. "PB2 is not toggling" is equally
+true whether the generator is unplugged or one terminal over, and the second is
+what had happened. The default is now `B3`, found by sampling all eight lines
+rather than assumed, and the skip now says where the generator **is** — one
+extra sweep of the port, since the device is already open. Verified with
+`INPUT=A1`: it names PB3 and says to set the variable or move the default. A
+default that tracks the bench needs a message that can distinguish "moved" from
+"absent", or it degrades into a green run with less coverage than it claims.
 
 The vendor manual also supplied what no capture had: **de-bounce settings
 are durations, and they run backwards** — `0` = 10 ms, `1` = 1 ms
