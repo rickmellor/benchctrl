@@ -43,10 +43,14 @@ load-bearing for a design decision that looks arbitrary without it:
 Arming the watchdog is off by default (``BENCHCTRL_ADU218_ARM_WATCHDOG``) because
 it de-energises every relay after a measured silence — correct behaviour, and a
 bad surprise on a bench someone else is using. Its ladder is tested against a
-synthetic clock in ``tests/test_bench_adu218.py`` and its trip time was bisected
-by hand into ``tests/fixtures/adu218/watchdog_trip.txt``, where the DMM
-corroborated the tripped state; the test here codifies that measurement so a
-regression would be caught rather than needing to be rediscovered by hand.
+synthetic clock in ``tests/test_bench_adu218.py``, and the trip itself has now
+been witnessed on hardware: at ``WD2`` the DMM held 17.471–17.474 Ω across 24
+consecutive readings spanning 9.86 s after arming, then read the overload
+sentinel, bracketing the trip to (9.86, 10.83] s against a 10.0 s nominal.
+``tests/fixtures/adu218/watchdog_trip.txt`` carries that and the earlier ``WD1``
+bracket. So the *device* de-energises its own relays with no benchctrl process,
+no GPIO and no kernel driver in the decision path — which is the whole reason
+this interlock is worth having, and it was previously asserted rather than seen.
 
 Running it
 ----------
@@ -59,8 +63,9 @@ test skips if it is not attached.
                                 to the SDM4065A on this bench as of 2026-08-27)
     BENCHCTRL_ADU218_DMM        DMM VISA resource    (default: autodetect)
     BENCHCTRL_ADU218_INPUT      the driven input line, e.g. ``A3`` (default
-                                ``B2`` — where the SDG1032X sits on this bench
-                                as of 2026-08-27; it was ``A3`` before that)
+                                ``B3`` — where the SDG1032X sits on this bench
+                                as of 2026-08-27, being where the bench walk
+                                left it; ``A3`` then ``B2`` before that)
     BENCHCTRL_ADU218_SWEEP_ALL  ``1`` to allow the all-eight-relay sweep
                                 (default: skip — see below)
     BENCHCTRL_ADU218_ARM_WATCHDOG  ``1`` to let the watchdog actually trip
@@ -286,7 +291,13 @@ def counted(adu):
     generator is driven by hand; the SDG1032X has no driver yet), not a driver
     defect, and a red test for it would train people to ignore this file.
     """
-    spec = os.environ.get("BENCHCTRL_ADU218_INPUT", "B2")
+    # Default tracks where the generator physically sits, the way TEST_RELAY
+    # tracks the meter. It was ``B2`` mid-walk and the walk ended on ``B3``, so
+    # the default went stale and this file quietly dropped to 7 passed / 5
+    # skipped with the bench fully wired — the skip *is* accurate about PB2, and
+    # that is exactly why it reads as a bench fact rather than as a default
+    # nobody moved. Confirmed by sampling all eight lines: only PB3 toggles.
+    spec = os.environ.get("BENCHCTRL_ADU218_INPUT", "B3")
     # Parse defensively: this guard exists to *skip* on a bad value, so it must
     # not raise on one. ``int(spec[1:])`` on "XY" throws before the check below
     # ever runs, and an empty string never even reaches it.
@@ -299,9 +310,27 @@ def counted(adu):
     # Confirm the line is actually moving before any test relies on it.
     seen = {adu.input_state(port, line) for _ in range(40)}
     if seen != {True, False}:
+        # Say where the generator *is*, not only that it is not here. A skip
+        # naming the configured line reads identically whether the generator is
+        # unplugged or merely on a different terminal, and the second is what
+        # actually happens — the default went stale twice while this message
+        # stayed accurate, so three tests quietly stopped running. The device is
+        # already open, so the whole port costs one extra sweep.
+        elsewhere = sorted(
+            f"P{p}{n}"
+            for p in ("A", "B")
+            for n in range(4)
+            if len({adu.input_state(p, n) for _ in range(20)}) == 2
+        )
+        found = (
+            f" — but {', '.join(elsewhere)} is toggling, so set "
+            f"BENCHCTRL_ADU218_INPUT to that (or update the default)"
+            if elsewhere
+            else "; no input line is toggling, so the generator is off or unwired"
+        )
         pytest.skip(
             f"P{port}{line} is not toggling (read only {seen}); connect a square "
-            f"wave well under ~25 Hz to it, or set BENCHCTRL_ADU218_INPUT"
+            f"wave well under ~25 Hz to it, or set BENCHCTRL_ADU218_INPUT{found}"
         )
     return port, line, counter
 
@@ -646,19 +675,21 @@ def test_a_driven_input_line_reads_high_and_only_its_own_counter_moves(adu, coun
     """The input/counter half of the device, which needs an external stimulus.
 
     Requires a square wave on the line named by ``BENCHCTRL_ADU218_INPUT``
-    (default PB2, the line wired to the SDG1032X on this bench). Skips without
-    it, because no amount of driver code can make an undriven line read high.
+    (default PB3, where the SDG1032X sits on this bench). Skips without it,
+    because no amount of driver code can make an undriven line read high.
 
     Two claims, and the second is the one that could not be read from the
     manual at all: the counter-to-input map lives **only in a Table 1 image**
     that the PDF's text layer omits entirely. So the mapping the driver uses is
     measured here or it is unverified.
 
-    Run once per port to get the full claim. PA3 pins the PORT A half; PB2 pins
-    the ``+ 4`` offset for PORT B, which nothing else can — with the generator
-    on PORT A every counter index equals its line number, so an offset of 4, 3
-    or 0 are indistinguishable. Confirmed by mutation: forcing the offset to 3
-    fails this test and the two below it.
+    Run once per port to get the full claim. PA3 pins the PORT A half; any PORT
+    B line pins the ``+ 4`` offset, which nothing else can — with the generator
+    on PORT A every counter index equals its line number, so offsets of 4, 3 and
+    0 are indistinguishable. The bench walk drove all eight, so the offset now
+    rests on three independent PORT B readings (PB0 → 4, PB2 → 6, PB3 → 7).
+    Confirmed by mutation: forcing the offset to 3 fails this test and the two
+    below it.
     """
     port, line, counter = counted
 
