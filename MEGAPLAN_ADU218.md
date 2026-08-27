@@ -1838,3 +1838,37 @@ warns against deleting them as redundant; `docs/drivers.md` separates what is
 (contact-to-contact timing, still unmeasured, and only one relay of eight is
 metered); the CHANGELOG carries the mutation history including the two failed
 attempts.
+
+### The numbers, because a categorical pass hides its own margin
+
+Every other bench claim in this driver has numbers on file — F-26's
+eight-position counter table, F-27's eight-relay resistance table,
+`watchdog_trip.txt`'s brackets. This one had only prose, and that is a real gap
+rather than a tidiness complaint: the test asserts **categorically** (finite
+versus the overload sentinel, which F-27 requires, since the closed value is a
+property of the wiring), and a categorical pass does not show how far from the
+boundary it sat. Captured in `tests/fixtures/adu218/whole_port_witness.txt`:
+
+| step | mask | bit 7 | DMM |
+|---|---|---|---|
+| `reset_relays` | `0b00000000` | — | OPEN (overload) |
+| `set_relay_port` `MK170` | `0b10101010` | 1 | CLOSED 17.5134 Ω |
+| `set_relay_port` `MK085` | `0b01010101` | 0 | OPEN (overload) |
+
+repeated three times (17.5134 / 17.5147 / 17.5152 Ω, spread **0.0018 Ω**), with
+standing DC at 0.0006 V confirming the leads were on a dry contact, and the
+device left at mask `0b00000000` / `WD` 0.
+
+**And the numbers turned out to corroborate something the test cannot.** The
+bench walk (§16, F-27) measured K7 at **17.50 Ω** through the *per-relay* `SKn`
+path. `MKddd` puts the same contact at 17.5134–17.5152 Ω. Two independent command
+paths, one contact, the same resistance to four decimal places — so `MKddd` is
+closing the relay the way `SKn` does, not by some other route that merely ends up
+*reported* as closed. That is a second, quantitative answer to the same question
+the categorical assertion answers, arrived at differently. It also cuts the other
+way as a check on §16: had the walk's eight figures been an artefact of the
+command route rather than of the wiring, the two paths would not agree like that.
+
+None of which becomes an assertion. 17.5 Ω is still a property of K7's leads and
+would break the moment they move — which is exactly why the numbers live in a
+fixture and F-27 gets them as corroboration rather than as a threshold.

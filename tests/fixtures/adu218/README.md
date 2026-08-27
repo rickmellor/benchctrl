@@ -61,6 +61,13 @@ Two consequences, both load-bearing:
   correction: its "3.7 s" is an observation latency, not a trip time.**
 - `watchdog_trip.txt` — the WD1 trip time measured properly, by bisecting the
   silence window: **(0.90, 1.10] s**, i.e. the documented 1 s
+- `whole_port_witness.txt` — the `MKddd` whole-port write witnessed by the DMM,
+  which the sweep's own `relay_mask()` read-back could not do. The two masks are
+  **complements**, so one meter suffices: `MK170` closes K7 at
+  **17.5134–17.5152 Ω** and `MK085` opens it. **The corroboration is the number:**
+  the bench walk read K7 at 17.50 Ω through the *per-relay* `SKn` path, so two
+  independent command paths put the same contact at the same resistance. Records
+  what is deliberately **not** asserted, and why (F-27)
 - `on_resistance.txt` — characterisation of the closed-contact reading. **Carries
   two corrections**: the repeats are 2-wire (not 4-wire), and its comparison
   against the datasheet maximum was never like-for-like

@@ -718,6 +718,16 @@ def test_a_whole_port_mask_moves_a_contact_an_instrument_can_see(
     strength of a bit position inside a three-digit decimal argument. Getting
     that endianness wrong is the plausible defect here, and it lands on this
     assertion rather than on a read-back that shares the same misreading.
+
+    The readings are on file in ``tests/fixtures/adu218/whole_port_witness.txt``,
+    because the assertions below are deliberately **categorical** (finite vs the
+    overload sentinel, per F-27 — the closed value is a property of the wiring)
+    and a categorical pass does not show how far from the boundary it sat. That
+    capture also carries the corroboration this test cannot make: the bench walk
+    measured K7 at 17.50 Ω through the *per-relay* ``SKn`` path, and ``MK170``
+    puts the same contact at 17.5134–17.5152 Ω. Two independent command paths,
+    one contact, the same resistance — so ``MKddd`` is closing the relay the way
+    ``SKn`` does, not by some other route that merely ends up reported as closed.
     """
     adu = adu_all_relays
     assert adu.reset_relays() == 0

@@ -428,6 +428,18 @@ with the next bench, where it may not be. Verified both ways: 13 passed / 0
 skipped with the gates set, and the gate still skips with the line named when
 unset.
 
+The readings themselves are on file in
+`tests/fixtures/adu218/whole_port_witness.txt`, because the test asserts
+**categorically** — finite versus the overload sentinel, per F-27, since the
+closed value is a property of the wiring — and a categorical pass does not show
+how far from the boundary it sat. That capture carries a corroboration the test
+cannot make: the bench walk read K7 at **17.50 Ω** through the *per-relay* `SKn`
+path, and `MK170` puts the same contact at **17.5134–17.5152 Ω** over three
+passes. Two independent command paths, one contact, the same resistance to four
+decimal places — so `MKddd` closes the relay the way `SKn` does, rather than by
+some other route that merely ends up reported as closed. F-27 records it as a
+cross-check on its own eight-relay table.
+
 ### `net/errors.py` — a constructor that accepts the message but does not store it
 
 Found by that witness, over the real RPC wire: a `SDM4065AOverloadError`

@@ -1425,9 +1425,21 @@ inside the rule rather than an exception to it. In service these relays
 switch a load rather than a meter, where what matters is that the drop and
 the dissipation are acceptable, not that the reading falls in a band.
 
+**One thing the walk's numbers can now be checked against.** K7 above reads
+17.50 Ω through the *per-relay* `SKn` path. Driving the same contact from the
+*whole-port* `MKddd` path gives **17.5134–17.5152 Ω** over three passes, a
+0.0018 Ω spread (`tests/fixtures/adu218/whole_port_witness.txt`). Two
+independent command paths put one contact at the same resistance, which is a
+useful cross-check on the table above: had the walk's figures been an artefact
+of the command route rather than the wiring, the two paths would not agree to
+four decimal places. It changes nothing about the rule — 17.5 Ω is still a
+property of K7's leads, and asserting it would still break the moment they
+move.
+
 Code reference:
 `tests/test_hardware_ontrak_adu218.py` — module docstring, the `witness`
-fixture, and `test_the_driver_and_an_independent_instrument_agree_on_every_transition`.
+fixture, `test_the_driver_and_an_independent_instrument_agree_on_every_transition`
+and `test_a_whole_port_mask_moves_a_contact_an_instrument_can_see`.
 
 
 ## Harness

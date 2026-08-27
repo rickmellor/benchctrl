@@ -1,0 +1,89 @@
+ADU218 whole-port write (MKddd) witnessed by an instrument
+==========================================================
+Device: Ontrak ADU218, USB 0a07:00da, s/n E02246
+Witness: SDM4065A s/n SDM46A0CA00021, 2-wire resistance, on K7
+Wiring: K7 contact -> DMM leads only. No load current. Standing DC
+        0.0006 V, so the leads are on a dry contact and not a rail.
+Captured: 2026-08-27, at commit 90e18f5 (the witnessed test) + 0145271
+
+Why this capture exists
+-----------------------
+The two whole-port mask writes in the gated all-eight sweep were checked
+only against relay_mask() -- the device reporting on itself. A firmware
+that accepted MKddd, updated its own state word and never moved a
+contact satisfied that check completely. The per-relay SKn/RKn path has
+had a DMM witness since the first bench session (switch_k0.txt); this
+path had none.
+
+The bench has ONE meter, which looked like the reason it could not be
+witnessed. It is not: the sweep's two masks are COMPLEMENTS, so
+whichever relay the meter is across, one mask closes it and the other
+opens it.
+
+  0b10101010 ^ 0b01010101 = 0b11111111
+
+With TEST_RELAY = 7 (the leading bit), MK170 closes K7 and MK085 opens
+it. One relay of eight is still all this witnesses -- but it is the same
+code path for all eight, and it is the difference between "the command
+path is asserted" and "the command path is measured".
+
+Readings
+--------
+Three passes of the exact sequence the test performs. reset_relays()
+first, so the run starts from a known safe state rather than assuming
+one.
+
+  step                  mask         bit7   DMM
+  -------------------   ----------   ----   ---------------------
+  reset_relays          0b00000000     -    OPEN (overload)
+  set_relay_port MK170  0b10101010     1    CLOSED  17.5134 ohm
+  set_relay_port MK085  0b01010101     0    OPEN (overload)
+
+  reset_relays          0b00000000     -    OPEN (overload)
+  set_relay_port MK170  0b10101010     1    CLOSED  17.5147 ohm
+  set_relay_port MK085  0b01010101     0    OPEN (overload)
+
+  reset_relays          0b00000000     -    OPEN (overload)
+  set_relay_port MK170  0b10101010     1    CLOSED  17.5152 ohm
+  set_relay_port MK085  0b01010101     0    OPEN (overload)
+
+  final reset_relays    0b00000000     -    OPEN (overload)
+  left on the device: relay mask 0b00000000, WD 0
+
+Every set_relay_port() call also returned the mask it was given, i.e.
+the device's own PK read-back agreed -- but that agreement is exactly
+what cannot be trusted alone, and is not what this file records.
+
+Two things the numbers add that the assertions cannot
+----------------------------------------------------
+1. MK085 is the reading that carries the information. It OPENS the
+   metered relay while closing seven others, which is what a
+   state-word-only bug cannot fake: it has to open a contact the driver
+   never named individually, on the strength of a bit position inside a
+   three-digit decimal argument. Getting that endianness backwards is
+   the plausible defect, and it lands here.
+
+2. The closed reading matches the OTHER command path. The bench walk
+   measured K7 at 17.50 ohm through the per-relay SKn route (F-27's
+   eight-relay table). MKddd puts the same contact at 17.5134-17.5152
+   ohm, spread 0.0018 ohm across three passes. Two independent command
+   paths, one contact, the same resistance -- so MKddd is closing the
+   relay the same way SKn does, not by some other route that merely
+   ends up reported as closed.
+
+Deliberately NOT asserted
+-------------------------
+The committed test asserts CATEGORICALLY -- finite vs the overload
+sentinel -- and must keep doing so. Per F-27 the closed reading is a
+property of the WIRING, not the relay: K0 read 9.483 ohm and K7 reads
+~17.5 ohm on identical PhotoMOS parts (vendor maximum 1.1 ohm, so the
+relay is under 7% of even this reading). A 17.5 ohm expectation would
+fail the moment the leads move. The corroboration above is a fact about
+this bench on this day, which is why it lives in a fixture and not in
+an assertion.
+
+Contact-to-contact SKEW inside one MKddd remains unmeasured, and only
+one relay of the eight is metered. See MEGAPLAN_ADU218.md §19 for why
+the skew claim is not worth an instrument (the manual gives no
+per-relay switching time, so there would be nothing to pass or fail)
+and §20 for this capture.
