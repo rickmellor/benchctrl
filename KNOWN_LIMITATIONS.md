@@ -1314,6 +1314,18 @@ bench-tracking default needs a diagnostic that separates "moved" from
 "absent", or an accurate skip becomes a silent reduction in what the suite
 actually checks.
 
+`BENCHCTRL_ADU218_RELAY` is the other bench-tracking default and it is
+**deliberately not treated the same way** — a stale value there *fails*
+rather than skips (see F-27), and that asymmetry should survive review
+rather than be tidied away. Failing is noisy and sometimes wrong about the
+cause; skipping is quiet, and quiet is what let the input default sit stale.
+Nor is the self-diagnosing fix even available: sweeping eight input lines is
+a passive read, whereas discovering which relay the meter is across would
+mean energising the other seven — precisely what `allowed_relays` refuses to
+assume and what `BENCHCTRL_ADU218_SWEEP_ALL` exists for the operator to
+state. So the two defaults differ because the measurements differ, not
+because one was overlooked.
+
 **Counters count cycles, not edges** — one count per low-to-high
 transition. Verified rather than assumed, because the two hypotheses differ
 by exactly 2× and a factor-of-two frequency error looks plausible forever:

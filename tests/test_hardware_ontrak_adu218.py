@@ -149,6 +149,24 @@ read-back — verified by pointing the tests at K5 while the leads sat on K7: bo
 witnessed tests fail, and their messages say the leads may be the problem instead
 of accusing the relay.
 
+**Do not "fix" that failure into a skip.** It looks like the same defect
+``BENCHCTRL_ADU218_INPUT`` has — a bench-tracking default that goes stale when the
+bench moves — and the two behave *oppositely*, each mode being the other's
+problem. A stale ``INPUT`` skips, which is quiet, and quiet is how it silently
+un-ran three tests for an afternoon (see F-26). A stale ``RELAY`` **fails**, which
+is noisy and occasionally wrong about the cause, but cannot cost coverage without
+saying so. Turning the failure into a skip would trade the louder problem for the
+one that already bit us here.
+
+The other half of the asymmetry is why ``INPUT`` could be made self-diagnosing and
+``RELAY`` cannot: finding the driven input line means *reading* eight lines, which
+is passive and costs one sweep. Finding which relay the leads are across would
+mean *energising* relays other than ``TEST_RELAY`` and watching the meter — and
+what is attached to the other seven is exactly what ``allowed_relays`` refuses to
+assume and what ``BENCHCTRL_ADU218_SWEEP_ALL`` exists to have the operator state.
+So the fix that worked for the inputs is not available here, by design rather than
+by omission.
+
 Two processes cannot hold the SDM4065A at once, and a running ``benchctrl-agent``
 opens it lazily on first claim and then keeps the VISA handle *after* the claim
 is released — so a direct open fails with errno 16 while the meter sits idle.
