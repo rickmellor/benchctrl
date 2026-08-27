@@ -2,7 +2,9 @@
 
 **Branch:** `feat/ontrak-adu218` (off `master` @ `2eb0003`)
 **State as of:** 2026-08-27 — **all stages landed and every bench claim
-witnessed, 33 commits pushed at `091bb3f`.** Sections 1-12 below were written
+witnessed, 35 commits ahead of master at `59d4b8d`, all pushed** (34 of them
+non-merge; `97b1e1b` is the two-parent merge that brought master's CP2112 driver
+in). Sections 1-12 below were written
 *before* the code and are kept as the design record; where the built driver
 diverges, §5 and §13 say so. **Read §17, then §16, first on return** — those are
 the bench results; §13 carries the vendor manual's findings and the PA3 signal
@@ -1426,8 +1428,7 @@ from host and board afterwards.
 
 ## 17. Addendum, 2026-08-27 — the watchdog trip, and a green test that could not support its own claim
 
-Commit `091bb3f`, 33 commits, pushed. The operator authorised the gate in as many
-words — *"The bench is safe and only used for this development. Set the
+Commit `091bb3f`. The operator authorised the gate in as many words — *"The bench is safe and only used for this development. Set the
 watchdog."* — which is worth contrasting with what came before it. *"Let's do
 B5"* named the **task**, and an attempt to set
 `BENCHCTRL_ADU218_ARM_WATCHDOG=1` on the strength of that was correctly blocked:
