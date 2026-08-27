@@ -107,6 +107,19 @@ SIGNATURES: tuple[DriverSignature, ...] = (
         note="SDM4045A/4055A/4065A share this ID; check *IDN? for the model",
     ),
     DriverSignature(
+        device_key="silabs_cp2112",
+        label="Silicon Labs CP2112 HID USB-to-SMBus bridge",
+        vid=0x10C4,
+        pid=0xEA90,
+        transport="hidraw",
+        confidence=EXACT,
+        product_hints=("cp2112",),
+        # 10c4:ea60 is the far more common CP210x UART bridge -- a different chip
+        # that presents a tty. The PID is what separates them, so this entry must
+        # never be loosened to match on vendor alone.
+        note="not to be confused with 10c4:ea60, the CP210x UART bridge",
+    ),
+    DriverSignature(
         device_key="ontrak_adu218",
         label="Ontrak ADU218 USB relay / digital I/O interface",
         vid=0x0A07,
@@ -426,6 +439,54 @@ def scan_usbtmc() -> list[DiscoveredDevice]:
     return found
 
 
+def scan_hidraw() -> list[DiscoveredDevice]:
+    """Enumerate ``/dev/hidraw*`` nodes and identify them by USB VID/PID.
+
+    Read-only, like the other scanners: it reads sysfs attributes and opens
+    nothing. That matters more here than elsewhere, because the neighbouring
+    hidraw nodes on a bench machine are typically the keyboard and mouse — a
+    scanner that opened nodes to identify them would be reading input events.
+    Identification is by descriptor alone, so an unknown HID device is reported
+    as unknown rather than interrogated.
+
+    Only nodes matching a known signature are returned. This is the one scanner
+    that filters rather than reporting everything it finds, and the reason is the
+    same: listing the operator's keyboard as an unidentified bench device would
+    be noise at best, and at worst an invitation for ``--probe`` to write to it.
+    """
+    found: list[DiscoveredDevice] = []
+    for sys_path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        name = os.path.basename(sys_path)
+        vid = _hidraw_attr(name, "idVendor")
+        pid = _hidraw_attr(name, "idProduct")
+        if vid is None or pid is None:
+            continue
+        try:
+            vid_i, pid_i = int(vid, 16), int(pid, 16)
+        except ValueError:
+            continue
+        sig = _match_signature(vid_i, pid_i, "hidraw")
+        if sig is None:
+            # Deliberately skipped, not reported as unknown -- see the docstring.
+            continue
+        found.append(
+            DiscoveredDevice(
+                path=f"/dev/{name}",
+                transport="hidraw",
+                device_key=sig.device_key,
+                label=sig.label,
+                vid=vid_i,
+                pid=pid_i,
+                serial_number=_hidraw_attr(name, "serial"),
+                description=_hidraw_attr(name, "product") or "",
+                manufacturer=_hidraw_attr(name, "manufacturer"),
+                product=_hidraw_attr(name, "product"),
+                confidence=sig.confidence,
+            )
+        )
+    return found
+
+
 def scan_usbfs() -> list[DiscoveredDevice]:
     """Enumerate USB devices driven through raw usbdevfs rather than a tty.
 
@@ -492,6 +553,34 @@ def scan_usbfs() -> list[DiscoveredDevice]:
             )
         )
     return found
+
+
+def _hidraw_attr(hidraw_name: str, attr: str) -> Optional[str]:
+    """One USB attribute for a hidraw node, walking up to the USB device.
+
+    The hop count from the hidraw node to the node carrying ``idVendor`` is not
+    fixed -- it differs between a directly attached device and one behind hubs --
+    so this walks rather than assuming a depth. Mirrors the helper in the CP2112
+    driver's transport, kept separate because discovery must not import a driver.
+    """
+    real_path = f"/sys/class/hidraw/{hidraw_name}/device"
+    try:
+        real = os.path.realpath(real_path)
+    except OSError:
+        return None
+    for _ in range(8):
+        candidate = os.path.join(real, attr)
+        if os.path.exists(candidate):
+            try:
+                with open(candidate) as fh:
+                    return fh.read().strip()
+            except OSError:
+                return None
+        parent = os.path.dirname(real)
+        if parent == real or parent == "/sys":
+            return None
+        real = parent
+    return None
 
 
 def scan_visa(resource_manager=None) -> list[DiscoveredDevice]:
@@ -562,6 +651,7 @@ def discover(
     serial: bool = True,
     usbtmc: bool = True,
     visa: bool = True,
+    hidraw: bool = True,
     usbfs: bool = True,
     probe: bool = False,
     resource_manager=None,
@@ -607,6 +697,10 @@ def discover(
                 continue
             found.append(dev)
     found.extend(visa_devices)
+    if hidraw:
+        # Additive: no other scanner reports hidraw nodes, so there is nothing
+        # to de-duplicate against.
+        found.extend(scan_hidraw())
     if usbfs:
         # Additive by construction, like scan_driverless_bridges: a usbdevfs
         # device has no tty and no usbtmc node, so nothing above can have

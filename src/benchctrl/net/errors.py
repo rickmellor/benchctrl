@@ -144,6 +144,27 @@ def _registry() -> dict[str, type]:
              "PDU41002SessionError"),
         ),
         (
+            "benchctrl.drivers.silabs_cp2112.driver",
+            # Two beyond the usual, and each is actionable only if its type
+            # survives the wire:
+            #
+            # - PolicyError: the line was outside allowed_lines, or the pin
+            #   carries an alternate function. A *refused* pin drive must not
+            #   look like a device fault; the remedy is a human decision about
+            #   what is wired where, never a retry.
+            # - VerifyError: the write was accepted and the pin did not move.
+            #   Open-drain cannot force a net against something stronger, so
+            #   this is the signal that the reset line is not actually under
+            #   our control -- the one failure a bench operator most needs
+            #   reported rather than swallowed as a generic error.
+            #
+            # There is deliberately no CP2112TimeoutError: ioctls to a hidraw
+            # node either complete or fail, so there is no timeout condition to
+            # distinguish and inventing one would be a lie about the transport.
+            ("CP2112Error", "CP2112ConnectionError", "CP2112ProtocolError",
+             "CP2112ValueError", "CP2112PolicyError", "CP2112VerifyError"),
+        ),
+        (
             "benchctrl.drivers.ontrak_adu218.driver",
             # No CommandError: this device has no error *reply* to carry. An
             # unknown command, a bad argument and a write-only command are all

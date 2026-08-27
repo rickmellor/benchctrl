@@ -112,7 +112,7 @@ Its clock is manual, so the watchdog ladder is deterministic.
 Also included: 18 MCP tools (`adu218_*`), a passive discovery signature
 (VID `0x0A07` / PID `0x00DA`, identified from sysfs — nothing is written
 to the device), full agent/remote registration, and
-`KNOWN_LIMITATIONS.md` entries H-6, H-7, F-17 through F-20, and A-5 —
+`KNOWN_LIMITATIONS.md` entries H-6, H-7, F-21 through F-24, and A-5 —
 which is not about this device alone: no simulator in the repo reaches its
 instrument's real transport, and writing the ADU218's version of that gap
 was what made the general case worth stating.
@@ -163,7 +163,7 @@ expected rather than broken — every filter width is far shorter than a
 50 ms half-period, so none has anything to reject — but it means a passing
 de-bounce round-trip proves acceptance, *not* effect. Telling the settings
 apart needs a few hundred Hz against counters rated to only 1 kHz, above
-which the count under-reports silently. New entries F-21 and F-22.
+which the count under-reports silently. New entries F-25 and F-26.
 
 The hardware suite grew from 6 tests to 12: the inputs, the counters, the
 cycles-not-edges cross-check and the de-bounce round trip now run against
@@ -191,6 +191,65 @@ correct for a driver about to open a device and wrong for a scan, and
 because `discover()` builds one merged list, letting it propagate took out
 **every other transport's results too** — a machine with no `/sys/bus/usb`
 reported no VISA instruments either.
+
+### Silicon Labs CP2112 — open-drain control lines for hardware reset
+
+The bench can now assert and release a DUT's reset line with a ~$15 USB
+board. During the i.MX8 Zephyr bring-up an Otii Arc Pro spent the whole
+effort doing nothing but toggling a reset pin; this frees the SMU for
+measurement, which is the only reason the driver exists.
+
+Scope is narrow on purpose: **GPIO only, open-drain only.** SMBus is not
+implemented despite being the chip's headline feature, and push-pull
+output is unreachable through the public API rather than merely
+discouraged. `set_line_mode` clears the push-pull bit on every call,
+`set_line_asserted` refuses a push-pull pin, and a test asserts no public
+method takes a `push_pull` parameter. Open-drain cannot source into a
+target's reset net, and on unplug the chip reverts to inputs — which for
+an open-drain reset line *is* released. Both are physical properties worth
+enforcing rather than documenting.
+
+The API says `asserted`, never high or low. Reset lines are active-low, so
+"set the line high" is ambiguous exactly where a mistake holds a DUT in
+reset indefinitely. `trigger_reset_pulse` releases in a `finally` so an
+interrupt cannot strand a target, and `close()` restores the configuration
+found at `open()` — which releases anything the driver was holding.
+
+`allowed_lines` is a required keyword argument with no "all" default: the
+driver cannot know what GPIO.3 is wired to. GPIO.0, GPIO.1 and GPIO.7
+carry alternate chip functions and need an explicit override, and GPIO.7's
+refusal stands regardless of the override if its clock output is actually
+running — that being a fact the driver can read rather than a claim it has
+to accept.
+
+**One bench fact is worth reading before using this driver.** An undriven
+CP2112 pin is high-impedance, so the chip's input buffer latches 1 while a
+10 MΩ meter reads ~0 V on the same net. Both readings are correct, and
+`read_levels()` therefore returns `0xFF` regardless of what is attached. A
+pin is identified only by a level you can make *change*. This is why the
+hardware tests are witnessed by a DMM rather than by the chip's own
+read-back, which is downstream of the thing under test. See
+`KNOWN_LIMITATIONS.md` §F-17.
+
+Transport is `hidraw`, not usbfs — measured both ways on the board rather
+than assumed: `usbhid` does claim the chip, and `hid-cp2112` is not built
+for the Uno Q kernel so no in-kernel I²C adapter competes. GPIO commands
+are HID *feature reports*, so the node needs `O_RDWR` even to read, and the
+ioctl request numbers are computed with `_IOC` rather than hardcoded (the
+payload size is embedded in the request number, so a constant lifted from
+a 64-bit header is wrong on a 32-bit userland).
+
+The udev rule is scoped to `10c4:ea90` specifically. A blanket
+`SUBSYSTEM=="hidraw"` rule would also hand the bench user the attached USB
+keyboard, which is a keylogging surface rather than a bench instrument;
+`discovery.scan_hidraw()` filters to known signatures for the same reason.
+
+10 MCP tools, prefixed `cp2112_`. None exposes
+`allow_alternate_function` — a model cannot walk to the bench and confirm
+a pin is idle, so offering it would leave the gate one plausible-sounding
+argument away from bypassed.
+
+Zero new dependencies: `os`, `fcntl`, `ctypes`.
 
 ### CyberPower PDU41002 switched PDU — over serial *or* SSH
 

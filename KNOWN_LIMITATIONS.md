@@ -160,7 +160,7 @@ interrupted.
 
 The mitigation that actually works across a host reset is the device's own
 watchdog (`set_watchdog`), which drops the relays without any host
-involvement — see F-18 and F-19 for what it costs.
+involvement — see F-22 and F-23 for what it costs.
 
 Code reference:
 `src/benchctrl/drivers/ontrak_adu218/driver.py` — `_connect`;
@@ -932,7 +932,149 @@ Code reference:
 `tests/test_hardware_cyberpower_pdu41002.py` —
 `test_an_idle_logout_is_recovered_on_serial_and_fatal_over_ssh`.
 
-### F-17. ADU218 reports no error, ever
+### F-17. A CP2112 level identifies nothing; only a level you can change does
+Bench-measured, and it is the fact that made commissioning this device
+slow. Two readings on the same net looked contradictory:
+
+- the CP2112 reported **every** pin as an input latching `1`
+- a DMM clamped to one of those pins read a flat **0.0002 V**
+
+Both were correct and nothing was broken. An undriven CP2112 pin is
+**high-impedance**, so a ~10 MOhm voltmeter drags the floating net to
+nearly 0 V while the chip's own input buffer still latches a 1. Neither
+instrument was lying; the pin was not being driven by anything.
+
+**The consequence is that `read_levels()` cannot be used to work out what
+is attached.** On an unconfigured device it returns `0xFF` regardless of
+wiring, regardless of whether anything is connected at all. A pin is
+identified only by a level you can make *move*: drive one line at a time
+as open-drain, and watch which one the meter follows.
+
+This is also why the hardware tests are witnessed by a DMM rather than by
+the chip. Reading a pin back through the CP2112 that just drove it proves
+the **latch** changed, not that any voltage did -- the read-back is
+downstream of the thing under test. `set_line_asserted(verify=True)` is
+still worth having, because a read-back that *disagrees* is a real
+failure, but a read-back that agrees is not evidence the net moved.
+
+Affects: any attempt to identify or diagnose CP2112 wiring from software
+alone, including `cp2112_line_states` output shown to a model.
+
+Code reference:
+`src/benchctrl/drivers/silabs_cp2112/driver.py` -- `read_levels` docstring;
+`src/benchctrl/sim/cp2112.py` -- `_effective_levels` models it;
+`tests/test_cp2112.py` -- `TestLevelsAreNotIdentity`.
+
+### F-18. CP2112 SMBus is out of scope, and push-pull is deliberately unreachable
+Two capability gaps that are decisions rather than omissions, recorded so
+neither is later "fixed" into a regression.
+
+**SMBus / I2C is not implemented**, despite being the chip's headline
+feature -- benchctrl wants the eight GPIO pins. A bus master would need
+device addressing, clock configuration and transfer-status polling: a
+second protocol with its own failure modes and its own simulator, for a
+capability nothing on the bench currently needs. The report IDs (`0x06`
+config, `0x10`-`0x17` transfers) are documented in `driver.py` if that
+changes.
+
+**Push-pull output is unreachable through the public API**, and that is a
+safety property rather than a style preference. It is enforced three ways:
+`set_line_mode` clears the push-pull bit on every call even if another
+program had set it, `set_line_asserted` refuses a pin configured
+push-pull, and a test asserts no public method takes a `push_pull`
+parameter. The reasons are physical:
+
+- An open-drain pin pulls a net low and releases it but never *sources*
+  into it. A push-pull output at 3.3 V wired to a 1.8 V reset net
+  back-feeds the target's rail through its ESD diodes.
+- On unplug the chip reverts every pin to an input, which for an
+  open-drain reset line *is* released. A push-pull pin holding 0 V would
+  leave the DUT in reset with no software left to notice.
+
+So a device needing a driven-high control line is not supported. That is
+the correct trade for the job this driver exists to do -- and a line that
+must be driven both ways is a different instrument's job.
+
+Affects: anyone reaching for the CP2112 as a general-purpose I2C bridge or
+as a two-way logic driver.
+
+Code reference:
+`src/benchctrl/drivers/silabs_cp2112/driver.py` -- `set_line_mode`,
+`set_line_asserted`;
+`src/benchctrl/drivers/silabs_cp2112/__init__.py` -- scope statement;
+`tests/test_cp2112.py` -- `TestOpenDrainIsTheOnlyDriveMode`.
+
+### F-19. CP2112 GPIO is not real-time, and the pins default to inputs
+Two datasheet facts with practical consequences.
+
+**Every transition is a separate USB control transfer**, so edge timing is
+bounded by bus scheduling rather than by the chip; the datasheet says the
+GPIO pins are "not recommended for real-time signaling." A requested 1 ms
+pulse would be neither 1 ms nor reliably repeatable, so
+`trigger_reset_pulse` **refuses durations below 5 ms** rather than
+silently stretching them and reporting success. Sub-millisecond edges need
+a different instrument. For reset lines, whose hold times are specified in
+milliseconds, this is not a constraint that bites.
+
+**All eight pins revert to inputs after any reset or re-plug** (datasheet
+section 7). This is benign for an open-drain reset line -- high-Z is
+released -- but it means configuration does not survive a USB
+re-enumeration, and code that configured a pin minutes ago cannot assume
+it is still an output. Every write in the driver is a read-modify-write
+against the live config register rather than against a cached copy, for
+this reason.
+
+A third, smaller one: `hidraw` numbering is not stable. `hidrawN` shifts
+whenever another HID device is replugged, and on the bench board the
+CP2112's neighbours are the USB keyboard. Use the udev symlink
+(`/dev/benchctrl/cp2112-<serial>`) or let the driver find the device by
+VID/PID rather than pinning a node path in config.
+
+Affects: pulse-timing expectations, and any assumption that pin
+configuration persists.
+
+Code reference:
+`src/benchctrl/drivers/silabs_cp2112/driver.py` -- `MIN_PULSE_S`,
+`trigger_reset_pulse`;
+`deploy/udev/64-benchctrl-cp2112.rules`.
+
+### F-20. A blanket hidraw udev rule would expose the keyboard
+Not a device limitation but a deployment trap specific to `hidraw`, and it
+has no equivalent for the serial drivers next to it.
+
+The CP2112 needs its node readable *and writable* by the bench user --
+writable even for reads, because a HID feature *get* is a `GET_REPORT`
+over the control pipe. The tempting one-liner is:
+
+```
+SUBSYSTEM=="hidraw", MODE="0660", GROUP="dialout"      # DO NOT
+```
+
+On the bench board that also matches `hidraw0` and `hidraw1`, which are
+the attached **USB keyboard** (`04d9:1818`). That is a keylogging surface,
+not a bench instrument. `deploy/udev/64-benchctrl-cp2112.rules` is
+therefore scoped to `10c4:ea90` specifically.
+
+Two related traps: `10c4:ea60` is the CP210x *UART* bridge, a different
+chip, and must not match. And `discovery.scan_hidraw()` filters to known
+signatures rather than reporting every hidraw node -- verified against the
+real board, where it finds the CP2112 and skips both keyboard nodes -- so
+`benchctrl-discover --probe` can never be pointed at the operator's
+keyboard.
+
+**Until the rule is installed the node is `root:root 0600`** and the agent
+cannot open it. That is the correct failure (loud, and it names the rule
+in the `PermissionError`), but installing it is a privileged operation and
+therefore the operator's to run, not the agent's.
+
+Affects: first-time CP2112 setup on any host.
+
+Code reference:
+`deploy/udev/64-benchctrl-cp2112.rules`;
+`src/benchctrl/drivers/silabs_cp2112/hidraw.py` -- `HidrawLink.open`;
+`src/benchctrl/discovery.py` -- `scan_hidraw`.
+
+### F-21. ADU218 reports no error, ever
 
 The Ontrak ADU218 has **no error reply**. Three different failures are
 byte-identical on the wire — nothing comes back:
@@ -972,7 +1114,7 @@ Code reference:
 `command_spec`, `_send`; `tests/fixtures/adu218/errors.txt`;
 `tests/test_bench_adu218.py` — `TestSilence`.
 
-### F-18. ADU218 `WD` cannot distinguish "timed out" from "never enabled"
+### F-22. ADU218 `WD` cannot distinguish "timed out" from "never enabled"
 
 Reading `WD` returns `0` in both cases. A watchdog that fired self-clears
 to 0, which is also exactly what a watchdog that was never armed reports.
@@ -1000,7 +1142,7 @@ Code reference:
 `read_watchdog_tripped`, `_connect`; `tests/test_bench_adu218.py` —
 `TestWatchdog`.
 
-### F-19. Any ADU218 command refeeds the watchdog, so a poller neuters it
+### F-23. Any ADU218 command refeeds the watchdog, so a poller neuters it
 
 The hardware watchdog is fed by **any** command reaching the device —
 including a plain state read, and including a command the device rejects.
@@ -1036,7 +1178,7 @@ Code reference:
 `adu218_set_watchdog`, `adu218_watchdog`; `tests/test_bench_adu218.py` —
 `test_any_command_refeeds_the_timer`.
 
-### F-20. ADU218 out of scope, deliberately
+### F-24. ADU218 out of scope, deliberately
 
 Three capabilities the device has that this driver does not expose, each
 because getting it wrong is worse than not having it:
@@ -1069,7 +1211,7 @@ Code reference:
 `ADU218Info`; `src/benchctrl/drivers/ontrak_adu218/__init__.py`;
 `tests/test_bench_adu218.py` — `TestLifecycle`, `TestDispatchGate`.
 
-### F-21. ADU218 de-bounce settings run backwards, and are unobservable below a few hundred Hz
+### F-25. ADU218 de-bounce settings run backwards, and are unobservable below a few hundred Hz
 
 Two separate traps in one setting, and the first is the kind of thing that
 silently does the opposite of what an operator intended.
@@ -1104,7 +1246,7 @@ Code reference:
 `tests/fixtures/adu218/counters_live_signal.txt`;
 `tests/test_bench_adu218.py` — `TestDebounce`.
 
-### F-22. ADU218 counter-to-input map exists only as an image, and counters wrap silently
+### F-26. ADU218 counter-to-input map exists only as an image, and counters wrap silently
 
 **The map is not in the manual's text.** Counter-to-input assignments live
 in a "Table 1: Event Counter Port Assignments" **image**, which `pdftotext`

@@ -133,6 +133,11 @@ INSTRUMENTS: tuple[dict, ...] = (
     {"key": "rigol_dl3031a", "label": "DC LOAD", "kind": "load", "role": "ELEC LOAD"},
     {"key": "siglent_sdm4065a", "label": "DMM", "kind": "dmm", "role": "6.5 DIGIT"},
     {"key": "eastwood_qr10x", "label": "QR10X", "kind": "sensor", "role": "SCANNER"},
+    # The CP2112 earns an instrument slot rather than a mains-panel entry: it
+    # switches a logic-level control line, not mains. Its role reads RESET LINE
+    # rather than "GPIO" because that is what an operator glancing at the rail
+    # needs to know is present -- the thing that can hold a DUT down.
+    {"key": "silabs_cp2112", "label": "CP2112", "kind": "gpio", "role": "RESET LINE"},
     # Not in PDU_KEYS, deliberately: these are 1 A signal-level SSRs on
     # instrument leads, not mains contactors, so the rail is the right place for
     # them and _mains_panel is not. The distinction is the same one that keeps
