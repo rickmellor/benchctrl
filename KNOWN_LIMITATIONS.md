@@ -1253,20 +1253,37 @@ in a "Table 1: Event Counter Port Assignments" **image**, which `pdftotext`
 drops entirely — the extraction renders blank space between the caption and
 the following paragraph. So the mapping the driver relies on (counters 0-3
 → PA0-PA3, 4-7 → PB0-PB3) could not be read from the document at all. It
-is measured instead, and **now on both ports**: driving PA3 moved counter 3
-and only counter 3, and moving the generator to PB2 moved counter 6 and only
-counter 6 (201 events in 20.13 s = 9.987/s against a 10 Hz wave, with PA3
-gone quiet and counter 3 frozen — the control that proves the lead moved
-rather than the measurement repeating). That second reading is what confirms
-the **offset** of 4 rather than assuming it: a wrong offset would have shown
-counter 4, 5 or 7. Verified as a mutation: forcing the offset to 3 fails all
-three counter tests.
+is measured instead — and as of 2026-08-27 **all eight positions are
+measured**, so the image is redundant rather than merely corroborated. The
+generator was walked across every line in turn:
 
-**Two of the four lines on each port are still untested**, so the map is
-witnessed at its ends (PA3, PB2) rather than exhaustively. Point
-`BENCHCTRL_ADU218_INPUT` at whichever line the generator is on; the fixture
-skips with the line named if it is not toggling, so a stale setting cannot
-false-pass.
+| line | counter that moved | rate (vs 10 Hz) | `PI` bit |
+|---|---|---|---|
+| PA0 | 0 | 9.972/s | 0 |
+| PA1 | 1 | 9.972/s | 1 |
+| PA2 | 2 | 10.071/s | 2 |
+| PA3 | 3 | 9.972/s | 3 |
+| PB0 | 4 | 10.071/s | 4 |
+| PB1 | 5 | 10.063/s | 5 |
+| PB2 | 6 | 9.973/s | 6 |
+| PB3 | 7 | 10.071/s | 7 |
+
+At each position the named counter was the **only** one of eight to move, and
+the `PI` union across 60 reads set that bit and no other. Every rate lands
+within ±0.5 % of the stimulus, which is ±1 event of quantisation in a 10 s
+window — no counter drops or doubles anywhere.
+
+**PORT B is what pins the offset, and PORT A cannot.** On PORT A the counter
+index simply *equals* the line number, so PA3 → 3 is equally consistent with
+offsets of 4, 3 and 0. The offset is confirmed at three PORT B lines
+independently (PB0 → 4, PB2 → 6, PB3 → 7), and as a mutation: forcing it to 3
+fails all three counter tests. The general shape: a reading taken where two
+hypotheses coincide confirms neither, so measure at the coordinate where they
+diverge.
+
+Point `BENCHCTRL_ADU218_INPUT` at whichever line the generator is on; the
+fixture skips with the line named if it is not toggling, so a stale setting
+cannot false-pass.
 
 **Counters count cycles, not edges** — one count per low-to-high
 transition. Verified rather than assumed, because the two hypotheses differ
@@ -1320,6 +1337,39 @@ cannot tell them apart.
 on a *powered* net (measured 3.392 V after the meter was left on the
 CP2112), but a *different dry* contact reads ~0 V exactly like the right
 one — so a stale `BENCHCTRL_ADU218_RELAY` fails rather than skips.
+
+**All eight measured in one session (2026-08-27), which settles the
+question.** The meter was walked across every relay in turn, one screw
+terminal pair at a time, and each was independently witnessed:
+
+| relay | closed Ω | within-position spread |
+|---|---|---|
+| K0 | 45.65 | 0.035 |
+| K1 | 20.77 | 0.004 |
+| K2 | 28.37 | 0.024 |
+| K3 | 31.36 | 0.062 |
+| K4 | 32.09 | 0.042 |
+| K5 | 41.19 | 0.544 |
+| K6 | 16.87 | 0.002 |
+| K7 | 17.50 | 0.002 |
+
+**16.9–45.7 Ω, a 2.7× spread, with no relation to index** — on identical
+PhotoMOS parts, one meter, one hour. Within-position spread is ≤ 0.06 Ω
+everywhere except K5, so the drift that broke `hi < lo * 2` is clip seating
+rather than anything about the bench or the device.
+
+**A ceiling on the closed reading was considered and rejected.** During this
+walk a loose screw terminal made K3 read **336 kΩ closed**, and the suite
+passed — a closed contact is asserted to be "a number", never bounded above.
+That is the correct behaviour, not a gap. The test's claim is that the
+relay's state follows the command, and at 336 kΩ that claim was *true*: the
+DMM saw overload → finite, a real state change. What was broken was bench
+wiring quality, which is not the driver's claim and is not visible to it. A
+ceiling would also be exactly the threshold-on-a-wiring-property this entry
+exists to forbid — a loose terminal *is* a wiring property, so it is squarely
+inside the rule rather than an exception to it. In service these relays
+switch a load rather than a meter, where what matters is that the drop and
+the dissipation are acceptable, not that the reading falls in a band.
 
 Code reference:
 `tests/test_hardware_ontrak_adu218.py` — module docstring, the `witness`

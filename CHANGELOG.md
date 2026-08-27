@@ -160,6 +160,31 @@ lead moved rather than the measurement repeating. Mutating the offset to 3
 fails all three counter tests, so the map is now pinned rather than merely
 consistent.
 
+**Then all eight positions were measured**, by walking both the meter and the
+generator across the device one terminal pair at a time. Every input line moved
+its own counter and only its own — PA0-PA3 → counters 0-3, PB0-PB3 → counters
+4-7 — each setting its own `PI` bit and no other, every rate within ±0.5 % of
+the 10 Hz stimulus (which is ±1 event of quantisation in a 10 s window). The
+Table 1 image is now redundant rather than corroborated, and the PORT B offset
+rests on three independent readings (PB0 → 4, PB2 → 6, PB3 → 7).
+
+The same walk **independently witnessed all eight relays**, which the opt-in
+all-eight sweep cannot: the bench has one meter, so that test checks seven
+relays against the device's own read-back. Here each relay in turn read
+*overload* open and a finite value closed, with the alternating
+five-transition check passing at every position. Closed readings: **16.87 /
+17.50 / 20.77 / 28.37 / 31.36 / 32.09 / 41.19 / 45.65 Ω** — a **2.7× spread
+with no relation to index**, which settles F-27's wiring-not-relay conclusion on
+eight points instead of two. Within-position spread was ≤ 0.06 Ω everywhere but
+one relay, so the drift that once broke a `hi < lo * 2` bound is clip seating.
+
+A loose screw terminal during that walk made one relay read **336 kΩ closed**,
+and the suite passed. Deliberately left that way: the claim is that the relay's
+state follows the command, and overload → finite is a real state change, so the
+claim held. What was broken was bench wiring quality — not the driver's claim,
+not visible to it, and a ceiling would be exactly the
+threshold-on-a-wiring-property F-27 exists to forbid.
+
 The same run witnessed **PORT B's bit ordering for the first time**, across
 all four input commands, which had only ever been checked against PORT A —
 `RPy`'s MSB-first text reversal, `Py`'s LSB weighting, `PI` placing PORT B in

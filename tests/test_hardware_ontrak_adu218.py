@@ -28,11 +28,12 @@ load-bearing for a design decision that looks arbitrary without it:
    counter counts *cycles, not edges*. Both need an external signal source, so
    they skip without one. The counter-to-input map is documented **only in a
    Table 1 image** that the manual's text layer omits entirely, so it is either
-   measured here or it is unverified. It has now been measured on **both
-   ports** — PA3 → counter 3 and PB2 → counter 6 — and the second reading is
-   what pins the PORT B *offset* rather than assuming it, since a wrong offset
-   would have moved counter 4, 5 or 7. Two lines per port remain untried, so
-   the map is witnessed at its ends and not exhaustively.
+   measured here or it is unverified. **All eight positions are now measured**
+   (2026-08-27, the generator walked across every line): PA0-PA3 → counters
+   0-3 and PB0-PB3 → counters 4-7, each the only counter of eight to move, and
+   each setting its own ``PI`` bit and no other. PORT B is what pins the
+   offset — on PORT A the counter index equals the line number, so PA3 → 3 fits
+   offsets of 4, 3 and 0 equally.
 
 6. **The watchdog actually trips, and the DMM sees the contact open** — the
    claim the interlock design rests on, since everything else about the watchdog
@@ -73,11 +74,14 @@ energise an output without knowing what is attached, and on this bench that
 relay is a DMM sense loop with nothing else across it. Point it elsewhere only
 after checking the wiring.
 
-**Never assert a resistance threshold**, and K7 is why. Measured on the same
-bench with the same meter: K0 closed reads **9.483 Ω**, K7 closed reads
-**36.02–36.22 Ω** — nearly 4× apart, on identical PhotoMOS parts, because the
-excess is lead and contact resistance outside the relay rather than the relay
-itself. Any ``< 10 Ω`` rule derived from K0 would call a perfectly good K7 open.
+**Never assert a resistance threshold**, and all eight relays are why. Walking
+the meter across every one of them in a single session gave **16.87 / 17.50 /
+20.77 / 28.37 / 31.36 / 32.09 / 41.19 / 45.65 Ω** closed — a **2.7× spread with
+no relation to index**, on identical PhotoMOS parts, because the excess is lead
+and contact resistance outside the relay rather than the relay itself. (Earlier
+readings on the same two relays: K0 **9.483 Ω**, K7 **36.02–36.22 Ω** — so the
+same relay also moves by 4-5× between wirings.) Any ``< 10 Ω`` rule derived from
+one relay would call most of the others open.
 So the witness keys on the instrument's **overload sentinel**: closed is "reads a
 number at all", open is "out of range", and neither claim depends on the wiring's
 series resistance. This is the same reason the K0 reading was allowed to step
@@ -273,9 +277,10 @@ def counted(adu):
     Returns the counter index alongside the port and line because the mapping —
     counters 0-3 to PA0-PA3, 4-7 to PB0-PB3 — is what several of these tests
     exist to verify, so it is computed here once from the documented rule rather
-    than hardcoded per test. Both ends of that rule are now measured: PA3 drove
-    counter 3, and PB2 drove counter 6, which is what pins the ``+ 4`` rather
-    than leaving it on the Table 1 image's word.
+    than hardcoded per test. Every position of that rule is now measured — all
+    four PORT A lines and all four PORT B lines, each moving its own counter
+    alone — so the ``+ 4`` rests on three independent PORT B readings rather
+    than on the Table 1 image's word.
 
     Skips when the line is not toggling. That is a fact about the bench (the
     generator is driven by hand; the SDG1032X has no driver yet), not a driver
@@ -517,6 +522,23 @@ def test_the_driver_and_an_independent_instrument_agree_on_every_transition(
     # that genuinely catches a lead on the wrong relay is the pair of "either the
     # relay is not switching or the leads are not across it" assertions above,
     # which fire whenever the nominated relay is not the one being measured.
+    #
+    # All eight relays were later measured in one session by walking the meter
+    # across them: 16.87 / 17.50 / 20.77 / 28.37 / 31.36 / 32.09 / 41.19 / 45.65
+    # Ohm, a 2.7x spread with no relation to index. So the no-threshold rule is
+    # not an inference from two relays any more.
+    #
+    # **Do not add a ceiling on the closed reading.** During that walk a loose
+    # screw terminal made K3 read 336 kOhm closed and this test passed, which
+    # looks like a hole and is not one. The claim here is that the relay's state
+    # follows the command, and at 336 kOhm that was *true* -- overload -> finite
+    # is a real state change. What was wrong was bench wiring quality, which is
+    # not this test's claim and is not visible to the driver. A ceiling would
+    # also be precisely the threshold-on-a-wiring-property that the paragraphs
+    # above rule out: a loose terminal is a wiring property, so it falls inside
+    # that rule rather than justifying an exception to it. In service these
+    # relays switch a load, where what matters is the voltage drop and the
+    # dissipation, not whether the ohms land in a band.
     lo, hi = min(closed_readings), max(closed_readings)
     assert hi < lo * 10, (
         f"the two closed-contact readings are not the same circuit: "
