@@ -1731,3 +1731,18 @@ only the pre-existing `UP045`/`UP037` `Optional`-annotation baseline, and these
 edits add no annotations. Commits `bdaa835` (code, tests, docs, F-27) and
 `9ca2285` (CHANGELOG), both pushed. **No behaviour change** — the driver sends
 exactly what it sent before.
+
+Then the whole tree, since two *deployed* files changed: **2446 hardware-free
+passed / 6 skipped**, 213 deselected, in 21 m 40 s. The baseline was 2444/6, and
+the +2 is this session's own additions (`test_bench_adu218.py` went 115 → 116) —
+worth checking rather than assuming, because the sibling constants
+`COUNTER_MAX_FREQUENCY_HZ` and `DEBOUNCE_MS` are referenced from three files, so
+a new exported constant is not automatically inert. Skips unchanged at 6.
+
+The board was then re-synced (`--check` had correctly gone out of sync on exactly
+`driver.py` and `mcp_tools.py`, and nothing else) and is **IN SYNC — 105 files
+identical**. On the board: **10 passed / 2 skipped** with no env vars, and
+**11 passed / 1 skipped** with the watchdog armed, the last skip being
+`SWEEP_ALL`. Device left safe and read back to prove it, not assumed: relay mask
+`0b00000000`, `WD` 0, de-bounce 1.0 ms. No agent restart was needed — driver
+modules re-import lazily, unlike a core module.
