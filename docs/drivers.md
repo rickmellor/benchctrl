@@ -1686,6 +1686,26 @@ against the whole mask rather than the diff: "no change requested" depends
 on a read that could be stale, and a policy that holds only when the
 device agrees is not a policy.
 
+**"Indivisible" is a claim about the command, not about the contacts.**
+Eight `SKn`/`RKn` writes are eight USB transfers, so the port really does
+visit `0b10101000` en route to `0b10101010`; one `MKddd` is one transfer,
+so it does not. That is what "simultaneous" means here and all it means.
+Skew *between* the eight contacts inside a single `MKddd` is unmeasured:
+verification is a `PK` read-back, which reports the landed state and says
+nothing about timing, and the manual gives no per-relay switching time to
+compare against. If a circuit depends on make-before-break ordering,
+measure it on your own bench — nothing here establishes it.
+
+**The relays are rated for 1 switch per second at full load**
+(`RELAY_MAX_SWITCH_HZ`), and the manual explicitly does not recommend the
+ADU218 for PWM: PhotoMOS dissipation rises with switching speed. Nothing
+in the driver enforces this, because the figure is qualified *at full
+load* and no part of USB, HID or the ADU command set reports what a
+contact is switching — a hard limit would throttle the dry-contact sweeps
+that are most of this bench's use on the strength of a condition it cannot
+observe. Note the inversion against the ADU208's mechanical relays at
+10 CPS: the solid-state part is the *slower* one to cycle under load.
+
 **`open()` reports what it found rather than fixing it.** Power-on relay
 state is undocumented and USB suspend holds outputs in their last state,
 so `open()` reads the port and logs a warning naming any energised relay.

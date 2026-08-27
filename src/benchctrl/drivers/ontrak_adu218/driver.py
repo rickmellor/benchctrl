@@ -135,6 +135,23 @@ class ADU218PolicyError(ADU218Error):
 #: Relays are ``K0``–``K7`` — eight of them, **zero-indexed**.
 RELAY_COUNT = 8
 
+#: The fastest the vendor recommends switching a relay, in cycles per second
+#: (manual, Relay Outputs spec table, and the CAUTION beside it: *"Power
+#: dissipation of PhotoMOS relays increases with switching speed. At full-load
+#: rating, the maximum recommended switching speed is 1 CPS. The ADU218 is not
+#: recommended for PWM applications."*)
+#:
+#: **Documented, deliberately not enforced.** The figure is qualified by *at full
+#: load*, and the driver cannot know the load — nothing in USB, HID or the ADU
+#: command set reports what a contact is switching. A hard rate limit would
+#: therefore throttle a dry-contact sweep, which is most of what this bench does,
+#: on the strength of a condition it cannot observe. It is here so a caller
+#: writing a toggle loop against a real load has the number, and so nobody reads
+#: the absence of a limit as evidence there isn't one. Compare the ADU208's
+#: mechanical relays at 10 CPS: the solid-state part is the *slower* one to cycle
+#: under load, which inverts the usual expectation.
+RELAY_MAX_SWITCH_HZ = 1.0
+
 #: Eight digital inputs, but as **two ports of four**: PORT A lines 0-3 and
 #: PORT B lines 0-3. Confirmed by ``reads.txt``, where ``RPA4``/``RPB4`` are
 #: silent while ``RPA3``/``RPB3`` answer.
@@ -693,6 +710,20 @@ class OntrakADU218:
         One ``MKddd`` is a single simultaneous transition, which per-relay writes
         cannot be — they pass through intermediate combinations that may be
         electrically meaningful.
+
+        **"Simultaneous" here means the command is indivisible, not that the
+        contacts have been measured to move together.** Eight ``SKn``/``RKn``
+        writes are eight USB transfers, so the port demonstrably visits
+        ``0b10101000`` on the way to ``0b10101010``; one ``MKddd`` is one
+        transfer, so it does not. That is the claim, and it is the one the
+        allowlist reasoning below depends on. Contact-to-contact skew *within* a
+        single ``MKddd`` is **unmeasured and unclaimed**: the verification here is
+        a ``PK`` read-back, which reports the landed state and can say nothing
+        about timing. The manual gives no per-relay switching time to compare
+        against either — only :py:data:`RELAY_MAX_SWITCH_HZ`, which bounds the
+        repetition rate rather than the transition. A caller whose circuit cares
+        about skew (a make-before-break sequence, say) must measure it on their
+        own bench; nothing in this driver or its tests establishes it.
 
         **The allowlist is enforced on the whole mask, not on the diff.** A mask
         naming a disallowed relay is refused even when that relay's requested

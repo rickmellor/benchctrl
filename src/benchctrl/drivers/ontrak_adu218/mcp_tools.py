@@ -201,7 +201,15 @@ def adu218_set_relay_port(mask: int, verify: bool = True) -> dict:
 
     One command, so all eight relays transition simultaneously. Per-relay calls
     cannot do that — they pass through intermediate combinations that may be
-    electrically meaningful.
+    electrically meaningful. "Simultaneously" means **one command rather than
+    eight**, so the port never visits an intermediate mask; contact-to-contact
+    timing within the one command is not measured and must not be relied on for
+    make-before-break ordering.
+
+    Do not call this in a fast loop. The relays are rated for **1 switch per
+    second at full load** and the vendor explicitly does not recommend PWM use;
+    faster cycling under load dissipates heat in the PhotoMOS parts. Nothing
+    enforces this, because the driver cannot see what a contact is switching.
 
     ``mask`` is 0-255. Note this sets **every** relay: a bit that is 0
     de-energises that relay even if you did not intend to touch it. Read

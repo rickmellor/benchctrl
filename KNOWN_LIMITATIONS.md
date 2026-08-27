@@ -1399,6 +1399,19 @@ PhotoMOS parts, one meter, one hour. Within-position spread is ≤ 0.06 Ω
 everywhere except K5, so the drift that broke `hi < lo * 2` is clip seating
 rather than anything about the bench or the device.
 
+**The vendor spec settles it independently of the walk.** The manual's Relay
+Outputs table gives on-state resistance for the ADU218 as **700 mΩ typical
+and 1.1 Ω maximum** (Panasonic AQZ207 PhotoMOS). Every reading above is
+**15× to 41× that maximum**, so by the manufacturer's own number the relay
+accounts for at most ~4 % of the *lowest* measurement here and under 3 % of
+the highest — the rest is leads, clips and terminals. This is worth stating
+because it changes the entry's status: the wiring conclusion no longer rests
+only on "the spread has no relation to index", which is an inference from our
+own bench. A threshold anywhere in the measured range would be a threshold on
+lead resistance with a relay spec two orders of magnitude below it, and the
+1.1 Ω figure is the ceiling a test *could* have keyed on had the leads not
+dominated. They do dominate, by construction, so it still cannot.
+
 **A ceiling on the closed reading was considered and rejected.** During this
 walk a loose screw terminal made K3 read **336 kΩ closed**, and the suite
 passed — a closed contact is asserted to be "a number", never bounded above.

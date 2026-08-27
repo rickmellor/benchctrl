@@ -25,6 +25,7 @@ Two shapes of past defect drive most of what is here:
 
 from __future__ import annotations
 
+import time
 from unittest import mock
 
 import pytest
@@ -545,6 +546,42 @@ class TestRelays:
         # reported as safe.
         assert swallowed == ["MK000"]
         assert model.relays == 0xFF
+
+    def test_the_switch_rate_ceiling_is_documented_and_not_enforced(self, adu):
+        """``RELAY_MAX_SWITCH_HZ`` records the vendor's 1 CPS full-load figure,
+        and **nothing throttles on it** — that is the point of the constant.
+
+        The spec is qualified *at full load*, and the driver cannot observe the
+        load, so a rate limit would throttle a dry-contact sweep on the strength
+        of a condition it cannot see. This test pins the absence of enforcement
+        so a later "safety" edit has to argue with it rather than slip a sleep
+        into the write path: eight back-to-back writes are asserted to be
+        allowed, which is nine transitions inside one second on any host.
+
+        Also pins the inversion against the ADU208 (mechanical, 10 CPS) — the
+        solid-state part is the *slower* one to cycle, which is backwards from
+        the usual expectation and is the kind of thing that gets "corrected".
+
+        **Asserted on elapsed time, not on "it returned".** A throttle has two
+        plausible shapes and only one of them raises: a limiter that *sleeps* to
+        pace the writes would leave every assertion below passing, just slowly,
+        so a success-only test cannot see it. Eight transitions at 1 CPS is ~7 s
+        of pacing, against microseconds on the simulated link — the 2 s ceiling
+        sits an order of magnitude clear of both.
+        """
+        assert driver_module.RELAY_MAX_SWITCH_HZ == 1.0
+
+        start = time.monotonic()
+        for _ in range(4):
+            assert adu.set_relay_port(0b00000001) == 0b00000001
+            assert adu.set_relay_port(0b00000000) == 0b00000000
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 2.0, (
+            f"eight relay-port writes took {elapsed:.2f} s. Nothing should be "
+            f"pacing them: RELAY_MAX_SWITCH_HZ is documentation, and the driver "
+            f"cannot see the load the 1 CPS figure is qualified on."
+        )
 
 
 class TestAllowlist:
