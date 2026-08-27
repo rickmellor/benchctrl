@@ -26,8 +26,13 @@ Fixture provenance
 ------------------
 The canned replies are **generated in the same shapes captured from hardware**
 and pinned against ``tests/fixtures/adu218/reads.txt`` by
-``tests/test_sim_adu218.py``, rather than typed out from my reading of the
-manual. ``sim/qr10x.py``'s docstring records what happens otherwise: a simulator
+``test_every_reply_width_matches_the_reads_capture`` in
+``tests/test_bench_adu218.py``, which parses the capture *at test time* rather
+than trusting a transcription of it. (An earlier version of this docstring cited
+``tests/test_sim_adu218.py``, which does not exist — worth naming the test, not
+just the file, since an unverifiable provenance citation is the same problem the
+pin exists to prevent.) ``sim/qr10x.py``'s docstring records what happens
+otherwise: a simulator
 built from the same misreading as the driver agrees with it, and the pair passes
 every test while both are wrong. Concretely, the widths here (``PK``=3,
 ``RPKn``=1, ``Py``=2, ``RPy``=4, ``PI``=3, ``REn``=5, ``DB``=1, ``WD``=1) are

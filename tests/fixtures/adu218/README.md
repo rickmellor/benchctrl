@@ -84,10 +84,42 @@ Two consequences, both load-bearing:
   both sides. This is what attributes the excess to a series connection outside
   the relay
 
-Every capture above predates any production code — they were taken with
-throwaway scripts in `/tmp`. The last two are different in kind: they exercise
-the **shipping module**, `src/benchctrl/drivers/ontrak_adu218/usbfs.py`, run
-unmodified.
+- `counters_live_signal.txt` — the counters and de-bounce under a **real signal**
+  (operator-driven SDG1032X square wave on PA3), which is what first drove an
+  ADU218 input line to a `1` on this bench. Counters count **cycles, not edges**,
+  measured at two frequencies an order of magnitude apart (device/host ratio
+  1.000 at 0.5 Hz, 1.003 at 10 Hz — both edges would give 2.0). Carries the B4
+  **negative** result with its scope: all three de-bounce settings count
+  identically at 10 Hz, which is expected rather than evidence `DB` is inert
+
+### Two groups, and which claim rests on which
+
+**Nine** of the fourteen captures **predate any production code**, taken with
+throwaway scripts in `/tmp`: `framing`, `reads`, `errors`, `switch_k0`,
+`watchdog`, `on_resistance`, `latency`, `latency_after_command`,
+`on_resistance_drift`. They are named rather than given as a range because the
+two groups are interleaved in the list above, not contiguous. That is what
+`AGENTS.md` asks for and it is load-bearing in exactly one place:
+`sim/adu218.py` replays `reads.txt`, so the simulator is pinned to the *device*
+rather than to our reading of the PDF. Had that capture come from the driver, the
+sim would agree with the driver by construction and prove nothing.
+
+The rest exercise **shipping code**, and that is the point of them rather than a
+weakness — a capture that drives the real API is the only kind that can witness
+the real API. What it costs is the anti-circularity guarantee, so none of them is
+a simulator source:
+
+- `link_hardware.txt` / `link_dmm_witness.txt` — `Adu218UsbfsLink` (details
+  below)
+- `counters_live_signal.txt` — read through the **agent over RPC**, since the
+  agent held the device
+- `whole_port_witness.txt` — `set_relay_port()` / `reset_relays()`, witnessed by
+  the DMM
+- `watchdog_trip.txt` — **straddles both groups.** Its `WD1` bracket is raw
+  `RPK0`; its `WD2` addendum calls `read_watchdog()` / `read_watchdog_tripped()`
+
+The two link captures are the ones to read first, because they exercise
+`src/benchctrl/drivers/ontrak_adu218/usbfs.py` unmodified:
 
 - `link_hardware.txt` — `Adu218UsbfsLink` on the real unit: enumeration by
   serial, claim, drain, every read, four K0 actuations, argument rejection,
@@ -553,6 +585,11 @@ input/counter/de-bounce half of the device was implemented but unwitnessed.
 
 Stimulus: operator-driven square wave, PA3, ~50 % duty. Counter read over the
 benchctrl agent via RPC. No relay switched, watchdog left disarmed.
+
+The raw capture is **`counters_live_signal.txt`** — the numbers below are its
+summary, and it carries the per-run detail plus the restore. Because it reads
+through the agent it is shipping-code output, so it belongs to the second group
+above and is not a simulator source.
 
 ### Counters count cycles, not edges — measured, not assumed
 
