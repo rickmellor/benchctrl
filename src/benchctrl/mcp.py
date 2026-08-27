@@ -58,6 +58,7 @@ from benchctrl.battery import (
     estimate_life_from_profile,
 )
 from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as _pdu41002_tools
+from benchctrl.drivers.silabs_cp2112 import mcp_tools as _cp2112_tools
 from benchctrl.drivers.eastwood_qr10x import mcp_tools as _qr10x_tools
 from benchctrl.drivers.otii_arc import mcp_tools as _arc_tools
 from benchctrl.drivers.rigol_dl3031a import mcp_tools as _dl3031a_tools
@@ -80,6 +81,7 @@ _dl3031a_tools.register_mcp_tools(mcp)
 _dp2031_tools.register_mcp_tools(mcp)
 _sdm4065a_tools.register_mcp_tools(mcp)
 _pdu41002_tools.register_mcp_tools(mcp)
+_cp2112_tools.register_mcp_tools(mcp)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +391,18 @@ from benchctrl.drivers.siglent_sdm4065a.mcp_tools import (
 )
 
 # PDU41002 tools — read-only in this build: nothing here switches mains.
+from benchctrl.drivers.silabs_cp2112.mcp_tools import (
+    cp2112_allowed_lines,
+    cp2112_close,
+    cp2112_info,
+    cp2112_line_state,
+    cp2112_line_states,
+    cp2112_open,
+    cp2112_reset_lines,
+    cp2112_set_line_asserted,
+    cp2112_set_line_mode,
+    cp2112_trigger_reset_pulse,
+)
 from benchctrl.drivers.cyberpower_pdu41002.mcp_tools import (
     pdu41002_allowed_outlets,
     pdu41002_clear_outlet_command,

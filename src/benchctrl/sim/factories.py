@@ -159,6 +159,42 @@ def make_pdu41002(**kwargs) -> Any:
     return _bind_lifetime(driver, sim)
 
 
+def make_cp2112(**kwargs) -> Any:
+    """A real ``CP2112`` driving a :py:class:`SimulatedCP2112`.
+
+    Unlike every other factory here, this one does **not** go through a pty.
+    The CP2112's GPIO commands are HID feature reports carried by ioctls, so
+    the simulator substitutes at the link seam instead and is handed to the
+    driver directly. :py:mod:`benchctrl.sim.cp2112` explains why, and what that
+    means for how much a green suite proves.
+
+    ``allowed_lines`` defaults to every line **in sim mode only**, following
+    ``make_pdu41002``'s reasoning: on hardware it is mandatory and has no
+    default, so a config typo cannot silently widen which pins can be driven.
+    Against a simulator there is no DUT to hold in reset. Callers can still
+    pass a narrower set to exercise the allowlist itself.
+    """
+    from benchctrl.drivers.silabs_cp2112 import CP2112, LINE_COUNT
+    from benchctrl.sim.cp2112 import SimulatedCP2112
+
+    sim_kwargs = dict(kwargs.pop("sim", {}))
+    kwargs.pop("path", None)  # the sim is not a filesystem node
+    sim = SimulatedCP2112(**sim_kwargs)
+    sim.open()
+    kwargs.setdefault("allowed_lines", tuple(range(LINE_COUNT)))
+    kwargs.setdefault("serial", sim.serial)
+    try:
+        driver = CP2112(sim, **kwargs)
+        # open() normally captures this; constructing the driver directly means
+        # doing it here, or close() would have no as-found state to restore and
+        # would silently skip the restore that keeps a DUT out of reset.
+        driver._as_found = driver.read_gpio_config()
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
 FACTORIES: dict[str, Callable[..., Any]] = {
     "otii_arc": make_otii_arc,
     "eastwood_qr10x": make_qr10x,
@@ -166,6 +202,7 @@ FACTORIES: dict[str, Callable[..., Any]] = {
     "rigol_dp2031": make_dp2031,
     "siglent_sdm4065a": make_sdm4065a,
     "cyberpower_pdu41002": make_pdu41002,
+    "silabs_cp2112": make_cp2112,
 }
 
 
