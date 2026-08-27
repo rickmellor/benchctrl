@@ -390,7 +390,16 @@ pytest -q                                  # all (needs the bench on USB)
 
 1. Create `src/benchctrl/drivers/<vendor_model>/` with `driver.py`,
    `__init__.py`, `mcp_tools.py`
-2. Define an exception hierarchy: `<Vendor>Error` → `<Vendor>ConnectionError` / `<Vendor>CommandError` / `<Vendor>TimeoutError` / `<Vendor>ValueError`
+2. Define an exception hierarchy: `<Vendor>Error` → `<Vendor>ConnectionError` / `<Vendor>CommandError` / `<Vendor>TimeoutError` / `<Vendor>ValueError`.
+   Register every class in `net/errors.py` or it degrades to its nearest known
+   ancestor over the wire. If a constructor takes something other than a message
+   first — `SDM4065AOverloadError(function, range_)`, `BenchCommandError(error_code, …)` —
+   that is fine and handled, **but a first parameter that merely *accepts* a
+   string is the trap**: `cls(message)` then succeeds, files the whole message
+   under that field, and re-composes a new one. `_instantiate()` guards it
+   generally now (each strategy must store the message unchanged), and
+   `test_every_registered_exception_round_trips` asserts `args` exactly rather
+   than by containment, because containment is what a re-composed message passes.
 3. Implement an `open(...)` class method that returns the instance with the transport open
 4. Implement `close()` and `__enter__` / `__exit__` for context-manager use; `__exit__` should also disable any output for safety
 5. Use the same property-read-method-write convention as the other drivers

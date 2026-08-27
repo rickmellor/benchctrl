@@ -98,6 +98,25 @@ change: closed reads *a number*, open reads the DMM's **overload sentinel**.
 That sentinel is what makes this a real witness — an open contact is not a large
 resistance, it is an unmeasurable one, so the two states cannot be confused by
 any amount of contact drift.
+
+The one thing that sentinel *cannot* distinguish is an open contact from leads
+that are not across the contact at all — both are unmeasurable. So the witness
+fixture first reads DC volts and skips if the leads are sitting on a powered
+net: a dry contact reads ~0 V open or closed, so this cannot mask a stuck relay,
+but it does turn "the leads got moved" from a bare ``assert None is not None``
+into a sentence naming the actual problem. Measured after the CP2112 work moved
+the meter: 3.392 V standing, unmoved by K0.
+
+Two processes cannot hold the SDM4065A at once, and a running ``benchctrl-agent``
+opens it lazily on first claim and then keeps the VISA handle *after* the claim
+is released — so a direct open fails with errno 16 while the meter sits idle.
+That arrives looking exactly like an unplugged instrument. Rather than require
+the agent to be stopped (which safe-stops the whole bench), the witness falls
+back to borrowing the meter *through* the agent, as
+``tests/test_hardware_cp2112.py`` does by design. Both routes are exercised on
+this bench. The overload sentinel survives the remote trip because
+``SDM4065AOverloadError`` is registered in ``net/errors.py``; if it were not,
+this witness would silently lose the distinction it is built on.
 """
 
 from __future__ import annotations
@@ -237,6 +256,56 @@ def counted(adu):
     return port, line, counter
 
 
+def _dmm_via_agent(busy_exc):
+    """Borrow the SDM4065A from the running agent, or skip.
+
+    The fallback path when a direct VISA open reports errno 16. Modelled on the
+    ``dmm`` fixture in ``tests/test_hardware_cp2112.py``, which goes through the
+    agent by design because the agent holds the writer claim
+    (``KNOWN_LIMITATIONS.md`` §N-4).
+
+    Returns ``(proxy, close)``. The proxy answers ``measure_resistance`` and
+    ``measure_dc_voltage`` like the local driver, so the fixture above does not
+    care which route it got.
+    """
+    import json
+
+    from benchctrl.config import EndpointConfig
+    from benchctrl.net.client import RemoteClient
+
+    try:
+        # Read inside the process that consumes it, and close the handle at once:
+        # this is the agent's shared secret and it should not outlive the parse.
+        with open("/etc/benchctrl/agent.json") as fh:
+            cfg = json.load(fh)
+    except OSError as exc:
+        pytest.skip(
+            f"the DMM is held by another process ({busy_exc}) and the agent "
+            f"config is not readable to borrow it through ({exc}); stop the "
+            f"agent, or run this on the bench board"
+        )
+
+    ep = EndpointConfig(
+        host="127.0.0.1",
+        port=cfg["port"],
+        token=cfg["token"],
+        heartbeat_s=1.0,
+        deadman_s=15.0,
+    )
+    try:
+        client = RemoteClient(ep).connect()
+    except Exception as exc:  # noqa: BLE001 - any connect failure is a skip
+        pytest.skip(
+            f"the DMM is held by another process ({busy_exc}) and the agent "
+            f"is not reachable to borrow it through ({exc})"
+        )
+    try:
+        return client.attach("siglent_sdm4065a"), client.close
+    except Exception as exc:  # noqa: BLE001
+        client.close()
+        pytest.skip(f"the agent has no siglent_sdm4065a to borrow: {exc}")
+
+
 @pytest.fixture()
 def witness():
     """The SDM4065A reading resistance across the relay, or a skip.
@@ -255,12 +324,53 @@ def witness():
         pytest.skip(f"SDM4065A driver unavailable: {exc}")
 
     resource = os.environ.get("BENCHCTRL_ADU218_DMM") or None
+    close_dmm = None
     try:
         dmm = SiglentSDM4065A.open(resource=resource) if resource else SiglentSDM4065A.open()
+        close_dmm = dmm.close
     except SDM4065AError as exc:
+        # Measured: a running benchctrl-agent opens the SDM4065A lazily on first
+        # claim and keeps the VISA handle after the claim is released, so the
+        # meter stays held by a process that is not using it. Two processes
+        # cannot hold one USBTMC node, and this arrives as errno 16 -- which
+        # reads exactly like an unplugged meter.
+        #
+        # Stopping the agent works but safe-stops the whole bench, so borrow the
+        # meter through the agent instead, the way tests/test_hardware_cp2112.py
+        # does. The overload sentinel survives that trip: SDM4065AOverloadError
+        # is registered in net/errors.py precisely so a remote caller can still
+        # tell "out of range" from "bad command", and this witness depends on
+        # that distinction rather than on a bare RuntimeError.
+        if "busy" not in str(exc).lower():
+            pytest.skip(
+                f"the DMM witness is not reachable ({exc}); the relay tests "
+                f"here are meaningless without an instrument that is not the "
+                f"ADU218"
+            )
+        dmm, close_dmm = _dmm_via_agent(exc)
+
+    # Are the leads actually across a dry contact? An open contact and a pair of
+    # leads clipped somewhere else both answer "unmeasurable" to a resistance
+    # read, so the resistance witness alone cannot tell them apart -- and the
+    # failure it produces (`assert witness() is not None`) points at the relay
+    # when the fault is in the wiring.
+    #
+    # DC volts is the discriminator, and it does not blur the two states this
+    # test exists to distinguish: a dry contact reads ~0 V whether it is open or
+    # closed, so a stuck relay still fails red. Only a lead on a *powered* net
+    # reads volts. Measured on this bench: leads left on a 3.3 V rail after the
+    # CP2112 work read 3.392 V, unmoved by K0 -- which is what this catches.
+    try:
+        standing_volts = abs(dmm.measure_dc_voltage())
+    except SDM4065AError:  # pragma: no cover - a meter that reads R but not V
+        standing_volts = 0.0
+    if standing_volts > 0.5:
+        close_dmm()
         pytest.skip(
-            f"the DMM witness is not reachable ({exc}); the relay tests here "
-            f"are meaningless without an instrument that is not the ADU218"
+            f"the DMM leads are sitting on a powered net ({standing_volts:.3f} V "
+            f"DC standing). A relay contact under test is dry and reads ~0 V, "
+            f"so a resistance witness here would report 'open' no matter what "
+            f"relay K{TEST_RELAY} does. Move the leads across the contact"
         )
 
     def read():
@@ -277,7 +387,7 @@ def witness():
     try:
         yield read
     finally:
-        dmm.close()
+        close_dmm()
 
 
 # ---------------------------------------------------------------------------
@@ -438,9 +548,28 @@ def test_a_driven_input_line_reads_high_and_only_its_own_counter_moves(adu, coun
         f"trip and every sample aliased onto one level"
     )
 
-    # The mask must agree with the per-line read, via a different command.
-    assert adu.input_mask() & (1 << counter), (
-        f"input_mask() does not show P{port}{line} set, but input_state() does"
+    # The mask must agree with the per-line read, via a different command --
+    # and it has to be sampled for the same reason the per-line read above is.
+    # A single `input_mask()` on a line toggling at 10 Hz catches a low half
+    # the time, which made this a coin flip rather than a check (measured: 2
+    # passes in 6 consecutive runs against the real device).
+    #
+    # Sampling the *union* is what keeps it falsifiable. Asserting the line is
+    # ever high would pass on a mask that reported every line high, so this
+    # also asserts nothing outside the stimulated line ever set a bit -- the
+    # bit-position claim, which is the one a wrong shift would break.
+    seen = 0
+    for _ in range(60):
+        seen |= adu.input_mask()
+    assert seen & (1 << counter), (
+        f"input_mask() never showed P{port}{line} set across 60 samples, but "
+        f"input_state() saw it toggle — the two commands disagree about which "
+        f"bit this line occupies"
+    )
+    assert seen == (1 << counter), (
+        f"input_mask() set bits {sorted(i for i in range(8) if seen & (1 << i))} "
+        f"but only P{port}{line} (bit {counter}) is being driven — either "
+        f"another line is floating high or the bit positions are wrong"
     )
 
     before = adu.read_counters()

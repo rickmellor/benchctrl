@@ -301,11 +301,32 @@ def _instantiate(cls: type, message: str) -> Optional[BaseException]:
     refuses ``RuntimeError.__new__`` for an ``OSError``-layout class. That is
     exactly why this is a cascade and not a single clever call.
 
+    **Not raising is not the same as succeeding.** A constructor whose first
+    parameter happens to accept a string takes the message as *that field* and
+    then composes a message of its own, so strategy 1 returns an exception whose
+    text is not the text the agent sent. Measured on the bench:
+    ``SDM4065AOverloadError(function, range_)`` turned "RESistance input
+    overloaded — …" into "RESistance input overloaded — … input overloaded — …",
+    doubling the sentence and leaving ``function`` set to a whole message. So
+    strategy 1 is accepted only if it stored the message unchanged; otherwise the
+    cascade continues to strategy 3, which cannot re-compose. Checked rather than
+    special-cased, because the next such constructor will be a different class.
+
+    The check is on ``args``, not on ``str()``: ``KeyError.__str__`` is always a
+    ``repr`` of its argument, so a ``str()`` comparison would reject a perfectly
+    faithful ``KeyError(message)`` and degrade it to ``RemoteBenchError`` —
+    losing the type this module exists to preserve. ``args == (message,)`` is
+    what "the constructor did not rewrite the message" actually means, and it is
+    also exactly what strategies 2 and 3 produce, so the criterion is uniform
+    across all three.
+
     Returns None if every strategy fails, so the caller can degrade to
     ``RemoteBenchError`` rather than raise while reporting an error.
     """
     try:
-        return cls(message)
+        exc = cls(message)
+        if exc.args == (message,):
+            return exc
     except Exception:  # noqa: BLE001
         pass
     try:

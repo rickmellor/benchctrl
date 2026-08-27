@@ -217,6 +217,53 @@ because `discover()` builds one merged list, letting it propagate took out
 **every other transport's results too** — a machine with no `/sys/bus/usb`
 reported no VISA instruments either.
 
+The hardware suite's DMM witness gained two skips, both for conditions that
+previously arrived looking like something else. A resistance read cannot
+tell an open contact from **leads that are not on the contact at all** —
+both are unmeasurable — so the witness now reads DC volts first and skips
+when the leads sit on a powered net, naming the wiring instead of failing as
+`assert None is not None`. It cannot mask a stuck relay: a dry contact reads
+~0 V open or closed. Measured after the CP2112 work moved the meter: 3.392 V
+standing, unmoved by K0. And because a running agent opens the SDM4065A
+lazily and keeps the VISA handle *after* the claim is released, a direct open
+returns errno 16 while the meter sits idle — indistinguishable from an
+unplugged instrument. The witness now borrows the meter *through* the agent
+in that case, the way `tests/test_hardware_cp2112.py` does by design, rather
+than requiring the whole bench be safe-stopped to run one file.
+
+`test_a_driven_input_line_reads_high_and_only_its_own_counter_moves` was
+**flaky on real hardware, 2 passes in 6 runs**, and the cause was one
+`input_mask()` read asserted high on a line toggling at 10 Hz — a coin flip
+sitting directly beneath a block that samples 60 times *because* the line
+toggles. It now samples the union the same way (measured: 32 of 60 reads
+catch the low half, so a single read fails about half the time) and asserts
+the union equals exactly the driven bit, so the bit-position claim a wrong
+shift would break is still tested. 6 of 6 after.
+
+### `net/errors.py` — a constructor that accepts the message but does not store it
+
+Found by that witness, over the real RPC wire: a `SDM4065AOverloadError`
+crossing the agent link arrived with its **sentence doubled**, and its
+`function` field set to an entire error message rather than a DMM function.
+
+`_instantiate()` tries `cls(message)` first and treated *not raising* as
+succeeding. `SDM4065AOverloadError(function, range_)` takes a string first,
+so that call is perfectly legal — it files the whole message under
+`function` and then composes a new message quoting it. Every strategy in the
+cascade now has to store the message unchanged (`args == (message,)`) to be
+accepted, so a re-composing constructor falls through to `__new__` instead.
+The check is on `args` rather than `str()` because `KeyError.__str__` is
+always a `repr` of its argument, and comparing text there would reject a
+faithful `KeyError` and degrade it to `RemoteBenchError` — losing the type
+this module exists to preserve.
+
+The existing round-trip test asserted `f"{name} message" in str(exc)`, and
+**containment is exactly what a re-composed message satisfies**, which is
+how this shipped. It now asserts `args` exactly and that the decoded class is
+still the class the agent raised, since a message check alone also passes on
+a silent degradation. All 59 registered exceptions round-trip under the
+stricter assertion; two did not before.
+
 ### Silicon Labs CP2112 — open-drain control lines for hardware reset
 
 The bench can now assert and release a DUT's reset line with a ~$15 USB
