@@ -1679,6 +1679,81 @@ to big-iron Linux hosts.
   selection is untested on hardware regardless: only one CH340 has ever been
   attached here at a time.
 
+### N-7. CI is red on `master`, from four unrelated causes
+Recorded because the symptom is a wall of red check marks that reads like a
+regression and is not one. **Every GitHub Actions run on `master` has failed for
+at least the last eight commits**, and the four causes below are independent —
+fixing any one leaves the matrix red, which is why nobody has.
+
+**1. Five modules import POSIX-only stdlib at module scope, unguarded** (this is
+the Windows rows):
+
+| Module | Import |
+|---|---|
+| `sim/loopback.py` | `termios`, `tty` |
+| `transports/ptybridge.py` | `termios` |
+| `drivers/cyberpower_pdu41002/links.py` | `pty` |
+| `drivers/silabs_cp2112/hidraw.py` | `fcntl` |
+| `drivers/ontrak_adu218/usbfs.py` | `fcntl` |
+
+On Windows these raise `ModuleNotFoundError` during **collection**, so pytest
+aborts before running anything — 15 collection errors on `master` and *zero*
+assertions evaluated. That is not a test failure and must not be read as one: a
+Windows row says nothing whatever about whether the code works.
+
+This is deliberate rather than an oversight. The imports are load-bearing: the
+transports genuinely are ptys and USBDEVFS/hidraw ioctls, so there is no
+cross-platform implementation to fall back to, and a guarded import would only
+move the failure from collection to the first call. Every device on this bench
+hangs off a Linux host (an Arduino Uno Q), so no Windows target exists for any
+of them.
+
+**2. `ruff` fails on `master` itself** — **1198 findings** at CI's scope
+(`ruff check src tests scenarios`) under ruff 0.16.3, a much newer ruff than the
+config was written against. Dominated by one rule: 538 × `UP045`
+(`Optional[X]` → `X | None`), then 315 × `F401`, 48 × `N806`, 24 × `UP037`,
+20 × `E402`.
+
+This is why lint claims in this repo compare **the set of rule codes against a
+`master` worktree** and never counts. The count is not merely uninformative, it
+is ambiguous: the same tree yields 1105 / 1197 / 1198 / 1262 depending on whether
+`tests` and `scenarios` are included, so "N ruff errors" identifies nothing
+unless the scope is stated. Match CI's scope, diff the *set of rule codes*
+against `master`, and treat a new code as the signal — a higher count under the
+same codes is just more instances of a baseline nobody has cleared.
+
+**3. The Python 3.9 row fails at `Install`**, before ruff or pytest is reached,
+so it evaluates nothing. `pyproject.toml` declares `requires-python = ">=3.9"`
+but the `[mcp]` extra pins `mcp>=1.0,<2`, and `mcp` itself requires `>=3.10` —
+pip reports `Could not find a version that satisfies the requirement mcp<2,>=1.0
+(extra == "mcp")` and stops. So the declared 3.9 support has never been
+installable with extras. That is a packaging contradiction, not a code defect.
+
+**4. The Ubuntu rows fail for want of a VISA backend.** On `master`:
+`1 failed, 2114 passed, 6 skipped, 111 errors`, every error the same cause —
+`Could not locate a VISA implementation. Install either the IVI binary or
+pyvisa-py.` The workflow installs `[bench-visa]` (which brings `pyvisa` but not a
+backend) on the stated grounds that the hardware-free tests are all mocks. They
+are not: the errors land on `tests/test_sim_loopback.py`, where a real driver is
+constructed and reaches `ResourceManager()` before any mock intervenes. Note that
+`pyvisa-py` is declared in no extra in `pyproject.toml` at all — § N-5 treats it
+as an operator install. Environmental, and unrelated to the three above.
+
+**Consequence for reviewers, and the trap.** A red matrix is the settled state,
+so "CI is red" carries no information here — which means a genuine regression
+would be **invisible**, hidden among failures everyone has learned to ignore.
+Until the matrix is fixed, comparing a branch against `master` means diffing the
+failures *module by module*, not glancing at job names. Concretely: `master`
+reports 15 Windows collection errors and a branch adding an `fcntl`-importing
+driver reports 18; the delta is that driver's three test modules, cause
+`ModuleNotFoundError: No module named 'fcntl'`, i.e. three new instances of an
+established pattern rather than a new failure mode.
+
+Fixing it properly is a repo-wide change — decide what the Windows rows are for,
+settle the ruff baseline, resolve the 3.9 packaging claim, and install
+`pyvisa-py` in CI — and it is tracked in [`ROADMAP.md`](ROADMAP.md) rather than
+being bolted onto whichever driver PR happens to notice.
+
 ## What's not in this list
 
 Things we **don't** consider limits — they're just facts:

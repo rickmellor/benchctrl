@@ -147,6 +147,79 @@ a network where a tunnel isn't practical.
 
 ## Foundation hardening
 
+### Make the CI matrix meaningful again
+
+**Status**: every GitHub Actions run on `master` has failed for at least the
+last eight commits, from four unrelated pre-existing causes. Recorded in
+[`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) § N-7 with the module table. They
+are independent, which is the reason none has been fixed: clearing any one
+leaves the matrix red, so no single piece of work is visibly worth doing.
+
+**Why it matters more than it looks.** The cost is not the red mark — it is that
+a red matrix carries no information, so a *genuine* regression would be
+invisible among failures everyone has learned to skip. Right now comparing a
+branch against `master` requires diffing collection errors module by module.
+
+**Scope when picked up**, four separable pieces — and they must be done together
+to produce any signal at all:
+
+- **Windows collection.** Five modules import POSIX-only stdlib at module
+  scope — `sim/loopback.py`, `transports/ptybridge.py`,
+  `drivers/cyberpower_pdu41002/links.py`, `drivers/silabs_cp2112/hidraw.py`,
+  `drivers/ontrak_adu218/usbfs.py`. The imports are load-bearing (real ptys,
+  real USBDEVFS/hidraw ioctls), so the fix is **not** to make them optional —
+  it is to decide what Windows CI is *for*. Cheapest honest answer: drop
+  `windows-latest` from the matrix, since every device on this bench hangs off a
+  Linux host and no Windows target exists. If Windows must stay, the modules
+  need platform guards *and* their tests need `skipif`, which is more surface to
+  maintain than the coverage is worth.
+- **The ruff baseline.** 1198 findings on `master` at CI's scope under ruff
+  0.16.3, far newer than the config was written for. It is concentrated enough to
+  be tractable: 538 are `UP045` (`Optional[X]` → `X | None`) and 315 are `F401`,
+  so ~71% is two mechanical rules, and `--fix` handles a large share. `UP045` is
+  safe to apply *despite* `target-version = "py39"` — it fires because 83 of the
+  100 modules in `src/` carry `from __future__ import annotations`, which is what
+  makes `X | None` legal in an annotation on 3.9, and ruff will not offer the fix
+  where it is not. So this piece is genuinely independent of the 3.9 decision
+  below. The alternative is to pin ruff to the version the config assumes and
+  defer the sweep. Until it is
+  cleared, lint claims must compare rule *codes* against a `master` worktree at
+  the same scope, never counts: the same tree gives 1105 / 1197 / 1198 / 1262
+  depending on which directories are passed.
+- **The 3.9 `Install` step**, which fails before ruff or pytest is reached, so that
+  row tests nothing at all. The cause is a **packaging** contradiction rather than
+  a code defect: `pyproject.toml` declares `requires-python = ">=3.9"`, but the
+  `[mcp]` extra pins `mcp>=1.0,<2` and `mcp` itself requires `>=3.10`, so pip
+  reports `Could not find a version that satisfies the requirement mcp<2,>=1.0
+  (extra == "mcp")` and stops. The 3.9 promise has therefore never been
+  installable with extras. Two honest resolutions, and it is a maintainer call
+  which: raise `requires-python` to `>=3.10` and drop 3.9 from the matrix, or make
+  `mcp` conditional (`mcp>=1.0,<2; python_version >= "3.10"`) and accept that on
+  3.9 the MCP server is simply absent. Whichever is chosen, the *claim* in
+  `pyproject.toml` and the matrix row should agree — today they do not. Note the
+  tooling has already half-decided: `[tool.ruff] target-version = "py39"` but
+  `[tool.mypy] python_version = "3.10"`, so the two linters are checking against
+  different language levels. Settle all three in one edit.
+- **The Ubuntu rows need a VISA backend, and a comment in the workflow says they
+  don't.** `1 failed, 2114 passed, 6 skipped, 111 errors` on `master`, every
+  error one cause: `Could not locate a VISA implementation. Install either the
+  IVI binary or pyvisa-py.` The install step already fetches `[bench-visa]` and
+  then explains why it stops there — *"Hardware-free tests use mock objects; we
+  install `[bench-visa]` for the pyvisa Python module but don't install a VISA
+  backend, which the mocks don't need."* That assumption is **false**, and the
+  errors say where: they land on `tests/test_sim_loopback.py`, i.e. the
+  simulator tests, which construct a real driver and so reach `ResourceManager()`
+  before any mock intervenes. So this is a stale comment rather than a forgotten
+  line, and `pyvisa-py` is declared in **no** extra in `pyproject.toml` — § N-5
+  documents it as something the operator installs by hand. Two ways out: add
+  `pyvisa-py` to the CI install, or give the sim tests a backend-free path so the
+  comment becomes true. Cheapest of the four by a wide margin and the only one
+  that turns a currently-red row *green*, so it is the sensible place to start.
+
+Deliberately **not** bundled into a driver PR: it touches four drivers, the lint
+config, the packaging metadata and the workflow, and would dwarf the diff of
+whichever driver happened to notice it.
+
 ### Strict mypy
 
 **Status**: `mypy src` runs with `check_untyped_defs = true` but not
