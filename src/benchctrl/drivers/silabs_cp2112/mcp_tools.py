@@ -133,7 +133,9 @@ def cp2112_line_states() -> dict:
                 "direction": "output" if s.is_output else "input",
                 "drive": "open-drain" if s.open_drain else ("input" if not s.is_output else "push-pull"),
                 "level": int(s.level),
-                "asserted": s.asserted if s.is_output else None,
+                # None for an input: the property carries that now, so the
+                # is_output guard that used to live here would be dead code.
+                "asserted": s.asserted,
                 "alternate_function": s.alternate_function,
                 "allowed": i in dev.allowed_lines,
             }
@@ -150,7 +152,8 @@ def cp2112_line_state(index: int) -> dict:
         "direction": "output" if s.is_output else "input",
         "open_drain": s.open_drain,
         "level": int(s.level),
-        "asserted": s.asserted if s.is_output else None,
+        # None for an input; see cp2112_line_states.
+        "asserted": s.asserted,
         "alternate_function": s.alternate_function,
     }
 

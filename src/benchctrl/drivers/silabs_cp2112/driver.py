@@ -184,8 +184,28 @@ class CP2112LineState:
         return self.is_output and not self.push_pull
 
     @property
-    def asserted(self) -> bool:
-        """True when the line is being pulled toward ground (active-low sense)."""
+    def asserted(self) -> Optional[bool]:
+        """True when *we* are pulling this line toward ground (active-low sense).
+
+        ``None`` for an input, and the guard is the point rather than tidiness.
+        Without it, an input sitting on a net that something **else** is holding
+        low reports ``asserted=True`` — which reads as "we are holding this DUT
+        in reset" when we are holding nothing and merely observing a third
+        party. On a reset line that is the most expensive possible confusion,
+        because it invites a caller to "release" a line it never held and
+        conclude the target should now be running.
+
+        ``level`` is still there for anyone who wants the raw latch, with the
+        high-Z caveat in :py:meth:`CP2112.read_levels` attached. This property
+        answers a narrower question: is this driver asserting the line?
+
+        Found on hardware. Both call sites in ``mcp_tools.py`` had independently
+        written ``s.asserted if s.is_output else None`` to compensate, which is
+        the tell — a property every caller has to correct has the wrong
+        contract, and the next caller would not have known to.
+        """
+        if not self.is_output:
+            return None
         return not self.level
 
 
@@ -449,8 +469,16 @@ class CP2112:
             alternate_function=ALTERNATE_FUNCTIONS.get(line),
         )
 
-    def line_is_asserted(self, index: int) -> bool:
-        """True when the line is pulled toward ground (active-low sense)."""
+    def line_is_asserted(self, index: int) -> Optional[bool]:
+        """True when *we* are pulling the line toward ground (active-low sense).
+
+        ``None`` for an input, propagated from
+        :py:attr:`CP2112LineState.asserted` rather than flattened to ``False``.
+        Flattening would be worse than the bug it hides: "nobody is asserting
+        this" and "we cannot tell, because this pin is an input" are different
+        facts, and only the second one means the caller is asking the wrong
+        object about the state of a reset line.
+        """
         return self.read_line_state(index).asserted
 
     # -- writes (all names carry a dispatch mutator prefix) -------------
@@ -563,9 +591,18 @@ class CP2112:
 
         after = self.read_line_state(line)
         if after.asserted != asserted:
+            # Three outcomes, not two. ``asserted`` is None when the pin came
+            # back as an *input*, which is a different fault from a line that
+            # would not move — and naming it "released" would be a false claim
+            # about the level on a reset line. It should be unreachable (§N-4
+            # gives one writer per device), so if it ever fires the message has
+            # to say what was actually seen rather than the nearest bool.
+            if after.asserted is None:
+                seen = "as an input, so it is no longer driven at all"
+            else:
+                seen = "asserted" if after.asserted else "released"
             raise CP2112VerifyError(
-                f"GPIO.{line} read back "
-                f"{'asserted' if after.asserted else 'released'} after asking for "
+                f"GPIO.{line} read back {seen} after asking for "
                 f"{'asserted' if asserted else 'released'}. If this line is "
                 f"externally driven, the CP2112 cannot pull it and open-drain "
                 f"cannot force it."

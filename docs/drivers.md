@@ -1252,8 +1252,21 @@ where a mistake holds a DUT in reset indefinitely. The whole API says
 | **asserted** | the pin pulls the net to 0 V | the target is **held in reset** |
 | **released** | the pin is high-Z; the net floats to VIO | the target **runs** |
 
-`CP2112LineState.asserted` is therefore `not level`, and it is `None` for
-an input, because an input asserts nothing.
+`CP2112LineState.asserted` is therefore `not level` — but only for an
+**output**. For an input it is `None`, and so is `line_is_asserted()`.
+
+That `None` is not tidiness, and getting it wrong was the one defect real
+hardware found in this driver. `asserted` answers "are *we* pulling this
+line down?", not "is this net low?". An input sitting on a net that
+something else holds low would otherwise report `asserted=True` — which
+reads as "we are holding this DUT in reset" while the driver holds nothing
+and is merely watching a third party. A caller believing that would
+"release" a line it never held and conclude the target is running.
+
+`None` rather than `False` for the same reason: "nobody is asserting this"
+and "this pin is an input, so the question does not apply" are different
+facts, and only the second means you are asking the wrong object about the
+state of a reset line.
 
 ### Open-drain is the only drive mode, and that is a safety property
 

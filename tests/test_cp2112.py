@@ -185,12 +185,70 @@ class TestOpenDrainIsTheOnlyDriveMode:
                 )
 
 
+class TestAssertedIsUnknownForAnInput:
+    """``asserted`` answers "are *we* holding this line", not "is it low".
+
+    Found on real hardware, on the one pin a DMM was clamped to. The property
+    used to be ``not self.level`` unconditionally, so an **input** sitting on a
+    net something else pulls low reported ``asserted=True`` — "we are holding
+    this DUT in reset" while the driver was holding nothing at all. The cost is
+    specific rather than theoretical: a caller reading that would "release" a
+    line it never held and conclude the target is now running.
+
+    The sim can reproduce it because it models a net (``pull_downs``) rather
+    than echoing the driver's own writes back.
+    """
+
+    def test_an_input_on_an_externally_held_net_is_not_asserted_by_us(self) -> None:
+        dev, _ = make_device(pull_downs=1 << 3, allowed_lines=(3,))
+        state = dev.read_line_state(3)
+        assert state.is_output is False
+        assert state.level is False, "the fixture is meant to hold this net low"
+        assert state.asserted is None, (
+            "an input reading low means somebody else is holding the net; "
+            "reporting asserted=True claims this driver is holding a DUT in reset"
+        )
+
+    def test_open_drain_is_the_correctly_guarded_twin(self) -> None:
+        """``open_drain`` always guarded on ``is_output``; ``asserted`` did not.
+
+        Kept as a test because that asymmetry is what made the bug invisible in
+        review: the two properties sit adjacent and one of them was already
+        right.
+        """
+        dev, _ = make_device(pull_downs=1 << 3, allowed_lines=(3,))
+        assert dev.read_line_state(3).open_drain is False
+
+    def test_line_is_asserted_propagates_the_unknown(self) -> None:
+        """Not flattened to False.
+
+        "nobody is asserting this" and "this pin is an input, so the question
+        does not apply" are different facts, and only the second one means the
+        caller is interrogating the wrong object about a reset line.
+        """
+        dev, _ = make_device(pull_downs=1 << 3, allowed_lines=(3,))
+        assert dev.line_is_asserted(3) is None
+
+    def test_becoming_an_output_makes_the_question_answerable(self) -> None:
+        """The same pin, same net: configuring it as an output is what turns
+        None into a real answer. Guards against a fix that returned None too
+        eagerly and left the property useless."""
+        dev, _ = make_device(pull_downs=1 << 3, allowed_lines=(3,))
+        assert dev.line_is_asserted(3) is None
+        dev.set_line_mode(3, output=True)
+        dev.set_line_asserted(3, True)
+        assert dev.line_is_asserted(3) is True
+
+
 class TestAssertAndRelease:
     def test_asserting_pulls_the_line_low(self) -> None:
         dev, sim = make_device()
         dev.set_line_mode(2, output=True)
         state = dev.set_line_asserted(2, True)
-        assert state.asserted
+        # ``is True`` rather than truthiness: ``asserted`` is Optional[bool] and
+        # None means "this pin is an input, we are holding nothing". A truthy
+        # form would keep passing if the state ever came back as an input.
+        assert state.asserted is True
         assert not state.level
         assert not (sim.latch & (1 << 2))
 
@@ -199,7 +257,10 @@ class TestAssertAndRelease:
         dev.set_line_mode(2, output=True)
         dev.set_line_asserted(2, True)
         state = dev.set_line_asserted(2, False)
-        assert not state.asserted
+        # ``is False``, not ``not ...``: None also passes the truthiness form,
+        # and None here would mean the pin reverted to an input — released in
+        # effect but for a reason this test is not making a claim about.
+        assert state.asserted is False
         assert state.level
         assert sim.latch & (1 << 2)
 
@@ -223,7 +284,7 @@ class TestAssertAndRelease:
         dev.set_line_asserted(2, True)
         dev.set_line_mode(3, output=True)
         dev.set_line_asserted(3, False)
-        assert dev.read_line_state(2).asserted, "GPIO.2 must still be held"
+        assert dev.read_line_state(2).asserted is True, "GPIO.2 must still be held"
 
     def test_driving_an_unconfigured_input_is_refused(self) -> None:
         """The chip ignores such a write, which would look like a dead line."""
@@ -259,7 +320,7 @@ class TestResetPulse:
         dev, sim = make_device()
         dev.set_line_mode(2, output=True)
         state = dev.trigger_reset_pulse(2, duration_s=MIN_PULSE_S)
-        assert not state.asserted, "the line must be released when the pulse ends"
+        assert state.asserted is False, "the line must be released when the pulse ends"
         assert sim.latch & (1 << 2)
 
     def test_the_line_is_released_even_if_the_hold_is_interrupted(self) -> None:
