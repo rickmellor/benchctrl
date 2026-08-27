@@ -8,9 +8,9 @@ by hand for several addenda and was wrong by two. **Not linear:** `97b1e1b` is a
 two-parent merge that brought master's CP2112 driver in, so `--no-merges` gives
 one fewer. Sections 1-12 below were written
 *before* the code and are kept as the design record; where the built driver
-diverges, §5 and §13 say so. **Read §18, then §17, then §16, first on return** —
-those are the bench results; §13 carries the vendor manual's findings and the PA3
-signal measurements.
+diverges, §5 and §13 say so. **Read §19, then §18, then §17, then §16, first on
+return** — those are the bench results; §13 carries the vendor manual's findings
+and the PA3 signal measurements.
 
 **The PR is open:** https://github.com/rickmellor/benchctrl/pull/1, the repo's
 first, `OPEN` and `MERGEABLE`. It was never blocked on the work — `gh` here is
@@ -23,9 +23,11 @@ REST instead (`gh api -X PATCH repos/…/pulls/1`).
 Remaining: **nothing that is mine.** **Every bench item is done.** §16 closed the
 counter map and the eight relays by walking the bench; §17 closed the watchdog
 trip, the last one; §18 is the leftover-sweep that followed and found a real
-coverage regression. The all-eight sweep remains opt-in and optional: all it
-uniquely adds is the simultaneous whole-port mask write, and its gate is the
-operator's to set.
+coverage regression; §19 answers what B1 actually needs and recovers two vendor
+specs. The all-eight sweep remains opt-in and optional: all it uniquely adds is
+the whole-port mask write, its gate is the operator's to set, and it needs **no
+instrument** — see §19, which also separates the two things "simultaneous" was
+being used to mean.
 
 **Resume by reading:** §13 of this file, then
 `tests/fixtures/adu218/README.md` (the measured device behaviour — believe it
@@ -1609,3 +1611,123 @@ hardware-free 12 deselected; `test_bench_adu218.py` 115 passed; ruff clean; boar
 `IN SYNC`, 105 files identical. Recorded in the CHANGELOG — which had to
 **correct its own earlier claim** — and in F-26. The discovery probe was removed
 from host and board.
+
+## 19. Addendum, 2026-08-27 — "simultaneous" meant two things, and B1 needs neither instrument
+
+Rick asked the question this plan should have answered in writing already:
+
+> *"I'm not clear on what B1 needs. Do we want to try toggling all the relays at
+> the same time instead of individually? If we want to measure that I'll have to
+> get the logic analyzer out."*
+
+An offer of real hardware effort deserves a precise answer, and producing one
+exposed that the repo used the word **simultaneous** in six docstrings without
+ever saying which of two claims it was making.
+
+### What B1 is, and why no instrument appears in it
+
+`test_all_eight_relays_switch_on_the_real_device` already does **both** things.
+It walks the eight relays individually (`SKn`/`RKn`, each cross-checked against
+`relay_mask()`), *then* writes the two whole-port masks `0b10101010` and
+`0b01010101` via `set_relay_port`, cross-checking each the same way, then
+`reset_relays()`. So "individually **instead of** together" is a false choice —
+it is not either.
+
+Its check is the device's own `PK` read-back and deliberately **not** a meter,
+for the reason its docstring gives: the bench has one DMM and it is across
+`TEST_RELAY`, so seven of the eight cannot be independently witnessed. That
+makes B1 *weaker* than the bench walk on every relay it covers, and its only
+unique contribution is that the device **accepts a whole-port mask and lands all
+eight bits where the mask says** — a state claim.
+
+### The distinction that was missing
+
+`driver.py`'s *"one `MKddd` is a single simultaneous transition"* is a claim
+about the **command**, not about the contacts:
+
+- eight `SKn`/`RKn` writes are eight USB transfers, so the port demonstrably
+  visits `0b10101000` on the way to `0b10101010`
+- one `MKddd` is one transfer, so it does not
+
+That is load-bearing — it is exactly why `set_relay_port` enforces the allowlist
+on the **whole mask** rather than on the diff, while `set_relay_state` can get
+away with checking only the energising direction.
+
+What it is **not** is a claim about contact-to-contact skew *inside* that one
+command. Verification is a `PK` read of the landed state, which cannot see
+timing at all. The wording was close enough to a timing guarantee that someone
+would eventually cite it for make-before-break ordering, so the driver, the MCP
+tool description (the caller most likely to over-read it) and `docs/drivers.md`
+now all say the skew is unmeasured and unclaimed.
+
+### Why the logic analyzer was declined
+
+The stronger claim — that the eight contacts move within some skew of each other
+— is one **nothing in the repo currently makes**, and two things argue against
+buying it now:
+
+1. **There is no number to check against.** The manual's Relay Outputs table
+   gives ratings, on-state resistance and the part (Panasonic AQZ207 PhotoMOS)
+   but **no switching time**, per-relay or port-wide. Any skew measured would be
+   a recorded observation with no pass/fail.
+2. These are **solid-state** relays, so the spread is opto-coupler turn-on, very
+   likely dominated by the USB HID report boundary rather than by anything the
+   choice of `MKddd` vs `SKn` controls.
+
+Recommended instead, if the claim is ever wanted: two DMM/scope channels across
+two relays on one `MKddd`. Same question, no new instrument.
+
+**B1's actual blocker is unchanged and is not a measurement.**
+`BENCHCTRL_ADU218_SWEEP_ALL=1` energises all eight outputs, and by the flag's
+own skip message that is the operator stating they know what is attached to each
+one. Still Rick's to set.
+
+### Two vendor specs recovered while looking for a switching time
+
+Neither was anywhere in the repo.
+
+**`RELAY_MAX_SWITCH_HZ = 1.0`** — the spec table's *"1 CPS at full load"* plus
+the CAUTION beside it: *"Power dissipation of PhotoMOS relays increases with
+switching speed... The ADU218 is not recommended for PWM applications."*
+Documented and **deliberately not enforced**: the figure is qualified *at full
+load*, and nothing in USB, HID or the ADU command set reports what a contact is
+switching, so a limiter would throttle the dry-contact sweeps that are most of
+this bench's use on the strength of a condition it cannot observe. Worth
+knowing that it **inverts the usual expectation** — the ADU208's *mechanical*
+relays manage 10 CPS, so the solid-state part is the slower one to cycle.
+
+**On-state resistance, 700 mΩ typical / 1.1 Ω maximum.** This corroborates F-27
+*independently of our own bench*, which matters because F-27's wiring conclusion
+previously rested on "the spread has no relation to index" — an inference from
+one bench. Every reading in the eight-relay walk is **15× to 41× the vendor
+maximum**, so by the manufacturer's own number the relay accounts for under 4 %
+of even the **lowest** measurement. The leads dominate by construction, so a
+threshold anywhere in the measured range would have been a threshold on lead
+resistance with the relay spec two orders of magnitude beneath it.
+
+### The test for the unenforced limit needed a clock
+
+First version: eight `set_relay_port` writes, each read back. It passed — and it
+**also passed against a `sleep(1.0 / RELAY_MAX_SWITCH_HZ)` mutant** in the write
+path, which is precisely the change it exists to forbid. A throttle has two
+shapes and only one of them raises: a limiter that *rejects* the fast call is
+caught by a success assertion, while one that *sleeps* to pace it leaves every
+state assertion passing, just slowly.
+
+Fixed by asserting `elapsed < 2.0`, chosen from the two hypotheses rather than as
+a round number — eight transitions at 1 CPS is ~7 s of pacing against
+microseconds on the simulated link, so the ceiling sits an order of magnitude
+clear of **both**. The mutant, held outside the module, now fails it at
+**8.00 s**, with **1 test collected and run** (an rc=0 with nothing selected
+would have read as a pass).
+
+### Verification
+
+`test_bench_adu218.py` **116 passed**; the new test collected under `TestRelays`
+(it was first written into `TestDebounce`, which is the wrong class for a relay
+claim); mutant kills it at 8.00 s vs the 2.0 s ceiling and the module was
+restored and re-checked for the mutant by grep; ruff on the changed files shows
+only the pre-existing `UP045`/`UP037` `Optional`-annotation baseline, and these
+edits add no annotations. Commits `bdaa835` (code, tests, docs, F-27) and
+`9ca2285` (CHANGELOG), both pushed. **No behaviour change** — the driver sends
+exactly what it sent before.
