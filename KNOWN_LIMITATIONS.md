@@ -1274,6 +1274,45 @@ Code reference:
 `tests/fixtures/adu218/counters_live_signal.txt`;
 `tests/test_bench_adu218.py` — `TestCounters`.
 
+### F-27. ADU218 closed-contact resistance is a property of the wiring, not the relay
+
+**No test may assert a resistance threshold, and no test may assume the
+reading is stable within a session.** Both were tried and both produced
+flaky tests on this bench.
+
+*Across relays.* Same meter, same session, identical PhotoMOS parts: **K0
+closed reads 9.483 Ω, K7 closed reads 36.02–36.22 Ω** — nearly 4× apart. The
+excess is lead and clip resistance outside the relay. Any `< 10 Ω` "closed"
+rule derived from K0 calls a perfectly good K7 open.
+
+*Across sessions.* The same closed relay measured 6.14, 10.69, 10.65 and
+9.40 Ω across four sessions, with the step traced to re-seated probes.
+
+*Within a session.* K7 on spring clips drifted **62 → 127 → 61 Ω** over 15
+back-to-back runs of one test, monotonically and then back. A
+same-circuit bound of `hi < lo * 2` worst-cased at **1.80** and failed about
+one suite run in seven.
+
+**Consequence.** The witness keys on the instrument's **overload
+sentinel**: closed is "reads a number at all", open is "out of range".
+That distinction is categorical rather than quantitative and survives any
+amount of contact drift. The residual same-circuit check is an order of
+magnitude, which by measurement does *not* catch a K7↔K0 lead move (ratio
+3.81–6.64) — accepted deliberately, because no threshold separates that
+from the 1.80 the clips produce unaided. Leads on the wrong relay are
+caught instead by the "either the relay is not switching or the leads are
+not across it" assertions, which name both causes because a resistance read
+cannot tell them apart.
+
+**Also unfixable by the volts gate.** The fixture skips when the leads sit
+on a *powered* net (measured 3.392 V after the meter was left on the
+CP2112), but a *different dry* contact reads ~0 V exactly like the right
+one — so a stale `BENCHCTRL_ADU218_RELAY` fails rather than skips.
+
+Code reference:
+`tests/test_hardware_ontrak_adu218.py` — module docstring, the `witness`
+fixture, and `test_the_driver_and_an_independent_instrument_agree_on_every_transition`.
+
 
 ## Harness
 

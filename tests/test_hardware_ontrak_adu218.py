@@ -13,9 +13,9 @@ load-bearing for a design decision that looks arbitrary without it:
 1. **The relays actually move, and the driver's read-back agrees with an
    independent instrument.** ``SKn``/``RKn`` are unacknowledged, so the driver's
    own confirmation is a second read of the same device — self-consistent by
-   construction. The SDM4065A on relay K0 is the only witness that is not the
-   ADU218 talking about itself. This is the test that would catch a driver
-   reporting a switch that never happened.
+   construction. The SDM4065A across the nominated relay is the only witness
+   that is not the ADU218 talking about itself. This is the test that would
+   catch a driver reporting a switch that never happened.
 2. **``USBDEVFS_BULK`` works on an interrupt endpoint.** The whole
    zero-dependency approach rests on it. The kernel source says it is handled;
    this is the run that shows it, on this kernel, on this board.
@@ -50,8 +50,8 @@ The device is found by USB descriptor; there is no address to supply. Every
 test skips if it is not attached.
 
     BENCHCTRL_ADU218_SERIAL     pick one of several  (default: the only one)
-    BENCHCTRL_ADU218_RELAY      the relay to switch  (default 0 — the K0 wired
-                                to the SDM4065A on this bench)
+    BENCHCTRL_ADU218_RELAY      the relay to switch  (default 7 — the K7 wired
+                                to the SDM4065A on this bench as of 2026-08-27)
     BENCHCTRL_ADU218_DMM        DMM VISA resource    (default: autodetect)
     BENCHCTRL_ADU218_INPUT      the driven input line, e.g. ``A3`` (default
                                 ``A3``, the line wired to the SDG1032X here)
@@ -64,17 +64,27 @@ test skips if it is not attached.
 named by ``BENCHCTRL_ADU218_RELAY``, and that relay is also the entire
 ``allowed_relays`` list, so a bug in this file cannot reach another one. They are
 1 A signal SSRs rather than mains contactors — but per ``AGENTS.md``, never
-energise an output without knowing what is attached, and on this bench K0 is a
-DMM sense loop with nothing else across it. Point it elsewhere only after
-checking the wiring.
+energise an output without knowing what is attached, and on this bench that
+relay is a DMM sense loop with nothing else across it. Point it elsewhere only
+after checking the wiring.
+
+**Never assert a resistance threshold**, and K7 is why. Measured on the same
+bench with the same meter: K0 closed reads **9.483 Ω**, K7 closed reads
+**36.02–36.22 Ω** — nearly 4× apart, on identical PhotoMOS parts, because the
+excess is lead and contact resistance outside the relay rather than the relay
+itself. Any ``< 10 Ω`` rule derived from K0 would call a perfectly good K7 open.
+So the witness keys on the instrument's **overload sentinel**: closed is "reads a
+number at all", open is "out of range", and neither claim depends on the wiring's
+series resistance. This is the same reason the K0 reading was allowed to step
++4.55 Ω between sessions without invalidating anything.
 
 The one exception is ``test_all_eight_relays_switch_on_the_real_device``, which
 by its nature energises all eight and is therefore **skipped unless
 ``BENCHCTRL_ADU218_SWEEP_ALL=1``**. Setting that variable is the operator saying
 they know what is on every output. It also has no DMM witness — the bench has one
-meter and it is across K0 — so it checks the driver's own read-back against the
-whole-port mask command, which is a weaker claim than the K0 test's and is
-labelled as such in the test.
+meter and it is across a single relay — so it checks the driver's own read-back
+against the whole-port mask command, which is a weaker claim than the witnessed
+test's and is labelled as such in the test.
 
 The input and counter tests need a signal the bench cannot generate on its own:
 the SDG1032X function generator has no driver yet, so the stimulus is set by hand
@@ -93,7 +103,16 @@ The closed-contact figure is **not** compared against a threshold. The same
 closed relay measured 6.14 Ω, 10.69 Ω, 10.65 Ω and 9.40 Ω across four sessions,
 milliohm-stable *within* each, with the step traced to re-seated screw-clamped
 probes rather than to the relay. Any threshold set from one of those numbers
-misreads the others. What is asserted is the shape that no probe seating can
+misreads the others.
+
+**Nor is within-session stability something to rely on.** That "milliohm-stable"
+observation was K0 on screw clamps; K7 on spring clips is not. Measured over 15
+back-to-back runs of the transition sequence, K7 closed drifted **62 → 127 →
+61 Ω**, monotonically and then back, and the earlier same-circuit bound of
+``hi < lo * 2`` worst-cased at 1.80 — which is why it failed roughly one suite
+run in seven. It is now an order of magnitude, and the reasoning is at the
+assertion. The load-bearing claim was never the number: it is closed-reads-a-
+number versus open-over-ranges, and that survives any amount of clip drift. What is asserted is the shape that no probe seating can
 change: closed reads *a number*, open reads the DMM's **overload sentinel**.
 That sentinel is what makes this a real witness — an open contact is not a large
 resistance, it is an unmeasurable one, so the two states cannot be confused by
@@ -106,6 +125,15 @@ net: a dry contact reads ~0 V open or closed, so this cannot mask a stuck relay,
 but it does turn "the leads got moved" from a bare ``assert None is not None``
 into a sentence naming the actual problem. Measured after the CP2112 work moved
 the meter: 3.392 V standing, unmoved by K0.
+
+That gate has a known blind spot, stated because it decides how much the pass is
+worth: it catches leads on a *powered* net, not leads across a *different dry
+contact*. Another open contact reads ~0 V exactly like the right one, so a stale
+``BENCHCTRL_ADU218_RELAY`` still produces a failure rather than a skip. What the
+relay assertions therefore do is name **both** causes and print the device's own
+read-back — verified by pointing the tests at K5 while the leads sat on K7: both
+witnessed tests fail, and their messages say the leads may be the problem instead
+of accusing the relay.
 
 Two processes cannot hold the SDM4065A at once, and a running ``benchctrl-agent``
 opens it lazily on first claim and then keeps the VISA handle *after* the claim
@@ -141,7 +169,13 @@ HW_SERIAL = os.environ.get("BENCHCTRL_ADU218_SERIAL") or None
 #: The one relay these tests may switch. Deliberately a single int, and
 #: deliberately also the whole allowlist passed to ``open()``, so a bug here
 #: cannot reach a relay the operator did not nominate.
-TEST_RELAY = int(os.environ.get("BENCHCTRL_ADU218_RELAY", "0"))
+#:
+#: The default tracks where the DMM actually is on this bench, which moves. It
+#: was K0; the operator moved the leads to **K7** on 2026-08-27. A stale default
+#: does not fail loudly -- it makes the wiring gate below skip three tests -- so
+#: this constant is the one place to change, and the gate is what catches it
+#: being wrong.
+TEST_RELAY = int(os.environ.get("BENCHCTRL_ADU218_RELAY", "7"))
 
 #: Settling time before the witness reads. The measured relay round trip is
 #: ~17 ms and the DMM's own reading takes longer than that, so this is generous
@@ -419,9 +453,21 @@ def test_the_driver_and_an_independent_instrument_agree_on_every_transition(
         assert got is expected
         measured = witness()
         if expected:
+            # Name both causes, because this evidence cannot separate them. An
+            # SSR that never closed and leads across a *different* dry contact
+            # both over-range, and the DC-volts gate in the fixture does not
+            # catch the second: another open contact reads ~0 V exactly like the
+            # right one. Asserting "the switch did not happen" here accused a
+            # working K7 when the leads were still on K0. Report the device's own
+            # read-back too -- it is not independent evidence, but it is the fact
+            # that tells the operator which of the two to go and look at.
             assert measured is not None, (
-                f"driver reports relay {TEST_RELAY} energised but the DMM "
-                f"still over-ranges; the switch was claimed and did not happen"
+                f"driver reports relay {TEST_RELAY} energised (read-back "
+                f"{adu.relay_state(TEST_RELAY)}) but the DMM still over-ranges. "
+                f"Either that relay is not switching, or the leads are not "
+                f"across it -- both over-range, and this test cannot tell them "
+                f"apart. Check BENCHCTRL_ADU218_RELAY against where the leads "
+                f"actually are"
             )
             closed_readings.append(measured)
         else:
@@ -434,12 +480,38 @@ def test_the_driver_and_an_independent_instrument_agree_on_every_transition(
     # every assertion above was the None branch and this test proved nothing.
     assert len(closed_readings) == 2
 
-    # No threshold — see the module docstring. What is checked is that the two
-    # closed readings are the same relay and not two different circuits: the
-    # within-session spread is milliohms, so a factor-of-two step would mean
-    # something other than contact seating changed.
+    # No threshold — see the module docstring. What is checked is that both
+    # closed readings are the *same circuit*, not two different ones.
+    #
+    # The bound is deliberately an order of magnitude, and the factor of 2 it
+    # replaces is why. That factor came with the comment "the within-session
+    # spread is milliohms", which was true of K0's screw clamps and is false of
+    # K7's spring clips: measured over 15 back-to-back runs of this exact
+    # sequence, K7 closed drifted 62 -> 127 -> 61 Ohm, monotonically and then
+    # back, with a worst within-trial ratio of 1.80 against a limit of 2.00. So
+    # the old bound was measuring the clips and it failed once in ~7 suite runs.
+    #
+    # Widening it costs little, because this assertion was never the load-bearing
+    # one: the *witness* is the overload sentinel, and closed-vs-open is what the
+    # test actually proves.
+    #
+    # Be honest about what is left, though. At an order of magnitude this no
+    # longer catches the leads moving between two *similar* points -- checked
+    # against real figures from this bench, a K7 -> K0 move is a ratio of 3.81
+    # and a K0 -> K7 move 6.64, and neither trips it; only something like a
+    # different net entirely (36 -> 600 Ohm, ratio 16.7) does. That coverage was
+    # already illusory rather than real: a bound the clips can breach on their
+    # own reports lead movement that did not happen, and there is no threshold
+    # that separates 3.81 from a 1.80 the hardware produces unaided. The thing
+    # that genuinely catches a lead on the wrong relay is the pair of "either the
+    # relay is not switching or the leads are not across it" assertions above,
+    # which fire whenever the nominated relay is not the one being measured.
     lo, hi = min(closed_readings), max(closed_readings)
-    assert hi < lo * 2, f"closed-contact readings disagree: {closed_readings}"
+    assert hi < lo * 10, (
+        f"the two closed-contact readings are not the same circuit: "
+        f"{closed_readings} Ohm. Contact drift alone does not do this — the "
+        f"leads most likely moved between the two closures"
+    )
 
 
 def test_reset_relays_reaches_a_genuinely_open_contact(adu, witness):
@@ -450,9 +522,21 @@ def test_reset_relays_reaches_a_genuinely_open_contact(adu, witness):
     the same claim checked against an instrument that has no stake in it.
     """
     adu.set_relay_state(TEST_RELAY, True)
-    assert witness() is not None  # the control: the contact really was closed
+    # The control: without this, the test below passes on a meter that reads
+    # over-range for any reason at all -- including leads on the wrong contact.
+    # It needs its own message for the same reason as the transition test: a bare
+    # `assert None is not None` reads as a relay fault when it is equally likely
+    # to be the wiring, and the two are indistinguishable from a resistance read.
+    assert witness() is not None, (
+        f"cannot close relay K{TEST_RELAY} onto the meter, so the open-contact "
+        f"claim below would be unfalsifiable. Either that relay is not switching "
+        f"or the leads are not across it; check BENCHCTRL_ADU218_RELAY"
+    )
     assert adu.reset_relays() == 0
-    assert witness() is None
+    assert witness() is None, (
+        f"reset_relays() reported success but K{TEST_RELAY} still conducts — "
+        f"the safe state was claimed and not reached"
+    )
 
 
 def test_the_allowlist_holds_on_hardware_and_still_permits_de_energising(adu):
@@ -491,10 +575,10 @@ def test_all_eight_relays_switch_on_the_real_device(adu_all_relays):
     an ad-hoc RPC sweep that was not codified — so nothing would have caught a
     regression on relays 1-7. That gap is what this closes.
 
-    No DMM witness: the bench has one meter and it is across K0, so seven of the
-    eight cannot be independently witnessed. The device's own read-back is
+    No DMM witness: the bench has one meter and it is across ``TEST_RELAY``, so
+    seven of the eight cannot be independently witnessed. The device's own read-back is
     therefore the check here, which is weaker — deliberately so, and stated. The
-    *witnessed* claim stays the K0 test above; this one proves the driver
+    *witnessed* claim stays the single-relay test above; this one proves the driver
     addresses all eight distinctly, and the mask cross-check is what makes
     "distinctly" mean something.
     """

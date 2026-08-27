@@ -231,6 +231,41 @@ unplugged instrument. The witness now borrows the meter *through* the agent
 in that case, the way `tests/test_hardware_cp2112.py` does by design, rather
 than requiring the whole bench be safe-stopped to run one file.
 
+The leads then moved again — to **K7** — and that exercised the volts gate's
+blind spot: it catches a *powered* net, but another **dry** contact reads ~0 V
+exactly like the right one, so a stale `BENCHCTRL_ADU218_RELAY` fails rather
+than skips. Both witnessed relay assertions now name **both** causes ("either
+that relay is not switching, or the leads are not across it — this test cannot
+tell them apart") and print the device's own read-back to say which to go and
+look at. `test_reset_relays_reaches_a_genuinely_open_contact`'s control read was
+a bare `assert witness() is not None` with no message at all; it has one now,
+because that assertion failing is what makes the open-contact claim below it
+unfalsifiable. Verified by pointing the suite at K5 with the leads on K7: both
+tests fail with the wiring named. `TEST_RELAY`'s default moved 0 → 7 to match
+the bench.
+
+**K7 is also the strongest evidence yet for refusing a resistance threshold.**
+Same meter, same session, identical PhotoMOS parts: K0 closed reads
+**9.483 Ω**, K7 closed reads **36.02–36.22 Ω** — nearly 4× apart, because the
+excess is lead and contact resistance *outside* the relay. Any `< 10 Ω` rule
+derived from K0 would call a perfectly good K7 open. Keying on the overload
+sentinel instead is what makes the witness survive being re-wired at all.
+
+Re-wiring also exposed a **second flaky assertion** in the same test, and it
+failed for the reason the first one did: a bound calibrated on the old wiring.
+`hi < lo * 2` on the two closed readings carried the comment "the within-session
+spread is milliohms" — true of K0's screw clamps, false of K7's spring clips.
+Measured over 15 back-to-back runs of that exact sequence, K7 closed drifted
+**62 → 127 → 61 Ω**, monotonically and then back, worst within-trial ratio
+**1.80** against a limit of 2.00 — so it failed about one suite run in seven.
+Now an order of magnitude, with what that gives up written down rather than
+implied: at ×10 a K7→K0 lead move (ratio 3.81) no longer trips it. That
+coverage was illusory anyway, since no threshold separates 3.81 from a 1.80 the
+clips produce unaided; the assertions that actually catch a lead on the wrong
+relay are the two above it. 6 consecutive full-suite runs green after. New
+entry **F-27** collects every closed-contact resistance figure measured on this
+bench and states why no test may assert a threshold or assume stability.
+
 `test_a_driven_input_line_reads_high_and_only_its_own_counter_moves` was
 **flaky on real hardware, 2 passes in 6 runs**, and the cause was one
 `input_mask()` read asserted high on a line toggling at 10 Hz — a coin flip
