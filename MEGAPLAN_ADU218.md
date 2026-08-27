@@ -8,7 +8,7 @@ the design record; where the built driver diverges, §5 and §13 say so. **Read
 measurements, and the two committed-but-never-run bench tests.
 
 Remaining: open the PR (the operator's, since `gh` here has READ only), then the
-two gated hardware tests and PORT B's counter map.
+two gated hardware tests. **PORT B's counter map is no longer open** — §15.
 
 **Resume by reading:** §13 of this file, then
 `tests/fixtures/adu218/README.md` (the measured device behaviour — believe it
@@ -1080,8 +1080,11 @@ toward the ceiling unattended.
 
 ### What is still unwitnessed
 
-- **PORT B's counter map.** Only PA3 has been driven, so counters 4-7 → PB0-PB3
-  still rests entirely on the Table 1 image.
+- ~~**PORT B's counter map.**~~ **Closed 2026-08-27** — see section 15.
+- **Six of the eight input lines.** PA3 and PB2 are driven; PA0-PA2 and
+  PB0/PB1/PB3 are not. One line per port is what the offset claim needs, and
+  there is one generator, so this is a diminishing return rather than a gap in
+  the argument.
 - **De-bounce's effect**, per the above.
 - **Seven of the eight relays, independently.** The bench has one DMM and it sits
   across a single relay — `TEST_RELAY`, which is K7 since 2026-08-27. The
@@ -1169,3 +1172,103 @@ Verification of the whole change: **6 consecutive full hardware runs at 10 passe
 / 2 skipped**, ruff rule/count profile identical to `HEAD` for the changed file,
 the file still collecting hardware-free (12 skipped), and the board `--check`
 IN SYNC at 105 files identical.
+
+## 15. Addendum, 2026-08-27 — the generator moved to PORT B
+
+The operator moved the SDG1032X off PA3 to "a PB input" without saying which,
+which turned the last open item on this plan into a measurement rather than a
+confirmation. That framing matters: a probe that asks "is it on PB0?" answers a
+question about my guess. The probe written instead sampled **all eight lines and
+read all eight counters**, so the result is *which one moved*.
+
+### The finding
+
+| observation | figure |
+|---|---|
+| driven line | **PB2** — 57 high / 63 low over 120 samples |
+| the other seven lines | stuck low, all 120 samples |
+| counter that moved | **6**, and only 6 of the eight |
+| rate | 201 events in 20.13 s = **9.987/s** against a 10 Hz wave |
+| de-bounce at the time | `DB = 1` → 1.0 ms |
+
+So **PB2 → counter 6**, and `4 + 2 = 6` confirms the Table 1 image's offset by
+measurement.
+
+### Why PORT B was the reading that mattered
+
+The PA3 result — counter 3 for line 3 — is consistent with an offset of 4, an
+offset of 3, and an offset of 0. On PORT A the counter index simply *equals* the
+line number, so no PORT A measurement can distinguish them. PB2 → 6 is the first
+reading that can, and a wrong offset would have shown counter 4, 5 or 7.
+
+Pinned as a mutation rather than left as an argument: a copy of the hardware
+suite with the fixture's offset forced from `else 4` to `else 3`, held in `/tmp`
+**outside** the module so the real file was never mutated, ran against B2 and
+gave **3 failed, 9 deselected** — the test count asserted, not just the return
+code, and the failure was `assert (64 & (1 << 5))`, i.e. the mutated bit index
+against the real one, not an unrelated error.
+
+### The control is part of the result
+
+PA3 read low across all 120 samples and counter 3 sat frozen at 25039 across the
+20 s window. Without that, "counter 6 moved" is equally consistent with every
+counter counting regardless of wiring, or with the old stimulus still being
+measured. A delta of exactly 0 on the line the generator *left* is what makes
+this the moved lead.
+
+### PORT B's bit ordering, witnessed for the first time
+
+The four input commands order their bits differently, and until now every check
+had been against PORT A:
+
+| command | ordering | PB2 expectation |
+|---|---|---|
+| `RPy` → `input_states()` | MSB-first **text**, reversed by the driver | index 2 |
+| `Py` → `input_port_mask('B')` | LSB-weighted decimal, no reordering | `0b0100` |
+| `PI` → `input_mask()` | both ports, **PORT A in the LOW nibble** | `0b01000000` |
+| `RPyn` → `input_state('B', n)` | per line | line 2 |
+
+All four agreed. The `RPy` reversal is the one worth dwelling on: getting it
+wrong makes PB2 read as line 1, an off-by-three that produces the *correct*
+answer for exactly the all-zero reply every unwired bench returns. The earlier
+sweep's "PORT B ever-high = []" was therefore an absence of evidence, not
+evidence of correctness.
+
+**Sampling method is load-bearing.** Each command was sampled 90 times and the
+**union** of high bits asserted **equal** to the single expected bit. A single
+read of a 10 Hz line catches the low half about half the time — precisely the
+flake fixed earlier in this branch — and my first probe hit it, catching PB2 on
+`input_port_mask('B')` and missing it on the other two in the same instant. That
+is a disagreement between commands only if you believe one read. And "ever high"
+alone would pass on a reply with every bit set, so equality is what makes it a
+check.
+
+### Three ways the suite's PORT B path was shown to be real
+
+1. **It passes**: `BENCHCTRL_ADU218_INPUT=B2` → **10 passed / 2 skipped**, the
+   only skips being the two operator gates.
+2. **It falsifies**: pointed at an undriven B1, the three counter tests *skip*
+   with `PB1 is not toggling (read only {False})` rather than false-passing.
+3. **It kills a mutant**: the offset mutation above.
+
+### Changes landed with it
+
+- `BENCHCTRL_ADU218_INPUT` now defaults to **`B2`**, tracking the bench the way
+  `BENCHCTRL_ADU218_RELAY` tracks K7. A stale default skips with the line named,
+  so it cannot silently pass.
+- The `counted` fixture's spec parsing was **defensive-guard bugged**: it did
+  `int(spec[1:])` *before* the `pytest.skip` that exists for a malformed value,
+  so `BENCHCTRL_ADU218_INPUT=XY` raised `ValueError` from the fixture instead of
+  skipping — the guard could not fire for most of the inputs it was written to
+  catch. Now one `re.fullmatch(r"[AaBb][0-3]", spec)` before any parsing.
+- F-26, the module docstring, the fixture docstring and the CHANGELOG now say
+  the map is measured on both ports, and say which lines are *not* driven, so
+  "witnessed" is not read as "exhaustive".
+
+### Gotcha worth keeping
+
+Running a probe through the agent (`RemoteClient.attach`) makes the agent open
+the device lazily and **hold interface 0**, so the next direct-open hardware run
+skips all 12 tests with "interface 0 is busy". That is N-4's single-writer guard
+working, not a regression — but it presents as a whole suite going dark. `-rs`
+gives the reason; `sudo -n systemctl restart benchctrl-agent` releases it.

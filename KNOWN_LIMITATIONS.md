@@ -1253,8 +1253,20 @@ in a "Table 1: Event Counter Port Assignments" **image**, which `pdftotext`
 drops entirely — the extraction renders blank space between the caption and
 the following paragraph. So the mapping the driver relies on (counters 0-3
 → PA0-PA3, 4-7 → PB0-PB3) could not be read from the document at all. It
-is measured instead: driving PA3 moved counter 3 and only counter 3, with
-the other seven flat. The PORT B half remains unwitnessed on hardware.
+is measured instead, and **now on both ports**: driving PA3 moved counter 3
+and only counter 3, and moving the generator to PB2 moved counter 6 and only
+counter 6 (201 events in 20.13 s = 9.987/s against a 10 Hz wave, with PA3
+gone quiet and counter 3 frozen — the control that proves the lead moved
+rather than the measurement repeating). That second reading is what confirms
+the **offset** of 4 rather than assuming it: a wrong offset would have shown
+counter 4, 5 or 7. Verified as a mutation: forcing the offset to 3 fails all
+three counter tests.
+
+**Two of the four lines on each port are still untested**, so the map is
+witnessed at its ends (PA3, PB2) rather than exhaustively. Point
+`BENCHCTRL_ADU218_INPUT` at whichever line the generator is on; the fixture
+skips with the line named if it is not toggling, so a stale setting cannot
+false-pass.
 
 **Counters count cycles, not edges** — one count per low-to-high
 transition. Verified rather than assumed, because the two hypotheses differ

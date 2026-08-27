@@ -28,7 +28,11 @@ load-bearing for a design decision that looks arbitrary without it:
    counter counts *cycles, not edges*. Both need an external signal source, so
    they skip without one. The counter-to-input map is documented **only in a
    Table 1 image** that the manual's text layer omits entirely, so it is either
-   measured here or it is unverified.
+   measured here or it is unverified. It has now been measured on **both
+   ports** — PA3 → counter 3 and PB2 → counter 6 — and the second reading is
+   what pins the PORT B *offset* rather than assuming it, since a wrong offset
+   would have moved counter 4, 5 or 7. Two lines per port remain untried, so
+   the map is witnessed at its ends and not exhaustively.
 
 6. **The watchdog actually trips, and the DMM sees the contact open** — the
    claim the interlock design rests on, since everything else about the watchdog
@@ -54,7 +58,8 @@ test skips if it is not attached.
                                 to the SDM4065A on this bench as of 2026-08-27)
     BENCHCTRL_ADU218_DMM        DMM VISA resource    (default: autodetect)
     BENCHCTRL_ADU218_INPUT      the driven input line, e.g. ``A3`` (default
-                                ``A3``, the line wired to the SDG1032X here)
+                                ``B2`` — where the SDG1032X sits on this bench
+                                as of 2026-08-27; it was ``A3`` before that)
     BENCHCTRL_ADU218_SWEEP_ALL  ``1`` to allow the all-eight-relay sweep
                                 (default: skip — see below)
     BENCHCTRL_ADU218_ARM_WATCHDOG  ``1`` to let the watchdog actually trip
@@ -150,6 +155,7 @@ this witness would silently lose the distinction it is built on.
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import pytest
@@ -267,17 +273,22 @@ def counted(adu):
     Returns the counter index alongside the port and line because the mapping —
     counters 0-3 to PA0-PA3, 4-7 to PB0-PB3 — is what several of these tests
     exist to verify, so it is computed here once from the documented rule rather
-    than hardcoded per test.
+    than hardcoded per test. Both ends of that rule are now measured: PA3 drove
+    counter 3, and PB2 drove counter 6, which is what pins the ``+ 4`` rather
+    than leaving it on the Table 1 image's word.
 
     Skips when the line is not toggling. That is a fact about the bench (the
     generator is driven by hand; the SDG1032X has no driver yet), not a driver
     defect, and a red test for it would train people to ignore this file.
     """
-    spec = os.environ.get("BENCHCTRL_ADU218_INPUT", "A3")
-    port = spec[0].upper()
-    line = int(spec[1:])
-    if port not in ("A", "B") or not 0 <= line <= 3:
+    spec = os.environ.get("BENCHCTRL_ADU218_INPUT", "B2")
+    # Parse defensively: this guard exists to *skip* on a bad value, so it must
+    # not raise on one. ``int(spec[1:])`` on "XY" throws before the check below
+    # ever runs, and an empty string never even reaches it.
+    if not re.fullmatch(r"[AaBb][0-3]", spec):
         pytest.skip(f"BENCHCTRL_ADU218_INPUT={spec!r} is not a port A/B line 0-3")
+    port = spec[0].upper()
+    line = int(spec[1])
     counter = line + (0 if port == "A" else 4)
 
     # Confirm the line is actually moving before any test relies on it.
@@ -613,13 +624,19 @@ def test_a_driven_input_line_reads_high_and_only_its_own_counter_moves(adu, coun
     """The input/counter half of the device, which needs an external stimulus.
 
     Requires a square wave on the line named by ``BENCHCTRL_ADU218_INPUT``
-    (default PA3, the line wired to the SDG1032X on this bench). Skips without
+    (default PB2, the line wired to the SDG1032X on this bench). Skips without
     it, because no amount of driver code can make an undriven line read high.
 
     Two claims, and the second is the one that could not be read from the
     manual at all: the counter-to-input map lives **only in a Table 1 image**
     that the PDF's text layer omits entirely. So the mapping the driver uses is
     measured here or it is unverified.
+
+    Run once per port to get the full claim. PA3 pins the PORT A half; PB2 pins
+    the ``+ 4`` offset for PORT B, which nothing else can — with the generator
+    on PORT A every counter index equals its line number, so an offset of 4, 3
+    or 0 are indistinguishable. Confirmed by mutation: forcing the offset to 3
+    fails this test and the two below it.
     """
     port, line, counter = counted
 
@@ -642,6 +659,12 @@ def test_a_driven_input_line_reads_high_and_only_its_own_counter_moves(adu, coun
     # ever high would pass on a mask that reported every line high, so this
     # also asserts nothing outside the stimulated line ever set a bit -- the
     # bit-position claim, which is the one a wrong shift would break.
+    #
+    # `counter` doubles as the PI bit index, and that is two separate facts
+    # agreeing rather than one: PI packs PORT A into the low nibble (so PORT B
+    # line n is bit n+4) and the counter map offsets PORT B by 4. Both were
+    # measured on PB2 -- bit 6 set, counter 6 moving -- so the reuse is
+    # witnessed, not assumed.
     seen = 0
     for _ in range(60):
         seen |= adu.input_mask()

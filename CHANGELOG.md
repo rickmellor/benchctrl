@@ -149,6 +149,29 @@ PA3 closed that gap and produced two findings:
   mapping the driver uses was unverifiable from the document. Driving PA3
   moved counter 3 and nothing else, with the other seven flat.
 
+Moving the generator to **PB2** later closed the other half, and it is the
+half that carries the information: with the stimulus on PORT A every counter
+index equals its line number, so offsets of 4, 3 and 0 are all consistent
+with the PA3 result. On PB2, counter **6** was the only one of eight to move
+— 201 events in 20.13 s, 9.987/s against a 10 Hz wave — which pins the
+offset at 4. PA3 falling silent and counter 3 freezing is part of that
+result: it is what rules out "everything counts regardless" and proves the
+lead moved rather than the measurement repeating. Mutating the offset to 3
+fails all three counter tests, so the map is now pinned rather than merely
+consistent.
+
+The same run witnessed **PORT B's bit ordering for the first time**, across
+all four input commands, which had only ever been checked against PORT A —
+`RPy`'s MSB-first text reversal, `Py`'s LSB weighting, `PI` placing PORT B in
+the *high* nibble, and the per-line read all agreed on line 2. Sampled as a
+union with an equality assertion, because a single read of a 10 Hz line is
+exactly the coin flip that made an earlier test flaky, and "ever high" would
+pass on a reply with every bit set. The earlier sweep's "no PORT B line ever
+high" was an absence of evidence — nothing was attached there — not evidence
+the ordering was right. `BENCHCTRL_ADU218_INPUT` now defaults to `B2` to
+match the bench; a stale value skips with the line named rather than
+false-passing, verified against an undriven B1.
+
 The vendor manual also supplied what no capture had: **de-bounce settings
 are durations, and they run backwards** — `0` = 10 ms, `1` = 1 ms
 (default), `2` = 100 µs. So the *highest* setting is the *weakest* filter,
