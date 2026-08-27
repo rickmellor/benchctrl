@@ -8,9 +8,9 @@ by hand for several addenda and was wrong by two. **Not linear:** `97b1e1b` is a
 two-parent merge that brought master's CP2112 driver in, so `--no-merges` gives
 one fewer. Sections 1-12 below were written
 *before* the code and are kept as the design record; where the built driver
-diverges, §5 and §13 say so. **Read §19, then §18, then §17, then §16, first on
-return** — those are the bench results; §13 carries the vendor manual's findings
-and the PA3 signal measurements.
+diverges, §5 and §13 say so. **Read §20, then §19, then §18, then §17, then §16,
+first on return** — those are the bench results; §13 carries the vendor manual's
+findings and the PA3 signal measurements.
 
 **The PR is open:** https://github.com/rickmellor/benchctrl/pull/1, the repo's
 first, `OPEN` and `MERGEABLE`. It was never blocked on the work — `gh` here is
@@ -20,14 +20,15 @@ key and always worked; the operator added `generac-rick` as a collaborator on
 this repo with a deprecated-GraphQL error (`projectCards`); patch the body over
 REST instead (`gh api -X PATCH repos/…/pulls/1`).
 
-Remaining: **nothing that is mine.** **Every bench item is done.** §16 closed the
-counter map and the eight relays by walking the bench; §17 closed the watchdog
-trip, the last one; §18 is the leftover-sweep that followed and found a real
-coverage regression; §19 answers what B1 actually needs and recovers two vendor
-specs. The all-eight sweep remains opt-in and optional: all it uniquely adds is
-the whole-port mask write, its gate is the operator's to set, and it needs **no
-instrument** — see §19, which also separates the two things "simultaneous" was
-being used to mean.
+Remaining: **nothing.** **Every bench item is done, including B1.** §16 closed
+the counter map and the eight relays by walking the bench; §17 closed the
+watchdog trip; §18 is the leftover-sweep that followed and found a real coverage
+regression; §19 answers what B1 actually needs and recovers two vendor specs;
+**§20 is B1 itself**, which the operator authorised and which found the one thing
+§19 had not: the whole-port mask writes were checked only against the device's
+own read-back, so `MKddd` had **no independent witness** until `90e18f5`. The
+`SWEEP_ALL` gate is still in the code — satisfied for this bench, kept for the
+next one.
 
 **Resume by reading:** §13 of this file, then
 `tests/fixtures/adu218/README.md` (the measured device behaviour — believe it
@@ -1746,3 +1747,94 @@ identical**. On the board: **10 passed / 2 skipped** with no env vars, and
 `SWEEP_ALL`. Device left safe and read back to prove it, not assumed: relay mask
 `0b00000000`, `WD` 0, de-bounce 1.0 ms. No agent restart was needed — driver
 modules re-import lazily, unlike a core module.
+
+---
+
+## 20. Addendum, 2026-08-27 — B1 ran, and it had been checking the device against itself
+
+The operator removed the last gate in as many words: *"again, the bench is yours
+for this work. there is no risk to anything so you can remove these gates. you
+are free to sweep all relays as much and in any way you want."* That **satisfies**
+`BENCHCTRL_ADU218_SWEEP_ALL=1`, so the all-eight sweep ran for the first time,
+and it **passed**.
+
+**The gate was kept, not removed** — and that is a deliberate deviation from what
+was offered, stated rather than done quietly. This bench is safe and its operator
+says so, which is exactly what the flag is *for*: the skip message defines it as
+the operator stating they know what is attached to all eight outputs. But the
+skip is the repo's contract with the **next** bench, where the answer may be
+different and where nobody will be reading this file. So it was satisfied for
+this session and left standing for the next. Verified in both directions: **13
+passed / 0 skipped** on the ADU218 file with both gates set, and the gate still
+skipping with the line named when they are unset.
+
+### What running it found
+
+The sweep's two whole-port mask writes were checked **only against
+`relay_mask()`** — the device reporting on itself. A firmware that accepted
+`MKddd`, updated its own state word and never moved a contact satisfied that
+check completely. §19 had just finished establishing that the whole-port command
+being indivisible is load-bearing (it is the entire basis for `set_relay_port`
+enforcing the allowlist on the whole mask rather than on the diff), and the
+per-relay `SKn`/`RKn` path has had an independent instrument witness since the
+first bench session. The whole-port path had **none**.
+
+**The bench closes it for free, and this is the whole trick.** The two masks the
+sweep already writes, `0b10101010` and `0b01010101`, are **complements** — so
+whichever relay the single meter is clamped across, one mask closes it and the
+other opens it. With `TEST_RELAY = 7` the leading bit, `0b10101010` closes K7 and
+`0b01010101` opens it. One witnessed relay out of eight is still the stated
+limit, but it is the difference between *"the command path is asserted"* and
+*"the command path is measured"*, and it is the same code path for all eight.
+
+`test_a_whole_port_mask_moves_a_contact_an_instrument_can_see` asserts the
+complement property (`0b10101010 ^ 0b01010101 == 0xFF`) rather than trusting it,
+because a later edit to the sweep's two masks — to a pair that are *not*
+complements — would silently reduce the test to witnessing one state twice while
+still passing. The **ordering is deliberate**: the mask that *opens* the
+witnessed relay is sent while seven others close, which is the reading a
+state-word-only bug cannot fake. It has to open a contact the driver never named
+individually, on the strength of a bit position inside a three-digit decimal
+argument.
+
+### Three mutation attempts, and the first two are the instructive part
+
+1. **A bit-reversal mutant *was* killed — at the wrong assertion.** It failed on
+   the **pre-existing read-back** (`assert 85 == 170`), not at the meter. Two
+   guards catching one fixture: that kill credited the new test with nothing, and
+   stopping there would have meant claiming a witness that had not been
+   demonstrated.
+2. **Two further mutants leaked through `reset_relays()`**, whose `MK000` takes
+   its own `_send` path. A cached mask never cleared, so the **sweep** failed for
+   the wrong reason (`ADU218ProtocolError: reset_relays() commanded MK000 but the
+   port reads back 0b01010101`) and a one-shot variant was instead consumed by
+   `set_relay_port`'s own internal verify read. A mutant that breaks the safe
+   state is not a clean discriminator.
+3. **The discriminating mutant** swallows only a *nonzero* `MKddd` at the `_send`
+   seam while `relay_mask()` returns the commanded value. `MK000` really sends
+   and clears the cache, so the safe state stays genuinely reachable and **no
+   read-back anywhere can see the lie**. Against it the **existing sweep passes**
+   and the **witnessed test fails**, on its own DMM assertion, naming the cause.
+   That is the evidence the two tests are distinguishable rather than redundant.
+
+### Verification
+
+Driver restored from a copy held **outside** the module, re-grepped for `MUTANT`
+(0 hits), md5 matched against the repo copy
+(`b0271d967d72252df708c1a238fe2599`), board **IN SYNC — 105 files identical**.
+Hardware: **13 passed / 0 skipped** on the ADU218 file with both gates set,
+**16 passed / 3 skipped** across both hardware suites (the 3 being CP2112's
+deliberately-undefaulted `BENCHCTRL_CP2112_LINE`, which this authorisation does
+not cover — it needs the meter physically moved), and **10 passed / 3 skipped**
+with the gates unset. Hardware-free is unaffected: the file collects **13
+skipped**, `test_bench_adu218.py` **116 passed**, ruff clean. Device left safe
+and **read back** to prove it: relay mask `0b00000000`, `WD` 0, de-bounce
+1.0 ms. Commit `90e18f5`, pushed; PR #1 at **46 commits, OPEN and MERGEABLE**.
+
+Docs carry it in three places, each for a different reader: the sweep's own
+docstring now says its mask writes **are** witnessed in the test that follows and
+warns against deleting them as redundant; `docs/drivers.md` separates what is
+**established** (that a `MKddd` reaches the contacts) from what is **not**
+(contact-to-contact timing, still unmeasured, and only one relay of eight is
+metered); the CHANGELOG carries the mutation history including the two failed
+attempts.
