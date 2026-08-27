@@ -1,10 +1,12 @@
 # benchctrl game plan — Ontrak ADU218 relay I/O driver
 
 **Branch:** `feat/ontrak-adu218` (off `master` @ `2eb0003`)
-**State as of:** 2026-08-27 — **all stages landed and every bench claim
-witnessed, 35 commits ahead of master at `59d4b8d`, all pushed** (34 of them
-non-merge; `97b1e1b` is the two-parent merge that brought master's CP2112 driver
-in). Sections 1-12 below were written
+**State as of:** 2026-08-27 — **all stages landed, every bench claim witnessed,
+everything pushed.** Get the commit count from
+`git rev-list --count master..HEAD` rather than from here; it was carried forward
+by hand for several addenda and was wrong by two. **Not linear:** `97b1e1b` is a
+two-parent merge that brought master's CP2112 driver in, so `--no-merges` gives
+one fewer. Sections 1-12 below were written
 *before* the code and are kept as the design record; where the built driver
 diverges, §5 and §13 say so. **Read §17, then §16, first on return** — those are
 the bench results; §13 carries the vendor manual's findings and the PA3 signal
