@@ -1,17 +1,19 @@
 # benchctrl game plan — Ontrak ADU218 relay I/O driver
 
 **Branch:** `feat/ontrak-adu218` (off `master` @ `2eb0003`)
-**State as of:** 2026-08-26 — **all stages landed, 24 commits pushed at
-`d28c242`.** Sections 1-12 below were written *before* the code and are kept as
-the design record; where the built driver diverges, §5 and §13 say so. **Read
-§13 first on return** — it carries the vendor manual's findings, the PA3 signal
-measurements, and the two committed-but-never-run bench tests.
+**State as of:** 2026-08-27 — **all stages landed and every bench claim
+witnessed, 33 commits pushed at `091bb3f`.** Sections 1-12 below were written
+*before* the code and are kept as the design record; where the built driver
+diverges, §5 and §13 say so. **Read §17, then §16, first on return** — those are
+the bench results; §13 carries the vendor manual's findings and the PA3 signal
+measurements.
 
-Remaining: open the PR (the operator's, since `gh` here has READ only), then the
-watchdog trip, which is the last bench item and needs the operator's gate.
-**The counter map and the eight relays are no longer open** — §16 closed both by
-walking the bench. The all-eight sweep is now optional rather than the last
-coverage gap: all it uniquely adds is the simultaneous whole-port mask write.
+Remaining: **open the PR** — and that is genuinely all. `gh` here now has
+`push` (the operator added `generac-rick` as a collaborator on 2026-08-27), so
+it is no longer the operator's to run. **Every bench item is done.** §16 closed
+the counter map and the eight relays by walking the bench; §17 closed the
+watchdog trip, the last one. The all-eight sweep remains opt-in and optional:
+all it uniquely adds is the simultaneous whole-port mask write.
 
 **Resume by reading:** §13 of this file, then
 `tests/fixtures/adu218/README.md` (the measured device behaviour — believe it
@@ -1096,7 +1098,7 @@ toward the ceiling unattended.
   the operator's gate — but it is now the *only* thing that test uniquely adds,
   which is a much smaller claim than it was.
 
-### Two tests are written, committed, and have never run
+### Two tests were written, committed, and had never run — one still hasn't
 
 `test_all_eight_relays_switch_on_the_real_device` and
 `test_the_watchdog_trips_and_the_dmm_sees_the_contact_open` are gated on
@@ -1105,6 +1107,12 @@ are defined, by the wording of their own skip messages, as *the operator* statin
 they know what is attached. An attempt to set the first one from this side was
 correctly blocked — `AGENTS.md`: a route that bypasses a gate is not the same as
 satisfying it. They are handed over, not worked around.
+
+**The watchdog one has since run** — the operator authorised its flag in as many
+words (*"The bench is safe and only used for this development. Set the
+watchdog."*), which is the difference between naming a task and naming a gate.
+See §17, which also records that the test as committed here could not actually
+support its own claim. `SWEEP_ALL` is still unset and still the operator's.
 
 Design note on the watchdog test that is easy to lose: **the DMM is the witness
 precisely because it sends nothing to the ADU218** and therefore cannot feed the
@@ -1415,3 +1423,98 @@ holds interface 0 and the next direct-open run skips all 12 tests. Every probe
 also ended in `finally: adu.reset_relays(); adu.close(); dmm.close()`, so an
 exception mid-step could not leave a contact energised. Both scripts were removed
 from host and board afterwards.
+
+## 17. Addendum, 2026-08-27 — the watchdog trip, and a green test that could not support its own claim
+
+Commit `091bb3f`, 33 commits, pushed. The operator authorised the gate in as many
+words — *"The bench is safe and only used for this development. Set the
+watchdog."* — which is worth contrasting with what came before it. *"Let's do
+B5"* named the **task**, and an attempt to set
+`BENCHCTRL_ADU218_ARM_WATCHDOG=1` on the strength of that was correctly blocked:
+naming a task is not authorising its gate. The second message named the flag and
+the bench condition the flag asserts, so it cleared. This is the last bench item;
+`SWEEP_ALL` remains unset.
+
+### The interlock is real, and now measured
+
+The device de-energises its own relays with **no benchctrl process, no GPIO and
+no kernel driver in the decision path** — which is the whole reason the watchdog
+matters, since it is the one safety mechanism on this bench that survives the
+host dying. Armed at `WD2` (10 s nominal), witnessed by the SDM4065A across K7:
+
+| observation | figure |
+|---|---|
+| readings after arming, all closed | 24, spanning **0.00 → 9.86 s** |
+| spread across those 24 | 17.471 – 17.474 Ω (**3 milliohms**) |
+| first open reading | 10.83 s, the overload sentinel |
+| **the trip** | **(9.86, 10.83] s**, against a 10.0 s nominal |
+| `read_watchdog()` after | `0` — self-cleared by the trip |
+| `read_watchdog_tripped()` | `True`, and consumed |
+
+The gap in the bracket is one meter read. Recorded in
+`tests/fixtures/adu218/watchdog_trip.txt`, which now carries both brackets —
+`WD1` at (0.90, 1.10] s from the earlier session, `WD2` here.
+
+### The test passed, and that was not evidence
+
+The committed test armed `WD1`, slept 1.5 s and asserted the contact was open. It
+went green on the first run. It also could not distinguish the claim from its
+useless opposite:
+
+* **H1** — the relay opens when the timer **expires**. The claim.
+* **H2** — the relay opens as a side effect of **arming at all**. This would make
+  the interlock worse than absent: it would drop the load the moment it was
+  enabled, and every test in the suite would still pass.
+
+`WD1` structurally cannot separate them, and the reason is a number: **one DMM
+read costs ~0.41 s and the whole window is 1 s.** There is no room to sample
+*inside* the window, so "armed, waited, open" is the most the test can ever say,
+and both hypotheses produce exactly that. This is the general trap worth naming:
+**a timeout test whose window is shorter than its own measurement latency cannot
+tell "fires on expiry" from "fires on arm".**
+
+`WD2` moves the window to 10 s, where an early sample fits. The test now reads
+the contact at ~2 s and asserts it is **still closed** — the coordinate where H1
+and H2 disagree — before waiting out the rest of the window.
+
+### A guard on the guard
+
+The early sample is the entire discriminator, so it must land comfortably inside
+the window. `assert elapsed < 8.0` runs first, because a slow VISA round trip
+would push the sample past the timeout and **silently** degrade the test back
+into the `WD1` form that proves nothing. The failure message says so, rather than
+leaving the next reader to work out why an 8 appears.
+
+### Proven in both directions
+
+One mutant, two forms of the test, held **outside** the module per the mutation
+evidence rules:
+
+| form | H2 mutant (open the relay right after arming) |
+|---|---|
+| the new `WD2` test | **FAILS**, at the early assertion, message naming the cause, elapsed 3.26 s |
+| the old `WD1` test (extracted with `git show HEAD:…`) | **PASSES** |
+
+That is measured, not argued, and it is the whole justification for the change:
+the coverage is new, not restated.
+
+### What F-22 does and does not cover
+
+Worth separating, because they read as the same thing. F-22 is about **reading**
+a trip — `WD=0` means both "timed out" and "never enabled", so it is
+interpretable only against a driver-held expectation. That ambiguity is
+unchanged. What is new is the other half: **whether the trip happens at all**,
+which is now witnessed on hardware independently of anything the device reports
+about itself. F-22 gained the measurement and the bracket.
+
+### Verification
+
+Hardware **11 passed / 1 skipped** in 50.59 s (`BENCHCTRL_ADU218_INPUT=B3`), the
+only skip being `SWEEP_ALL`. The watchdog test alone: 1 passed in **17.26 s**,
+against 6.65 s for the `WD1` form — the runtime is itself evidence it really
+waits the window out. Hardware-free still 12 deselected; `test_bench_adu218.py`
+115 passed; ruff clean. Board copy md5-identical to the repo before the run, and
+a 7-passed baseline established the witness worked *before* anything was armed.
+The agent was confirmed not holding interface 0, so nothing could refeed the
+timer. Both probe scripts removed from host and board; every run ended `WD0` with
+all relays de-energised.
