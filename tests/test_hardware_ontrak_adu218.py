@@ -655,12 +655,21 @@ def test_all_eight_relays_switch_on_the_real_device(adu_all_relays):
     an ad-hoc RPC sweep that was not codified — so nothing would have caught a
     regression on relays 1-7. That gap is what this closes.
 
-    No DMM witness: the bench has one meter and it is across ``TEST_RELAY``, so
-    seven of the eight cannot be independently witnessed. The device's own read-back is
-    therefore the check here, which is weaker — deliberately so, and stated. The
-    *witnessed* claim stays the single-relay test above; this one proves the driver
-    addresses all eight distinctly, and the mask cross-check is what makes
-    "distinctly" mean something.
+    No DMM witness *here*: the bench has one meter and it is across
+    ``TEST_RELAY``, so seven of the eight cannot be independently witnessed. The
+    device's own read-back is therefore the check, which is weaker — deliberately
+    so, and stated. This test proves the driver addresses all eight distinctly,
+    and the mask cross-check is what makes "distinctly" mean something.
+
+    **The two port-mask writes below are witnessed, in the test that follows.**
+    They are complements, so whichever relay the meter is on, one mask closes it
+    and the other opens it. That matters because the read-back here cannot
+    distinguish a device that switches from one that merely updates its own state
+    word — proven by mutation: a ``MKddd`` swallowed at the ``_send`` seam while
+    ``relay_mask()`` returns the commanded value leaves **this test passing** and
+    fails the witnessed one. Do not delete these two writes on the grounds that
+    the other test covers them; the pair is the sweep's, and the witness asserts
+    they are still complements.
     """
     adu = adu_all_relays
     assert adu.reset_relays() == 0
@@ -682,6 +691,77 @@ def test_all_eight_relays_switch_on_the_real_device(adu_all_relays):
     assert adu.set_relay_port(0b01010101) == 0b01010101
     assert adu.relay_mask() == 0b01010101
     assert adu.reset_relays() == 0
+
+
+def test_a_whole_port_mask_moves_a_contact_an_instrument_can_see(
+    adu_all_relays, witness
+):
+    """``MKddd`` witnessed by the DMM — the one thing the sweep above cannot do.
+
+    The test above checks both port masks against ``relay_mask()``, which is the
+    device reporting on itself: a firmware that accepted ``MKddd`` and updated
+    its own state word without moving a contact would satisfy it completely. So
+    the whole-port command path had **no independent witness**, while the
+    per-relay ``SKn``/``RKn`` path has had one since the first bench session.
+
+    The bench makes that closable for free, and this is the whole trick: the two
+    masks the sweep already uses put ``TEST_RELAY`` in **opposite** states, so
+    the single meter clamped across it discriminates them. With K7 the leading
+    bit, ``0b10101010`` closes it and ``0b01010101`` opens it. One relay
+    witnessed out of eight is exactly the limit stated above — but one is the
+    difference between "the command path is asserted" and "the command path is
+    measured", and it is the *same* code path for all eight.
+
+    Ordering is deliberate. The mask that **opens** the witnessed relay is sent
+    while seven others close, which is the reading a state-word-only bug cannot
+    fake: it has to open a contact the driver did not name individually, on the
+    strength of a bit position inside a three-digit decimal argument. Getting
+    that endianness wrong is the plausible defect here, and it lands on this
+    assertion rather than on a read-back that shares the same misreading.
+    """
+    adu = adu_all_relays
+    assert adu.reset_relays() == 0
+    assert witness() is None, (
+        "the witnessed contact reads closed before anything was commanded — "
+        "either the DMM is not across it or reset_relays() did not reach the "
+        "safe state"
+    )
+
+    # The two masks are complements, so whichever relay the meter is on, exactly
+    # one of them closes it and the other opens it. That holds for any
+    # TEST_RELAY, which is why this needs no per-relay special casing -- but
+    # assert it rather than trust it, because a future edit to the sweep's masks
+    # (to two that are *not* complements) would silently reduce this test to
+    # witnessing one state twice.
+    assert 0b10101010 ^ 0b01010101 == 0xFF, (
+        "the sweep's two port masks are no longer complements, so they no "
+        "longer put the witnessed relay in opposite states"
+    )
+
+    for mask in (0b10101010, 0b01010101):
+        should_close = bool(mask >> TEST_RELAY & 1)
+        assert adu.set_relay_port(mask) == mask
+        measured = witness()
+        if should_close:
+            assert measured is not None, (
+                f"MKddd wrote mask {mask:#010b}, which sets bit {TEST_RELAY}, "
+                f"and the device reports {adu.relay_mask():#010b} — but the DMM "
+                f"still over-ranges. Either the whole-port command updates the "
+                f"state word without moving the contact, or the leads are not "
+                f"across K{TEST_RELAY}; both over-range and this cannot tell "
+                f"them apart. Check BENCHCTRL_ADU218_RELAY"
+            )
+        else:
+            assert measured is None, (
+                f"MKddd wrote mask {mask:#010b}, which clears bit "
+                f"{TEST_RELAY}, and the device reports "
+                f"{adu.relay_mask():#010b} — but the DMM measures {measured} Ω, "
+                f"so that contact is still conducting. A whole-port write must "
+                f"open the bits it clears, not only close the bits it sets"
+            )
+
+    assert adu.reset_relays() == 0
+    assert witness() is None, "reset_relays() left the witnessed contact closed"
 
 
 # ---------------------------------------------------------------------------

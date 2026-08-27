@@ -1696,6 +1696,17 @@ nothing about timing, and the manual gives no per-relay switching time to
 compare against. If a circuit depends on make-before-break ordering,
 measure it on your own bench — nothing here establishes it.
 
+What *is* established, and what is not, are worth keeping apart. **That a
+`MKddd` reaches the contacts at all is witnessed** by an instrument outside
+the device: the gated hardware sweep writes two complementary masks, so
+whichever relay the meter is clamped across, one closes it and the other
+opens it. That was added because the `PK` read-back cannot tell a device
+that switches from one that only updates its own state word — a mutant
+swallowing the `MKddd` write while `relay_mask()` returns the commanded
+value passes the read-back check and fails the witnessed one. What remains
+unwitnessed is only the *timing* between contacts, and only one relay of the
+eight is metered, since the bench has one meter.
+
 **The relays are rated for 1 switch per second at full load**
 (`RELAY_MAX_SWITCH_HZ`), and the manual explicitly does not recommend the
 ADU218 for PWM: PhotoMOS dissipation rises with switching speed. Nothing

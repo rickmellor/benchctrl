@@ -395,6 +395,39 @@ maximum**, so the relay accounts for under 4 % of even the lowest one. The
 wiring conclusion had rested on "the spread has no relation to index", an
 inference from a single bench.
 
+**The whole-port command path now has an independent witness.** With the
+operator opening the bench up for the all-eight sweep, that gated test ran for
+the first time — and running it exposed that its two port-mask writes were
+checked only against `relay_mask()`, i.e. the device reporting on itself. A
+firmware that accepted `MKddd`, updated its own state word and never moved a
+contact satisfied it completely, which is the one defect class the per-relay
+path had been protected from since the first bench session.
+
+The bench closed it for free: the two masks the sweep already writes,
+`0b10101010` and `0b01010101`, are **complements**, so whichever relay the one
+meter is clamped across, one mask closes it and the other opens it. A new
+witnessed test asserts that, and asserts the two masks are still complements so
+a later edit cannot silently reduce it to measuring one state twice.
+
+Proven by mutation, and the first two attempts are the instructive part. A
+bit-reversal mutant *was* killed — but at the pre-existing read-back assertion
+(`assert 85 == 170`), not at the meter, so the witness contributed nothing:
+two guards catching one fixture. Two further mutants leaked through
+`reset_relays`, whose `MK000` takes its own `_send` path. The discriminating
+mutant swallows only a **nonzero** `MKddd` at the `_send` seam while
+`relay_mask()` returns the commanded value, leaving the safe state genuinely
+reachable and no read-back anywhere able to see the lie: against it the
+**existing sweep passes and the witnessed test fails**, on its own DMM
+assertion, naming the cause. Ordering in the test is deliberate — the mask that
+*opens* the metered relay is sent while seven others close, which is the
+reading a state-word-only bug cannot fake.
+
+The `SWEEP_ALL` gate was **kept**, not removed. This bench is safe and its
+operator said so, which satisfies the gate; the skip is the repo's contract
+with the next bench, where it may not be. Verified both ways: 13 passed / 0
+skipped with the gates set, and the gate still skips with the line named when
+unset.
+
 ### `net/errors.py` — a constructor that accepts the message but does not store it
 
 Found by that witness, over the real RPC wire: a `SDM4065AOverloadError`
