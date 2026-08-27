@@ -8,7 +8,10 @@ the design record; where the built driver diverges, §5 and §13 say so. **Read
 measurements, and the two committed-but-never-run bench tests.
 
 Remaining: open the PR (the operator's, since `gh` here has READ only), then the
-two gated hardware tests. **PORT B's counter map is no longer open** — §15.
+watchdog trip, which is the last bench item and needs the operator's gate.
+**The counter map and the eight relays are no longer open** — §16 closed both by
+walking the bench. The all-eight sweep is now optional rather than the last
+coverage gap: all it uniquely adds is the simultaneous whole-port mask write.
 
 **Resume by reading:** §13 of this file, then
 `tests/fixtures/adu218/README.md` (the measured device behaviour — believe it
@@ -1081,17 +1084,17 @@ toward the ceiling unattended.
 ### What is still unwitnessed
 
 - ~~**PORT B's counter map.**~~ **Closed 2026-08-27** — see section 15.
-- **Six of the eight input lines.** PA3 and PB2 are driven; PA0-PA2 and
-  PB0/PB1/PB3 are not. One line per port is what the offset claim needs, and
-  there is one generator, so this is a diminishing return rather than a gap in
-  the argument.
+- ~~**Six of the eight input lines.**~~ **Closed 2026-08-27** — all eight are
+  driven and all eight counters witnessed; see section 16.
+- ~~**Seven of the eight relays, independently.**~~ **Closed 2026-08-27** — all
+  eight independently witnessed with the meter, one at a time; see section 16.
 - **De-bounce's effect**, per the above.
-- **Seven of the eight relays, independently.** The bench has one DMM and it sits
-  across a single relay — `TEST_RELAY`, which is K7 since 2026-08-27. The
-  committed all-eight test cross-references each `SKn` against the whole-port
-  `PK` mask, which is the device agreeing with itself — a weaker claim than the
-  witnessed relay's, and the test says so in its own docstring rather than
-  letting the green tick imply parity.
+- **The two simultaneous whole-port mask writes.** The walk drove each relay
+  alone through `set_relay_state`; `0b10101010` / `0b01010101` via
+  `set_relay_port` (the `MKddd` path) is covered in the simulator and has never
+  run on hardware. It lives inside the opt-in all-eight test, so it stays behind
+  the operator's gate — but it is now the *only* thing that test uniquely adds,
+  which is a much smaller claim than it was.
 
 ### Two tests are written, committed, and have never run
 
@@ -1272,3 +1275,143 @@ the device lazily and **hold interface 0**, so the next direct-open hardware run
 skips all 12 tests with "interface 0 is busy". That is N-4's single-writer guard
 working, not a regression — but it presents as a whole suite going dark. `-rs`
 gives the reason; `sudo -n systemctl restart benchctrl-agent` releases it.
+
+## 16. Addendum, 2026-08-27 — the bench walk, and every claim made exhaustive
+
+Commit `49cc718`, 32 commits, pushed. The operator offered to reposition the DMM
+and the signal generator one terminal pair at a time: *"Say the word and I'll
+connect to one relay and one input, you measure, then tell me to switch and I'll
+reposition."* Eight steps, each one a full hardware suite run plus a probe that
+captured the numbers.
+
+**This is strictly stronger than the gated all-eight sweep**, and it is worth
+being precise about why, because the two look interchangeable and are not. The
+sweep energises all eight relays at once and can independently witness exactly
+**one** of them — the bench has a single meter, sitting across whichever relay
+`BENCHCTRL_ADU218_RELAY` names; the other seven rest on the device agreeing with
+its own read-back. Walking the meter inverts that: **eight independently
+witnessed relays instead of one**.
+
+It also did not bypass the `SWEEP_ALL` gate so much as make it largely
+unnecessary. Each step opened the device with `allowed_relays` pinned to the
+**single** relay the operator had just wired and vouched for, so no step ever
+energised an output nobody had nominated — which is precisely the condition that
+flag exists to assert. The flag was never set.
+
+### Relays — all eight, independently witnessed
+
+Every position: overload when open, a finite resistance when closed, and the
+alternating five-transition check passing.
+
+| relay | closed (Ω) | within-position spread (Ω) |
+|---|---|---|
+| K6 | 16.87 | ≤ 0.06 |
+| K7 | 17.50 | ≤ 0.06 |
+| K1 | 20.77 | ≤ 0.06 |
+| K2 | 28.37 | ≤ 0.06 |
+| K3 | 31.36 | ≤ 0.06 |
+| K4 | 32.09 | ≤ 0.06 |
+| K5 | 41.19 | **0.544** |
+| K0 | 45.65 | ≤ 0.06 |
+
+A **2.7× spread with no relation to index**, on identical PhotoMOS parts, one
+meter, one hour. F-27's "the excess is outside the relay" conclusion now rests on
+eight points rather than two. The within-position figures localise something the
+two-relay version could not: the drift that once broke `hi < lo * 2` is **clip
+seating specifically**, not the bench and not the device — seven positions held
+to hundredths of an ohm and one did not.
+
+### Counters — the map is complete, and the image is now redundant
+
+| line | counter that moved | rate (vs 10 Hz) | `PI` bit |
+|---|---|---|---|
+| PA0 | 0 | 9.972/s | 0 |
+| PA1 | 1 | 9.972/s | 1 |
+| PA2 | 2 | 10.071/s | 2 |
+| PA3 | 3 | 9.972/s | 3 |
+| PB0 | 4 | 10.071/s | 4 |
+| PB1 | 5 | 10.063/s | 5 |
+| PB2 | 6 | 9.973/s | 6 |
+| PB3 | 7 | 10.071/s | 7 |
+
+At each position the named counter was the **only** one of eight to move, and the
+`PI` union across 60 reads set that bit and no other. Every rate lands within
+±0.5 % of the stimulus — ±1 event of quantisation in a 10 s window, so nothing is
+dropping or doubling.
+
+Table 1's image is now **redundant rather than corroborated**: the map does not
+depend on it at any position. And the PORT B offset, which §15 established on one
+line, now rests on **three independent readings** (PB0 → 4, PB2 → 6, PB3 → 7).
+PORT A still cannot pin it and never will — there the counter index equals the
+line number, so the term under test is absent.
+
+### The K3 incident, and a ceiling that was proposed and rejected
+
+Mid-walk, K3 read **336 kΩ** closed — four orders of magnitude above the
+neighbours — and **the suite passed**. I stopped the walk rather than continue,
+and wrote a diagnostic designed to separate a marginal mechanical contact
+(intermittent, wandering) from a degraded PhotoMOS (repeatable): six open/close
+cycles printing the meter reading and the device's own `relay_state(3)` read-back
+side by side, with a standing-DC-volts check first.
+
+Two things to keep straight about what happened next. The retest came back clean
+— six cycles at 31.5–40.1 Ω, overload on every open, read-back agreeing, standing
+volts 0.0011 V — and I initially described the clip as having "re-seated," which
+implies self-healing. The operator corrected that: *"i snugged the screw terminals
+before your retest."* So the clean run is the **post-repair** state, not evidence
+of recovery. The fault was real and persistent until a human fixed it.
+
+Then I proposed adding a **~1 kΩ ceiling** on the closed reading, and argued F-27
+did not forbid it because this case was categorically different. The operator
+pushed back: *"Do we need a ceiling? In practice we won't be measuring the
+relays... they'll be controlling something. So long as their resistance is low
+enough to not drop voltage or generate heat, we don't care."*
+
+That is right and my argument was weak, in a way worth recording because it is a
+recurring failure shape:
+
+- **Nothing false-passed.** The test's claim is that the relay's *state follows
+  the command*. At 336 kΩ that claim was **true** — overload → finite is a real
+  state change. A test is not holed by failing to catch something it never
+  claimed.
+- **"Categorically different" was special pleading.** A loose screw terminal *is*
+  a wiring property. That puts it **inside** F-27's rule rather than justifying an
+  exception to it — I was reaching for an exemption for the first case that
+  actually stung.
+- **The driver cannot see the thing a ceiling would police.** Bench wiring quality
+  is invisible to it. A threshold there fails on the bench's condition while
+  reading as a statement about the device.
+- **In service these relays switch a load**, where the voltage drop and the
+  dissipation are what matter — not whether the ohms land in a band.
+
+The rejection is recorded in three places so nobody "fixes" it later: a **"Do not
+add a ceiling on the closed reading"** comment block at the assertion itself, a
+closing paragraph in F-27, and the CHANGELOG.
+
+### What landed
+
+**Docs and comments only — no production code, no assertions changed.** That is
+the direct consequence of the ceiling decision, and it is the right shape for the
+commit: eight positions of measurement that *confirmed* the existing assertions
+rather than moving them.
+
+- **F-26** — the eight-position table, the ±0.5 % rate note, and the
+  measure-where-hypotheses-diverge lesson stated generally.
+- **F-27** — the eight-relay table with per-position spreads, plus "A ceiling on
+  the closed reading was considered and rejected."
+- The module docstring's resistance paragraph, rewritten from two relays to
+  eight; claim 5 rewritten to say all eight positions are measured.
+- The `counted` fixture docstring — the `+ 4` now rests on three PORT B readings.
+- CHANGELOG, and the "do not add a ceiling" block at the `hi < lo * 10` assertion.
+
+Verified before committing: **10 passed / 2 skipped** at K7/PB3 after the edits,
+the file still collecting hardware-free (12 deselected), ruff clean.
+
+### Probe hygiene worth repeating
+
+The step probes opened the device **directly** rather than through the agent,
+specifically to avoid §15's interface-0-busy trap: an agent that has attached
+holds interface 0 and the next direct-open run skips all 12 tests. Every probe
+also ended in `finally: adu.reset_relays(); adu.close(); dmm.close()`, so an
+exception mid-step could not leave a contact energised. Both scripts were removed
+from host and board afterwards.
