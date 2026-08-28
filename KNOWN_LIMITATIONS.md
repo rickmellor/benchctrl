@@ -1840,6 +1840,64 @@ must install config explicitly, and a test must assert on what
 route, too: `config.load_env()` returns `None` when no variable is set, so a
 fix covering the environment can leave the config file just as inert.
 
+### N-9. `grace_for_disconnect()` is computed, logged, and never applied
+Found while documenting the CLI's remote teardown, and measured rather than
+read: the agent's disconnect path **understates how long an armed device stays
+armed**, by a factor that grows with `deadman_s`.
+
+`SafetyGovernor.grace_for_disconnect()` (`agent/safety.py:229`) returns 3 s
+when something is armed and 10 s when nothing is, and the comment on the
+constants says *"grace after a socket closes before tripping"*. It has exactly
+one call site repo-wide — `agent/server.py:1485` — and that site is a
+`log.warning` argument:
+
+```python
+log.warning(
+    "agent: client holding an armed device disconnected; "
+    "safe state in <= %.0fs unless it reconnects",
+    self.governor.grace_for_disconnect(),
+)
+```
+
+Nothing consumes the return value. The only thing that trips is the deadman
+thread, whose test is `any_armed and seconds_since_contact > deadman_s`, and
+**nothing on the disconnect path touches `_last_contact`** — its only writer is
+`touch()`, called on inbound frames. So the clock the comment above the call
+site says it is shortening is not shortened, and the real delay is the full
+remaining deadman window. `TripReason.CLIENT_DISCONNECT` exists
+(`safety.py:47`) and is raised nowhere in `src/`, which is the same finding
+from the other direction.
+
+Measured with a real agent, a simulated Arc armed via `set_output(True)`, and
+the client socket closed:
+
+| `deadman_s` | the log promises | actual trip |
+|---|---|---|
+| 6.0 s | ≤ 3 s | **6.45 s** |
+| 12.0 s | ≤ 3 s | **12.46 s** |
+
+The delay is `deadman_s` plus the 0.5 s deadman poll interval, and it is
+completely independent of `grace_for_disconnect()`. At the shipped default of
+`deadman_s = 15.0` an operator reading the log expects safe state within 3 s
+and gets it after about 15.5 s.
+
+**Why this is a documentation-grade problem and not just a wrong number.** The
+message is what an operator sees at the moment a client holding a live output
+dies, and it is the basis for deciding whether to walk to the bench. It is also
+the shape worth recognising: a value that is calculated correctly, logged
+plausibly, and wired to nothing is indistinguishable from a working mechanism
+from the outside. The fix is small either way — either apply the grace by
+back-dating `_last_contact` on disconnect (and raise
+`TripReason.CLIENT_DISCONNECT`, which is what it is for), or delete
+`grace_for_disconnect()` and log the honest figure. What must not happen is
+leaving the promise in place.
+
+Not fixed here because it is agent-side safety behaviour, not CLI behaviour,
+and shortening a trip delay deserves its own change with its own test — a
+timing assertion, since every "did it go safe" assertion passes on both
+hypotheses (§ A-6 makes the related point that a governor is damage limitation;
+§ N-1 that it is not a guarantee).
+
 ## What's not in this list
 
 Things we **don't** consider limits — they're just facts:

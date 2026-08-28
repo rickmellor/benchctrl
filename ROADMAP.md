@@ -147,6 +147,36 @@ a network where a tunnel isn't practical.
 
 ## Foundation hardening
 
+### Apply the disconnect grace, or stop promising it
+
+**Status**: `KNOWN_LIMITATIONS.md § N-9`, with the measurement.
+`SafetyGovernor.grace_for_disconnect()` returns 3 s when armed, has one call
+site repo-wide, and that site is a `log.warning` argument. Nothing consumes the
+value, nothing on the disconnect path touches `_last_contact`, and
+`TripReason.CLIENT_DISCONNECT` is raised nowhere — so the real delay is the
+full remaining deadman window. Measured at **6.45 s with `deadman_s=6` and
+12.46 s with `deadman_s=12`**, against a logged promise of "≤ 3s" in both
+cases. At the shipped default of 15 s the message understates it fivefold.
+
+**Why it matters more than the number**: an operator reads that line at the
+moment a client holding a live output died, and decides from it whether to walk
+to the bench.
+
+**Scope when picked up**, one of two, and the choice is the work:
+1. **Apply it** — back-date `_last_contact` on disconnect so the grace really
+   is the window, and trip with `TripReason.CLIENT_DISCONNECT`, which is what
+   that enum member exists for. Shortens a safety delay, so it needs a timing
+   assertion: every "did it reach safe state" assertion passes on both the old
+   and new behaviour, which is exactly how this shipped.
+2. **Delete it** — drop `grace_for_disconnect()` and log
+   `max(0, deadman_s - seconds_since_contact)`, the honest figure.
+
+Option 1 is better behaviour and option 2 is a smaller change; either is
+strictly better than a promise wired to nothing.
+
+**Why deferred**: found while documenting the CLI, and it is agent-side safety
+behaviour. Changing when the bench goes safe does not belong in a CLI commit.
+
 ### Close the writer-claim escapes in `agent/dispatch.py`
 
 **Status**: found while building the CLI's authorisation table, and it is an
