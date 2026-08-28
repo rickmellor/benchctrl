@@ -9,6 +9,52 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### A user guide, separate from the reference docs — `docs/guide/`
+
+Fifteen task-oriented pages for people *using* the bench rather than changing
+it: an overview, the theory of operation, the equipment matrix, installation,
+bench-host setup, local vs remote, driving it from an agent harness, how to add
+a driver, and six worked examples — board bringup, sleep current, power
+characterization, battery emulation, power cycling, unattended runs.
+
+**Why a new tree rather than more files in `docs/`.** The existing docs are
+reference: `api_reference.md` is exhaustive by design, `drivers.md` is per-device,
+`design.md` is internals. None of them answer "I have a new board and want to
+know what it draws." The guide is organised by task, one file per page, so it
+maps 1:1 onto a wiki space — directory becomes page tree — when it moves under
+document management. `docs/*.md` is unchanged and is the layer the guide links
+down into.
+
+Written to be **externally distributable**: no product names, part numbers or
+internal project identifiers. The campaigns that motivated the examples appear
+by technique and measured result, so a reader outside the org gets the method
+and the numbers without the provenance.
+
+Two conventions the pages hold to, both learned the hard way here.
+**Limitations go in the body, not an appendix** — the emulator-and-recording
+deadlock belongs next to the emulator example, because an appendix is read after
+the mistake. And **numbers are measured, not nominal**: every figure traces to
+`scenarios/README.md`, `docs/battery.md`, `docs/drivers.md` or
+`KNOWN_LIMITATIONS.md`, including the ones that make the bench look worse — the
+27× instrument-regime error, the 4.2 V output ceiling that silently clamps a
+fresh LiPo, and the 100 Hz loop that cannot see a switching converter.
+
+**Verified rather than proofread.** A link/anchor checker over all fifteen pages
+reports zero broken links; every backticked tool name is cross-checked against
+the live 324-entry `TOOL_TIERS`; every subcommand resolves in `--help`; and both
+example run specs were parsed verbatim through `RunSpec.from_dict`, so the JSON
+in the docs is executable rather than decorative. That pass found fourteen
+defects in the first drafts — `Channel` for `OtiiArcChannel` in eleven places,
+`--yes` trailing the device group (a parse error, not an authorisation) on five
+pages, three tool names that do not exist, and four undefined imports in the
+profiler snippet.
+
+It also found one **product** bug, disclosed in the affected page rather than
+papered over: `cp2112_open` calls `CP2112.open()` directly instead of
+`session.resolve()`, so `--sim silabs_cp2112` is accepted, logged and then
+ignored. Seven of the eight drivers resolve correctly; the sim factory and the
+registry opener both exist, so only the MCP-tool layer is wrong.
+
 ### The whole bench from a shell — 324 CLI subcommands, generated
 
 `benchctrl` reached seven drivers with ten hand-written Arc-only commands. Every

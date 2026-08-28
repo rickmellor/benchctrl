@@ -356,8 +356,15 @@ More: [`docs/getting_started.md`](docs/getting_started.md).
 
 ## Documentation
 
+**Start here if you are using the bench rather than changing it:**
+[`docs/guide/`](docs/guide/README.md) — the user guide. Overview, theory of
+operation, the equipment matrix, local vs remote, driving it from an agent, and
+worked examples (board bringup, sleep current, battery emulation, power cycling,
+unattended runs). The table below is the reference layer underneath it.
+
 | Doc | What's in it |
 |---|---|
+| [`docs/guide/`](docs/guide/README.md) | **User guide** — task-oriented, externally distributable |
 | [`docs/getting_started.md`](docs/getting_started.md) | Install + first capture tutorial |
 | [`docs/api_reference.md`](docs/api_reference.md) | Every public class and method |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Driver-symmetric layout, Protocol contract, registration model |
