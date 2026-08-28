@@ -108,8 +108,10 @@ Being clear about this saves you evaluating it for the wrong job.
   off through a wedged driver. For genuinely unattended work at energies that
   matter, a hardware interlock is the only real answer, and the guide says so
   where it applies.
-- **It is not a GUI.** There is a read-only status dashboard for a bench
-  display. Everything else is API, CLI or agent.
+- **It is not a GUI.** A bench host with a monitor runs a fullscreen
+  [status panel](bench-display.md), but it is read-only by construction — it
+  cannot arm an instrument or switch an outlet. Everything you *do* is API, CLI
+  or agent.
 
 ## How the pieces fit
 

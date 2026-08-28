@@ -324,12 +324,29 @@ imports are lazy. Restart it deliberately, when nothing is armed.
   working TCP path with no network at all — which is also how the latency figures
   in [Local and remote mode](local-vs-remote.md) were measured.
 
-Optional extras in [`deploy/`](../../deploy/README.md): a read-only HDMI status
-display, a kiosk mode that boots straight into it, and a fix for HDMI through a
-USB-C hub.
+## Put a monitor on it
+
+If the board has a display attached, it can boot straight into a fullscreen
+read-only status panel — what is armed, what is attached, which mains outlets are
+energised, what happened recently — so the state of the bench is something you
+look up at rather than query:
+
+```bash
+sudo ./deploy/install-fui.sh      # the panel
+sudo ./deploy/install-kiosk.sh    # boot into it, no login prompt
+```
+
+Test the panel over an SSH tunnel **before** enabling the kiosk: the second script
+removes the board's only local login, and on a keyboard-less board SSH becomes the
+only way back in. Full instructions, how to read the panel, and why it cannot be a
+control surface are in [The bench display](bench-display.md).
+
+Also in [`deploy/`](../../deploy/README.md): a fix for a display that arrives as
+DisplayPort altmode through a USB-C hub and stays dark after boot.
 
 ## Next
 
+- [The bench display](bench-display.md) — the status panel on this board's monitor
 - [Local and remote mode](local-vs-remote.md) — what changes once you are remote
 - [Unattended runs](examples/unattended-runs.md) — the payoff
 - [`deploy/README.md`](../../deploy/README.md) — every script, in detail

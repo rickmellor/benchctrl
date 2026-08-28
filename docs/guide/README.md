@@ -25,6 +25,7 @@ instruments attached at all.
 |---|---|
 | [Local and remote mode](local-vs-remote.md) | Running the bench on your machine vs. on a dedicated host — and the honest trade-offs |
 | [Setting up a bench host](bench-host-setup.md) | Standing up a small Linux board as a permanent bench controller |
+| [The bench display](bench-display.md) | The read-only status panel on the bench host's own monitor |
 | [Driving it from an AI agent](agent-harness.md) | Wiring the bench into Claude Code or any MCP client |
 | [Command line](../cli.md) | Every instrument function as a shell command |
 
@@ -54,6 +55,7 @@ The guide links into these rather than repeating them:
 
 - [`api_reference.md`](../api_reference.md) — every public class and method
 - [`drivers.md`](../drivers.md) — per-instrument detail, firmware quirks, wire formats
+- [`dashboard.md`](../dashboard.md) — the bench display's design, the hazard it replaced, the e-stop
 - [`KNOWN_LIMITATIONS.md`](../../KNOWN_LIMITATIONS.md) — hardware caps and workarounds, kept deliberately honest
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — development setup and conventions
 
