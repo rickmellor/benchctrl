@@ -58,6 +58,12 @@ Hardware-marked tests need:
 - For DP2031 tests: a **Rigol DP2031** on USB-TMC
 - For QR10x tests: an **Eastwood QR10x** on a USB-Serial port
 - For SDM4065A tests: a **Siglent SDM4065A** on USB-TMC
+- For CLI tests (`test_hardware_cli.py`): an **Ontrak ADU218**, and the tests
+  must run **where the instruments are** — they spawn `python3 -m benchctrl` as
+  a real subprocess, so on a remote bench that means running them on the bench
+  machine, not against it. Two of them switch a relay and skip unless
+  `BENCHCTRL_CLI_HW_WRITE=1`, because the CLI has no `allowed_relays` flag by
+  design.
 
 Tests skip cleanly with a useful message if the hardware isn't
 present, so partial setups don't fail the suite — you just get fewer

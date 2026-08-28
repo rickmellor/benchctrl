@@ -342,6 +342,37 @@ Nothing retries and nothing backs off, so "wait" is the whole of the advice.
 Recordings and streams cannot span invocations either — for anything stateful,
 use the Python API.
 
+## How this is verified
+
+Three hardware-free modules cover the generated surface in-process:
+`test_cli_generated.py`, `test_cli_main.py` and `test_cli_tiers.py` — 140 tests,
+including the completeness assertion that fails the suite if a tool ships without
+a tier.
+
+[`test_hardware_cli.py`](../tests/test_hardware_cli.py) covers the two claims
+those cannot make, because both are properties of *a process against a device*:
+that a reflected subcommand really drives the instrument through a cold
+open/call/teardown, and that the exit codes are what `$?` sees rather than what
+`main()` returned.
+
+The pairing that matters there is the gate. A refusal proves nothing on its own —
+a permanently-closed gate passes every refusal assertion — so the satisfied case
+is checked against real hardware too, where it must reach the device and exit 0.
+With nothing attached it would exit 2, and 2-vs-3 would stop being a distinction.
+
+```bash
+# on the bench machine — the tests spawn a real `python3 -m benchctrl`
+pytest -m hardware tests/test_hardware_cli.py -q
+BENCHCTRL_CLI_HW_WRITE=1 pytest -m hardware tests/test_hardware_cli.py -q
+```
+
+The two relay-switching tests skip without that variable. The CLI has no
+`allowed_relays` flag (see [Arguments deliberately not
+exposed](#arguments-deliberately-not-exposed)), so a CLI write reaches whatever
+relay is named — the nomination has to come from the operator, and it shares
+`BENCHCTRL_ADU218_RELAY` with the driver's own hardware tests so the two files
+cannot drift about which contact is safe to move.
+
 ## Known limits
 
 - **There is no local governor.** `SafetyGovernor` is a member of the *agent

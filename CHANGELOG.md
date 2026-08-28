@@ -162,9 +162,32 @@ the two Rigols are real exposure. And **mains switching is now one shell line**,
 which does not change the cabling invariant that makes self-kill impossible but
 does raise the cost of anyone ever changing it (§ F-12).
 
+**Two claims needed a real process against a real device**, so
+`tests/test_hardware_cli.py` spawns `python3 -m benchctrl` as a subprocess: that a
+reflected subcommand drives the instrument through a cold open/call/teardown, and
+that the exit codes are what `$?` sees rather than what `main()` returned — the
+second also depends on `__main__` and on no traceback escaping, and scripts branch
+on `$?`.
+
+The gate is tested as a *pair*, because a refusal proves nothing alone: a
+permanently-closed gate passes every refusal assertion, so the **satisfied** case
+is the discriminator and is checked against real hardware, where it has to get
+past the gate and reach the device. With nothing attached that run also fails —
+with 2 — and 2-vs-3 would stop being a distinction. Measured on the board:
+`adu218 set-relay-state 0 on` exits **3** with `Nothing has been sent to the
+device.` and an empty stdout; `--yes` plus `BENCHCTRL_ADU218_ARM_WATCHDOG=1`
+reaches the instrument and exits **0**.
+
+Eight of the ten pass on the bench today. The two that switch a relay skip unless
+`BENCHCTRL_CLI_HW_WRITE=1`: the CLI deliberately has no `allowed_relays` flag, so
+a CLI write reaches whatever relay is named, and the nomination has to come from
+the operator. It shares `BENCHCTRL_ADU218_RELAY` with the driver's own hardware
+tests so the two files cannot drift about which contact is safe to move.
+
 New: `src/benchctrl/cli_generated.py`, `cli_tiers.py`, `cli_lifecycle.py`,
-[`docs/cli.md`](docs/cli.md), and 140 tests across `test_cli_generated.py`,
-`test_cli_tiers.py` and `test_cli_main.py`.
+[`docs/cli.md`](docs/cli.md), 140 hardware-free tests across
+`test_cli_generated.py`, `test_cli_tiers.py` and `test_cli_main.py`, and 10
+hardware-marked in `test_hardware_cli.py`.
 
 ### Ontrak ADU218 relay / digital I/O interface — zero dependencies
 
