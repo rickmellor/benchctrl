@@ -131,6 +131,22 @@ misread as evidence this one fired.
 
 ## Reading the panel
 
+![The bench display, with the source-measure unit armed](images/fui-armed.png)
+
+Above is the panel with one instrument armed. It is a real render of the shipping
+display against a **simulated** bench — the `SIM…` serial numbers on the rail are
+the giveaway, and they are left visible on purpose so nothing here can be
+mistaken for a measurement off real hardware. Everything the panel *says* about
+that bench, though, is produced by the same code the board runs: `ARMED` in
+amber, the armed slot boxed in red, an activity age under each linked
+instrument, `NO ID` on the QR10X, and the mains outlet map along the bottom left.
+
+Note what it does *not* draw. `DIGITAL MULTIMETER` reads `OPEN · no measurement
+channel yet` and the supply/load trace reads `NO SIGNAL`, because an observer
+session carries arm state and presence but no readings. A panel that filled those
+with a plausible number would be inventing one, so it says which kind of nothing
+it has.
+
 Four panels and a rail.
 
 | Panel | Shows |
