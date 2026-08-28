@@ -154,6 +154,34 @@ def test_pdu_switching_is_present_and_double_gated():
     assert cli_tiers.env_gate_for("pdu41002_reset_outlet") == "BENCHCTRL_PDU_ALLOW_SWITCHING"
 
 
+def test_every_pdu_write_is_exposed_and_none_is_ungated():
+    """Derived, for the same reason the ADU218 check below is.
+
+    The two assertions above name the switching tools, so they cannot regress —
+    but they say nothing about a write added *later*. ``test_every_tool_has_a_tier``
+    does not cover that case either: it compares the table against ``_TOOLS``, so
+    a driver that grows a mutator with no tool at all satisfies both. On the one
+    device that switches mains, "the driver can do it and the CLI cannot" should
+    be a test failure rather than something noticed by reading.
+    """
+    from benchctrl.agent import dispatch
+    from benchctrl.drivers.cyberpower_pdu41002.driver import CyberPowerPDU41002
+
+    surface = dispatch.introspect(
+        CyberPowerPDU41002.__new__(CyberPowerPDU41002), "cyberpower_pdu41002"
+    )
+    for method in sorted(surface.mutators):
+        tool = f"pdu41002_{method}"
+        assert tool in TOOL_TIERS, (
+            f"PDU41002.{method} mutates a mains switch but {tool} is not a CLI "
+            f"subcommand"
+        )
+        assert TOOL_TIERS[tool] != READ, (
+            f"{tool} is a wire-level mutator classified READ, so it would run "
+            f"with no authorisation at all"
+        )
+
+
 def test_every_adu218_write_is_exposed():
     """"All features of the ADU218 must be writable as well."
 
