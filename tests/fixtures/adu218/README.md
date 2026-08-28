@@ -1,0 +1,679 @@
+# ADU218 Stage 0 device transcripts
+
+Verbatim captures from the real device, taken before any driver code was
+written. Per `AGENTS.md`: a simulator built from the same misreading of a
+manual as the driver agrees with the driver and proves nothing. These
+transcripts are what the simulator must replay, so it replays the *device*
+rather than our reading of the PDF.
+
+## Provenance
+
+| Item | Value |
+|---|---|
+| Device | Ontrak Control Systems ADU218 USB Relay I/O Interface |
+| USB ID | `0a07:00da` |
+| USB serial | `E02246` |
+| Enumeration | USB 1.10, **Low Speed**, `bInterfaceClass 03` (HID), **no kernel driver bound** |
+| Endpoints | 8-byte interrupt: EP `0x01` OUT, EP `0x81` IN, `bInterval` 10 |
+| Host | Arduino Uno Q, kernel 6.16.7-g0dd6551ae96b, Python 3.13.5 |
+| Access path | raw `USBDEVFS` ioctls via stdlib `fcntl` + `ctypes` — **no pyusb, no hidapi, no pyserial** |
+| Capture date | 2026-08-25 |
+| Witness DMM | Siglent SDM4065A, s/n `SDM46A0CA00021`, firmware `0.0.0.20` |
+| Wiring | ADU218 relay **K0** load side → SDM4065A input leads. Nothing else attached, so no load current flows and the PhotoMOS CPS limit does not bind. This is the safety basis for every switching capture here |
+
+### Why no driver binds, and why that is not luck
+
+Worth stating precisely, because the obvious reading is wrong. `usbhid` is
+built into this kernel and *did* bind the USB keyboard on the same bus, so this
+is not the `ch341` situation of a missing module (`KNOWN_LIMITATIONS.md` § N-6).
+
+The interface is unclaimed because upstream Linux **deliberately ignores** it:
+`drivers/hid/hid-quirks.c` lists `0a07:0x0064`, `+20`, `+30`, `+100`, `+108`,
+`+118`, `+200`…`+500` in `hid_ignore_list`, and `hid-ids.h` defines
+`USB_VENDOR_ID_ONTRAK 0x0a07` / `USB_DEVICE_ID_ONTRAK_ADU100 0x0064`. Our PID
+`0x00da` is `0x0064 + 118` — the ADU218 entry. HID core is told to keep away
+because these devices are not really HID; the report descriptor is a wrapper
+around a private ASCII protocol.
+
+Two consequences, both load-bearing:
+
+- **`CLAIMINTERFACE` will always succeed** on any mainline kernel, with no
+  driver to detach first. The zero-dependency userspace path is not a local
+  accident of this board, and it will not break when a kernel is updated.
+- **A kernel driver for this device does exist**: `drivers/usb/misc/adutux.c`
+  (`CONFIG_USB_ADUTUX`) binds the same six PIDs including `0x0064+118`
+  `/* ADU218 */` and exposes `/dev/usb/adutuxN`. It is **not** enabled on this
+  board (nor on the WSL host: `# CONFIG_USB_ADUTUX is not set`), so it is not
+  the path we take — but it is why the driver's transport seam matters. Its
+  `write()` copies the user buffer to the interrupt endpoint verbatim and its
+  `read()` returns the payload unmodified, so the framing below is identical on
+  both routes. See `framing.txt`. Note `adutux` enforces exclusive open
+  (`-EBUSY`), which is a stronger writer guarantee than usbfs gives us.
+
+## Files
+
+- `framing.txt` — proof that the `0x01` report prefix is mandatory
+- `reads.txt` — every read-only command, with the exact 8-byte response
+- `errors.txt` — invalid and out-of-range commands
+- `switch_k0.txt` — two full K0 close/open cycles, each corroborated by the DMM
+- `watchdog.txt` — the hardware watchdog opening a relay on host silence, with
+  a fed-timer control; also `MKddd`, the counters, and `DBn`. **Carries a
+  correction: its "3.7 s" is an observation latency, not a trip time.**
+- `watchdog_trip.txt` — the WD1 trip time measured properly, by bisecting the
+  silence window: **(0.90, 1.10] s**, i.e. the documented 1 s
+- `whole_port_witness.txt` — the `MKddd` whole-port write witnessed by the DMM,
+  which the sweep's own `relay_mask()` read-back could not do. The two masks are
+  **complements**, so one meter suffices: `MK170` closes K7 at
+  **17.5134–17.5152 Ω** and `MK085` opens it. **The corroboration is the number:**
+  the bench walk read K7 at 17.50 Ω through the *per-relay* `SKn` path, so two
+  independent command paths put the same contact at the same resistance. Records
+  what is deliberately **not** asserted, and why (F-27)
+- `on_resistance.txt` — characterisation of the closed-contact reading. **Carries
+  two corrections**: the repeats are 2-wire (not 4-wire), and its comparison
+  against the datasheet maximum was never like-for-like
+- `latency.txt` — write-to-read round-trip latency, 200 samples each of `PK` and
+  `RPK0`: **max 16.65 ms**, which is what justifies the read timeout. Also
+  re-confirms every documented silence at the shipping timeout rather than at the
+  2000 ms the other captures used
+- `latency_after_command.txt` — the same latency for the read-back that
+  *immediately follows relay motion*, which is the path `verify=True` depends on
+  (**max 16.68 ms**, 40 actuations, zero disagreements). §B pins the DMM range,
+  which `on_resistance.txt` never recorded
+- `on_resistance_drift.txt` — the closed-contact reading **stepped +4.55 Ω
+  between sessions** with nothing in software changed, and is milliohm-stable on
+  both sides. This is what attributes the excess to a series connection outside
+  the relay
+
+- `counters_live_signal.txt` — the counters and de-bounce under a **real signal**
+  (operator-driven SDG1032X square wave on PA3), which is what first drove an
+  ADU218 input line to a `1` on this bench. Counters count **cycles, not edges**,
+  measured at two frequencies an order of magnitude apart (device/host ratio
+  1.000 at 0.5 Hz, 1.003 at 10 Hz — both edges would give 2.0). Carries the B4
+  **negative** result with its scope: all three de-bounce settings count
+  identically at 10 Hz, which is expected rather than evidence `DB` is inert
+
+### Two groups, and which claim rests on which
+
+**Nine** of the fourteen captures **predate any production code**, taken with
+throwaway scripts in `/tmp`: `framing`, `reads`, `errors`, `switch_k0`,
+`watchdog`, `on_resistance`, `latency`, `latency_after_command`,
+`on_resistance_drift`. They are named rather than given as a range because the
+two groups are interleaved in the list above, not contiguous. That is what
+`AGENTS.md` asks for and it is load-bearing in exactly one place:
+`sim/adu218.py` replays `reads.txt`, so the simulator is pinned to the *device*
+rather than to our reading of the PDF. Had that capture come from the driver, the
+sim would agree with the driver by construction and prove nothing.
+
+The rest exercise **shipping code**, and that is the point of them rather than a
+weakness — a capture that drives the real API is the only kind that can witness
+the real API. What it costs is the anti-circularity guarantee, so none of them is
+a simulator source:
+
+- `link_hardware.txt` / `link_dmm_witness.txt` — `Adu218UsbfsLink` (details
+  below)
+- `counters_live_signal.txt` — read through the **agent over RPC**, since the
+  agent held the device
+- `whole_port_witness.txt` — `set_relay_port()` / `reset_relays()`, witnessed by
+  the DMM
+- `watchdog_trip.txt` — **straddles both groups.** Its `WD1` bracket is raw
+  `RPK0`; its `WD2` addendum calls `read_watchdog()` / `read_watchdog_tripped()`
+
+The two link captures are the ones to read first, because they exercise
+`src/benchctrl/drivers/ontrak_adu218/usbfs.py` unmodified:
+
+- `link_hardware.txt` — `Adu218UsbfsLink` on the real unit: enumeration by
+  serial, claim, drain, every read, four K0 actuations, argument rejection,
+  lifecycle. **Its section D is the load-bearing one:** all three documented
+  silences still time out at the shipping 200 ms *and* leave **0 replies
+  queued**, which is what licenses the 10x cut from the 2000 ms evidence base.
+  Section G is deliberately labelled weak — `RPK0` is the device agreeing with
+  itself
+- `link_dmm_witness.txt` — the same link, witnessed by the **SDM4065A** instead
+  of by the device: **6 state changes, 0 disagreements**, with the DMM unable to
+  see the USB bus. Also carries a correction to its own script's summary line
+  ("9 transitions" is the command count, not the transition count), and notes
+  that the repeated-command rows prove the relay commands are **absolute, not
+  toggling**. Third data point for the resistance story: 10.65 Ω, i.e. ~40 mΩ
+  *below* the previous session, with nothing touched in between
+
+## Wire format, as measured
+
+Commands are ASCII, case-insensitive, in an 8-byte packet:
+
+```
+byte 0    = 0x01          report prefix — MANDATORY, and specifically 0x01
+bytes 1.. = ASCII command, NUL-padded to 8
+```
+
+Responses arrive on EP `0x81`, also 8 bytes, same shape: byte 0 is `0x01`,
+then the ASCII payload, NUL-terminated and NUL-padded.
+
+The prefix was measured, not assumed — `framing.txt` shows bare ASCII, `0x00`
+and `0x02` are all silently ignored while `0x01` answers. A test asserting only
+that byte 0 is non-printable would pass for two encodings the device rejects.
+
+The measurement turns out to be a documented rule rather than a local quirk, and
+knowing why raises confidence that it will hold: the byte is a **report ID**
+selecting a pipe — `0x01` Device (ASCII commands), `0x02` RS232, `0x03`
+Streaming. §4 of the manual states the ADU208/ADU218 "does not use the RS232 or
+Stream pipes", so there is no hardware for a `0x02` packet to reach, which is
+exactly why it is *silently* ignored rather than refused. The vendor gives a
+byte-exact ADU218 example matching this framing in both directions:
+
+```
+01h 52h 45h 32h 00h 00h 00h 00h    "RE2" to the ADU218
+01h 31h 30h 34h 34h 39h 00h 00h    count "10449" back to the host
+```
+
+Two consequences: never emit `0x02`/`0x03`, and the ASCII payload budget is
+**7 bytes** (prefix + payload + NUL padding = 8). The longest documented command
+is `MK255` at 5, so a `>7` rejection is a cheap validator with real headroom.
+Commands are case-insensitive.
+
+Response payload widths are **fixed per command** and match the manual. The last
+column records how well the manual backs each one: six are *stated*, four appear
+only in an example — for those four the measurement is the stronger evidence.
+
+| Command | Width | Meaning | In manual |
+|---|---|---|---|
+| `PK` | 3 | PORT K as decimal `000`–`255` | stated §6a |
+| `RPKn` | 1 | one relay, `0` or `1` | example only §6a |
+| `Py` (`PA`/`PB`) | 2 | 4-bit input port as decimal `00`–`15` | stated §6b |
+| `RPy` | 4 | 4-bit input port in binary, MSB-first | stated §6b |
+| `RPyn` | 1 | one input line | example only §6b |
+| `PI` | 3 | both input ports, decimal `000`–`255`; PORT A low nibble | stated §6b |
+| `REn` / `RCn` | 5 | 16-bit event counter, `00000`–`65535` | stated §6c |
+| `DB` | 1 | de-bounce setting | example only §6c |
+| `WD` | 1 | watchdog setting | example only §6d |
+
+The `PK`=3 vs `Py`=2 asymmetry is fully explained by the port widths: PORT K is
+8 bits (0–255, three digits), PORT A/B are 4 bits (0–15, two digits), and `PI`
+needs three because it packs both nibbles into one byte. Values are zero-padded.
+**Parse by strip-at-first-NUL rather than fixed slicing** — free, and it survives
+either padding style.
+
+Bit weighting, for the record: in `PK`, bit *n* is relay K*n* with LSB = K0
+(§6a's example gives `128` = "K7 is closed… K0-K6 are open"). `RPKn` returns
+`0` = open, `1` = closed. `RPy` is MSB-first, so `char[0]` = PA3 … `char[3]` =
+PA0. In `PI`, PORT A is the low nibble.
+
+Counters: 16-bit, count low-to-high transitions, and **roll over** 65535 → 00000
+with no documented overflow flag — so zero counts and exactly 65536 counts are
+indistinguishable. The counter-to-input map is in a Table 1 *image* that text
+extraction drops entirely; read from the image, it is counters 0–3 → PA0–PA3 and
+counters 4–7 → PB0–PB3, corroborated by the manual's `RE1`→"PA1" and
+`RC3`→"PA3" examples. There is **no clear-without-read command**: zeroing a
+counter requires accepting its value via `RCn`.
+
+## Ratings, as written in the manual's specifications table
+
+Relevant because the driver's safety posture should be sized to the real device,
+and because two of these differ from the vendor's web page.
+
+| Spec | ADU218 (this device) |
+|---|---|
+| Relay type | Panasonic **AQZ207 PhotoMOS**, form A (N.O.), solid-state |
+| AC rating | **1 A @ 120 VAC** |
+| DC rating | **1 A @ 120 VDC** (the manual's DC row reads "120VAC" — a typo; the web page gives 120 VDC) |
+| On-state R | 700 mΩ typ / **1.1 Ω max** — conditions omitted here; the part datasheet specifies them at `IL = 1.0 A` (see finding 4) |
+| Max switching speed | **1 CPS at full load** — but Panasonic's own limit for the part is **0.5 cps** (see below) |
+| Isolation | 2500 Vrms (manual) — **but the manual does not say which barrier this bounds**, and the web page's two figures (3500 V, plus 500 V *channel-to-channel*) show at least two distinct barriers exist. A single number cannot describe both, so this row must not be quoted as "the" isolation rating of anything |
+| Safety certification | **primary insulation ONLY** |
+
+Two things to carry into the driver and its docs:
+
+- **`§6a` caution, verbatim:** *"At full-load rating, the maximum recommended
+  switching speed is 1 CPS. The ADU218 is not recommended for PWM applications.
+  Recommended switching speed can be safely exceeded only for applications
+  operating at 20% or less of rated current."* The limit is therefore
+  load-dependent — 1 Hz at 1 A, effectively unbounded at ≤200 mA — and a driver
+  cannot enforce it without knowing the load. That makes it a
+  `KNOWN_LIMITATIONS.md` entry, not a code check.
+
+  **Ontrak's 1 CPS is twice the part maker's limit.** Panasonic
+  `ASCTB467E` gives max operating frequency as **0.5 cps** for the AQZ207, at
+  `IF = 10 mA, duty = 50 %, IL = Max., VL = Max.` Both figures claim to be "at
+  full load", so they conflict. Ontrak may be derating differently at 120 V
+  against the part's 200 V rating; that is a guess and is not resolved here.
+  **If the driver docs ever state a switching-rate ceiling, use 0.5 CPS** — it is
+  the more conservative and it comes from the component manufacturer rather than
+  the integrator.
+- **`§2` caution, verbatim:** *"The ADU218 provides CSA/UL EN60950-1 2nd edition
+  safety certification for **primary insulation only**. For applications using
+  an ADU218 requiring double insulation, additional protection should be provided
+  by user in end application."* The sibling ADU208 is double-insulated; this one
+  is not. Worth stating in the driver docs because it is a property of the model
+  on the bench, not something an operator would infer.
+
+Manual-vs-web conflicts are recorded rather than silently resolved: operating
+temperature is −25/85 °C in the manual and 0–50 °C on the web page; isolation
+differs as above; de-bounce options differ (see below).
+
+## Five findings that would each have been a driver bug
+
+1. **`RI` times out; `PI` answers.** The manual's command summary (§5) lists
+   `RI` to read both input ports. The command *description* (§6b) calls the same
+   thing `PI`, in four places (prose, command line, and both examples). The
+   device answers `PI` and **times out on `RI`** — the summary table is
+   unusable. A driver written from it would hang on every input read.
+
+   Phrased as *timed out* rather than *does not exist* deliberately, because
+   finding 3 limits what a timeout can prove: silence is also how this device
+   rejects a valid command carrying a bad argument (`RPK8`, `DB9`), so a timeout
+   establishes only that `RI` is unusable, never that the firmware lacks the
+   opcode. The driver consequence is identical either way, but the record should
+   not claim more than the wire showed.
+
+   Both spellings really are in the PDF: `RI` appears exactly once (§5, p10),
+   `PI` four times (§6b, p13), confirmed against raw non-layout text extraction
+   so it is not a `pdftotext` artifact. So this is a genuine internal
+   contradiction in the vendor document that the hardware resolves — **cite §6b
+   in code, never §5.** `PI` also fits the `P`-prefix decimal-read family
+   (`PK`, `PA`, `PB`, `PI`), which is weak corroboration on its own.
+
+2. **PORT A and PORT B are 4 bits each, not 8.** Eight digital inputs total,
+   split across two isolated 4-bit ports (`n = 0..3` per port). This is why
+   `PK` returns three digits but `PA` returns two. Indexing inputs 0–7
+   against a single port is wrong.
+
+3. **An invalid command returns nothing at all** — no error string, no
+   sentinel. The read simply times out (`ETIMEDOUT`/110). So the driver must
+   know, per command, whether a response is expected; it cannot discover this
+   at runtime. The mitigating half of the finding: the session stays healthy,
+   and the very next valid command answers normally. This is *unlike* the
+   SDM4065A, where a query on an undefined header can strand the bulk
+   endpoints until a power cycle (`KNOWN_LIMITATIONS.md` § F-8).
+
+   The manual has no error-response section at all — no sentinel, no NAK, no
+   status register — so silence is not documented *as* the error behaviour, but
+   it is what the architecture implies, and Ontrak states the general rule:
+   "The ADU will not send data to the host computer unless requested." The
+   survival half **is** a documented rule rather than luck: §6d says invalid
+   commands are received and parsed (they reset the watchdog) and then discarded
+   without side effect. That is why the next valid command answers — and, less
+   comfortably, why an invalid command still feeds the deadman.
+
+4. **The measured closed-contact resistance cannot be compared to the datasheet
+   at all, and the excess is in the bench wiring rather than the relay.** Two
+   separate errors were made reading this and both are now closed; the driver
+   consequence survives both, and is stronger for it.
+
+   The reading was ~6.14 Ω against the manual's 700 mΩ typical / 1.1 Ω maximum.
+   Eight repeats spread 0.98 mΩ, so it was stable and systematic, not noise. It
+   is a **2-wire** measurement (the 4-wire attempt returned −146172 Ω with no
+   sense leads attached), so it includes lead and contact resistance — which was
+   argued away by citing § H-5's ~79 mΩ lead error as far too small to explain a
+   5 Ω discrepancy. **That citation was itself the wrong-conditions mistake a
+   third time:** H-5's figure was measured on a QR10x 100 Ω setpoint with a
+   different lead set and different connections, so it bounds *that* path, not
+   this one — and it turned out to be wrong by 57x here. With the bound removed,
+   the 2-wire/4-wire distinction was never dismissible. That was where the
+   question sat: unexplained.
+
+   It is no longer unexplained. A later session read the same closed contact at
+   **10.694 Ω** with nothing in software changed — a **+4.55 Ω step**, and
+   milliohm-stable on both sides of it (3.93 mΩ across ten re-actuations, against
+   0.12–2.35 mΩ within one close; 1.67 mΩ of drift over a 28 s hold). See
+   `on_resistance_drift.txt`. A semiconductor's R_on does not step 74% between
+   sessions and then hold to 4 mΩ across ten actuations, and a range-dependent
+   DMM offset was eliminated independently (pinned 200 Ω vs autoranged: 1.353 mΩ,
+   against a 4550 mΩ step — `latency_after_command.txt` §B). What *does* produce
+   that shape is a series connection outside the relay — DMM leads, K0 screw
+   terminals, clip joints — disturbed or lightly oxidised, stepping to a new
+   value and holding there. 6.14 Ω and 10.69 Ω are both stable readings of a
+   stable connection; they are readings of two **different** connections.
+
+   **The driver must not treat the datasheet on-resistance as a validation
+   threshold, and must not report a contact-resistance figure at all** — an
+   open/closed check keys on the DMM's overload sentinel, where the margin is
+   effectively infinite, not on a resistance limit. The step demonstrates why
+   directly: a driver that had thresholded "closed" at `< 10 Ω` from the original
+   6.14 Ω observation would today call every closed relay open.
+
+   Four candidate mechanisms were checked against the ADU218 manual — series
+   protection resistance, a current-sense element, a different specified
+   measurement condition, and PhotoMOS R_on being specified at a load current
+   far above a DMM's ohmmeter drive — and the manual is **silent on all four**.
+   The entire manual contains four resistance-related lines: two input-impedance
+   figures (2700 Ω) and the two on-state numbers, and the on-state numbers are
+   given **with no test conditions at all**. So the manual offers nothing to
+   compare against.
+
+   **The part datasheet supplies the missing conditions, and they invalidate the
+   comparison.** Panasonic `ASCTB467E` (PhotoMOS Power SIL 1 Form A family
+   catalogue; AQZ207 has no standalone datasheet) specifies on-resistance in a
+   table with an explicit Condition column: **`IF = 10 mA`, `IL = Max.`,
+   `Within 1 s`**. For the AQZ207, `IL = Max.` resolves to **1.0 A** from the
+   absolute-maximum-ratings row. Ontrak's 700 mΩ / 1.1 Ω are copied verbatim out
+   of that table — correct column, correct part — **but reprinted with the
+   conditions stripped.**
+
+   So the 1.1 Ω maximum is a short-pulse figure at **1.0 A**, and this bench
+   measured at roughly **1 mA**: three orders of magnitude below the specified
+   envelope. "6.14 Ω vs 1.1 Ω max" was never like-for-like, and nothing in the
+   ADU218 manual lets a reader discover that. Consequences for the driver:
+
+   - **This unit is not "out of spec."** There is no datasheet limit a 1 mA
+     reading can violate — nor one it can satisfy. Recording it as a fault would
+     be wrong.
+   - **Nor is it explained.** The tempting story — R_on rises steeply as load
+     current falls — is *not* in the datasheet. There is no R_on-vs-load-current
+     curve anywhere in it (R_on is plotted only against ambient temperature),
+     and the one lower-current point it does give trends the wrong way for that
+     story: graph 3-4 is taken at **0.4 A** and reads ≈0.65 Ω at 25 °C, slightly
+     *below* the 0.7 Ω typical quoted at 1.0 A. The I-V curve (graph 9-2) is a
+     straight line through the origin with no knee, but at ±4 A full scale it
+     cannot resolve 1 mA either way. Temperature is the only R_on modifier the
+     datasheet quantifies, and it bounds that at ~1.5x over 25→85 °C — nowhere
+     near the 5.44 Ω unaccounted for (3.07 Ω per die across the two series
+     MOSFETs, against 0.35 Ω per die implied by the typical).
+   - **The two-MOSFET topology does not add a factor.** The AC/DC variants
+     (AQZ20x) really are two MOSFETs in anti-series — visible in the schematic
+     and quantitatively in the ~2x R_on ratio against each DC-only sibling
+     (AQZ107 0.34 Ω → AQZ207 0.7 Ω). That doubling is **already inside** the
+     published 0.7 Ω. Do not double it again.
+   - **The driver must not report or imply a contact-resistance figure**, because
+     no in-spec figure exists at any current the driver could know about. An
+     open/closed check keys on the DMM's overload sentinel.
+
+   **Status: closed, and confirmed off-host.** The comparison was invalid, and
+   the excess is attributed to series connections outside the relay. Which of
+   those connections moved is not identifiable from here — the leads, screw
+   terminals and clip joints are all in series and all outside the part — so the
+   operator was asked, and confirmed it: **the probes were re-seated between the
+   two sessions, deliberately, to improve connection stability**, then left
+   untouched for the two hours spanning the drift and re-actuation captures. The
+   attribution was reached before that answer was known and did not depend on it.
+
+   Two consequences the host-side evidence could not have supplied. **6.14 Ω was
+   never a relay measurement either** — both numbers are probe-path resistance, so
+   nothing in this fixture set ever measured the part. And **the probes are
+   clamped into a screw terminal, so contact point quality is not guaranteed by
+   construction**; the operator's stated improvement is *mechanical* (the probe
+   moves less than it did), which is a different quantity from contact resistance
+   and does not bound it.
+
+   A claim made in an earlier pass — that the re-seated joint was "more stable" as
+   well as more resistive — was **withdrawn**: it compared the later session's
+   across-close spread (3.93 mΩ) against the earlier session's within-close spread
+   (0.983 mΩ), which are different quantities. Like-for-like within-close is
+   0.983 mΩ before vs 0.12–2.35 mΩ after — comparable, arguably slightly worse —
+   and no across-close data exists from the earlier session. What stands is
+   absolute stability over the measured window, which is all the elimination
+   needed, plus a reading that went **up** 4.55 Ω. Repeat precision is therefore
+   no evidence a figure describes the relay: this one is milliohm-repeatable and
+   measures a screw clamp.
+
+   Measuring the relay's *actual* R_on remains out of reach and out of scope: it
+   would need the datasheet's own condition (1.0 A, expecting ≤1.1 Ω; or 0.4 A
+   for direct comparison with graph 3-4), which energises a 120 V-rated relay
+   into a real load. That is an operator decision, not something to slip into a
+   probe script. See `on_resistance.txt` and `on_resistance_drift.txt`.
+
+5. **A queued response outlives the command that caused it.** Interrupt-IN
+   replies sit on EP `0x81` until read, so a driver that skips a read (or
+   fails one) leaves an answer behind, and the *next* query returns the
+   *previous* command's value — a silent wrong answer, not an error. This is
+   not hypothetical: it invalidated the first framing measurement here, which
+   credited a bare-ASCII write with a reply that belonged to the prefixed
+   command before it. The driver must own the endpoint's read/write pairing
+   strictly, and should drain on open. See `framing.txt`.
+
+   Ontrak documents both the cause and the mitigation, and adds a depth figure
+   that measurement here did not establish: there are "**three buffers per
+   device** in the USB core", so a skipped read can leave *more than one*
+   reading stale — the driver cannot assume a single stale frame and drain one.
+   Their guidance is "read the response immediately after writing a query
+   command", and their own Python example drains at connect: "you may want to
+   read until there is nothing left to read from the device… to clear any
+   pending reads that was not initiated by us." Two consequences: drain in
+   `open()` (a stale reply **survives a process restart**, so session N can read
+   session N−1's answers), and serialise strictly write→read under a lock rather
+   than pipelining.
+
+## And one finding that is an opportunity, not a bug
+
+**The hardware watchdog is real, and it is a deadman that needs no software
+running.** Armed with `WD1`, K0 opened on host silence — witnessed by the DMM,
+not just by the device's own `RPK0` — and the fed-timer control held it closed
+for 3.1 s, so the drop is caused by silence rather than by arming. `WD` also
+self-clears to `0`, which is the only trace a host can use to learn a timeout
+happened (with a caveat — see below).
+
+The trip time is **(0.90, 1.10] s** for `WD1`, matching the documented 1 s.
+That figure comes from `watchdog_trip.txt`, which bisects the silence window;
+`watchdog.txt`'s "3.7 s" was `sleep(3.0)` plus a DMM read and timed the
+*observation*, not the trip. The ladder is bounded: `WD0` off, `WD1` 1 s,
+`WD2` 10 s, `WD3` 1 min, `n` constrained to 0..3, and `WDn` sets the interval
+*and* arms in one command.
+
+Two qualifications that make the feature harder to use safely than it first
+appears, both of which belong in the driver's design rather than a footnote:
+
+- **`WD`=0 is ambiguous.** It means "timed out" *and* "never enabled". So the
+  self-clear is only a usable trace against a driver-held expected value, and a
+  driver restart loses that — the first `WD` read after a restart cannot be
+  interpreted. Write `WD0` at `open()` unless using the watchdog.
+- **A status poller silently neuters it.** Any command refeeds the timer, so a
+  health-check loop reading `PK` keeps the deadman fed however wedged the
+  control path is. The control case above did exactly this, deliberately. The
+  feed must therefore live on the *control* path only, and the driver must
+  expose no background feeder.
+
+This matters beyond the driver: `KNOWN_LIMITATIONS.md` § N-1 says a software
+deadman cannot guarantee an output goes off, and `ROADMAP.md`'s "Hardware
+interlock for unattended runs" is open work. The relay opens because the host
+went *quiet*, so a wedged agent, a killed process, an unplugged cable and a
+panicking kernel all de-energise the load. See `watchdog.txt` for the five
+design consequences, chiefly that arming the watchdog makes every relay's state
+depend on call frequency and must therefore never be implicit.
+
+**Design decision resting on this capture (operator's call):** the watchdog *is*
+the interlock, and the driver adds no software trip hook — a governor trip does
+not open the relays. Default behaviour is plain relay toggling; deadman coverage
+is enabled per test by arming `WD`. The reasoning is the asymmetry this file
+measured: a software hook is software in the decision path, so it fails in
+exactly the scenarios that matter, while `WD` fails closed against all of them in
+(0.90, 1.10] s. Consequence for anyone reading `agent/safety.py` later: the
+ADU218's absence from `default_safe_state()` is **deliberate**, not the accidental
+inertness the PDU had, and `read_watchdog()` is the only way an observer learns
+the interlock fired.
+
+## What the manual adds that measurement could not
+
+Some things cannot be established by probing a load-switching device, because
+the probe is the risk. From the vendor manual and Ontrak's Linux pages, verified
+against the captures above:
+
+**Nothing here writes non-volatile memory.** The manual never mentions EEPROM,
+flash or NVM in any form; all 15 commands touch volatile I/O state or timer
+settings, and every setter has a matching getter. So there is **no documented
+command that can permanently alter this device's configuration** — a reassuring
+property for a switch, and the reason no capture below needed a restore beyond
+re-issuing defaults. Whether `WDn`/`DBn` survive a power cycle is *not*
+specified; `DBn`'s documented 1 ms default hints at volatile, but that is
+inference.
+
+**No mode-latch exists.** There is no analogue of the CyberPower PDU's
+`menumode` — no command changes protocol mode, is one-way, or is documented to
+need a power cycle. The nearest thing to a mode is the report-ID byte, and
+`0x02`/`0x03` are inert on this model.
+
+**Four things not to send, none of which the captures cover:**
+
+1. **`WD4` and above** — behaviour unspecified; `n` is bounded 0..3.
+2. **Out-of-range parameters, `MK300` especially** — the manual is silent on
+   whether out-of-range values are ignored, clamped, or wrapped. `MK300`
+   exceeds one byte, and an *aliased* whole-port write could close relays that
+   were never requested. Validate host-side; never let the device arbitrate.
+3. **`RCn` inside any retry wrapper** — it is the only responsive command that
+   mutates state. If the reply is lost *after* the device cleared, a retry
+   returns a fresh count and the original is gone permanently. Prefer `REn`
+   plus host-side differencing wherever the count matters.
+4. **`'s'` as byte 0** — it appears in Ontrak's `adutux` docs as a serial-number
+   request, but it is a *driver-layer* pseudo-command with "no physical I/O".
+   Over USBDEVFS it is an undefined report ID to the firmware. Take the serial
+   from the USB descriptor instead (`E02246`).
+
+**Two upstream errors worth not copying:**
+
+- **Ontrak's own Python sample has the relay comments swapped** (`'RK0' # set
+  relay 0`, `'SK0' # reset relay 0`). The manual is authoritative and says the
+  opposite: `SK4` *closes* K4, `RK3` *opens* K3. S=Set=close, R=Reset=open,
+  which is what `switch_k0.txt` measures.
+- **The web page lists four de-bounce options** ("10ms, 1ms, 100us, NONE") while
+  the manual documents three and bounds `n` to 0..2 — and the same four-option
+  string appears verbatim on the ADU208 and ADU228 pages, so it reads as shared
+  boilerplate. The captures show 0/1/2 only. **Implement three.**
+
+**Do not infer responsiveness from the mnemonic.** The pattern nearly holds —
+responsive commands start with `R` or `P`, and bare `DB`/`WD` answer while their
+`n`-suffixed setters do not — but **`RKn` starts with `R` and is write-only**,
+and it is the most-called command on the device. The per-command boolean table
+is not redundant with a naming rule.
+
+**Relay index ranges differ by command family:** relays are `n = 0..7`, input
+lines are `n = 0..3` (4 bits per port). One shared validator across both is a
+live off-by-four bug.
+
+**Ontrak explains the HID situation directly**, which corroborates the
+`hid_ignore_list` finding above from the vendor's side: "The Ontrak ADU devices
+appear in the [kernel HID] black list because they do not behave like standard
+HID devices… The ADU devices conform to the USB specification in a unique way
+preventing us from using the canned HID drivers." They also note Linux does not
+read the ADU's report descriptors and that "a Linux application must inspect the
+first data byte to determine the report id" — which is why the `0x01` appears
+raw in both directions with nothing stripping it, on our path and on libusb's
+alike. Ontrak's own examples use a **200 ms** read timeout; with `bInterval` 10
+at low speed the round-trip floor is ~10-20 ms, so that is ~10x margin and worth
+adopting.
+
+**Power-on relay state is undocumented, and `close()` does not de-energise.**
+The manual never states what the relays do when USB power is first applied, nor
+across re-enumeration. What it *does* document is USB **suspend**: "In suspend
+mode the ADU208/ADU218 relay outputs remain in their last state" — and
+critically, "the host may suspend the connection **if no handle is opened**". So
+after a driver closes its handle the device may be suspended with outputs still
+energised, indefinitely. Three consequences: never assume relays are open at
+`open()` (read `PK`, or drive `MK000` explicitly); an explicit `MK000` before
+close covers the clean path; and **nothing in software covers a crash** — which
+is precisely why the hardware watchdog matters for the interlock work, and why
+its feed must sit on the control path.
+
+Two additional measurement notes, both about the witness rather than the
+ADU218:
+
+- `measure_resistance_4wire()` returns a plausible-looking large negative
+  float with no sense leads attached, rather than raising. It is also not
+  repeatable: `-116276 Ω` on one run, `-146172 Ω` on the capture checked in
+  here. Do not use the 4-wire function as a witness on this setup
+  (`KNOWN_LIMITATIONS.md` § H-5).
+- `measure_continuity()` and `measure_resistance()` disagree by ~134 mΩ on the
+  same physical circuit (6.006 Ω vs 6.140 Ω). Consistent with continuity using
+  a different range, but it means the two are not interchangeable as a witness.
+  The switching fixture uses `measure_resistance()` throughout.
+
+---
+
+## Addendum, 2026-08-26: the vendor manual, and the counters under a real signal
+
+Two things changed after the captures above: the manual PDF was located
+(`references/adu208218v2.pdf`, gitignored — copyrighted and binary), and the
+operator put a real square wave on **PA3** from a Siglent SDG1032X. Until then
+no ADU218 input line had ever been driven to a `1` on this bench, so the entire
+input/counter/de-bounce half of the device was implemented but unwitnessed.
+
+Stimulus: operator-driven square wave, PA3, ~50 % duty. Counter read over the
+benchctrl agent via RPC. No relay switched, watchdog left disarmed.
+
+The raw capture is **`counters_live_signal.txt`** — the numbers below are its
+summary, and it carries the per-run detail plus the restore. Because it reads
+through the agent it is shipping-code output, so it belongs to the second group
+above and is not a simulator source.
+
+### Counters count cycles, not edges — measured, not assumed
+
+At 10 Hz over a 30.010 s window:
+
+| Method | Result |
+|---|---|
+| A — device counter `RE3` | 301 counts → **10.030 counts/s** |
+| B — host level-sampling of `RPA3` | 300 rising **and** 300 falling → **9.997 Hz** |
+| A / B | **1.003** |
+
+Counting both edges would have put A/B at 2.0. The manual agrees in words —
+§6c, "The event counters count low to high transitions" — but the ratio is the
+evidence, and it is now a driver comment on `COUNTER_COUNT`.
+
+Two supporting details from the same run. Duty cycle 53.6 % (905/1687 samples
+high), consistent with a square wave. Run lengths: 301 high runs averaging
+~53 ms, 300 low averaging ~46 ms. There were **63 single-sample runs**, which
+the harness flags as possible bounce — at 10 Hz that is the *host sampler*
+aliasing, not the signal: mean sample interval was 17.8 ms against a 50 ms
+half-period, so only ~3 samples land per half-cycle and boundary samples land
+in a run of 1 routinely. The device counter is unaffected and is the method to
+trust here; at 0.5 Hz (~57 samples per half-cycle) the same harness reported 0
+single-sample runs.
+
+Earlier, at 0.5 Hz: A = 0.500 counts/s, B = 0.500 Hz, A/B = 1.000. Two
+frequencies an order of magnitude apart both give one count per cycle.
+
+### PA3 → counter 3 confirmed by measurement
+
+`input_states()` → `{'A': (False, False, False, True), 'B': (...)}` and
+`input_mask()` → `0b00001000`. Reading all eight counters twice, **only counter
+3 moved** (97 → 98 in 2 s; the other seven flat at 0).
+
+This matters because the counter-to-input map is documented **only in a Table 1
+image** that the PDF's text extraction drops entirely — `pdftotext` renders the
+table as blank space between "Table 1: Event Counter Port Assignments" and the
+next paragraph. So the mapping used by the driver (counters 0-3 → PA0-PA3,
+4-7 → PB0-PB3) could not be read from the manual at all. It is now measured for
+PA3 → counter 3.
+
+`clear_counter(3)` also verified genuinely read-and-clear on the device:
+`RE3` 98 → `RC3` returned 98 → `RE3` 0.
+
+### De-bounce: the manual gives the milliseconds, and the ordering is inverted
+
+**Manual §6c is explicit and was previously missing from this repo entirely:**
+
+```
+DBn    Sets de-bounce time of event counters (n=0, 1 or 2)
+       (0 =10ms,     1 = 1ms (Default),    2 = 100us)
+```
+
+The spec table confirms: "Programmable Debounce — 10ms, 1ms, or 100us", and
+"Max Frequency — 1KHz" for the event counters.
+
+**A higher setting is a shorter filter.** This inverts both intuitive readings:
+0 is not "off" (it is the *longest* filter) and 2 does not filter hardest (it is
+the weakest). Hence `DEBOUNCE_MS` and `read_debounce_ms()` in the driver — the
+raw setting number is actively misleading on its own.
+
+It also settles the "three settings, not four" question from a second direction:
+the manual bounds `n` to 0..2 *and* names exactly three durations, so the web
+page's fourth `NONE` option is boilerplate, as suspected.
+
+### B4 negative result, stated with its scope
+
+Varying **only** `DB` against the fixed 10 Hz stimulus, 20 s per setting:
+
+| setting | filter | counts | rate |
+|---|---|---|---|
+| DB0 | 10 ms | 201 | 10.042 /s |
+| DB1 | 1 ms | 200 | 9.992 /s |
+| DB2 | 100 µs | 200 | 9.992 /s |
+
+Spread 0.5 % — **indistinguishable**. That is the *expected* result and not
+evidence the setting is inert: at 10 Hz the half-period is 50 ms, so all three
+filter widths (10 ms, 1 ms, 100 µs) are shorter than the interval between
+transitions and none of them has anything to reject.
+
+Scope of this negative: it shows only that **a clean 10 Hz signal cannot
+discriminate the three settings**, not that `DB` has no effect. Telling them
+apart needs a period approaching 10 ms, i.e. a few hundred Hz — and the
+counters are rated to only 1 kHz, so the usable discrimination window is
+roughly 100–500 Hz. Above the rating the count under-reports **silently**; the
+driver cannot detect an overrun. Deliberately not attempted with the counter
+near its rated limit while nobody is watching the bench.

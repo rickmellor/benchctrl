@@ -1,0 +1,128 @@
+Adu218UsbfsLink on real hardware: does the link seam actually work?
+==================================================================
+Date: 2026-08-25.  Unit: USB 0a07:00da serial E02246, firmware bcdDevice 0000
+Host: Arduino Uno Q, user `arduino` (in `dialout`), node /dev/bus/usb/001/015
+Code under test: src/benchctrl/drivers/ontrak_adu218/usbfs.py, run unmodified
+                 (scp'd to /tmp and imported; no driver layer exists yet)
+
+This is the first execution of any ADU218 PRODUCTION code. Everything before
+it was throwaway probe scripts in /tmp. So the question is narrow: does the
+module -- ioctl constants derived rather than hardcoded, framing, timeouts,
+lifecycle -- behave the way the probe scripts did?
+
+Section G below is the one that matters, and it is deliberately WEAK: RPK0 is
+the ADU218's own report of its own state. A link that mangled a command
+identically in both directions would pass it. The independent witness is in
+link_dmm_witness.txt.
+
+== A. find_device by serial ==
+   Adu218Device(path='/dev/bus/usb/001/015', bus=1, device=15, serial='E02246')
+== B. open / claim / drain ==
+   is_open before: False
+   is_open after : True
+   repr          : Adu218UsbfsLink(serial='E02246', timeout_ms=200, open=True)
+   device        : E02246 /dev/bus/usb/001/015
+== C. reads (no state change) ==
+   PK    -> '000'         ( 11.75 ms)
+   RPK0  -> '0'           ( 16.17 ms)
+   RPA   -> '0000'        ( 15.73 ms)
+   RPB   -> '0000'        ( 15.94 ms)
+   DB    -> '1'           ( 16.02 ms)
+   WD    -> '0'           ( 15.83 ms)
+== D. documented silences must still time out ==
+   RI    -> timeout as expected (212.49 ms)
+   ZZZ   -> timeout as expected (207.77 ms)
+   RPK9  -> timeout as expected (208.06 ms)
+   left queued after the silences: 0
+== E. input validation (no bytes on the wire) ==
+   ''           rejected: ValueError
+   'TOOLONGXX'  rejected: ValueError
+   'PKé'        rejected: UnicodeEncodeError
+== F. timeout floor rejected at construction ==
+   rejected: timeout_ms=5 is below the 25 ms protocol floor
+== G. actuate K0 and read back (DMM witnesses) ==
+   start PK = 000
+   set K0=1 -> RPK0='1'  ok
+   set K0=0 -> RPK0='0'  ok
+   set K0=1 -> RPK0='1'  ok
+   set K0=0 -> RPK0='0'  ok
+   MK000 (safe state)
+   final PK = 000
+== H. close is idempotent, does not raise ==
+   is_open: False
+   query after close: link is not open
+== I. context manager ==
+   inside : 000 is_open True
+   after  : is_open False
+
+ALL SECTIONS RAN
+
+WHAT EACH SECTION ESTABLISHES
+-----------------------------
+A. Serial-based lookup works, and needs no device I/O at all: idVendor,
+   idProduct, busnum, devnum and serial all come from sysfs. The path
+   (001/015) is an OUTPUT of the lookup, never an input -- it changes on
+   re-plug, which is why deploy/udev/63-benchctrl-adu218.rules deliberately
+   offers no stable symlink.
+
+B. open() -> CLAIMINTERFACE succeeded with nothing to detach, confirming on
+   live hardware what hid_ignore_list predicts: usbhid sees an Ontrak vendor
+   id and declines to bind. `is_open` False -> True -> False across the
+   lifecycle. The drain reported 0 stale replies, i.e. the previous process
+   (adu_latency.py, hours earlier) left the queue clean.
+
+   Note the ioctl constants are COMPUTED here, from sizeof(struct
+   usbdevfs_bulktransfer) = 24, and arrive at 0x8004550f / 0x80045510 /
+   0xc0185502 -- byte-identical to the hardcoded values the probe scripts
+   used successfully. Verified separately on the aarch64 host.
+
+C. Every read answered on the first attempt, 12.93-16.25 ms. That sits inside
+   the 16.68 ms worst case measured over 440 transfers in latency.txt and
+   latency_after_command.txt, so DEFAULT_TIMEOUT_MS = 200 keeps its ~12x
+   margin. WD=0 confirms the watchdog is disarmed, as the previous session
+   left it.
+
+D. THE IMPORTANT NEGATIVE RESULT. All three documented silences still time
+   out at 200 ms (207.8-214.8 ms wall, i.e. the timeout plus ioctl overhead),
+   and -- the part that would have broken the driver -- `drain()` afterwards
+   reports **0 replies left queued**. A late reply arriving after the timeout
+   would sit on EP 0x81 and be returned as the NEXT query's answer: a silent
+   wrong value, not an error. It does not happen. Shortening 2000 ms to
+   200 ms therefore does not convert an error into a stale success.
+
+   `RI` is included as a command that does not exist, `ZZZ` as garbage, and
+   `RPK9` as a VALID command with an out-of-range argument. All three are
+   indistinguishable on the wire. That is why Adu218LinkTimeout is documented
+   as ambiguous and why the per-command expectation lives in the driver.
+
+E/F. Malformed commands are rejected before any byte reaches the device: an
+   empty command, a 9-byte command (7 is the limit after the mandatory 0x01
+   report id), and non-ASCII. And a sub-floor timeout is rejected at
+   CONSTRUCTION, not at first use -- 5 ms is below the ~10-20 ms set by
+   bInterval=10 at low speed, so it would fail CORRECT reads. Failing in the
+   constructor means a bad config cannot reach the relays at all.
+
+G. Four actuations of K0, device-reported read-back agreeing each time, and
+   MK000 restoring 000. Necessary but NOT sufficient -- see the header, and
+   see link_dmm_witness.txt for the second instrument.
+
+H. close() is idempotent (called twice, no raise), and a query afterwards
+   raises Adu218LinkError rather than operating on a closed fd. Note what
+   close() does NOT do: it does not de-energise. Relays keep their state; the
+   explicit way to drop them is MK000 / reset_relays(). Hiding a switching
+   operation inside close() would make every teardown a bench event.
+
+I. The context manager opens and closes, and `is_open` is False on exit even
+   though the object outlives the block.
+
+WHAT THIS DOES NOT SHOW
+  - Nothing about the watchdog (WD stayed 0 throughout, deliberately: any
+    command refeeds an armed timer, so a test that polls state would silently
+    neuter the interlock it was trying to test).
+  - Nothing about relays K1-K7 or any input port beyond a single RPA/RPB
+    read; K0 is the only channel with a witness attached.
+  - Nothing about contention. One process held the interface for the whole
+    run. Whether a second CLAIMINTERFACE gets EBUSY is asserted in the code's
+    error message but is UNTESTED on hardware.
+  - No resistance claim. The ohm values in link_dmm_witness.txt are
+    probe-path resistance; see on_resistance_drift.txt.

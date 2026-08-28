@@ -43,6 +43,7 @@ DEVICE_KEYS: tuple[str, ...] = (
     "siglent_sdm4065a",
     "cyberpower_pdu41002",
     "silabs_cp2112",
+    "ontrak_adu218",
 )
 
 MODES: tuple[str, ...] = ("local", "remote", "sim")

@@ -164,6 +164,22 @@ def _registry() -> dict[str, type]:
             ("CP2112Error", "CP2112ConnectionError", "CP2112ProtocolError",
              "CP2112ValueError", "CP2112PolicyError", "CP2112VerifyError"),
         ),
+        (
+            "benchctrl.drivers.ontrak_adu218.driver",
+            # No CommandError: this device has no error *reply* to carry. An
+            # unknown command, a bad argument and a write-only command are all
+            # answered with silence, byte-identical, so what would have been a
+            # command error surfaces as ADU218TimeoutError instead — and the
+            # ambiguity is documented on that class rather than hidden by a
+            # type that implies the device said something.
+            #
+            # ADU218PolicyError must survive the wire for the same reason as
+            # the PDU's: a relay refused by allowed_relays is a deliberate
+            # configuration decision, and degrading it to RuntimeError would
+            # make it read as a device fault a retry might clear.
+            ("ADU218Error", "ADU218ConnectionError", "ADU218ProtocolError",
+             "ADU218TimeoutError", "ADU218ValueError", "ADU218PolicyError"),
+        ),
     ):
         try:
             module = __import__(module_path, fromlist=["*"])
@@ -285,11 +301,32 @@ def _instantiate(cls: type, message: str) -> Optional[BaseException]:
     refuses ``RuntimeError.__new__`` for an ``OSError``-layout class. That is
     exactly why this is a cascade and not a single clever call.
 
+    **Not raising is not the same as succeeding.** A constructor whose first
+    parameter happens to accept a string takes the message as *that field* and
+    then composes a message of its own, so strategy 1 returns an exception whose
+    text is not the text the agent sent. Measured on the bench:
+    ``SDM4065AOverloadError(function, range_)`` turned "RESistance input
+    overloaded — …" into "RESistance input overloaded — … input overloaded — …",
+    doubling the sentence and leaving ``function`` set to a whole message. So
+    strategy 1 is accepted only if it stored the message unchanged; otherwise the
+    cascade continues to strategy 3, which cannot re-compose. Checked rather than
+    special-cased, because the next such constructor will be a different class.
+
+    The check is on ``args``, not on ``str()``: ``KeyError.__str__`` is always a
+    ``repr`` of its argument, so a ``str()`` comparison would reject a perfectly
+    faithful ``KeyError(message)`` and degrade it to ``RemoteBenchError`` —
+    losing the type this module exists to preserve. ``args == (message,)`` is
+    what "the constructor did not rewrite the message" actually means, and it is
+    also exactly what strategies 2 and 3 produce, so the criterion is uniform
+    across all three.
+
     Returns None if every strategy fails, so the caller can degrade to
     ``RemoteBenchError`` rather than raise while reporting an error.
     """
     try:
-        return cls(message)
+        exc = cls(message)
+        if exc.args == (message,):
+            return exc
     except Exception:  # noqa: BLE001
         pass
     try:

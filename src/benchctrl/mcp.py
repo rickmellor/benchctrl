@@ -37,6 +37,7 @@ since the singleton mutates only on open/close.
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -60,10 +61,12 @@ from benchctrl.battery import (
 from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as _pdu41002_tools
 from benchctrl.drivers.silabs_cp2112 import mcp_tools as _cp2112_tools
 from benchctrl.drivers.eastwood_qr10x import mcp_tools as _qr10x_tools
+from benchctrl.drivers.ontrak_adu218 import mcp_tools as _adu218_tools
 from benchctrl.drivers.otii_arc import mcp_tools as _arc_tools
 from benchctrl.drivers.rigol_dl3031a import mcp_tools as _dl3031a_tools
 from benchctrl.drivers.rigol_dp2031 import mcp_tools as _dp2031_tools
 from benchctrl.drivers.siglent_sdm4065a import mcp_tools as _sdm4065a_tools
+from benchctrl.config import DEVICE_KEYS
 from benchctrl.recording import Recording
 
 log = logging.getLogger("benchctrl.mcp")
@@ -82,6 +85,7 @@ _dp2031_tools.register_mcp_tools(mcp)
 _sdm4065a_tools.register_mcp_tools(mcp)
 _pdu41002_tools.register_mcp_tools(mcp)
 _cp2112_tools.register_mcp_tools(mcp)
+_adu218_tools.register_mcp_tools(mcp)
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +423,31 @@ from benchctrl.drivers.cyberpower_pdu41002.mcp_tools import (
     pdu41002_set_outlet_state,
     pdu41002_status,
     pdu41002_transport,
+)
+
+# ADU218 tools. Switching here is signal-level (1 A SSRs on instrument leads),
+# not mains — but adu218_set_watchdog arms a hardware interlock that
+# de-energises every relay on silence, so it is not a read-only surface either.
+from benchctrl.drivers.ontrak_adu218.mcp_tools import (
+    adu218_allowed_relays,
+    adu218_clear_counter,
+    adu218_close,
+    adu218_counter,
+    adu218_counters,
+    adu218_debounce,
+    adu218_info,
+    adu218_input_port_mask,
+    adu218_input_state,
+    adu218_input_states,
+    adu218_open,
+    adu218_relay_state,
+    adu218_relay_states,
+    adu218_reset_relays,
+    adu218_set_debounce,
+    adu218_set_relay_port,
+    adu218_set_relay_state,
+    adu218_set_watchdog,
+    adu218_watchdog,
 )
 
 
@@ -945,12 +974,49 @@ def battery_emulator_stop() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def install_config() -> None:
+    """Bind devices to local / remote / sim before the first tool call.
+
+    Split out of :py:func:`main` so it is testable without starting a stdio
+    server. Without this, :py:func:`benchctrl.session.resolve` reads a module
+    global that is never populated, so ``BENCHCTRL_REMOTE`` /
+    ``BENCHCTRL_SIM_DEVICES`` / ``~/.config/benchctrl/config.json`` are inert
+    and a device the operator asked to *simulate* opens the real instrument
+    instead. That failure is silent and points the wrong way — the tools
+    cannot tell the three apart, which is the whole point of the seam.
+
+    A malformed config is fatal on purpose. The alternative is to warn and
+    carry on, which means driving hardware the operator did not ask for.
+    """
+    from benchctrl import session
+
+    cfg = session.configure_from_environment()
+    if cfg.is_all_local:
+        log.debug("benchctrl-mcp: nothing configured; every device is local")
+        return
+    # Announced on stderr rather than through ``log``, because an MCP server
+    # inherits no logging configuration from its client and stdout is the
+    # JSON-RPC channel. A non-local binding is exactly the thing an operator
+    # must be able to see they got.
+    for key in DEVICE_KEYS:
+        mode = cfg.mode_for(key)
+        if mode != "local":
+            print(f"benchctrl-mcp: {key} -> {mode}", file=sys.stderr)
+
+
 def main() -> None:
     """``benchctrl-mcp`` entry point. Runs the FastMCP server on stdio."""
+    from benchctrl import session
+
+    install_config()
     try:
         mcp.run()
     finally:
         _close_smu()
+        # Remote devices outlive this process unless the client disconnects
+        # cleanly: the agent reads a clean disconnect as consent to drop the
+        # writer claim and drive an armed device to its safe state.
+        session.shutdown()
 
 
 if __name__ == "__main__":

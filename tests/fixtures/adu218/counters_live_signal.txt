@@ -1,0 +1,141 @@
+# Event counters and de-bounce against a REAL signal on PA3.
+#
+# Captured 2026-08-26 on the bench, through the benchctrl agent over RPC
+# (not a direct driver open — the agent holds the device, and a second open
+# correctly fails with "interface 0 is busy", KNOWN_LIMITATIONS § N-4).
+#
+# Stimulus: Siglent SDG1032X square wave into PA3, driven manually by the
+# operator. The SDG1032X has no driver yet, which is why the stimulus is
+# operator-set rather than scripted -- and that is the better split here: a
+# harness that changed the signal while measuring it could not tell a
+# de-bounce effect from a generator change.
+#
+# Nothing was switched. Watchdog left disarmed (WD0) throughout. De-bounce was
+# restored to its entry value (1) at the end.
+#
+# WHY THIS FIXTURE EXISTS: before this capture, no ADU218 input line had ever
+# been driven to a 1 on this bench, so no counter had ever incremented and
+# clear_counter() had never run on the device. The inputs/counters/de-bounce
+# half of the driver was implemented and simulator-covered but unwitnessed.
+
+=== PA3 at ~0.5 Hz: two independent methods, 30.010 s window ===
+# Method A: the device's own counter (RE3).
+# Method B: host-side level sampling of RPA3, counting transitions.
+# Distinct failure modes: the counter can see edges the host never samples,
+# and the host sampler aliases if the wave is fast vs the ~17 ms round trip.
+
+debounce setting: 1
+window        : 30.000 s
+host samples  : 1712  (mean interval 17.5 ms -> Nyquist limit ~28.5 Hz)
+
+--- Method A: device event counter RE3 ---
+  15 counts in 30.000 s  => 0.500 counts/s
+
+--- Method B: host level sampling ---
+  15 rising, 15 falling edges seen  => 0.500 rising edges/s
+  duty cycle: 859/1712 high = 50.2 %
+
+--- comparison ---
+  A/B = 1.000
+
+--- shape: consecutive-sample run lengths ---
+  high runs: n=15  mean=57.3  (~1004 ms mean)
+  low  runs: n=15  mean=53.3  (~934 ms mean)
+  single-sample runs: 0 (clean)
+
+=== PA3 at ~10 Hz: the same two methods, 30.010 s window ===
+
+debounce setting: 1
+window        : 30.010 s
+host samples  : 1687  (mean interval 17.8 ms -> Nyquist limit ~28.1 Hz)
+
+--- Method A: device event counter RE3 ---
+  3206 -> 3507   = 301 counts in 30.010 s
+  => 10.030 counts/s
+
+--- Method B: host level sampling ---
+  300 rising, 300 falling edges seen
+  => 9.997 rising edges/s
+  duty cycle: 905/1687 high = 53.6 %
+
+--- comparison ---
+  A/B = 1.003
+
+--- shape: consecutive-sample run lengths ---
+  601 runs total
+  high runs: n=301  min=1  max=4  mean=3.0  (~53 ms mean)
+  low  runs: n=300  min=1  max=3  mean=2.6  (~46 ms mean)
+  single-sample runs: 63
+
+# NOTE on those 63 single-sample runs: that is the HOST SAMPLER aliasing, not
+# bounce on the wire. At 17.8 ms per sample against a 50 ms half-period only
+# ~3 samples land per half-cycle, so a boundary sample forming a run of 1 is
+# routine. The device counter is unaffected. Compare the 0.5 Hz run above,
+# where ~57 samples per half-cycle gave 0 single-sample runs. At 10 Hz the
+# device counter is the method to trust; Method B is a sanity check only.
+
+# CONCLUSION, and the reason A/B matters more than either number alone:
+# A/B = 1.003 at 10 Hz and 1.000 at 0.5 Hz. The counter increments ONCE PER
+# CYCLE, not once per edge -- had it counted both edges A/B would be 2.0.
+# Manual §6c agrees in words ("count low to high transitions"), but this is
+# the measurement, at two frequencies an order of magnitude apart.
+
+=== counter-to-input map: only counter 3 moves ===
+# The map is documented ONLY in a Table 1 IMAGE that pdftotext drops
+# entirely -- the extraction renders blank space where the table should be.
+# So this could not be read from the manual at all, only measured.
+
+input_states :  {'A': [False, False, False, True], 'B': [False, False, False, False]}
+input_mask   :  0b00001000
+
+  t=0.00s  counters read
+  t=2.00s  counters read again
+
+  deltas over ~2.0 s:
+    counter 0:     0 ->     0  delta     +0
+    counter 1:     0 ->     0  delta     +0
+    counter 2:     0 ->     0  delta     +0
+    counter 3:    97 ->    98  delta     +1   <-- COUNTING
+    counter 4:     0 ->     0  delta     +0
+    counter 5:     0 ->     0  delta     +0
+    counter 6:     0 ->     0  delta     +0
+    counter 7:     0 ->     0  delta     +0
+
+# PA3 -> counter 3, and nothing else. Confirms the driver's assumed mapping
+# (counters 0-3 -> PA0-PA3, 4-7 -> PB0-PB3) for the one line under stimulus.
+# The B-port half of the map remains untested on hardware.
+
+=== RCn is genuinely read-and-clear ===
+  RE3 before  : 98
+  RC3 returned: 98      (the value it cleared)
+  RE3 after   : 0
+
+# The residual would have been non-zero had more edges arrived during the
+# round trip; at 0.5 Hz it did not. This is the command that must never be
+# retried: a lost reply loses the count permanently and a retry returns 0,
+# indistinguishable from "no events happened".
+
+=== B4: de-bounce ladder against the 10 Hz signal, 20 s per setting ===
+# Only DB varies. Stimulus untouched between settings.
+
+  DB0:   201 counts in 20.02 s =  10.042 counts/s   (100.4% of 10.0 Hz)
+  DB1:   200 counts in 20.02 s =   9.992 counts/s   ( 99.9% of 10.0 Hz)
+  DB2:   200 counts in 20.02 s =   9.992 counts/s   ( 99.9% of 10.0 Hz)
+
+  spread: 0.5% between the extremes  -> INDISTINGUISHABLE
+
+  restored de-bounce to 1
+
+# This is a NEGATIVE RESULT WITH A KNOWN SCOPE, not a finding that DB is inert.
+#
+# Manual §6c gives the durations: 0 = 10ms, 1 = 1ms (default), 2 = 100us.
+# Note the INVERSION -- a higher setting is a SHORTER filter. At 10 Hz the
+# half-period is 50 ms, so all three filters are shorter than the interval
+# between transitions and none of them has anything to reject. Identical
+# counts are exactly what a working de-bounce produces here.
+#
+# What would discriminate: a period approaching 10 ms, i.e. a few hundred Hz.
+# The counters are rated to 1 kHz max ("Max Frequency 1KHz" in the spec
+# table), so the usable window is roughly 100-500 Hz. Above the rating the
+# count under-reports SILENTLY and the driver cannot detect the overrun --
+# which is why this was not pushed toward the limit unattended.

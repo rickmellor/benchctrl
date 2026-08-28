@@ -1,0 +1,45 @@
+ADU218 write-to-read latency, measured
+======================================
+Device: Ontrak ADU218, USB 0a07:00da
+Host: Arduino Uno Q, kernel 6.16.7-g0dd6551ae96b
+Read-only: PK/RPK0 only. No relay commanded, no WD armed, DB untouched.
+Drained 0 stale reply/replies before starting.
+
+Why: the 200 ms timeout in the plan was justified by Ontrak's examples
+plus arithmetic on bInterval=10, while errors.txt was captured at
+2000 ms and framing.txt never recorded its trial timeout at all. Since
+SILENCE is this device's only error signal, the timeout is the
+threshold that decides correct-vs-broken and it had never been measured.
+
+--- PK x200 (expects 3-digit reply) ---
+  min      13.80 ms
+  median   15.99 ms
+  p95      16.35 ms
+  p99      16.60 ms
+  max      16.65 ms
+  short reads: 0
+  margin of a 200 ms timeout over max:   12.0x
+  margin of a 2000 ms timeout over max: 120.1x
+
+--- RPK0 x200 (expects 1-digit reply) ---
+  min      14.43 ms
+  median   15.99 ms
+  p95      16.38 ms
+  p99      16.55 ms
+  max      16.65 ms
+  short reads: 0
+  margin of a 200 ms timeout over max:   12.0x
+  margin of a 2000 ms timeout over max: 120.1x
+
+--- do the documented silences still register at 200 ms? ---
+(errors.txt established every one of these at 2000 ms)
+  RI       -> silent (errno 110) after 202 ms
+  XYZ      -> silent (errno 110) after 202 ms
+  RPK8     -> silent (errno 110) after 202 ms
+  RPA4     -> silent (errno 110) after 206 ms
+  DB9      -> silent (errno 110) after 202 ms
+  MK9999   -> silent (errno 110) after 206 ms
+
+--- control: link still healthy, and no reply was left queued ---
+  PK -> b'\x01000\x00\x00\x00\x00'
+  queued replies left behind: 0  (0 means the pairing held)

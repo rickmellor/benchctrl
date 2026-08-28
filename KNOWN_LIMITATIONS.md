@@ -122,6 +122,51 @@ Code reference:
 `measure_resistance` docstring; `docs/drivers.md` § "2-wire vs 4-wire";
 `tests/test_cross_validate_sdm4065a_qr10x.py`.
 
+### H-6. ADU218 relays are 1 A signal switches, not power contactors
+
+The eight relays are solid-state (PhotoMOS) devices rated **1 A at 120 V
+AC or DC**. They are not a substitute for the PDU41002's mains outlets and
+must not be treated as one: switching a bench instrument's supply through
+one would exceed the rating, and inrush on an inductive or capacitive load
+exceeds it by more than the steady-state figure suggests.
+
+They are also **solid-state**, so there is no audible click and no
+mechanical confirmation that a switch happened. The only confirmation is
+the read-back the driver performs — and because the device acknowledges no
+write, a switch without a read-back is unfalsifiable.
+
+Related consequence: relay switching is deliberately absent from
+`agent/safety.py`'s `_ARMING_CALLS`. Closing a signal relay is not arming
+an output, and treating it as one would start a governor countdown on every
+switch — a second, weaker software deadman layered over the device's own
+hardware watchdog.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `set_relay_state`;
+`src/benchctrl/agent/safety.py` — the comment after `_ARMING_CALLS`;
+`docs/drivers.md` § "Safety" under the ADU218.
+
+### H-7. ADU218 relay state survives a host reset
+
+Power-on relay state is undocumented by Ontrak, and USB autosuspend holds
+the outputs in whatever state they were last commanded to. So a relay can
+be conducting before any software runs — after a host reboot, after the
+agent is killed, after the cable is unplugged from the *host* end.
+
+`open()` therefore **reads and warns** rather than assuming, naming any
+relay it found energised. It does not de-energise them: the driver cannot
+know whether an energised relay is holding something that must not be
+interrupted.
+
+The mitigation that actually works across a host reset is the device's own
+watchdog (`set_watchdog`), which drops the relays without any host
+involvement — see F-22 and F-23 for what it costs.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `_connect`;
+`tests/test_bench_adu218.py` — `test_open_reports_relays_it_found_energised`.
+
+
 ## Driver / firmware interactions
 
 ### F-1. DL3031A `:SOUR:LIST:STEP 4` fires no steps (firmware bug)
@@ -1029,6 +1074,374 @@ Code reference:
 `src/benchctrl/drivers/silabs_cp2112/hidraw.py` -- `HidrawLink.open`;
 `src/benchctrl/discovery.py` -- `scan_hidraw`.
 
+### F-21. ADU218 reports no error, ever
+
+The Ontrak ADU218 has **no error reply**. Three different failures are
+byte-identical on the wire — nothing comes back:
+
+- an unknown command
+- a valid command with an out-of-range argument (`RPK8`, `RPA4`, `MK256`)
+- a write-only command working exactly as intended (`SKn`, `RKn`, `MKddd`,
+  `DBn`, `WDn`)
+
+So `ADU218TimeoutError` is **ambiguous by construction** and its message
+says so. It cannot distinguish "the command was wrong" from "the device is
+gone", and no amount of driver work can make it: the information is not on
+the wire.
+
+What the driver does instead of pretending:
+
+- a whitelist of every command it can render, checked before the write, so
+  a format-string slip is caught host-side rather than becoming silence
+- an explicit per-command `responsive: bool` table, never inferred — the
+  trap is `RKn`, which is write-only despite starting with `R` while every
+  other `R` command answers, and is the most-called command on the device
+- an explicit per-command reply *width*, so a desynced reply raises
+  `ADU218ProtocolError` instead of returning a plausible number
+- read-back verification on every relay write, since an accepted-and-ignored
+  command is otherwise invisible
+
+**The mitigating half:** unlike the SDM4065A, an ignored command does not
+poison the session. There is no error queue to surface on the next read —
+the next valid command answers normally.
+
+Affects: every command. Diagnosing a silent ADU218 means checking the
+command against the manual by hand; the driver's whitelist is the closest
+thing to a syntax error available.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `_COMMAND_SPECS`,
+`command_spec`, `_send`; `tests/fixtures/adu218/errors.txt`;
+`tests/test_bench_adu218.py` — `TestSilence`.
+
+### F-22. ADU218 `WD` cannot distinguish "timed out" from "never enabled"
+
+Reading `WD` returns `0` in both cases. A watchdog that fired self-clears
+to 0, which is also exactly what a watchdog that was never armed reports.
+So a trip leaves **no trace the device can be asked about** — the only
+evidence is a disagreement between the device's answer and what the host
+last commanded.
+
+Consequences the driver accepts rather than hides:
+
+- it holds its own armed state, and `read_watchdog_tripped()` compares the
+  two. Latched once: detecting a trip clears the held expectation, so the
+  same trip is not re-reported.
+- it writes `WD0` at `open()` unless told otherwise, because a fresh
+  process has no expectation to compare against and would inherit the
+  ambiguity from whatever ran before it. `disarm_watchdog=False` preserves
+  an inherited setting at the cost of that ambiguity, and the driver's held
+  expectation is then 0 — which is a lie it cannot avoid telling.
+- **a trip that happens while no benchctrl process is running is
+  undetectable.** The relays will have dropped and nothing will say why.
+
+Affects: any use of the hardware watchdog across a process restart.
+
+**The interlock itself is now witnessed on hardware** (2026-08-27), which is
+worth separating from the ambiguity above: the ambiguity is about *reading* a
+trip, not about whether the trip happens. Armed at `WD2`, the DMM held
+17.471–17.474 Ω across 24 consecutive readings spanning 9.86 s after arming,
+then read the overload sentinel — bracketing the trip to **(9.86, 10.83] s**
+against a 10.0 s nominal, the gap being one meter read. So the *device*
+de-energises its own relays with no benchctrl process, no GPIO and no kernel
+driver in the decision path.
+
+That measurement also closed a hole in the test that asserted it. The original
+form armed `WD1` (1 s), waited 1.5 s and asserted the contact was open — which
+is satisfied both by "opens on timeout" and by "opens as a side effect of
+arming". The second would make the interlock useless, since it would drop the
+load the moment it was enabled, and `WD1` is too short to sample between the two
+(one meter read costs ~0.41 s). The test now uses `WD2` and asserts the contact
+is **still closed** early in the window, with a guard that the early sample
+really landed early. Confirmed by mutation in both directions: de-energising
+right after arming fails the `WD2` form and **passes** the `WD1` form.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `_watchdog_setting`,
+`read_watchdog_tripped`, `_connect`; `tests/test_bench_adu218.py` —
+`TestWatchdog`; `tests/fixtures/adu218/watchdog_trip.txt` — both brackets.
+
+### F-23. Any ADU218 command refeeds the watchdog, so a poller neuters it
+
+The hardware watchdog is fed by **any** command reaching the device —
+including a plain state read, and including a command the device rejects.
+There is no dedicated keep-alive command and no way to read state without
+feeding.
+
+That makes two reasonable-looking patterns silently wrong:
+
+1. **A status-polling loop keeps an armed watchdog alive indefinitely.**
+   Measured on the simulator's synthetic clock: with `WD2` (10 s) armed,
+   ten rounds of *advance 9 s, then read the relay states* held a relay
+   energised across 90 s with **zero** trips. Eleven seconds of real
+   silence dropped it. A dashboard refreshing a panel is enough to defeat
+   the interlock it is displaying.
+2. **A background keep-alive thread is worse than no watchdog.** It would
+   keep the timer fed precisely while the failure the watchdog guards
+   against was happening — wedged control logic, a hung test, a process
+   that is alive but no longer doing anything. The interlock would be inert
+   and indistinguishable from a working one.
+
+So benchctrl ships **no keep-alive helper for this device**, and a test
+asserts no such method exists. The feed has to come from whatever is
+actually controlling the test, which is the only thing whose silence means
+something.
+
+Affects: any use of the watchdog alongside monitoring. If a dashboard or
+an agent presence sweep is polling this device, the watchdog is not
+protecting you.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — module docstring,
+`set_watchdog`; `src/benchctrl/drivers/ontrak_adu218/mcp_tools.py` —
+`adu218_set_watchdog`, `adu218_watchdog`; `tests/test_bench_adu218.py` —
+`test_any_command_refeeds_the_timer`.
+
+### F-24. ADU218 out of scope, deliberately
+
+Three capabilities the device has that this driver does not expose, each
+because getting it wrong is worse than not having it:
+
+**Power-on relay state.** Undocumented, and USB suspend holds outputs in
+their last state, so a relay can be conducting before any software runs.
+`open()` reads the port and **warns**, naming any energised relay, rather
+than driving `MK000` — the driver cannot know whether an energised relay is
+holding something that must not be interrupted. `reset_relays()` is one
+explicit call away.
+
+**No firmware version.** `bcdDevice` is `0000` on the bench unit, so there
+is nothing to report and `ADU218Info` has no firmware field. An
+always-`None` field would invite a caller to read its absence as "old
+firmware"; deriving one from the product string would be a guess wearing a
+measurement's name.
+
+**No `interfaces.Switch` Protocol.** Per `CONTRIBUTING.md` convention 3, a
+Protocol lands with the *second* instance. The PDU41002 is 1-indexed mains
+outlets with configurable switch delays; this is 0-indexed signal relays
+with a hardware watchdog. A Protocol generalised from those two would fit a
+third device — a real signal multiplexer — badly.
+
+Related: the device key is deliberately absent from
+`registry.SWITCHED_PDU_KEYS` and the FUI's `PDU_KEYS`, both of which mean
+"switches mains". Tests pin both exclusions.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `_connect`,
+`ADU218Info`; `src/benchctrl/drivers/ontrak_adu218/__init__.py`;
+`tests/test_bench_adu218.py` — `TestLifecycle`, `TestDispatchGate`.
+
+### F-25. ADU218 de-bounce settings run backwards, and are unobservable below a few hundred Hz
+
+Two separate traps in one setting, and the first is the kind of thing that
+silently does the opposite of what an operator intended.
+
+**A higher setting is a *shorter* filter.** Manual §6c: `0 = 10ms`,
+`1 = 1ms` (default), `2 = 100us`. Both intuitive readings are wrong — `0`
+is not "off", it is the *longest* filter, and `2` does not filter hardest,
+it filters least. Somebody chasing maximum contact de-bounce on a noisy
+input reaches for `2` and gets 100 µs, the weakest setting available. The
+driver therefore exposes `read_debounce_ms()` and `DEBOUNCE_MS` alongside
+the raw setting, and the MCP tools return `debounce_ms` next to `debounce`,
+because handing a caller the bare number invites the wrong inference.
+
+**The setting has no observable effect on a clean slow signal.** Measured
+on a 10 Hz square wave into PA3, 20 s per setting: `DB0` 10.042, `DB1`
+9.992, `DB2` 9.992 counts/s — 0.5 % spread, i.e. indistinguishable. That
+is not a fault: every filter width is far shorter than the 50 ms
+half-period, so none has anything to reject. The consequence for testing is
+that **a passing de-bounce round-trip proves acceptance, not effect**, and
+the hardware test says so rather than implying more.
+
+Discriminating the three needs a period approaching 10 ms — a few hundred
+Hz — against event counters rated to only **1 kHz** ("Max Frequency 1KHz").
+Above that rating the count under-reports **silently**; there is no
+overrun flag and the driver cannot detect it, so a frequency read off a
+counter driven past 1 kHz is wrong with no indication. The usable
+discrimination window is therefore roughly 100–500 Hz.
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `DEBOUNCE_MS`,
+`COUNTER_MAX_FREQUENCY_HZ`, `read_debounce_ms`;
+`tests/fixtures/adu218/counters_live_signal.txt`;
+`tests/test_bench_adu218.py` — `TestDebounce`.
+
+### F-26. ADU218 counter-to-input map exists only as an image, and counters wrap silently
+
+**The map is not in the manual's text.** Counter-to-input assignments live
+in a "Table 1: Event Counter Port Assignments" **image**, which `pdftotext`
+drops entirely — the extraction renders blank space between the caption and
+the following paragraph. So the mapping the driver relies on (counters 0-3
+→ PA0-PA3, 4-7 → PB0-PB3) could not be read from the document at all. It
+is measured instead — and as of 2026-08-27 **all eight positions are
+measured**, so the image is redundant rather than merely corroborated. The
+generator was walked across every line in turn:
+
+| line | counter that moved | rate (vs 10 Hz) | `PI` bit |
+|---|---|---|---|
+| PA0 | 0 | 9.972/s | 0 |
+| PA1 | 1 | 9.972/s | 1 |
+| PA2 | 2 | 10.071/s | 2 |
+| PA3 | 3 | 9.972/s | 3 |
+| PB0 | 4 | 10.071/s | 4 |
+| PB1 | 5 | 10.063/s | 5 |
+| PB2 | 6 | 9.973/s | 6 |
+| PB3 | 7 | 10.071/s | 7 |
+
+At each position the named counter was the **only** one of eight to move, and
+the `PI` union across 60 reads set that bit and no other. Every rate lands
+within ±0.5 % of the stimulus, which is ±1 event of quantisation in a 10 s
+window — no counter drops or doubles anywhere.
+
+**PORT B is what pins the offset, and PORT A cannot.** On PORT A the counter
+index simply *equals* the line number, so PA3 → 3 is equally consistent with
+offsets of 4, 3 and 0. The offset is confirmed at three PORT B lines
+independently (PB0 → 4, PB2 → 6, PB3 → 7), and as a mutation: forcing it to 3
+fails all three counter tests. The general shape: a reading taken where two
+hypotheses coincide confirms neither, so measure at the coordinate where they
+diverge.
+
+Point `BENCHCTRL_ADU218_INPUT` at whichever line the generator is on; the
+fixture skips with the line named if it is not toggling, so a stale setting
+cannot false-pass. **It can still quietly cost coverage, though, and did.**
+The default tracks the bench, so it goes stale whenever the bench moves: the
+walk left the generator on PB3 while the default still said `B2`, and the
+suite ran 7 passed / 5 skipped instead of 10 / 2 with nothing misconfigured
+and nothing red. "PB2 is not toggling" is equally true when the generator is
+unplugged and when it is one terminal over. The skip now sweeps the whole
+port and names the line that *is* toggling, which is the only version of
+that message that distinguishes the two. Worth generalising: a
+bench-tracking default needs a diagnostic that separates "moved" from
+"absent", or an accurate skip becomes a silent reduction in what the suite
+actually checks.
+
+`BENCHCTRL_ADU218_RELAY` is the other bench-tracking default and it is
+**deliberately not treated the same way** — a stale value there *fails*
+rather than skips (see F-27), and that asymmetry should survive review
+rather than be tidied away. Failing is noisy and sometimes wrong about the
+cause; skipping is quiet, and quiet is what let the input default sit stale.
+Nor is the self-diagnosing fix even available: sweeping eight input lines is
+a passive read, whereas discovering which relay the meter is across would
+mean energising the other seven — precisely what `allowed_relays` refuses to
+assume and what `BENCHCTRL_ADU218_SWEEP_ALL` exists for the operator to
+state. So the two defaults differ because the measurements differ, not
+because one was overlooked.
+
+**Counters count cycles, not edges** — one count per low-to-high
+transition. Verified rather than assumed, because the two hypotheses differ
+by exactly 2× and a factor-of-two frequency error looks plausible forever:
+at 10 Hz the device counted 10.030/s while host sampling independently saw
+9.997 rising *and* 9.997 falling edges/s (ratio 1.003, not 2.0).
+
+**They wrap from 65535 to 0 with no flag.** The only correct use is
+differencing successive reads *modulo 65536*; a naive `after - before` goes
+sharply negative exactly once per 65536 events. `clear_counter()` (`RCn`)
+is read-and-clear and must never be retried — a lost reply loses the count
+permanently and a retry returns 0, indistinguishable from "no events".
+
+Code reference:
+`src/benchctrl/drivers/ontrak_adu218/driver.py` — `COUNTER_COUNT`,
+`COUNTER_MAX`, `clear_counter`;
+`tests/fixtures/adu218/counters_live_signal.txt`;
+`tests/test_bench_adu218.py` — `TestCounters`.
+
+### F-27. ADU218 closed-contact resistance is a property of the wiring, not the relay
+
+**No test may assert a resistance threshold, and no test may assume the
+reading is stable within a session.** Both were tried and both produced
+flaky tests on this bench.
+
+*Across relays.* Same meter, same session, identical PhotoMOS parts: **K0
+closed reads 9.483 Ω, K7 closed reads 36.02–36.22 Ω** — nearly 4× apart. The
+excess is lead and clip resistance outside the relay. Any `< 10 Ω` "closed"
+rule derived from K0 calls a perfectly good K7 open.
+
+*Across sessions.* The same closed relay measured 6.14, 10.69, 10.65 and
+9.40 Ω across four sessions, with the step traced to re-seated probes.
+
+*Within a session.* K7 on spring clips drifted **62 → 127 → 61 Ω** over 15
+back-to-back runs of one test, monotonically and then back. A
+same-circuit bound of `hi < lo * 2` worst-cased at **1.80** and failed about
+one suite run in seven.
+
+**Consequence.** The witness keys on the instrument's **overload
+sentinel**: closed is "reads a number at all", open is "out of range".
+That distinction is categorical rather than quantitative and survives any
+amount of contact drift. The residual same-circuit check is an order of
+magnitude, which by measurement does *not* catch a K7↔K0 lead move (ratio
+3.81–6.64) — accepted deliberately, because no threshold separates that
+from the 1.80 the clips produce unaided. Leads on the wrong relay are
+caught instead by the "either the relay is not switching or the leads are
+not across it" assertions, which name both causes because a resistance read
+cannot tell them apart.
+
+**Also unfixable by the volts gate.** The fixture skips when the leads sit
+on a *powered* net (measured 3.392 V after the meter was left on the
+CP2112), but a *different dry* contact reads ~0 V exactly like the right
+one — so a stale `BENCHCTRL_ADU218_RELAY` fails rather than skips.
+
+**All eight measured in one session (2026-08-27), which settles the
+question.** The meter was walked across every relay in turn, one screw
+terminal pair at a time, and each was independently witnessed:
+
+| relay | closed Ω | within-position spread |
+|---|---|---|
+| K0 | 45.65 | 0.035 |
+| K1 | 20.77 | 0.004 |
+| K2 | 28.37 | 0.024 |
+| K3 | 31.36 | 0.062 |
+| K4 | 32.09 | 0.042 |
+| K5 | 41.19 | 0.544 |
+| K6 | 16.87 | 0.002 |
+| K7 | 17.50 | 0.002 |
+
+**16.9–45.7 Ω, a 2.7× spread, with no relation to index** — on identical
+PhotoMOS parts, one meter, one hour. Within-position spread is ≤ 0.06 Ω
+everywhere except K5, so the drift that broke `hi < lo * 2` is clip seating
+rather than anything about the bench or the device.
+
+**The vendor spec settles it independently of the walk.** The manual's Relay
+Outputs table gives on-state resistance for the ADU218 as **700 mΩ typical
+and 1.1 Ω maximum** (Panasonic AQZ207 PhotoMOS). Every reading above is
+**15× to 41× that maximum**, so by the manufacturer's own number the relay
+accounts for at most ~4 % of the *lowest* measurement here and under 3 % of
+the highest — the rest is leads, clips and terminals. This is worth stating
+because it changes the entry's status: the wiring conclusion no longer rests
+only on "the spread has no relation to index", which is an inference from our
+own bench. A threshold anywhere in the measured range would be a threshold on
+lead resistance with a relay spec two orders of magnitude below it, and the
+1.1 Ω figure is the ceiling a test *could* have keyed on had the leads not
+dominated. They do dominate, by construction, so it still cannot.
+
+**A ceiling on the closed reading was considered and rejected.** During this
+walk a loose screw terminal made K3 read **336 kΩ closed**, and the suite
+passed — a closed contact is asserted to be "a number", never bounded above.
+That is the correct behaviour, not a gap. The test's claim is that the
+relay's state follows the command, and at 336 kΩ that claim was *true*: the
+DMM saw overload → finite, a real state change. What was broken was bench
+wiring quality, which is not the driver's claim and is not visible to it. A
+ceiling would also be exactly the threshold-on-a-wiring-property this entry
+exists to forbid — a loose terminal *is* a wiring property, so it is squarely
+inside the rule rather than an exception to it. In service these relays
+switch a load rather than a meter, where what matters is that the drop and
+the dissipation are acceptable, not that the reading falls in a band.
+
+**One thing the walk's numbers can now be checked against.** K7 above reads
+17.50 Ω through the *per-relay* `SKn` path. Driving the same contact from the
+*whole-port* `MKddd` path gives **17.5134–17.5152 Ω** over three passes, a
+0.0018 Ω spread (`tests/fixtures/adu218/whole_port_witness.txt`). Two
+independent command paths put one contact at the same resistance, which is a
+useful cross-check on the table above: had the walk's figures been an artefact
+of the command route rather than the wiring, the two paths would not agree to
+four decimal places. It changes nothing about the rule — 17.5 Ω is still a
+property of K7's leads, and asserting it would still break the moment they
+move.
+
+Code reference:
+`tests/test_hardware_ontrak_adu218.py` — module docstring, the `witness`
+fixture, `test_the_driver_and_an_independent_instrument_agree_on_every_transition`
+and `test_a_whole_port_mask_moves_a_contact_an_instrument_can_see`.
+
+
 ## Harness
 
 ### A-1. Emulator + `SMU.record()` deadlock
@@ -1111,6 +1524,51 @@ past this window deliberately.
 
 Code reference: `src/benchctrl/drivers/otii_arc/transport.py` —
 `read_chunk`, and `device.py` — `_reader_loop`.
+
+### A-5. No simulator exercises the transport its device really uses
+Every simulator models its instrument's wire protocol faithfully, and
+none of them reaches that instrument's real transport. The SCPI sims
+answer over pyvisa-py's ASRL backend while the hardware is USB-TMC, so
+`SimulatedSDM4065A` proves the SCPI grammar and proves nothing about the
+USB-TMC endpoint pair — which is why `clear_device_buffers()`, the
+wedged-endpoint recovery for F-8, has no hardware-free test at all.
+
+The ADU218 is the sharpest case, because its transport *is* most of the
+driver. `SimulatedAdu218Link` subclasses the production
+`Adu218UsbfsLink` and overrides `_transfer()` — the one method that calls
+`fcntl.ioctl` — plus the three lifecycle members that would otherwise
+open a real device node (`open`, `close`, `is_open`). Everything else is
+shipping code under test: the 8-byte report framing, the mandatory `0x01`
+prefix, the NUL trim, the desync check, the `ETIMEDOUT` →
+`Adu218LinkTimeout` mapping, `drain()`. Everything below the seam is the
+kernel, and that is where the coverage stops.
+
+Consequence, stated precisely so it is not over-read: a hardware-free run
+cannot fail because `USBDEVFS_BULK` was the wrong request number, because
+the `usbdevfs_bulktransfer` struct was laid out wrongly for the running
+word size, because an interrupt endpoint rejected a bulk-shaped ioctl, or
+because the interface could not be claimed. Those are exactly the
+failures that separate a 64-bit laptop from a 32-bit board.
+
+Two things narrow it rather than close it. The ioctl request numbers are
+**computed** by `_ioc()` and pinned by test to all three measured
+constants (`0xC0185502` on 64-bit, `0xC0105502` for a 16-byte struct,
+plus the claim/release codes), so a struct-layout slip fails on the
+laptop instead of on the bench. And the kernel side is contractual rather
+than assumed: `devio.c` branches on `USB_ENDPOINT_XFER_INT` and reissues
+the transfer as an interrupt URB, so "bulk ioctl on an interrupt
+endpoint" is a documented kernel path, not a happy accident.
+
+Not fixed because closing it means simulating `fcntl.ioctl` itself, which
+would assert that the model of the kernel matches the model of the kernel.
+The honest substitute is the hardware tier — six tests in
+`tests/test_hardware_ontrak_adu218.py`, one of which checks a relay with
+the SDM4065A rather than with the device's own read-back.
+
+Code reference: `src/benchctrl/sim/adu218.py` — `SimulatedAdu218Link`;
+`src/benchctrl/drivers/ontrak_adu218/usbfs.py` — `_ioc`, `_transfer`;
+`tests/test_usbfs_adu218.py` — its module docstring states the same
+boundary, and `TestIoctlConstants` is the part that guards it.
 
 ## Network (remote mode)
 
@@ -1220,6 +1678,111 @@ to big-iron Linux hosts.
   the only way to choose. Other CH340 variants do carry one. Multi-adapter
   selection is untested on hardware regardless: only one CH340 has ever been
   attached here at a time.
+
+### N-7. CI is red on `master`, from four unrelated causes
+Recorded because the symptom is a wall of red check marks that reads like a
+regression and is not one. **Every GitHub Actions run on `master` has failed for
+at least the last eight commits**, and the four causes below are independent —
+fixing any one leaves the matrix red, which is why nobody has.
+
+**1. Five modules import POSIX-only stdlib at module scope, unguarded** (this is
+the Windows rows):
+
+| Module | Import |
+|---|---|
+| `sim/loopback.py` | `termios`, `tty` |
+| `transports/ptybridge.py` | `termios` |
+| `drivers/cyberpower_pdu41002/links.py` | `pty` |
+| `drivers/silabs_cp2112/hidraw.py` | `fcntl` |
+| `drivers/ontrak_adu218/usbfs.py` | `fcntl` |
+
+On Windows these raise `ModuleNotFoundError` during **collection**, so pytest
+aborts before running anything — 15 collection errors on `master` and *zero*
+assertions evaluated. That is not a test failure and must not be read as one: a
+Windows row says nothing whatever about whether the code works.
+
+This is deliberate rather than an oversight. The imports are load-bearing: the
+transports genuinely are ptys and USBDEVFS/hidraw ioctls, so there is no
+cross-platform implementation to fall back to, and a guarded import would only
+move the failure from collection to the first call. Every device on this bench
+hangs off a Linux host (an Arduino Uno Q), so no Windows target exists for any
+of them.
+
+**2. `ruff` fails on `master` itself** — **1198 findings** at CI's scope
+(`ruff check src tests scenarios`) under ruff 0.16.3, a much newer ruff than the
+config was written against. Dominated by one rule: 538 × `UP045`
+(`Optional[X]` → `X | None`), then 315 × `F401`, 48 × `N806`, 24 × `UP037`,
+20 × `E402`.
+
+This is why lint claims in this repo compare **the set of rule codes against a
+`master` worktree** and never counts. The count is not merely uninformative, it
+is ambiguous: the same tree yields 1105 / 1197 / 1198 / 1262 depending on whether
+`tests` and `scenarios` are included, so "N ruff errors" identifies nothing
+unless the scope is stated. Match CI's scope, diff the *set of rule codes*
+against `master`, and treat a new code as the signal — a higher count under the
+same codes is just more instances of a baseline nobody has cleared.
+
+**3. The Python 3.9 row fails at `Install`**, before ruff or pytest is reached,
+so it evaluates nothing. `pyproject.toml` declares `requires-python = ">=3.9"`
+but the `[mcp]` extra pins `mcp>=1.0,<2`, and `mcp` itself requires `>=3.10` —
+pip reports `Could not find a version that satisfies the requirement mcp<2,>=1.0
+(extra == "mcp")` and stops. So the declared 3.9 support has never been
+installable with extras. That is a packaging contradiction, not a code defect.
+
+**4. The Ubuntu rows fail for want of a VISA backend.** On `master`:
+`1 failed, 2114 passed, 6 skipped, 111 errors`, every error the same cause —
+`Could not locate a VISA implementation. Install either the IVI binary or
+pyvisa-py.` The workflow installs `[bench-visa]` (which brings `pyvisa` but not a
+backend) on the stated grounds that the hardware-free tests are all mocks. They
+are not: the errors land on `tests/test_sim_loopback.py`, where a real driver is
+constructed and reaches `ResourceManager()` before any mock intervenes. Note that
+`pyvisa-py` is declared in no extra in `pyproject.toml` at all — § N-5 treats it
+as an operator install. Environmental, and unrelated to the three above.
+
+**Consequence for reviewers, and the trap.** A red matrix is the settled state,
+so "CI is red" carries no information here — which means a genuine regression
+would be **invisible**, hidden among failures everyone has learned to ignore.
+Until the matrix is fixed, comparing a branch against `master` means diffing the
+failures *module by module*, not glancing at job names. Concretely: `master`
+reports 15 Windows collection errors and a branch adding an `fcntl`-importing
+driver reports 18; the delta is that driver's three test modules, cause
+`ModuleNotFoundError: No module named 'fcntl'`, i.e. three new instances of an
+established pattern rather than a new failure mode.
+
+Fixing it properly is a repo-wide change — decide what the Windows rows are for,
+settle the ruff baseline, resolve the 3.9 packaging claim, and install
+`pyvisa-py` in CI — and it is tracked in [`ROADMAP.md`](ROADMAP.md) rather than
+being bolted onto whichever driver PR happens to notice.
+
+### N-8. A device asked to simulate opens the real instrument if nothing installs the config
+
+**Fixed for `benchctrl-mcp`**; recorded because the shape of the failure
+outlives the fix and applies to every future entry point.
+
+`session.resolve()` decides local vs remote vs sim by reading a module global.
+Something has to *install* a `Config` into it — `session.configure()` directly,
+or `session.configure_from_environment()` for the flag / environment / file
+layers. Until 2026-08-27 nothing in `src/` called the latter, so
+`benchctrl-mcp` resolved every device `local` no matter what the operator set.
+
+**Why it stayed hidden for a whole release.** Every test and every documented
+remote-mode example takes precedence level 1 — `session.configure()` in Python
+— which always worked. The four layers underneath it parsed correctly and
+produced a correct `Config` that was then never installed, so there was nothing
+to see: no exception, no warning, no wrong value. The seam's entire purpose is
+that the tools cannot distinguish a simulator from a remote proxy from real
+silicon, and that property is precisely what makes this failure invisible.
+
+**The generalisation, which is the part worth keeping.** A configuration layer
+is only real if some entry point installs it, and a *default* of "everything
+local" means the un-installed case is indistinguishable from the configured one
+on a bench where the hardware is present. For anything that switches mains or
+steps relays, "silently fell back to real hardware" is the wrong direction to
+fail in. So: any new entry point — a CLI, a scenario runner, a dashboard —
+must install config explicitly, and a test must assert on what
+`session.resolve()` *returns*, not that a function was called. Assert per
+route, too: `config.load_env()` returns `None` when no variable is set, so a
+fix covering the environment can leave the config file just as inert.
 
 ## What's not in this list
 

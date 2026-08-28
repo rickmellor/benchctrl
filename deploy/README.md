@@ -12,6 +12,8 @@ none of it; see [`docs/remote.md`](../docs/remote.md) for the client config.
 | [`install-fui.sh`](install-fui.sh) | optional: the read-only HDMI status display (`benchctrl-fui`) |
 | [`install-kiosk.sh`](install-kiosk.sh) | optional: boots the board straight into that display, **no login prompt** — run `install-fui.sh` first |
 | [`udev/61-benchctrl-usbtmc.rules`](udev/61-benchctrl-usbtmc.rules) | required for USB-TMC instruments (SDM4065A, both Rigols) on a kernel without `usbtmc` |
+| [`udev/62-benchctrl-ftdi.rules`](udev/62-benchctrl-ftdi.rules) | recommended for the CyberPower PDU41002's serial console: grants no permissions (`ftdi_sio` already does), but pins a stable symlink so `ttyUSB0` cannot be handed to another adapter |
+| [`udev/63-benchctrl-adu218.rules`](udev/63-benchctrl-adu218.rules) | required for the Ontrak ADU218 — a USB HID device with **no** kernel driver, so raw `USBDEVFS` is the only route in |
 | [`sync-board.sh`](sync-board.sh) | during development: push this checkout to a board and **prove** it landed — runs from your workstation, not the board |
 | [`board_sync_manifest.py`](board_sync_manifest.py) | what `sync-board.sh` compares with; also useful on its own to answer "is the board current?" |
 | [`board_apply_sync.sh`](board_apply_sync.sh) | the board-side half of that: extract, then delete what the tarball did not carry |
@@ -202,6 +204,43 @@ sudo udevadm trigger --action=add     # existing devices need this, see above
 Needs `pyvisa` and `pyvisa-py` on the board alongside `pyusb`. All three are
 pure Python — unzip the wheels next to `benchctrl`, same as `pyserial`.
 `pyvisa-py` also wants `typing_extensions`.
+
+## The Ontrak ADU218 — a HID device with no driver to detach
+
+| File | Installs to |
+|---|---|
+| `udev/63-benchctrl-adu218.rules` | `/etc/udev/rules.d/` (0644) |
+
+```bash
+sudo install -m 0644 udev/63-benchctrl-adu218.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger --action=add
+```
+
+This one is **not** a missing-module problem like the two above. `usbhid` is
+loaded and working — it has bound the board's keyboard perfectly well. It leaves
+the ADU218 alone *on purpose*: Ontrak's vendor id is in the kernel's
+`hid_ignore_list` (`drivers/hid/hid-quirks.c`), which is exactly what this
+driver wants, because it means `CLAIMINTERFACE` succeeds with no kernel driver
+to detach first.
+
+The consequence is that there is no `/dev/hidraw*` node either, so the only
+route in is raw `USBDEVFS` ioctls on `/dev/bus/usb/BBB/DDD` — which the kernel
+creates `root:root 0664`. Interrupt transfers need **write** access, so without
+the rule `os.open(path, O_RDWR)` fails `EACCES` before any protocol work starts.
+That failure is at least honest: the driver catches it and names this rules file
+in the error, rather than reporting the device as absent the way the USB-TMC
+case does.
+
+**No board-side dependency at all.** Unlike every other instrument here, the
+ADU218 driver imports nothing outside the standard library — no pyserial, no
+pyusb, no pyvisa. `deploy/sync-board.sh` carries it and there is nothing else to
+vendor.
+
+If a future kernel drops Ontrak from `hid_ignore_list`, `usbhid` will claim the
+interface and the symptom will be a claim failure rather than a permission
+error. That is the case `tests/test_hardware_ontrak_adu218.py` documents, so the
+reason arrives with the failure.
 
 ## Keeping a board's source current
 

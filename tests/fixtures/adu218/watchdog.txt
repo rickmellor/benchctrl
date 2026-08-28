@@ -1,0 +1,139 @@
+ADU218 hardware watchdog + port-write verification
+=================================================
+Device: Ontrak ADU218, USB 0a07:00da
+Witness: SDM4065A s/n SDM46A0CA00021 fw 0.0.0.20, on K0
+Wiring: K0 load side -> DMM leads only. No load current.
+
+initial: PK=000 WD=0 DB=1
+
+=== MKddd whole-port write ===
+# Only K0 is instrumented, so the DMM witnesses bit 0 while PK
+# reports the whole port. MK001 sets K0 alone.
+MK001  (K0 only  ) -> PK=001 RPK0=1  DMM: 6.1391 ohm (CLOSED)
+MK000  (all off  ) -> PK=000 RPK0=0  DMM: overload sentinel (OPEN)
+
+=== event counters (inputs unwired, so nothing should count) ===
+RE0 twice: 00000 then 00000   (REn reads without clearing)
+RC0 (read+clear): 00000
+RE0 after RC0:    00000
+
+=== DBn de-bounce round trip ===
+# 0 = 10 ms, 1 = 1 ms (power-on default), 2 = 100 us
+DB0 -> DB reads 0
+DB2 -> DB reads 2
+DB1 -> DB reads 1
+restored to power-on default; was '1', now '1'
+
+=== THE WATCHDOG: does a timeout really open the relays? ===
+# Sequence: close K0, confirm with the DMM, arm WD1 (1 s), then go
+# SILENT. Any command - even an invalid one - refeeds the timer, so
+# polling would prevent the very timeout being tested.
+K0 closed:  RPK0=1  DMM: 6.1390 ohm (CLOSED)
+WD1 armed:  WD=1   <- reading WD refed the timer; clock restarts now
+staying silent for 3.0 s (timeout is 1 s)...
+after 3.7 s of ADU218 silence:            <- SEE CORRECTION BELOW: this figure
+                                             is sleep(3.0) plus the DMM read
+                                             latency, NOT the trip time
+  DMM (independent, feeds nothing): overload sentinel (OPEN)
+  RPK0=0  PK=000
+  WD=0   <- manual says a timeout also resets this to 0
+
+=== control: does the watchdog leave relays alone while fed? ===
+K0 closed and WD1 armed: RPK0=1 DMM: 6.1393 ohm (CLOSED)
+feeding the timer with PK every 0.3 s for 3.0 s...
+after 3.1 s of being fed:
+  RPK0=1  WD=1  DMM: 6.1392 ohm (CLOSED)
+  (if RPK0=1 and WD=1 here, the watchdog only fires on real silence)
+
+restored: WD=0 PK=000 DB=1
+
+CORRECTION: the "3.7 s" above is not a trip time
+------------------------------------------------
+This capture reports "after 3.7 s of ADU218 silence: OPEN". That number is
+sleep(3.0) plus the latency of the DMM read that followed it - an upper bound
+on when the trip was OBSERVED, not a measurement of when it FIRED. The relay
+opened somewhere inside an unobserved window. This file timed the observation
+and labelled it the timeout.
+
+The error is worth keeping on the record because of what it invited: read as a
+trip time, 3.7 s against a documented 1 s suggests the interval is ~3.7x its
+label and cannot be trusted, which would make every WD interval a thing to
+characterise rather than rely on. A reviewer drew exactly that conclusion from
+this line.
+
+Measured properly by bisection in watchdog_trip.txt (stay silent for exactly T,
+then one RPK0 read that terminates the window): still closed at 0.90 s, open by
+1.10 s, so the WD1 trip is in (0.90, 1.10] s. That is the documented 1 s. There
+is no timing anomaly, and the design consequences below do not depend on one:
+they follow from arming coupling relay state to call frequency, which is
+unaffected.
+
+INTERPRETATION
+--------------
+The watchdog works as documented, and the control case is what makes that
+claim safe to rely on: a fed timer left K0 closed for 3.1 s while an unfed one
+opened it, so the relay drop is caused by silence and not by arming WD1.
+
+Both halves were witnessed by the DMM, which sits on a different bus and
+therefore cannot feed the ADU218 by being read. That matters: RPK0 is the
+device reporting on itself, and a firmware that lied about relay state would
+lie consistently. The overload sentinel is independent evidence the contact
+physically opened.
+
+Why this is more than a device feature
+--------------------------------------
+KNOWN_LIMITATIONS.md N-1 states the honest position that "a software deadman
+cannot guarantee an output goes off", and ROADMAP.md's "Hardware interlock for
+unattended runs" is open work waiting on a GPIO e-stop button ordered
+2026-08-19. This device is a second, independent answer to the same problem:
+the relay opens because the HOST WENT QUIET, with no benchctrl process, no
+GPIO, and no kernel driver involved in the decision. A wedged agent, a killed
+process, an unplugged USB cable and a panicking kernel all produce the same
+silence, and all therefore de-energise the load.
+
+The design consequences are not obvious, so they are written down rather than
+inferred later:
+
+1. Arming the watchdog makes EVERY relay's state depend on call frequency. A
+   driver that arms it and then blocks for longer than the interval - one
+   pyvisa call to another instrument would do it - silently opens the load it
+   was told to hold closed. So WD must never be armed implicitly, and the
+   driver must not offer a "keep alive" thread that hides the coupling.
+
+2. WD1 (1 s, confirmed in watchdog_trip.txt) is too tight for a general-purpose
+   bench. The ladder is bounded and documented: WD0=off, WD1=1 s, WD2=10 s,
+   WD3=1 min, and n is constrained to 0..3 - there is no WD4 and no custom
+   interval, so 1 min is the longest available. WD3 is the only setting a run
+   loop can plausibly meet without a dedicated feeder. Note WDn both sets the
+   interval and arms in one command; there is no separate arm step.
+
+3. There is no way to distinguish "the watchdog fired" from "someone opened the
+   relays" by reading relay state alone - but WD resetting itself to 0 IS a
+   distinguishable trace, and it is the only one. Polling WD is how a host
+   learns a timeout happened (the manual says as much in section 6d). That
+   read must be recorded in the run's event stream, because a fired interlock
+   that is not in the artifact bundle is a gap in the audit trail.
+
+   BUT the trace is weaker than it looks, and the qualification matters: WD=0
+   means BOTH "timed out" and "never enabled". It is only interpretable against
+   a driver-held expected value, so a driver restart loses the ability to
+   interpret it - the first WD read after a restart is ambiguous by
+   construction. Consequences: the driver must hold the armed-state itself and
+   compare, and it should write WD0 explicitly at open() unless it is using the
+   watchdog, so that later reads have a known starting point rather than an
+   inherited one.
+
+4. The feed-vs-timeout coupling is exactly the failure mode described in
+   memory as the "inert governor" trap: a watchdog nobody feeds looks identical
+   to a watchdog that works, until the day it should have fired. A test must
+   assert the LADDER - fed stays closed, unfed opens - against a synthetic
+   clock, not just that WD1 is accepted.
+
+5. A status poller silently disables the watchdog. Any command refeeds the
+   timer, so a health-check loop that reads PK on a timer keeps the deadman fed
+   no matter how wedged the control path is - the exact inert-governor shape
+   from memory, and demonstrated by the control case above, which held the
+   relay closed using nothing but PK. So if the watchdog is the safety
+   mechanism, the feed must live on the CONTROL path and nowhere else, and the
+   driver must not expose a background feeder at all. A benchctrl dashboard
+   polling device state would be enough to neuter it.

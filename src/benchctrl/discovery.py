@@ -119,6 +119,28 @@ SIGNATURES: tuple[DriverSignature, ...] = (
         # never be loosened to match on vendor alone.
         note="not to be confused with 10c4:ea60, the CP210x UART bridge",
     ),
+    DriverSignature(
+        device_key="ontrak_adu218",
+        label="Ontrak ADU218 USB relay / digital I/O interface",
+        vid=0x0A07,
+        pid=0x00DA,
+        transport="usbfs",
+        confidence=EXACT,
+        product_hints=("adu218",),
+        # The PID is per-model across the whole ADU family (the ADU208 is
+        # 0x00D8, the ADU100 0x0064), so this identifies the exact model rather
+        # than a family -- unlike the Siglent entry above. Do not widen it: the
+        # ADU208 has mechanical relays with different switching limits, and the
+        # driver's timing and CPS assumptions are the AQZ207's.
+        #
+        # ``transport="usbfs"`` is not a serial port, which matters twice:
+        # :py:func:`scan_usbfs` is what finds it, and ``_is_probe_candidate``
+        # requires ``transport == "serial"`` -- so this device is unprobeable by
+        # construction. That is the right answer for a relay board and it comes
+        # free, so nothing here relies on it: the signature identifies the
+        # device from its descriptor alone and writes nothing.
+        note="identification is passive; usbfs devices are never probed",
+    ),
 )
 
 #: Labels for keys only a probe can return. Kept beside :py:data:`SIGNATURES`
@@ -465,6 +487,74 @@ def scan_hidraw() -> list[DiscoveredDevice]:
     return found
 
 
+def scan_usbfs() -> list[DiscoveredDevice]:
+    """Enumerate USB devices driven through raw usbdevfs rather than a tty.
+
+    Today that means the ADU218: it is USB HID, and ``usbhid`` ignores Ontrak
+    devices deliberately (``hid_ignore_list`` in the kernel's ``hid-quirks.c``),
+    so there is no ``/dev/hidraw*`` node and no tty either. The only evidence it
+    exists is its sysfs entry and its ``/dev/bus/usb`` node, which is what this
+    reads.
+
+    **Entirely passive.** It reads sysfs attributes the kernel already populated
+    during enumeration — no node is opened, no interface is claimed, and nothing
+    is written. That matters for a board whose outputs are relays: a scan must
+    never be the thing that actuates one, and this cannot, because it never
+    acquires a handle capable of it.
+
+    This scanner exists in the same change as the ADU218's
+    :py:data:`SIGNATURES` entry, and the two must never be separated. A
+    signature with no scanner is worse than no entry at all: the dashboard's
+    "on bus" denominator would count the device as scannable, find nothing, and
+    report ``NOT FOUND`` for an instrument that is plugged in, served, and open.
+    A missing signature merely leaves a device unidentified; a missing scanner
+    makes the panel confidently wrong.
+
+    Returns an empty list rather than raising when the transport cannot be
+    scanned at all — no driver package, or no ``/sys/bus/usb`` (a container, a
+    non-Linux host, a sandboxed test runner). An unscannable transport is not a
+    discovery error, and the alternative was measured: ``enumerate_devices()``
+    raises for a missing sysfs root, which is correct for a *driver* about to
+    open a device and wrong for a scan. Letting it propagate took out every
+    other transport's results too, because :py:func:`discover` builds one merged
+    list — so a machine with no USB sysfs reported no VISA instruments either.
+    """
+    try:
+        from benchctrl.drivers.ontrak_adu218.usbfs import (
+            Adu218LinkError,
+            enumerate_devices,
+        )
+    except ImportError as exc:  # pragma: no cover - driver always present
+        log.debug("usbfs scan unavailable: %s", exc)
+        return []
+
+    try:
+        devices = enumerate_devices()
+    except Adu218LinkError as exc:
+        log.debug("usbfs scan found no enumerable bus: %s", exc)
+        return []
+
+    sig = _match_signature(0x0A07, 0x00DA, "usbfs")
+    found: list[DiscoveredDevice] = []
+    for device in devices:
+        found.append(
+            DiscoveredDevice(
+                path=device.path,
+                transport="usbfs",
+                device_key=sig.device_key if sig else None,
+                label=sig.label if sig else (device.product or ""),
+                vid=0x0A07,
+                pid=0x00DA,
+                serial_number=device.serial,
+                description=device.product or "",
+                manufacturer=device.manufacturer,
+                product=device.product,
+                confidence=sig.confidence if sig else UNKNOWN,
+            )
+        )
+    return found
+
+
 def _hidraw_attr(hidraw_name: str, attr: str) -> Optional[str]:
     """One USB attribute for a hidraw node, walking up to the USB device.
 
@@ -562,6 +652,7 @@ def discover(
     usbtmc: bool = True,
     visa: bool = True,
     hidraw: bool = True,
+    usbfs: bool = True,
     probe: bool = False,
     resource_manager=None,
 ) -> list[DiscoveredDevice]:
@@ -610,6 +701,11 @@ def discover(
         # Additive: no other scanner reports hidraw nodes, so there is nothing
         # to de-duplicate against.
         found.extend(scan_hidraw())
+    if usbfs:
+        # Additive by construction, like scan_driverless_bridges: a usbdevfs
+        # device has no tty and no usbtmc node, so nothing above can have
+        # reported it and there is nothing to de-duplicate against.
+        found.extend(scan_usbfs())
     if probe:
         found = probe_unidentified(found)
     return sorted(found, key=lambda d: (d.transport, d.path))

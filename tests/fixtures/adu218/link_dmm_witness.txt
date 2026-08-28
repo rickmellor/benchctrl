@@ -1,0 +1,93 @@
+Adu218UsbfsLink witnessed by a SECOND instrument, not by the device
+==================================================================
+Date: 2026-08-25.  Unit: USB 0a07:00da serial E02246
+Witness: SDM4065A (LXI), 2-wire resistance on K0's load side, DMM leads only
+Wiring: no load, nothing energised, no DUT rail. K0 switches the DMM's own
+        ~1 mA test current and nothing else.
+Code under test: src/benchctrl/drivers/ontrak_adu218/usbfs.py, unmodified
+
+WHY THIS FILE EXISTS, given link_hardware.txt section G already "passed"
+-----------------------------------------------------------------------
+Section G compared `SK0`/`RK0` against `RPK0`. Both sides of that comparison
+are the ADU218 talking about itself over the same link. If the framing were
+wrong in a way that was symmetric -- a report id the device silently ignored,
+a command it misread consistently -- the device would agree with itself and
+the test would pass while no contact ever moved. The DMM has no knowledge of
+what the link is doing and is not on the USB bus at all.
+
+THE DISCRIMINATOR IS THE OVERLOAD SENTINEL, NOT AN OHM VALUE
+The resistance figures below are probe-path resistance, not the relay's R_on;
+see on_resistance.txt and on_resistance_drift.txt, where a 4.55 ohm step was
+traced to re-seated screw-clamped probes. Open vs closed keys on the DMM's
+over-range sentinel, which is insensitive to that entire class of drift.
+
+witness: SDM4065A connected
+
+ cmd    device says   DMM says          agree?
+ -----  -----------   ---------------    ------
+ RK0    RPK0=0       OPEN   overload (open)  ok
+ SK0    RPK0=1       CLOSED 10.64849 ohm     ok
+ RK0    RPK0=0       OPEN   overload (open)  ok
+ SK0    RPK0=1       CLOSED 10.65126 ohm     ok
+ SK0    RPK0=1       CLOSED 10.65063 ohm     ok
+ RK0    RPK0=0       OPEN   overload (open)  ok
+ RK0    RPK0=0       OPEN   overload (open)  ok
+ SK0    RPK0=1       CLOSED 10.64935 ohm     ok
+ RK0    RPK0=0       OPEN   overload (open)  ok
+
+ restored: PK=000  DMM=OPEN
+
+9 transitions, 0 disagreements
+VERDICT: the link's writes reach the physical contact
+
+CORRECTION TO THE SCRIPT'S OWN SUMMARY LINE
+The script prints "9 transitions". That is the command count, not the
+transition count, and it flatters the result. K0 was at 0 after the opening
+MK000, so:
+  - 6 rows are genuine state CHANGES (0->1 or 1->0)
+  - 3 rows are HOLDS: the leading RK0 (already 0), the second SK0 of the
+    SK0,SK0 pair, and the second RK0 of the RK0,RK0 pair
+All 9 agree with the DMM, but only 6 of them are evidence that a write moved
+a contact. The 3 holds are worth having for a different reason: they show a
+repeated command does not toggle -- the ADU218's relay commands are absolute
+(set/reset), not inverting, so a duplicate write is harmless. A driver built
+on a toggle assumption would have failed exactly those rows.
+
+The order is deliberately not alternating. A DMM stuck returning its last
+reading, or a link whose read lagged one command behind, both survive strict
+alternation and are caught by the SK0,SK0 / RK0,RK0 pairs.
+
+WHAT THIS ESTABLISHES
+  The link's writes reach the physical contact, and its reads report the
+  physical contact. 6 state changes, 0 disagreements between the device's
+  RPK0 and an instrument that cannot see the USB bus. That is the claim the
+  driver layer will be built on top of.
+
+CONSISTENCY WITH EARLIER CAPTURES
+  Closed readings here: 10.64849 - 10.65126 ohm (this run), and
+  10.64923 - 10.65245 ohm on an immediately preceding run of the same script.
+  on_resistance_drift.txt, ~2 hours earlier: 10.69189 - 10.69583 ohm.
+  So the probe path has drifted DOWN by roughly 40 mohm between sessions,
+  with milliohm stability within each. Nothing was touched in between.
+
+  This is a third data point for the conclusion those files reached and it
+  sharpens it: the closed-state figure moves by tens of milliohms across
+  hours with no intervention at all, so it is not a stable property of
+  anything the driver could report. It is also 40x smaller than the 4.55 ohm
+  step attributed to re-seating, which is consistent with re-seating being a
+  real perturbation rather than more of this same drift -- but note that is a
+  comparison of magnitudes only, not a measurement of the joint, and the
+  operator's confirmation remains the evidence for the re-seating cause.
+
+  The sentinel, meanwhile, has now stepped cleanly across 6 changes here, 10
+  in on_resistance_drift.txt, and 4 in link_hardware.txt section G, over a
+  closed value that has ranged 6.14 -> 10.69 -> 10.65 ohm. A threshold-based
+  driver keyed to any one of those numbers would have misreported the others.
+
+WHAT THIS DOES NOT SHOW
+  - Only K0. It is the only channel with a witness attached; K1-K7 are
+    asserted by the device alone.
+  - No R_on measurement, at any point. The datasheet condition is 1.0 A
+    within 1 s (Panasonic ASCTB467E); this is ~1 mA with indefinite dwell.
+    Neither a pass nor a violation.
+  - Nothing about switching under load. Every actuation here is dry.

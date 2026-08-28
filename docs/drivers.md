@@ -19,6 +19,7 @@ Each driver is independent and optional. Import only what you need.
 | Siglent SDM4065A 6½-digit bench DMM | `benchctrl.drivers.siglent_sdm4065a.SiglentSDM4065A` | USB-TMC + SCPI via pyvisa | **shipped (unreleased)** |
 | CyberPower PDU41002 8-outlet switched PDU | `benchctrl.drivers.cyberpower_pdu41002.CyberPowerPDU41002` | vendor CLI over USB-Serial (FTDI) **or** SSH | **shipped (unreleased)** — switches mains |
 | Silicon Labs CP2112 GPIO control lines | `benchctrl.drivers.silabs_cp2112.CP2112` | USB HID feature reports over `hidraw` | **shipped (unreleased)** — open-drain reset lines |
+| Ontrak ADU218 relay / digital I/O interface | `benchctrl.drivers.ontrak_adu218.OntrakADU218` | USB HID over raw USBDEVFS ioctls, **no dependencies** | **shipped (unreleased)** — switches signal circuits |
 
 ## QR10x — programmable resistance
 
@@ -1479,3 +1480,564 @@ address handling, clock configuration and transfer-status polling — a
 second protocol with its own failure modes, for a capability nothing on
 the bench currently needs. The report IDs are documented in `driver.py`
 if that changes.
+
+## Ontrak ADU218 — 8 relays, 8 digital inputs, no dependencies
+
+[Ontrak ADU218](https://www.ontrak.net/adu218.htm) — USB relay and
+digital I/O interface: eight 1 A solid-state (PhotoMOS) relays rated to
+120 V AC/DC on a screw terminal block, eight opto-isolated digital inputs
+with hardware event counters, and a hardware watchdog that de-energises
+every relay by itself if the host stops talking.
+
+Two things make this driver unlike the others in this repo.
+
+**It has no dependencies at all.** Not pyserial, not pyvisa, not `hid` or
+`pyusb`. The device is USB HID, and the driver talks to it with
+`fcntl.ioctl`, `ctypes` and `os` — raw USBDEVFS on `/dev/bus/usb/BBB/DDD`.
+
+**Silence is the only error signal.** The device has no error reply. An
+unknown command, a valid command with an out-of-range argument, and a
+write-only command are byte-identical on the wire: nothing comes back.
+Every design decision below follows from that.
+
+### Quick start
+
+```python
+from benchctrl.drivers.ontrak_adu218 import OntrakADU218
+
+with OntrakADU218.open() as adu:              # finds itself by VID/PID
+    print(adu.read_identity())                 # costs no round trip
+    adu.set_relay_state(0, True)               # returns the verified read-back
+    print(adu.relay_states())                  # one command, one instant
+    print(adu.input_states())                  # {'A': (...4 bools), 'B': (...)}
+    adu.reset_relays()                         # de-energise all eight
+```
+
+`open()` takes no port and no path. The driver walks `/sys/bus/usb` for
+VID `0x0A07` / PID `0x00DA`, so identity comes from the descriptor rather
+than from a device node that renumbers on re-plug. Pass `serial=` when
+more than one ADU218 is attached.
+
+### No pyserial — it is not a serial device
+
+The starting assumption for this device was pyserial, and it was wrong:
+the ADU218 does not present a tty. It is a USB HID device with one
+interface (class `0x03`) and two interrupt endpoints, `0x81` IN and
+`0x01` OUT, both `wMaxPacketSize` 8 with `bInterval` 10.
+
+Ontrak's own Linux path is `libusb` plus their `AduHid` shared library.
+Neither is available on the Uno Q, and both are dependencies. The route
+taken instead — raw USBDEVFS ioctls from the standard library — needs
+nothing installed, which is what the operator asked for.
+
+Three facts make that route work rather than merely compile:
+
+- **`USBDEVFS_BULK` on an interrupt endpoint is contractual, not a
+  loophole.** The kernel's `devio.c` branches on `USB_ENDPOINT_XFER_INT`,
+  rewrites the pipe to `PIPE_INTERRUPT` and calls `usb_fill_int_urb()`
+  with the endpoint's own `bInterval`. It is documented in `message.c`'s
+  kerneldoc and has behaved this way since v2.6.15. So an 8-byte
+  "bulk" transfer to `0x01` is an interrupt transfer.
+- **`usbhid` ignores Ontrak devices deliberately**, via `hid_ignore_list`
+  in `hid-quirks.c`. `hid-ids.h` defines `USB_VENDOR_ID_ONTRAK 0x0a07`
+  and the ADU100's `0x0064`; this device's `0x00da` is in the same claimed
+  block. So `USBDEVFS_CLAIMINTERFACE` succeeds with no kernel driver to
+  detach first — no `hidraw` fight, no udev unbind rule.
+- **Autosuspend cannot strand a live session.** `usbdev_open()` takes a
+  runtime-PM reference that is held until the fd is released. The driver
+  must therefore never pass `USBDEVFS_ALLOW_SUSPEND`, and does not.
+
+The ioctl request numbers are **computed**, not copied: `USBDEVFS_BULK`
+encodes `sizeof(struct usbdevfs_bulktransfer)`, which is 24 on 64-bit and
+16 on 32-bit, so the constant differs per ABI (`0xC0185502` vs
+`0xC0105502`). A hardcoded value works on the laptop and fails on a
+32-bit board.
+
+### Wire format
+
+Every packet is 8 bytes in both directions. Byte 0 is the report ID and
+must be **`0x01`** — measured, not assumed: bare ASCII with no prefix,
+`0x00` and `0x02` were all silently ignored. Bytes 1..7 carry an ASCII
+command, NUL-padded. Seven payload bytes, so an eighth character is
+dropped by the device — indistinguishable from an unknown command.
+
+Commands are case-insensitive. Replies are prefixed the same way and
+NUL-padded.
+
+| Command | Answers | Width | What |
+|---|---|---|---|
+| `PK` | yes | 3 | all eight relays as a decimal mask |
+| `RPKn` | yes | 1 | one relay, `n` = 0-7 |
+| `SKn` | **no** | — | energise relay `n` |
+| `RKn` | **no** | — | de-energise relay `n` |
+| `MKddd` | **no** | — | write all eight relays, `ddd` = 000-255 |
+| `PA` / `PB` | yes | 2 | one input port's nibble |
+| `RPA` / `RPB` | yes | 4 | one port's four lines, **MSB first** |
+| `RPAn` / `RPBn` | yes | 1 | one input line, `n` = **0-3** |
+| `PI` | yes | 3 | all eight inputs as a mask |
+| `REn` | yes | 5 | read event counter `n`, no clear |
+| `RCn` | yes | 5 | read **and clear** event counter `n` |
+| `DB` / `DBn` | yes / **no** | 1 / — | read / set de-bounce, `n` = 0-2 |
+| `WD` / `WDn` | yes / **no** | 1 / — | read / set the watchdog, `n` = 0-3 |
+
+Every width in that table came from a hardware capture
+(`tests/fixtures/adu218/reads.txt`), not from the manual — the manual gives
+an *example* rather than a width for `RPKn`, `RPyn`, `DB` and `WD`, and an
+example is not a specification. A width wrong by one turns a desynced reply
+into a plausible value instead of an exception.
+
+**`RKn` is write-only despite starting with `R`.** Every other
+`R`-prefixed command answers. A driver that inferred "responsive" from the
+mnemonic would wait the full timeout on every de-energise — the most-called
+command on the device — and would look broken only under load. So the
+driver carries an explicit per-command `responsive: bool` table and never
+infers.
+
+`RI` appears in the manual's summary table as the name for the
+read-all-inputs command. It is silent on hardware; only `PI` answers.
+
+### Silence, and what the driver does about it
+
+There is no `*OPC?`, no `SYST:ERR?`, no `[^]` caret. So:
+
+- Every command is checked against a **whitelist** before it is written.
+  A rendered command that matches no entry is refused host-side, because
+  a bad *rendering* (a format-string slip) is invisible to an argument
+  range check and produces the same silence as a device fault.
+- A command declared responsive that answers nothing raises
+  `ADU218TimeoutError`, which is documented as **ambiguous by
+  construction**: it cannot say whether the command was unknown, the
+  argument was out of range, or the device is gone. Pretending otherwise
+  would be exactly the misdiagnosis this device invites.
+- A reply of the wrong width raises `ADU218ProtocolError`. Without the
+  width check a desynced reply is a plausible number.
+- **The session is not poisoned.** Unlike the SDM4065A, where a bad
+  command leaves an error queued that surfaces on the *next* read, an
+  ignored command here costs nothing — the next valid command answers
+  normally. That is the one mitigating property.
+
+`open()` **drains** the IN endpoint before doing anything else. Replies
+queue on the endpoint rather than overwriting a slot, so a reply left by a
+crashed previous process would be returned as the answer to this process's
+first query — a silently wrong value, not an exception.
+
+The read timeout is 200 ms. Measured worst cases: 16.65 ms for an idle
+`PK`/`RPK0`, 16.68 ms for a post-actuation read-back, 7.35-8.19 ms for a
+write-only ioctl. That is a 12x margin, re-confirmed at the shipping value
+with zero replies left queued.
+
+### Two index ranges, and one that reads correctly when wrong
+
+Relays are `0..7`. **Input lines are `0..3`** — PORT A and PORT B are four
+bits each, eight inputs in total. Counters are `0..7`. A single shared
+validator would accept `RPA5`, the device would answer with silence, and
+the operator would see a timeout three layers away from the bad argument.
+So each range has its own coercion.
+
+`RPy` replies **MSB first**: the leftmost character of `RPA` is line 3, not
+line 0. Indexing the reply string directly is an off-by-three that reads
+correctly for the all-zero case every unwired bench produces, which is why
+the test for it asserts an asymmetric pattern.
+
+**Three commands read the inputs, and their bit orders disagree.** That is
+the reason `input_port_mask()` exists alongside `input_states()` and
+`input_mask()`, rather than being a redundant fourth spelling of the same
+read:
+
+| Method | Command | What the bits do |
+|---|---|---|
+| `input_states()` | `RPA` / `RPB` | MSB-first *text*; the driver reverses it |
+| `input_port_mask(port)` | `PA` / `PB` | LSB-weighted decimal — bit 0 **is** line 0 |
+| `input_mask()` | `PI` | both ports in one byte, PORT A in the low nibble |
+
+So `Py` is the only input read needing no transformation, and a caller that
+wants one port's bits and wants to trust their positions should use it. `PI`
+remains the right call for all eight lines at once — `input_port_mask` is
+not a cheaper route to the same answer but a *different* answer, one port,
+with the other port's state absent rather than masked off.
+
+Index coercion rejects `bool` **before** `int`, since `bool` is an `int`
+subclass: `relay_state(True)` would silently mean relay 1, and
+`set_watchdog(True)` would arm a one-second hardware deadman on a bench
+nobody expected to hold one.
+
+### Safety
+
+The relays are 1 A signal-level SSRs on instrument leads, not mains
+contactors. That is a real difference from the PDU41002 and the policy
+differs accordingly — but the direction of a relay's state is still worth
+being careful about.
+
+**`allowed_relays` defaults to all eight.** The PDU makes its allowlist
+mandatory with no "all" default because a typo there de-powers mains. Here
+the operator's stated policy is that the relays toggle freely with the
+hardware watchdog available as the per-test interlock. Pass
+`allowed_relays=` to narrow it.
+
+**The allowlist guards *closing* a contact, not opening one.**
+`set_relay_state` refuses to energise an unlisted relay and always
+de-energises one; `reset_relays()` bypasses the list entirely. Both keep
+the safe state reachable on exactly the benches most carefully configured
+— a rule that also blocked de-energising would make a narrower policy the
+more dangerous one. `set_relay_port` is the exception and enforces on the
+whole mask, because `MKddd` moves all eight lines in one indivisible
+command and there is no de-energise-only form of it. It is also checked
+against the whole mask rather than the diff: "no change requested" depends
+on a read that could be stale, and a policy that holds only when the
+device agrees is not a policy.
+
+**"Indivisible" is a claim about the command, not about the contacts.**
+Eight `SKn`/`RKn` writes are eight USB transfers, so the port really does
+visit `0b10101000` en route to `0b10101010`; one `MKddd` is one transfer,
+so it does not. That is what "simultaneous" means here and all it means.
+Skew *between* the eight contacts inside a single `MKddd` is unmeasured:
+verification is a `PK` read-back, which reports the landed state and says
+nothing about timing, and the manual gives no per-relay switching time to
+compare against. If a circuit depends on make-before-break ordering,
+measure it on your own bench — nothing here establishes it.
+
+What *is* established, and what is not, are worth keeping apart. **That a
+`MKddd` reaches the contacts at all is witnessed** by an instrument outside
+the device: the gated hardware sweep writes two complementary masks, so
+whichever relay the meter is clamped across, one closes it and the other
+opens it. That was added because the `PK` read-back cannot tell a device
+that switches from one that only updates its own state word — a mutant
+swallowing the `MKddd` write while `relay_mask()` returns the commanded
+value passes the read-back check and fails the witnessed one. What remains
+unwitnessed is only the *timing* between contacts, and only one relay of the
+eight is metered, since the bench has one meter.
+
+**The relays are rated for 1 switch per second at full load**
+(`RELAY_MAX_SWITCH_HZ`), and the manual explicitly does not recommend the
+ADU218 for PWM: PhotoMOS dissipation rises with switching speed. Nothing
+in the driver enforces this, because the figure is qualified *at full
+load* and no part of USB, HID or the ADU command set reports what a
+contact is switching — a hard limit would throttle the dry-contact sweeps
+that are most of this bench's use on the strength of a condition it cannot
+observe. Note the inversion against the ADU208's mechanical relays at
+10 CPS: the solid-state part is the *slower* one to cycle under load.
+
+**`open()` reports what it found rather than fixing it.** Power-on relay
+state is undocumented and USB suspend holds outputs in their last state,
+so `open()` reads the port and logs a warning naming any energised relay.
+It does not drive `MK000`, because the driver cannot know whether an
+energised relay is holding something that must not be interrupted.
+`reset_relays()` is one call away and is explicit.
+
+**`close()` does not de-energise, and does not disarm the watchdog.** A
+teardown that dropped contacts would make every `with` block a bench
+event. The watchdog case is sharper: if it is armed, releasing the device
+*is* the silence it exists to detect, so disarming at close would defeat
+exactly the situation it was armed for.
+
+**`is_open` means the link, not a contact.** That is the framework-wide
+meaning (`agent/registry.py` publishes it as `"open"`), and it is the
+opposite sign to a relay's "open". Both senses live in this device, so no
+relay-facing name in the driver uses open/close/opened/closed —
+`relay_state()` documents that `True` means *energised* — and a test
+enforces the rule, because a method named `close_relay()` would also be
+remotely callable with no writer claim.
+
+### The watchdog
+
+`WD0` off, `WD1` 1 s, `WD2` 10 s, `WD3` 1 minute. `WDn` sets **and** arms;
+there is no separate arm step. While armed, the device de-energises all
+eight relays by itself if no command arrives within the interval. No
+software is in that decision path — a wedged process, a killed agent, an
+unplugged cable and a panicking kernel all look identical to the device
+and all drop the load. That is the point, and it is why this is the
+recommended interlock for a test that must not leave a relay closed.
+
+`WD1`'s one second was established by bisecting the silence window on
+hardware; the trip falls in `(0.90, 1.10] s`. An earlier capture suggested
+3.7 s, which was observation latency rather than a trip time.
+
+Two properties you own once you arm it:
+
+**Any command refeeds the timer** — including an invalid one, and
+including a plain state read. So a status-polling loop *silently neuters
+the watchdog*: ten rounds of "advance 9 s, read the relay states" keeps a
+`WD2` watchdog fed across 90 s with zero trips. The feed has to come from
+whatever is actually controlling the test.
+
+**There is no keep-alive helper, deliberately.** A background feeder would
+keep the watchdog fed precisely while the failure it guards against was
+happening — an interlock that is inert and indistinguishable from a
+working one. A test asserts no such method exists.
+
+`WD` reads back `0` both for "timed out" and for "never enabled", so a
+trip is invisible in isolation. The driver holds its own armed state and
+`read_watchdog_tripped()` compares the two; it also writes `WD0` at
+`open()` unless told not to, because a fresh process has no expectation to
+compare against and would inherit an ambiguity. Pass
+`disarm_watchdog=False` to inspect what a previous session left, at the
+cost of that ambiguity.
+
+### Counters
+
+Each digital input has a hardware event counter, so transitions are caught
+between polls. Counters wrap at 65535.
+
+`REn` reads without clearing. `RCn` reads **and** clears — the only
+command on the device that both answers and changes state, which makes it
+the only one that must never be retried: if the reply is lost after the
+device has already cleared, the count is gone permanently and a retry
+reports 0, indistinguishable from "no events happened". So
+`clear_counter()` propagates the timeout rather than retrying, and the
+returned count is the only copy. Prefer `read_counter()` and difference
+successive readings.
+
+### De-bounce
+
+Three settings: 0, 1, 2. Ontrak's web page lists a fourth (`NONE`), but
+the manual bounds `n` to 0-2, the hardware captures show 0/1/2, and the
+same four-option string appears on the ADU208 and ADU228 pages — shared
+boilerplate. The bench unit reported `DB` = 1 out of the box, which is
+also the simulator's default so that a driver returning a hardcoded 0
+would be caught.
+
+**A higher setting is a *shorter* filter.** Manual §6c:
+
+| setting | filter width |
+|---|---|
+| 0 | 10 ms |
+| 1 | 1 ms (device default) |
+| 2 | 100 µs |
+
+Both intuitive readings are wrong: 0 is not "off" — it is the *longest*
+filter — and 2 does not filter hardest, it filters least. Somebody wanting
+maximum contact de-bounce would reach for 2 and get 100 µs. Hence
+`read_debounce_ms()` alongside `read_debounce()`, and `DEBOUNCE_MS` in the
+driver; the raw setting number is not a duration and should not be printed
+as though it were.
+
+The practical consequence is that **the setting is unobservable at low
+frequencies.** Measured on this bench against a 10 Hz square wave on PA3,
+20 s per setting: DB0 10.042, DB1 9.992, DB2 9.992 counts/s — a 0.5 %
+spread, i.e. indistinguishable. That is the expected result, not a fault:
+every filter width is far shorter than the 50 ms half-period, so there is
+nothing for any of them to reject. Telling the three apart needs a
+stimulus whose period approaches 10 ms — a few hundred Hz — and the
+counters are rated to only 1 kHz (`COUNTER_MAX_FREQUENCY_HZ`), so the
+usable discrimination window is narrow. Above that rating the count
+under-reports **silently**; the driver cannot detect it.
+
+### Counters count cycles, not edges
+
+The counters count **low-to-high transitions only** — one count per cycle.
+Verified on hardware rather than assumed: at 10 Hz the device counter read
+10.030 counts/s while host level-sampling independently saw 9.997 rising
+*and* 9.997 falling edges per second. Counting both edges would have given
+a ratio of 2.0; the measured ratio was 1.003.
+
+Counters are 16-bit and **roll over from 65535 to 0**. Differencing
+successive reads is the only correct way to use them, and the difference
+must be taken modulo 65536 — a naive `after - before` goes sharply negative
+exactly once per 65536 events. `read_counter()` and differencing is
+preferred over `clear_counter()`, which destroys the only copy of what it
+returns.
+
+### API
+
+```python
+# reads (no mutator prefix — deliberate; see below)
+is_open -> bool;  relay_count -> int;  input_count -> int
+allowed_relays -> frozenset[int];  watchdog_setting -> int   # cached, no I/O
+read_identity() -> ADU218Info               # from the descriptor, no round trip
+relay_state(index) -> bool                  # True == energised
+relay_states() -> dict[int, bool]           # one command, one instant
+relay_mask() -> int
+input_state(port, index) -> bool            # port "A"/"B", index 0-3
+input_states() -> dict[str, tuple[bool, ...]]
+input_port_mask(port) -> int                 # Py — one port's nibble, LSB = line 0
+input_mask() -> int                          # PI — both ports, A in the low nibble
+read_counter(index) -> int;  read_counters() -> dict[int, int]
+read_debounce() -> int                      # the setting, 0-2
+read_debounce_ms() -> float                 # the filter width; see the table
+read_watchdog() -> int;  read_watchdog_tripped() -> bool
+
+# writes (all prefix-matched, so the writer-claim gate catches them)
+set_relay_state(index, on, *, verify=True) -> bool   # the verified read-back
+set_relay_port(mask, *, verify=True) -> int
+reset_relays(*, verify=True) -> int                  # bypasses the allowlist
+clear_counter(index) -> int                          # destroys what it returns
+set_debounce(setting) -> int
+set_watchdog(setting) -> int
+
+close(); __enter__; __exit__
+```
+
+`set_relay_state` returns the **verified** read-back rather than `None`,
+because a write is unacknowledged on this device. A switch the driver
+cannot confirm is a switch it should not claim, so the return value is the
+confirmation and discarding it is the caller's explicit choice.
+`verify=False` returns the *commanded* value instead — a real downgrade,
+and the docstring says so.
+
+Method names are constrained by `agent/dispatch.py`, which derives which
+calls need a writer claim purely from name prefixes with no
+driver-declared override. Every mutator therefore takes an existing prefix
+(`set_`, `reset`, `clear_`). `clear_counter` is the interesting one: it is
+a read that mutates, and its `clear_` prefix is what makes the gate catch
+it — a name like `read_and_clear_counter` would not be gated.
+
+Adding a prefix such as `relay_` to `_MUTATOR_PREFIXES` was rejected: it
+would also capture `relay_state()`, making observation a privileged
+operation.
+
+### Exceptions
+
+`ADU218Error(RuntimeError)` is the base. `ADU218ConnectionError`,
+`ADU218ProtocolError` (the device answered and the answer is not
+believable), `ADU218TimeoutError` (also a builtin `TimeoutError`),
+`ADU218ValueError` (also a `ValueError`) and `ADU218PolicyError`.
+
+`ADU218PolicyError` is deliberately **not** a `ValueError`: the index was
+perfectly valid for the hardware, and the refusal is configured policy
+rather than a malformed request. A caller catching `ValueError` to mean "I
+passed something wrong" must not swallow it.
+
+There is deliberately **no** `ADU218CommandError`. Every other driver here
+has one, carrying the device's error *reply*; this device has no error
+reply to carry, so a `CommandError` would imply a diagnostic that does not
+exist. A test asserts its absence so nobody adds one by analogy.
+
+### Not a `SwitchedPDU`, and not on the mains panel
+
+The device key is absent from `registry.SWITCHED_PDU_KEYS` and from the
+FUI's `PDU_KEYS`, on purpose in both cases: those gate run-engine outlet
+setpoints and a fixed mains panel respectively, and mean "switches mains".
+These are 1 A SSRs on instrument leads. The ADU218 gets an instrument-rail
+slot with `kind: "switch"` instead. Tests pin both exclusions.
+
+`agent/safety.py`'s `default_safe_state()` is inert for this device, and
+that is documented rather than accidental — the case for inertness is
+*stronger* here than for the PDU, because the hardware watchdog already
+de-energises the relays when the agent stops talking, by a mechanism that
+works when `default_safe_state()` cannot run at all. Relay switching is
+also absent from `_ARMING_CALLS`: closing a signal relay is not arming an
+output, and treating it as one would start a governor countdown on every
+switch — a second, weaker deadman layered over the device's own. A test
+asserts the intersection is empty so a rename cannot quietly create it.
+
+No `interfaces.Switch` Protocol yet, per `CONTRIBUTING.md` convention 3.
+The PDU is 1-indexed mains outlets and this is 0-indexed signal relays; a
+Protocol generalised from the two would fit a third device badly.
+
+### Discovery: identified passively, never probed
+
+`SIGNATURES` carries VID `0x0A07` / PID `0x00DA` with `EXACT` confidence,
+and `scan_usbfs()` finds it by reading `/sys/bus/usb`. Nothing is written
+to the device to identify it, which is the ideal case — the QR10x and the
+PDU both need a write-probe because they hide behind generic USB bridges.
+
+`scan_usbfs()` returns `[]` rather than raising when the bus cannot be
+enumerated at all. That is not defensive coding: `enumerate_devices()`
+raising is correct for a *driver* about to open a device and wrong for a
+*scan*, and because `discover()` builds one merged list, letting it
+propagate took out **every other transport's results too** — a machine
+with no USB sysfs reported no VISA instruments either.
+
+### Simulator
+
+`benchctrl.sim.adu218` is not a `SimDevice` behind a pty, because USB HID
+has no byte stream to loop back. Instead `SimulatedAdu218Link` **subclasses
+the production USBDEVFS link and overrides only `_transfer()`** (plus
+lifecycle).
+
+That is the whole reason the sim is trustworthy: framing, the mandatory
+`0x01` report id, NUL padding and stripping, the report-id desync check,
+the timeout mapping and `drain()` are all still the shipping code paths, so
+a regression in any of them fails a sim-mode test. A hand-written
+four-method stand-in would cover none of them. A test asserts the override
+set stays that small.
+
+The device model itself is pinned against the hardware captures rather
+than against the manual: a test parses `tests/fixtures/adu218/reads.txt` at
+run time and asserts every simulated reply width matches the captured one.
+That is the fix for the failure mode `sim/qr10x.py` records — a simulator
+built from the same misreading as the driver agrees with it, and the pair
+passes every test while both are wrong.
+
+The clock is manual by default (`advance(seconds)`), so the watchdog ladder
+is deterministic rather than a race.
+
+### MCP tools
+
+19 tools, prefixed `adu218_`. The surface is **not** read-only: three of
+them move physical contacts (`adu218_set_relay_state`,
+`adu218_set_relay_port`, `adu218_reset_relays`) and `adu218_set_watchdog`
+arms a hardware interlock whose effect outlives the connection. Each of
+those docstrings says plainly what it does and points at `allowed_relays`
+as an operator decision to ask about rather than widen.
+
+`adu218_watchdog` folds the device read, the driver's held expectation and
+the trip verdict into one result, deliberately: `read_watchdog_tripped()`
+*clears* the expectation when it detects a trip, so a standalone tool would
+let a model consume the only trace of a trip without seeing the setting it
+must be compared against. Its docstring also warns that reading it refeeds
+the timer.
+
+### Tests, and the one that needs an instrument
+
+Three files, and they answer different questions:
+
+| File | Against | What only it can prove |
+|---|---|---|
+| `tests/test_usbfs_adu218.py` | fake ioctls | the request numbers, struct layout and errno mapping |
+| `tests/test_bench_adu218.py` | the simulator | every parser, range check, policy and the watchdog ladder |
+| `tests/test_remote_ontrak_adu218.py` | agent + simulator | the seven registration sites, four of which fail silently |
+| `tests/test_hardware_ontrak_adu218.py` | the real device | that the relays actually move |
+
+The last one exists because **the driver's own verification is the device
+talking about itself.** `SKn` and `RKn` are unacknowledged, so
+`set_relay_state()` confirms a switch by reading the same device back — which
+catches a device that ignored the command, but not a *driver* whose read-back
+is secretly its own commanded value. The only witness that is not the ADU218 is
+another instrument.
+
+So on this bench relay K0 is wired across the SDM4065A's leads, and the
+hardware suite asserts the driver and the DMM agree on five alternating
+transitions. Measured:
+
+```
+at open            driver=False  DMM=OVERLOAD (open contact)
+K0 energised       driver=True   DMM=9.4237 ohm
+K0 de-energised    driver=False  DMM=OVERLOAD (open contact)
+K0 energised #2    driver=True   DMM=9.3958 ohm
+reset_relays       driver=False  DMM=OVERLOAD (open contact)
+```
+
+Two details make that a real check rather than a decoration:
+
+- **No resistance threshold is asserted, ever.** The same closed relay has
+  measured 6.14 Ω, 10.69 Ω, 10.65 Ω and 9.40 Ω across four sessions,
+  milliohm-stable *within* each, with the step traced to re-seated
+  screw-clamped probes rather than to the relay. A threshold set from any one
+  of those numbers misreads the others. What is asserted is the shape no probe
+  seating can change: closed reads *a number*, open reads the DMM's **overload
+  sentinel**. An open contact is not a large resistance, it is an unmeasurable
+  one — so the two states cannot be confused by any amount of contact drift.
+- **The suite was verified to fail on the defect it is for.** Patching
+  `set_relay_state` to return its own argument without touching the device made
+  three of the six tests fail, with the message written for exactly that case
+  ("the switch was claimed and did not happen"). A hardware test that cannot
+  fail is worse than no hardware test, because it reads as evidence.
+
+The 2-wire function is used deliberately: 4-wire needs separate source and
+sense leads, and with one pair across the relay `measure_resistance_4wire()`
+returns drifting negatives — measured, not assumed.
+
+The watchdog trip is deliberately **not** in the hardware suite. Arming it
+de-energises every relay after a measured silence, which is correct behaviour
+and a bad thing to do unattended on a shared bench; its ladder is tested
+against a synthetic clock and its trip time was bisected by hand into
+`tests/fixtures/adu218/watchdog.txt`.
+
+Everything else in that file is about the USB stack rather than the relays:
+that `USBDEVFS_BULK` really is serviced on an interrupt endpoint by this
+kernel, that `CLAIMINTERFACE` succeeds with no driver to detach (so if a
+future kernel drops Ontrak from `hid_ignore_list`, the failure arrives with an
+explanation instead of as a mysterious `EBUSY` in the field), that a second
+session is refused while the first holds the interface, and that discovery
+names the device from sysfs with no probe write.

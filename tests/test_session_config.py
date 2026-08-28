@@ -325,3 +325,117 @@ def test_mcp_globals_remain_injectable():
         assert dl_tools._get_dl3031a() is sentinel
     finally:
         dl_tools._dl3031a = None
+
+
+# --------------------------------------------------------------------------
+# The entry points must *install* the config, or the layering above is inert
+# --------------------------------------------------------------------------
+#
+# Every test above this line calls ``session.configure()`` by hand, which is
+# precedence level 1. Levels 2-4 — flags, ``BENCHCTRL_*``, the config file —
+# reach ``session`` only through ``configure_from_environment``, and until it
+# was wired into an entry point nothing in ``src/`` called it. So the env vars
+# documented in ``docs/remote.md`` parsed correctly, produced a correct
+# ``Config``, and were then dropped on the floor: a device the operator asked
+# to *simulate* opened the real instrument. These tests are about the wiring,
+# so they assert on what ``resolve`` hands back rather than on a call count.
+
+
+def test_mcp_install_config_makes_sim_env_take_effect(monkeypatch):
+    """``BENCHCTRL_SIM_DEVICES`` must reach ``session.resolve``."""
+    from benchctrl import mcp as mcpmod
+    from benchctrl.drivers.otii_arc import OtiiArc
+
+    monkeypatch.setenv("BENCHCTRL_SIM_DEVICES", "otii_arc")
+    monkeypatch.delenv("BENCHCTRL_REMOTE", raising=False)
+    monkeypatch.delenv("BENCHCTRL_CONFIG", raising=False)
+
+    opened_locally = []
+
+    def opener(**kwargs):
+        opened_locally.append(kwargs)
+        raise AssertionError("opened the real instrument in sim mode")
+
+    mcpmod.install_config()
+
+    assert session.mode_for("otii_arc") == "sim"
+    smu = session.resolve("otii_arc", opener=opener)
+    try:
+        # Both halves matter. The mode alone would pass if ``resolve`` ignored
+        # it; the object alone would pass on a driver that happened to open.
+        assert opened_locally == []
+        assert isinstance(smu, OtiiArc)
+        assert smu._benchctrl_sim is not None
+    finally:
+        smu.close()
+
+
+def test_mcp_install_config_reads_the_config_file(monkeypatch, tmp_path):
+    """Precedence level 4 — the file — must reach ``session`` too.
+
+    Separate from the env test because they arrive by different routes:
+    ``load_env`` returns ``None`` when no variable is set, so a fix that
+    only handled the env layer would still leave the file inert.
+    """
+    from benchctrl import mcp as mcpmod
+
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "endpoints": {"bench": {"host": "unoq.local", "port": 9999}},
+                "devices": {"ontrak_adu218": {"mode": "remote", "endpoint": "bench"}},
+            }
+        )
+    )
+    monkeypatch.setenv("BENCHCTRL_CONFIG", str(path))
+    monkeypatch.delenv("BENCHCTRL_REMOTE", raising=False)
+    monkeypatch.delenv("BENCHCTRL_SIM_DEVICES", raising=False)
+
+    mcpmod.install_config()
+
+    assert session.mode_for("ontrak_adu218") == "remote"
+    endpoint = session.current_config().endpoint_for("ontrak_adu218")
+    assert (endpoint.host, endpoint.port) == ("unoq.local", 9999)
+    # A device the file does not mention stays local — the binding is per key.
+    assert session.mode_for("otii_arc") == "local"
+
+
+def test_mcp_install_config_with_nothing_set_leaves_everything_local(
+    monkeypatch, tmp_path
+):
+    """The "with nothing configured, nothing changes" contract still holds."""
+    from benchctrl import mcp as mcpmod
+
+    for var in (
+        "BENCHCTRL_REMOTE",
+        "BENCHCTRL_TOKEN",
+        "BENCHCTRL_SIM_DEVICES",
+        "BENCHCTRL_LOCAL_DEVICES",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    # Point at a path that does not exist rather than trusting the developer's
+    # real ~/.config/benchctrl/config.json to be absent.
+    monkeypatch.setenv("BENCHCTRL_CONFIG", str(tmp_path / "absent.json"))
+
+    mcpmod.install_config()
+
+    cfg = session.current_config()
+    assert cfg.is_all_local
+    sentinel = object()
+    assert session.resolve("otii_arc", opener=lambda **kw: sentinel) is sentinel
+
+
+def test_configure_from_environment_returns_what_it_installed(monkeypatch):
+    """The return value must be the config that is now active, not a copy of
+    the inputs — a caller logs it to tell the operator what they got."""
+    monkeypatch.setenv("BENCHCTRL_REMOTE", "bench.local:9001")
+    monkeypatch.setenv("BENCHCTRL_TOKEN", "s3cret")
+    monkeypatch.delenv("BENCHCTRL_SIM_DEVICES", raising=False)
+    monkeypatch.delenv("BENCHCTRL_CONFIG", raising=False)
+
+    returned = session.configure_from_environment()
+
+    assert returned.mode_for("otii_arc") == "remote"
+    assert returned.to_dict() == session.current_config().to_dict()
+    assert returned.endpoint_for("otii_arc").token == "s3cret"

@@ -103,6 +103,22 @@ _ARMING_CALLS: dict[str, str] = {
     "set_input": "output",  # electronic loads sink, which is equally live
 }
 
+#: **``set_relay_state`` and ``set_relay_port`` are deliberately absent too**,
+#: for the ADU218, and for a different reason than the PDU's above.
+#:
+#: Closing a 1 A signal relay is not arming an output — nothing is sourced or
+#: sunk, and whatever the relay connects arms itself on its own device key. The
+#: sharper point is what including them would break: the ADU218's *hardware*
+#: watchdog already de-energises every relay if the device hears nothing for the
+#: configured interval, with no software in the decision path. A governor
+#: countdown started by a relay switch would be a second, weaker deadman layered
+#: over a strictly better one — weaker because it needs a live agent to fire,
+#: which is the failure it would be claiming to cover.
+#:
+#: Verified rather than assumed: the intersection of this dict's keys with the
+#: ADU218's method surface is empty, and ``tests/test_bench_adu218.py`` asserts
+#: that so a later rename cannot quietly create the overlap.
+
 #: How long a panic outlet cut may take to *confirm*, after the commands have
 #: all been sent. Nothing like :py:data:`SAFE_STATE_TIMEOUT_S`, and the gap is
 #: not slack: ``oltctrl index N act off`` honours the outlet's configured
@@ -425,6 +441,17 @@ def default_safe_state(obj: Any) -> None:
     ``panic_outlets``, which is empty by default and must be a subset of
     ``allowed_outlets``. Wire it in through ``trip(safe_state_fns=...)``, not
     by adding outlet calls here.
+
+    **It is also inert on the ADU218, and there the case is stronger.** That
+    device implements none of these four either, so the loop skips it — and
+    adding ``reset_relays()`` here would be actively worse than the omission.
+    The ADU218 carries a *hardware* watchdog that de-energises all eight relays
+    when the device stops hearing commands, and a governor trip is very often the
+    same silence: an agent that has stopped talking to its devices is also not
+    feeding the watchdog. So the relays already drop, by a mechanism that works
+    when this function cannot run at all. A software de-energise here would add
+    nothing in the case it fires and would mask, in testing, the fact that the
+    interlock is the thing actually protecting the bench.
     """
     errors = []
     for method, args in (

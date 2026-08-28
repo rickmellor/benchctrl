@@ -15,7 +15,7 @@ any concrete driver.
 ```
                            ┌──────────────────────────────────────────┐
                            │   MCP server  (benchctrl.mcp)            │
-                           │   280 tools — orchestrator that calls    │
+                           │   324 tools — orchestrator that calls    │
                            │   each driver's register_mcp_tools(mcp)  │
                            └──────────────────────────────────────────┘
                                           │
@@ -94,6 +94,28 @@ MCP tool surface.
   doesn't fit the SMU Protocol either — it sources nothing. No
   `DigitalMultimeter` Protocol was introduced: per `CONTRIBUTING.md`
   rule 3, that waits for the second DMM.
+- `benchctrl.drivers.cyberpower_pdu41002.CyberPowerPDU41002` —
+  CyberPower 8-outlet switched PDU. One line-oriented CLI engine over
+  either of two byte pipes: pyserial, or `/usr/bin/ssh` under
+  `pty.fork()`. Concrete class; the first driver that switches rather
+  than sources or measures, and the first needing a credential.
+- `benchctrl.drivers.silabs_cp2112.CP2112` — Silicon Labs CP2112,
+  8 open-drain control lines for hardware reset and boot-strap pins. USB
+  HID *feature reports* over `hidraw`, with `os`/`fcntl`/`ctypes` only.
+  Concrete class. No `ControlLine` Protocol was introduced: this is the
+  bench's first digital-control device, and a Protocol generalised from
+  one sample would bake in CP2112 specifics — whole-port configuration
+  registers, a USB round trip per transition — that a GPIO expander or a
+  relay board would not share. Only the GPIO half of the chip is
+  implemented; the SMBus/I²C bridge is out of scope.
+- `benchctrl.drivers.ontrak_adu218.OntrakADU218` — Ontrak ADU218,
+  8 relays and 8 digital inputs with event counters and a hardware
+  watchdog. USB HID, spoken through raw `USBDEVFS` ioctls with
+  `fcntl`/`ctypes`/`os` — **the only driver with no dependency at all**,
+  not even pyserial. Concrete class. No `Switch` Protocol was
+  introduced: the PDU switches mains outlets and this switches signal
+  contacts, and generalising one shape from two that disagree would
+  produce an interface that fits neither.
 
 Each driver exposes its own exception hierarchy
 (`QR10xConnectionError`, `RigolDLCommandError`, etc.) so callers can
@@ -215,8 +237,11 @@ Tool inventory:
 | Rigol DL3031A | 45 |
 | Rigol DP2031 | 134 |
 | Siglent SDM4065A | 54 |
+| CyberPower PDU41002 | 15 |
+| Silicon Labs CP2112 | 10 |
+| Ontrak ADU218 | 19 |
 | Cross-driver (recording I/O, battery, emulator) | 13 |
-| **Total** | **280** |
+| **Total** | **324** |
 
 The MCP layer is intentionally thin: each tool wraps one SDK method,
 coerces JSON-friendly argument types where needed, returns a dict.
@@ -304,19 +329,26 @@ error frames are detected in-band by the transport reader.
 
 `tests/` has two kinds of tests:
 
-- **Hardware-free** (default): **1333 tests**, running in ~10 minutes
+- **Hardware-free** (default): **2450 tests**, running in ~22 minutes
   with no device attached. Most drive `benchctrl.sim` simulators rather
   than mocks, so the transport, binary framing, session handshake and
   reader threads are all genuinely exercised — see
   [`docs/simulation.md`](docs/simulation.md).
 - **Hardware-marked** (`@pytest.mark.hardware`): require real
-  instruments. Skip gracefully if hardware is absent. 173 tests across
-  Arc + DL3031A + DP2031 + QR10x + SDM4065A, each set skipped when its
-  instrument isn't connected. The SDM4065A sets are the newest: run
-  against the meter the driver suite is 13 passed / 1 skipped, and the
-  QR10x cross-validation 4 passed / 3 skipped — the cross-validation
-  skips are the 4-wire comparisons, which need sense leads that are not
-  currently attached. See `TEST_PLAN.md`.
+  instruments. Skip gracefully if hardware is absent. 213 tests across
+  Arc + DL3031A + DP2031 + QR10x + SDM4065A + PDU41002 + ADU218 +
+  CP2112, each set skipped when its instrument isn't connected. Two of
+  them use a *second* instrument as a witness, and for the same reason:
+  the device's own read-back is the device talking about itself. The
+  ADU218 switches a relay and the SDM4065A reads the contact, because
+  the ADU218's writes are unacknowledged (12 tests, 10 passed / 1
+  skipped against the real device with a live 10 Hz stimulus). The
+  CP2112 needs it more starkly — an undriven pin reads back as a latched
+  1 regardless of what is attached, so the DMM is the only thing that
+  can tell an asserted line from an idle one (6 tests). The SDM4065A sets: the driver suite is 13 passed /
+  1 skipped, and the QR10x cross-validation 4 passed / 3 skipped — the
+  cross-validation skips are the 4-wire comparisons, which need sense
+  leads that are not currently attached. See `TEST_PLAN.md`.
 
 Mock SMUs in battery tests partially implement the
 `SourceMeasurementUnit` Protocol — the methods the subsystem under
@@ -350,7 +382,7 @@ is `local` and behaviour is unchanged.
    host laptop                                    bench (e.g. Uno Q)
    ┌────────────────────────┐                     ┌──────────────────────────┐
    │ benchctrl.mcp          │                     │ benchctrl-agent          │
-   │   280 tools, unchanged │                     │   registry / dispatch    │
+   │   324 tools, unchanged │                     │   registry / dispatch    │
    │        │               │                     │   DeviceWorker per device│
    │        ▼               │                     │   SafetyGovernor         │
    │ session.resolve()      │   length-prefixed   │   RunManager             │

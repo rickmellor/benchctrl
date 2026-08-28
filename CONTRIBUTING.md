@@ -25,6 +25,9 @@ The extras you actually need depend on what you're touching:
 | SMU / battery / QR10x bench driver | `pip install -e ".[dev]"` |
 | MCP server | `pip install -e ".[dev,mcp]"` |
 | Rigol DL3031A / DP2031 / Siglent SDM4065A drivers / `bench-visa` | `pip install -e ".[dev,bench-visa]"` |
+| CyberPower PDU41002 driver | `pip install -e ".[dev]"` — pyserial for the serial link, `/usr/bin/ssh` for the network one |
+| Ontrak ADU218 driver | `pip install -e ".[dev]"` — the driver itself needs **nothing**; stdlib `fcntl`/`ctypes` only |
+| Silicon Labs CP2112 driver | `pip install -e ".[dev]"` — likewise nothing of its own; stdlib `os`/`fcntl`/`ctypes` only |
 | Parquet / pandas / matplotlib output paths | `pip install -e ".[dev,science]"` |
 | `benchctrl.sim` simulators | `pip install -e ".[dev,bench-visa]"` (the SCPI sims need pyvisa-py) |
 | `benchctrl.net` / `benchctrl.agent` | `pip install -e ".[dev]"` — stdlib + pyserial only, by design |
@@ -98,7 +101,8 @@ them.
 
 Every public SDK method has a matching MCP tool. When you add a public
 method to `OtiiArc` / `Emulator` / `QR10x` / `RigolDL3031A` /
-`RigolDP2031` / `SiglentSDM4065A`, add the matching MCP tool to that
+`RigolDP2031` / `SiglentSDM4065A` / `CyberPowerPDU41002` /
+`OntrakADU218` / `CP2112`, add the matching MCP tool to that
 driver's `mcp_tools.py` (or, for cross-driver tools,
 `src/benchctrl/mcp.py`) in the same PR, and list it in that module's
 `_TOOLS` tuple.
@@ -107,7 +111,19 @@ driver's `mcp_tools.py` (or, for cross-driver tools,
 `tests/test_mcp.py` asserts this mechanically for the SDM4065A, with
 the deliberate exemptions named and justified in the test. Copy that
 pattern for a new driver — the failure mode it catches is a capability
-that works locally and is invisible to an agent.
+that works locally and is invisible to an agent. The ADU218 has the
+same parity test, and it earns its keep: the driver's public surface and
+its tool surface were written days apart, and the test is what caught
+the gap.
+
+The ADU218 also carries the *converse* test,
+`test_every_whitelisted_command_is_reachable_from_the_sdk`, which is worth
+copying for any driver with a command whitelist. Parity guards the SDK →
+MCP direction; this one guards wire → SDK, and it caught a command that was
+whitelisted, given a hardware-measured reply width, modelled by the
+simulator and written into a docs table while **no public method could
+send it**. A capability documented as present and absent at once is not
+something either the parity test or a grep will find.
 
 Tools reach their device through the module's `_get_<device>()`
 singleton, which populates via `session.resolve()`. Don't open a
@@ -155,7 +171,8 @@ session.resolve()  —  local | remote | sim
 SourceMeasurementUnit Protocol + framework primitives
     ↓
 Driver public API (OtiiArc / QR10x / RigolDL3031A / RigolDP2031 /
-                  SiglentSDM4065A)
+                  SiglentSDM4065A / CyberPowerPDU41002 / OntrakADU218 /
+                  CP2112)
     ↓
 Driver-internal modules (channels / protocol / transport)
     ↓
@@ -290,14 +307,29 @@ benchctrl/
 │   │   ├── rigol_dp2031/                Rigol DP2031 triple-output PSU
 │   │   │   ├── driver.py                RigolDP2031 class
 │   │   │   └── mcp_tools.py
-│   │   └── siglent_sdm4065a/            Siglent SDM4065A 6½-digit DMM
-│   │       ├── driver.py                SiglentSDM4065A class
+│   │   ├── siglent_sdm4065a/            Siglent SDM4065A 6½-digit DMM
+│   │   │   ├── driver.py                SiglentSDM4065A class
+│   │   │   └── mcp_tools.py
+│   │   ├── cyberpower_pdu41002/         CyberPower 8-outlet switched PDU
+│   │   │   ├── driver.py                CLI engine + CyberPowerPDU41002
+│   │   │   ├── links.py                 serial and ssh byte pipes
+│   │   │   └── mcp_tools.py
+│   │   ├── ontrak_adu218/               Ontrak ADU218 relays + digital I/O
+│   │   │   ├── usbfs.py                 raw USBDEVFS ioctls, stdlib only
+│   │   │   ├── driver.py                OntrakADU218 class
+│   │   │   └── mcp_tools.py
+│   │   └── silabs_cp2112/               CP2112 open-drain control lines
+│   │       ├── hidraw.py                HID feature reports over hidraw
+│   │       ├── driver.py                CP2112 class
 │   │       └── mcp_tools.py
 │   ├── sim/                             wire-protocol simulators (pty-backed)
 │   │   ├── base.py, loopback.py         SimDevice + pty pair
 │   │   ├── otii_arc.py, qr10x.py        per-instrument simulators
 │   │   ├── scpi.py                      both Rigols, via pyvisa-py ASRL
 │   │   ├── sdm4065a.py                  Siglent DMM, incl. its quirks
+│   │   ├── pdu41002.py                  the PDU's CLI, incl. its error shapes
+│   │   ├── adu218.py                    subclasses the real USB link, not a pty
+│   │   ├── cp2112.py                    stands in at the hidraw link seam
 │   │   ├── waveforms.py                 analytically-known signals
 │   │   └── factories.py                 production driver + simulator
 │   ├── transports/                      reaching a device the kernel can't
