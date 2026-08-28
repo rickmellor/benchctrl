@@ -169,15 +169,39 @@ def open_kwargs_for(
 ) -> dict[str, Any]:
     """Arguments for the implicit open: bench config, then the one-shot overrides.
 
-    Overrides are applied *last* and deliberately win over the bench file. They
-    exist because a one-shot process is not a server, which is not something a
-    per-bench config should have to know or be able to get wrong.
+    ``bench`` maps device key -> open kwargs. Overrides are applied *last* and
+    deliberately win over the config. They exist because a one-shot process is
+    not a server, which is not something a per-bench config file should have to
+    know or be able to get wrong.
     """
     kwargs: dict[str, Any] = {}
     if bench and device_key:
         kwargs.update(bench.get(device_key, {}))
     kwargs.update(ONE_SHOT_OPEN_OVERRIDES.get(open_tool, {}))
     return kwargs
+
+
+def bench_open_kwargs(cfg: Any = None) -> dict[str, dict[str, Any]]:
+    """Per-device open arguments from the active config.
+
+    Reuses ``DeviceConfig.open`` — the dict the MCP server and the agent already
+    forward as ``**open_kwargs`` — rather than adding a second, CLI-only config
+    file. A bench whose PDU lives at a fixed address should not have to say so
+    once for the server and again for the CLI, and two files would eventually
+    disagree about which outlets are allowed.
+
+    ``open`` is not a place for a secret: it is emitted by ``to_dict()`` and it
+    crosses the authenticated-but-unencrypted RPC wire. The PDU password comes
+    from ``BENCHCTRL_PDU_PASSWORD`` in the environment where the driver runs.
+    """
+    from benchctrl import config, session
+
+    cfg = session.current_config() if cfg is None else cfg
+    return {
+        key: dict(cfg.device(key).open)
+        for key in config.DEVICE_KEYS
+        if cfg.device(key).open
+    }
 
 
 def _tool(module_name: str, tool_name: str) -> Callable:

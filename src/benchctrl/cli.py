@@ -48,6 +48,8 @@ from benchctrl.drivers.otii_arc import OtiiArc, OtiiArcChannel
 from benchctrl._version import __version__
 from benchctrl.exceptions import BenchError
 
+log = logging.getLogger("benchctrl.cli")
+
 
 def _open_smu(args) -> OtiiArc:
     if args.port:
@@ -176,7 +178,10 @@ def cmd_generated(args) -> int:
     _install_session_config(args)
 
     result, warning = cli_lifecycle.run_tool(
-        args._group, fn, cli_generated.tool_kwargs(fn, args)
+        args._group,
+        fn,
+        cli_generated.tool_kwargs(fn, args),
+        bench=cli_lifecycle.bench_open_kwargs(),
     )
     print(cli_generated.render_result(result, as_json=args.json))
     if warning:
@@ -304,6 +309,37 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def device_error_types() -> tuple[type, ...]:
+    """Every exception class that means "the instrument or the library refused".
+
+    ``BenchError`` alone is not enough. **No driver exception subclasses it** —
+    ``ADU218Error``, ``PDU41002Error``, ``QR10xError`` and the rest all descend
+    straight from ``RuntimeError`` — so a CLI catching only ``BenchError`` lets
+    an ordinary "device not plugged in" escape as a raw traceback with exit
+    code 1, which is already the code ``discover`` returns for "found nothing".
+    A script cannot tell those apart, and a traceback is not an error message.
+
+    The class list comes from :py:mod:`benchctrl.net.errors`, which already
+    maintains it so exceptions survive the RPC wire. Reusing that registry means
+    a new driver's exceptions are handled here the moment they are made
+    remote-safe, rather than needing a second list to be remembered separately.
+    Flattening the hierarchies into one base class would be the cleaner fix and
+    is not the CLI's to make.
+    """
+    from benchctrl.net import errors
+
+    return tuple(
+        {
+            cls
+            for cls in errors._registry().values()
+            # Only benchctrl's own exceptions. Catching bare OSError/ValueError
+            # here would swallow genuine bugs in the CLI itself as though the
+            # instrument had refused something.
+            if cls.__module__.startswith("benchctrl.")
+        }
+    ) or (BenchError,)
+
+
 def main(argv: list[str] | None = None) -> int:
     from benchctrl.cli_generated import CliError
 
@@ -316,17 +352,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return func(args)
     except CliError as exc:
-        # Distinct from BenchError and from a distinct exit code: "you did not
+        # Distinct from BenchError and given a distinct exit code: "you did not
         # authorise this" is a different thing for a script to handle than "the
         # device is not there".
         print(f"benchctrl: {exc}", file=sys.stderr)
         return 3
-    except BenchError as exc:
-        print(f"benchctrl error: {exc}", file=sys.stderr)
-        return 2
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except device_error_types() as exc:
+        # The class name is kept: with eight driver hierarchies, "which kind of
+        # refusal" is most of the diagnosis, and `-v` is the way to the traceback.
+        print(f"benchctrl error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        log.debug("device error", exc_info=True)
+        return 2
 
 
 if __name__ == "__main__":
