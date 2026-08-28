@@ -1754,6 +1754,36 @@ settle the ruff baseline, resolve the 3.9 packaging claim, and install
 `pyvisa-py` in CI — and it is tracked in [`ROADMAP.md`](ROADMAP.md) rather than
 being bolted onto whichever driver PR happens to notice.
 
+### N-8. A device asked to simulate opens the real instrument if nothing installs the config
+
+**Fixed for `benchctrl-mcp`**; recorded because the shape of the failure
+outlives the fix and applies to every future entry point.
+
+`session.resolve()` decides local vs remote vs sim by reading a module global.
+Something has to *install* a `Config` into it — `session.configure()` directly,
+or `session.configure_from_environment()` for the flag / environment / file
+layers. Until 2026-08-27 nothing in `src/` called the latter, so
+`benchctrl-mcp` resolved every device `local` no matter what the operator set.
+
+**Why it stayed hidden for a whole release.** Every test and every documented
+remote-mode example takes precedence level 1 — `session.configure()` in Python
+— which always worked. The four layers underneath it parsed correctly and
+produced a correct `Config` that was then never installed, so there was nothing
+to see: no exception, no warning, no wrong value. The seam's entire purpose is
+that the tools cannot distinguish a simulator from a remote proxy from real
+silicon, and that property is precisely what makes this failure invisible.
+
+**The generalisation, which is the part worth keeping.** A configuration layer
+is only real if some entry point installs it, and a *default* of "everything
+local" means the un-installed case is indistinguishable from the configured one
+on a bench where the hardware is present. For anything that switches mains or
+steps relays, "silently fell back to real hardware" is the wrong direction to
+fail in. So: any new entry point — a CLI, a scenario runner, a dashboard —
+must install config explicitly, and a test must assert on what
+`session.resolve()` *returns*, not that a function was called. Assert per
+route, too: `config.load_env()` returns `None` when no variable is set, so a
+fix covering the environment can leave the config file just as inert.
+
 ## What's not in this list
 
 Things we **don't** consider limits — they're just facts:

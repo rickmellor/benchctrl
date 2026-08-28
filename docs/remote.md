@@ -50,9 +50,24 @@ Precedence, highest first:
 
 1. `benchctrl.session.configure(...)` in code
 2. CLI flags — `--remote`, `--local`, `--sim`
-3. environment — `BENCHCTRL_REMOTE`, `BENCHCTRL_TOKEN`, `BENCHCTRL_LOCAL_DEVICES`
+3. environment — `BENCHCTRL_REMOTE`, `BENCHCTRL_TOKEN`,
+   `BENCHCTRL_LOCAL_DEVICES`, `BENCHCTRL_SIM_DEVICES`, `BENCHCTRL_CONFIG`
 4. `~/.config/benchctrl/config.json`
 5. everything local
+
+Levels 2-4 reach `session` only when an entry point installs them.
+`benchctrl-mcp` does this at startup and prints any non-local binding to
+stderr, so you can see what you got:
+
+```
+$ BENCHCTRL_SIM_DEVICES=ontrak_adu218 benchctrl-mcp
+benchctrl-mcp: ontrak_adu218 -> sim
+```
+
+If you embed benchctrl yourself, call `session.configure_from_environment()`
+once before the first device opens — otherwise every device resolves `local`
+and a device you asked to *simulate* drives the real instrument. See
+[`KNOWN_LIMITATIONS.md`](../KNOWN_LIMITATIONS.md) § N-8.
 
 Mode resolves **per device key**, which is what lets you split a bench:
 

@@ -440,6 +440,47 @@ decimal places — so `MKddd` closes the relay the way `SKn` does, rather than b
 some other route that merely ends up reported as closed. F-27 records it as a
 cross-check on its own eight-relay table.
 
+### `benchctrl-mcp` never installed its configuration, so four of the five precedence levels were inert
+
+`session.resolve()` is the local / remote / sim seam, and it reads a module
+global that something has to populate. `session.configure_from_environment()`
+is what populates it from the documented layers — and it had **no callers
+anywhere in `src/` or `tests/`**. So `benchctrl-mcp` resolved every device
+`local`, unconditionally. `BENCHCTRL_REMOTE`, `BENCHCTRL_TOKEN`,
+`BENCHCTRL_SIM_DEVICES`, `BENCHCTRL_LOCAL_DEVICES` and
+`~/.config/benchctrl/config.json` all parsed correctly, produced a correct
+`Config`, and were then dropped. Only precedence level 1 —
+`session.configure()` called from Python — ever worked, which is why every
+test and every remote-mode demo passed: they all take that route.
+
+**The failure mode points the wrong way, which is the reason this is a
+safety fix and not a papercut.** Ask for `mode="sim"` and you got the real
+instrument, silently, with no diagnostic — because the seam's whole purpose
+is that the 324 tools cannot tell a simulator, a remote proxy and real
+silicon apart. Someone stepping relays or switching mains while reading
+"simulated" in their own shell history is the concrete hazard;
+`KNOWN_LIMITATIONS.md § N-8` records it.
+
+`mcp.install_config()` now runs before `mcp.run()`, and any non-local
+binding is announced on **stderr** — an MCP server inherits no logging
+configuration from its client and stdout is the JSON-RPC channel, so a
+`log.info` would have gone nowhere. A malformed config is fatal rather
+than a warning, since carrying on means driving hardware nobody asked for.
+
+`main()` also now calls `session.shutdown()` in its `finally`, which
+`session.shutdown()`'s own docstring had been instructing readers to do
+("call this from any process-exit path that can arm hardware — see
+`benchctrl.mcp.main`") while `main()` did not. The agent reads a clean
+disconnect as consent to drop the writer claim and drive an armed device to
+its safe state; without it, exiting the MCP server left that to the deadman.
+
+The tests assert on what `session.resolve()` hands back rather than that a
+function was called, and they are split by *route*: `load_env()` returns
+`None` when no variable is set, so a fix that only handled the environment
+would leave the config file just as inert. Both fail against the pre-fix
+behaviour; the "with nothing configured, nothing changes" test passes either
+way, correctly, since it does not depend on the wiring.
+
 ### `net/errors.py` — a constructor that accepts the message but does not store it
 
 Found by that witness, over the real RPC wire: a `SDM4065AOverloadError`
