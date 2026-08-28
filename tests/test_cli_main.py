@@ -455,6 +455,127 @@ def test_the_teardown_warning_goes_to_stderr_so_json_stays_parseable(
     assert "de-energise" in out.err
 
 
+# ---------------------------------------------------------------------------
+# Claim contention: the one remote failure with an unhelpful message
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def claim_conflict_error():
+    """The real ``PolicyError`` a second client gets, from a real agent.
+
+    Built rather than written out, because the whole mechanism is a substring
+    match against a message this module does not own. A hand-written
+    ``PolicyError("... is claimed by session ...")`` would keep passing forever
+    after the server reworded it, which is exactly the failure the marker is
+    exposed to: the explanation would silently stop appearing.
+    """
+    import contextlib
+
+    from benchctrl.agent.registry import DeviceRegistry
+    from benchctrl.agent.server import AgentServer, BenchAgent
+    from benchctrl.config import EndpointConfig
+    from benchctrl.drivers.otii_arc import OtiiArc
+    from benchctrl.net.client import RemoteClient
+    from benchctrl.sim import SimulatedOtiiArc
+
+    token = "claim-conflict-test"
+    sim = SimulatedOtiiArc()
+    sim.start()
+    smu = OtiiArc.open(sim.port)
+    registry = DeviceRegistry()
+    registry.register_open("otii_arc", smu)
+    agent = BenchAgent(registry, token=token, deadman_s=30.0, heartbeat_s=5.0)
+    server = AgentServer(agent, host="127.0.0.1", port=0).start()
+
+    def endpoint():
+        return EndpointConfig(host="127.0.0.1", port=server.port, token=token)
+
+    first = RemoteClient(endpoint()).connect()
+    second = RemoteClient(endpoint()).connect()
+    try:
+        first.attach("otii_arc")
+        with pytest.raises(Exception) as caught:  # noqa: PT011 - the type is the assertion
+            second.attach("otii_arc")
+        yield caught.value
+    finally:
+        for c in (first, second):
+            with contextlib.suppress(Exception):  # teardown
+                c.close()
+        server.stop()
+        sim.close()
+
+
+def test_a_second_process_is_told_a_claim_is_held_not_that_it_is_an_observer(
+    claim_conflict_error,
+):
+    """The message the operator gets is the deliverable here.
+
+    The server's own text names an opaque session id and says this session "is a
+    read-only observer until it is released" — accurate for a protocol client,
+    misleading from a shell, where nobody asked to be an observer. The added
+    text names the real cause and says the useful thing: wait, because nothing
+    retries.
+    """
+    from benchctrl.net.errors import PolicyError
+
+    assert isinstance(claim_conflict_error, PolicyError)
+    help_text = cli.claim_conflict_help(claim_conflict_error)
+    assert help_text is not None, (
+        "the real claim-contention error was not recognised — "
+        f"CLAIM_CONFLICT_MARKER no longer matches: {claim_conflict_error}"
+    )
+    assert "second benchctrl process" in help_text
+    assert "Nothing has been sent to the device." in help_text
+
+
+def test_a_claim_conflict_still_exits_2_and_keeps_the_original_message(
+    monkeypatch, capsys, claim_conflict_error
+):
+    """Added to, not replaced. The server's text carries the session id, which
+    is the only thing that distinguishes *which* other session — so it stays,
+    and the explanation follows it."""
+
+    def boom(*a, **k):
+        raise claim_conflict_error
+
+    monkeypatch.setattr(cli_lifecycle, "run_tool", boom)
+    monkeypatch.setattr(cli, "_install_session_config", lambda args: None)
+    assert cli.main(["arc", "info"]) == 2
+    err = capsys.readouterr().err
+    assert "is claimed by session" in err, "the original message was replaced"
+    assert "second benchctrl process" in err
+
+
+def test_an_ordinary_device_error_gets_no_claim_explanation(monkeypatch, capsys):
+    """A message pasted onto every failure is a message nobody reads."""
+    def boom(*a, **k):
+        raise BenchError("no such port")
+
+    monkeypatch.setattr(cli_lifecycle, "run_tool", boom)
+    monkeypatch.setattr(cli, "_install_session_config", lambda args: None)
+    assert cli.main(["adu218", "relay-states"]) == 2
+    assert "second benchctrl process" not in capsys.readouterr().err
+
+
+def test_the_claim_is_taken_once_with_no_retry_so_failing_fast_is_correct():
+    """The advice "wait, do not retry" has to be true of the code.
+
+    ``RemoteClient.attach`` calls ``agent.claim`` exactly once and lets the
+    PolicyError out. If a retry or backoff were ever added, the message would be
+    wrong in the least helpful direction — telling an operator to wait while the
+    CLI was already spinning.
+    """
+    import inspect
+
+    from benchctrl.net.client import RemoteClient
+
+    src = inspect.getsource(RemoteClient.attach)
+    assert src.count("agent.claim") == 1
+    for spin in ("retry", "backoff", "while ", "sleep"):
+        assert spin not in src, f"attach() now {spin}s — the CLI's advice is stale"
+
+
 def test_an_interrupt_exits_130(monkeypatch, capsys):
     def boom(*a, **k):
         raise KeyboardInterrupt

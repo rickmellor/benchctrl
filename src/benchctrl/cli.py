@@ -340,6 +340,42 @@ def device_error_types() -> tuple[type, ...]:
     ) or (BenchError,)
 
 
+#: The substring that identifies claim contention inside a ``PolicyError``.
+#: Matching on text is fragile and is done anyway, because the error carries no
+#: structured field to key on — ``agent.claim`` raises
+#: ``PolicyError(f"{device_key} is claimed by session {holder}; …")``. The
+#: fragility is contained by a test that produces the error from a *real* agent
+#: with two connected clients, so a reworded server message fails the test
+#: rather than silently turning the explanation back off.
+CLAIM_CONFLICT_MARKER = "is claimed by session"
+
+
+def claim_conflict_help(exc: BaseException) -> str | None:
+    """Extra explanation when a device is held by another session, else None.
+
+    The server's own wording is aimed at a protocol client: it names an opaque
+    session id and says this session "is a read-only observer", which reads as
+    though the operator asked for that. From a shell it is nearly always one
+    thing — another ``benchctrl`` process, or a dashboard, got there first —
+    and the fix is to wait rather than to retry harder.
+
+    Worth saying explicitly that nothing is retried: ``RemoteClient.attach``
+    calls ``agent.claim`` once, at open, before the tool runs. There is no
+    queue and no backoff anywhere in ``net/client.py``, so a second invocation
+    fails immediately and the device is untouched.
+    """
+    if CLAIM_CONFLICT_MARKER not in str(exc):
+        return None
+    return (
+        "Another session holds the writer claim on this device — most likely a "
+        "second benchctrl process or a dashboard that attached first.\n"
+        "Concurrent invocations fail immediately: the claim is taken at open, "
+        "before the tool runs, and nothing retries or queues. Nothing has been "
+        "sent to the device.\n"
+        "Wait for the other process to exit, or run the command there."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     from benchctrl.cli_generated import CliError
 
@@ -364,6 +400,9 @@ def main(argv: list[str] | None = None) -> int:
         # The class name is kept: with eight driver hierarchies, "which kind of
         # refusal" is most of the diagnosis, and `-v` is the way to the traceback.
         print(f"benchctrl error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        extra = claim_conflict_help(exc)
+        if extra:
+            print(extra, file=sys.stderr)
         log.debug("device error", exc_info=True)
         return 2
 
