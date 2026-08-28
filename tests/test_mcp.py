@@ -1186,3 +1186,191 @@ def test_adu218_tools_work_against_the_simulator():
     finally:
         adu_tools._adu218 = None
         driver.close()
+
+
+# --------------------------------------------------------------------------
+# The generated CLI's contract: ``_TOOLS`` is the whole surface
+# --------------------------------------------------------------------------
+#
+# ``benchctrl`` (the CLI) builds its subcommands by walking each module's
+# ``_TOOLS`` tuple rather than asking a live FastMCP server, because importing
+# ``benchctrl.mcp`` costs ~0.6 s and drags in the optional ``[mcp]`` extra —
+# which needs Python >=3.10 while the package supports 3.9. That is only sound
+# while the two routes describe the same surface. The tests below are what make
+# it sound: a tool added with a bare ``@mcp.tool()`` against the module-level
+# server would be reachable over MCP and *silently absent from the CLI*, which
+# is the exact failure mode that motivated moving the framework tools out of
+# ``benchctrl.mcp`` into ``benchctrl.framework_tools``.
+
+
+#: Every module that contributes tools. The CLI reads this same list, so a new
+#: driver missing here is missing from both — a visible failure, not a silent
+#: one.
+TOOL_MODULES = (
+    "benchctrl.drivers.otii_arc.mcp_tools",
+    "benchctrl.drivers.eastwood_qr10x.mcp_tools",
+    "benchctrl.drivers.rigol_dl3031a.mcp_tools",
+    "benchctrl.drivers.rigol_dp2031.mcp_tools",
+    "benchctrl.drivers.siglent_sdm4065a.mcp_tools",
+    "benchctrl.drivers.cyberpower_pdu41002.mcp_tools",
+    "benchctrl.drivers.silabs_cp2112.mcp_tools",
+    "benchctrl.drivers.ontrak_adu218.mcp_tools",
+    "benchctrl.framework_tools",
+)
+
+
+def _tools_route_names() -> list[str]:
+    """The surface as the CLI sees it: no FastMCP import anywhere."""
+    import importlib
+
+    names = []
+    for mod_name in TOOL_MODULES:
+        mod = importlib.import_module(mod_name)
+        names += [fn.__name__ for fn in mod._TOOLS]
+    return names
+
+
+def test_every_tool_module_exposes_the_registration_contract():
+    """``_TOOLS`` plus ``register_mcp_tools`` — the shape the CLI relies on."""
+    import importlib
+
+    for mod_name in TOOL_MODULES:
+        mod = importlib.import_module(mod_name)
+        assert isinstance(mod._TOOLS, tuple), f"{mod_name}._TOOLS must be a tuple"
+        assert mod._TOOLS, f"{mod_name}._TOOLS is empty"
+        assert callable(mod.register_mcp_tools), f"{mod_name} has no register_mcp_tools"
+        for fn in mod._TOOLS:
+            assert callable(fn), f"{mod_name}._TOOLS holds a non-callable: {fn!r}"
+
+
+def test_tools_route_has_no_duplicate_names():
+    """Two modules exporting one name would collide into a single subcommand,
+    and argparse takes the last one silently. Checked separately from parity
+    because a duplicate makes the *set* comparison pass while the CLI loses a
+    tool."""
+    names = _tools_route_names()
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert dupes == [], f"tool names exported by more than one module: {dupes}"
+
+
+def test_tools_route_matches_the_live_mcp_server_exactly():
+    """The parity guarantee, asserted as set equality in both directions.
+
+    A tool present only on the server is missing from the CLI; a tool present
+    only in ``_TOOLS`` is a CLI subcommand that no MCP client can reach. Both
+    are defects, so neither ``<=`` nor ``>=`` is the right assertion.
+    """
+    import asyncio
+
+    pytest.importorskip("mcp.server.fastmcp")
+    from benchctrl.mcp import mcp
+
+    served = {t.name for t in asyncio.run(mcp.list_tools())}
+    generated = set(_tools_route_names())
+
+    assert sorted(served - generated) == [], (
+        "on the MCP server but not in any _TOOLS tuple — the CLI cannot see "
+        "these. A bare @mcp.tool() in benchctrl.mcp is the usual cause."
+    )
+    assert sorted(generated - served) == [], (
+        "in a _TOOLS tuple but never registered on the server — a "
+        "register_mcp_tools call is missing from benchctrl.mcp."
+    )
+
+
+def test_framework_tools_are_reachable_without_importing_fastmcp():
+    """The whole point of the ``_TOOLS`` route.
+
+    Imports the framework module into a fresh interpreter with ``mcp`` poisoned,
+    proving the CLI's enumeration path does not reach FastMCP even transitively.
+    A subprocess is needed because ``benchctrl.mcp`` is almost certainly already
+    in ``sys.modules`` by the time this test runs, which would make an in-process
+    check pass vacuously.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    program = textwrap.dedent(
+        """
+        import sys
+
+        class _Poison:
+            def __getattr__(self, name):
+                raise AssertionError("FastMCP was imported by the _TOOLS route")
+
+        sys.modules["mcp"] = _Poison()
+        sys.modules["mcp.server"] = _Poison()
+        sys.modules["mcp.server.fastmcp"] = _Poison()
+
+        from benchctrl import framework_tools
+
+        assert len(framework_tools._TOOLS) == 13, len(framework_tools._TOOLS)
+        assert "benchctrl.mcp" not in sys.modules
+        print("ok")
+        """
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "ok"
+
+
+def test_framework_tools_are_importable_from_the_orchestrator():
+    """The re-export block: ``from benchctrl.mcp import plot_recording`` is a
+    documented import path and predates the move, so it must keep working."""
+    from benchctrl import framework_tools
+    from benchctrl import mcp as m
+
+    missing = [fn.__name__ for fn in framework_tools._TOOLS if not hasattr(m, fn.__name__)]
+    assert missing == []
+    # Same object, not a copy — a re-export that shadowed the original would
+    # mean the emulator's module-global state had two homes.
+    assert m.plot_recording is framework_tools.plot_recording
+    assert m.battery_emulator_stop is framework_tools.battery_emulator_stop
+
+
+def test_framework_tools_have_docstrings():
+    """The docstring is the tool description a model sees and the CLI's
+    ``--help`` text, so an empty one degrades two interfaces at once."""
+    from benchctrl import framework_tools
+
+    for fn in framework_tools._TOOLS:
+        assert fn.__doc__ and fn.__doc__.strip(), f"{fn.__name__} missing docstring"
+
+
+def test_every_public_function_in_framework_tools_is_in_the_tuple():
+    """Closes a blind spot the parity test structurally cannot see.
+
+    A function defined here but left out of ``_TOOLS`` is never registered
+    *and* never generated, so both routes agree it does not exist and parity
+    passes. Every driver catches this with a "tools cover the driver surface"
+    test; framework tools have no driver to compare against, so the module
+    itself is the reference.
+
+    Underscore-prefixed helpers and imported symbols are excluded — only
+    functions actually defined in this module.
+    """
+    import inspect
+
+    from benchctrl import framework_tools
+
+    declared = {fn.__name__ for fn in framework_tools._TOOLS}
+    public = {
+        name
+        for name, obj in vars(framework_tools).items()
+        if inspect.isfunction(obj)
+        and not name.startswith("_")
+        and obj.__module__ == framework_tools.__name__
+        and name != "register_mcp_tools"
+    }
+    assert public - declared == set(), (
+        f"defined in framework_tools but absent from _TOOLS, so invisible to "
+        f"both the MCP server and the CLI: {sorted(public - declared)}"
+    )
+    assert declared - public == set(), (
+        f"in _TOOLS but not a function defined in this module: {sorted(declared - public)}"
+    )
