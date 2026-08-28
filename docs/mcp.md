@@ -5,7 +5,7 @@ exposes your whole bench as tools any MCP-aware client (Claude Code,
 Claude Desktop, Cursor, custom agents) can call. Built on the official
 `mcp` Python SDK.
 
-**313 tools**, registered per driver:
+**324 tools**, registered per driver:
 
 | Source | Tools |
 |---|---|
