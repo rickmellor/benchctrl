@@ -734,6 +734,19 @@ network gear are not plugged into the PDU. That assumption is stated in
 `docs/drivers.md`, and `allowed_outlets` / `panic_outlets` are the
 controls to revisit *before* anyone changes the cabling.
 
+**The CLI raises the cost of that invariant ever changing**, which is worth
+stating plainly now rather than after someone re-cables. `benchctrl --yes
+pdu41002 set-outlet-state` puts mains switching one shell line away — no
+Python, no session, no import — so the distance between "typed a command"
+and "de-powered the thing that would have recovered it" is a single
+`BENCHCTRL_PDU_ALLOW_SWITCHING=1` away. That is why the switching tools are
+the only ones behind an environment gate as well as `--yes`
+(`src/benchctrl/cli_tiers.py`), and why `allowed_outlets` and
+`panic_outlets` are config-only with no CLI flag: a flag would let a caller
+*widen* scope per invocation, which inverts an allowlist's purpose. Nothing
+here changes the invariant — it changes how expensive it would be to break
+it. See [`docs/cli.md`](docs/cli.md) § *Known limits*.
+
 ### F-13. PDU41002 cannot be identified by a discovery probe
 Bench-measured, and it invalidates the obvious design. The FT232R's
 `0403:6001` is in `GENERIC_BRIDGES`, so VID/PID cannot name this device
@@ -1569,6 +1582,49 @@ Code reference: `src/benchctrl/sim/adu218.py` — `SimulatedAdu218Link`;
 `src/benchctrl/drivers/ontrak_adu218/usbfs.py` — `_ioc`, `_transfer`;
 `tests/test_usbfs_adu218.py` — its module docstring states the same
 boundary, and `TestIoctlConstants` is the part that guards it.
+
+### A-6. Local mode has no safety governor, so it protects *less* than remote
+Counter-intuitive enough to be worth stating outright, because the usual
+assumption runs the other way: talking to an instrument directly feels safer
+than talking to it across a network, and for arm tracking it is not.
+
+`SafetyGovernor` is constructed in exactly one place — `AgentServer.__init__`
+(`src/benchctrl/agent/server.py:898`) — and nothing else in `src/` builds one.
+So it exists only when a bench agent is running. A driver opened directly, a
+`benchctrl` one-shot command, an `examples/` script and a local `benchctrl-mcp`
+all share the same absence: no arm tracking, no deadman, no trip ladder, and
+no `default_safe_state()` on the way out. Nothing regressed here — the governor
+was always the agent's — but the CLI makes local mode easy enough to reach
+that the asymmetry now needs saying.
+
+What that means per device, since it is not uniform:
+
+- **The Arc, the DL3031A and the DP2031 are the exposure.** These are the
+  `_ARMING_CALLS` devices (`agent/safety.py:99`) — the ones a governor would
+  actually be tracking. Energise one from a local one-shot and nothing is
+  counting: if the process is killed between the `set_output` and the close,
+  the output holds its last commanded state indefinitely. Remote mode would
+  have reclaimed it on the deadman.
+- **The ADU218 is genuinely covered without one**, and by something better:
+  its watchdog is in the device's own firmware, so it de-energises every relay
+  with no software in the decision path. That is exactly why
+  `set_relay_state` is deliberately absent from `_ARMING_CALLS` (see the note
+  at `safety.py:106`) — a governor countdown there would be a weaker deadman
+  layered over a strictly stronger one.
+- **The PDU is exempt by design, not by omission.** It implements none of
+  `default_safe_state()`'s methods, and a deadman countdown started by an
+  outlet switch would trip while an operator was at lunch. Its protection is
+  the allowlist and the cabling invariant (§ F-12), neither of which needs the
+  governor.
+
+Not fixed, and the fix is not obviously right. A CLI-local governor would need
+its own thread and its own lifetime inside a process that exits in under a
+second, which is a deadman with nobody left to fire it. The honest positions
+are the ones already available: run the bench agent and use `--remote` when
+you want arm tracking, or rely on a hardware interlock (§ N-1 makes the same
+point about the governor being damage limitation rather than a guarantee).
+[`docs/cli.md`](docs/cli.md) § *Known limits* says this where an operator will
+meet it.
 
 ## Network (remote mode)
 

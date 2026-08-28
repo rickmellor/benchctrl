@@ -5,7 +5,7 @@ Every MCP tool is a shell command. 324 of them, across nine groups:
 ```bash
 benchctrl adu218 relay-states
 benchctrl sdm4065a measure-dc-voltage
-benchctrl --remote unoq.local dp2031 read-identity
+benchctrl --remote unoq.local dp2031 info
 ```
 
 The shape is always `benchctrl [global flags] <group> <command> [args]`.
@@ -351,7 +351,9 @@ use the Python API.
   its own hardware watchdog, and the PDU is exempt from arm tracking by design
   (a deadman countdown on every switch would trip while an operator was at
   lunch). It is worth knowing that `benchctrl --local` gives you less protection
-  than `--remote`, not more.
+  than `--remote`, not more. The exposure is the Arc and the two Rigols, the
+  devices a governor would actually be tracking; `KNOWN_LIMITATIONS.md` § A-6
+  has the per-device breakdown.
 - **A bare exit releases the claim but does not close the device** on the agent.
   Benign — with nothing armed the deadman never reclaims it either — but the CLI
   does not pretend otherwise.
@@ -365,7 +367,8 @@ use the Python API.
   gear are not on the PDU (`drivers.md`). That was already true; a mains-capable
   CLI raises the cost of it ever changing, because it becomes possible to
   destroy the recovery path in one command. `allowed_outlets` and
-  `panic_outlets` are the controls to revisit *before* any such move.
+  `panic_outlets` are the controls to revisit *before* any such move
+  (`KNOWN_LIMITATIONS.md` § F-12).
 
 ## See also
 

@@ -56,13 +56,23 @@ Precedence, highest first:
 5. everything local
 
 Levels 2-4 reach `session` only when an entry point installs them.
-`benchctrl-mcp` does this at startup and prints any non-local binding to
-stderr, so you can see what you got:
+`benchctrl-mcp` and `benchctrl` both do this before the first device opens, and
+print any non-local binding to stderr, so you can see what you got:
 
 ```
 $ BENCHCTRL_SIM_DEVICES=ontrak_adu218 benchctrl-mcp
 benchctrl-mcp: ontrak_adu218 -> sim
+
+$ benchctrl --sim ontrak_adu218 adu218 relay-states
+benchctrl: ontrak_adu218 -> sim
+relays: 0=off, 1=off, 2=off, 3=off, 4=off, 5=off, 6=off, 7=off
+energised: -
+mask: 0
 ```
+
+Level 2 is where the CLI flags sit; [`cli.md`](cli.md) covers the rest of that
+surface. With no flags `benchctrl` installs no config *object* at all, so an
+empty one cannot count as an override and beat levels 3 and 4.
 
 If you embed benchctrl yourself, call `session.configure_from_environment()`
 once before the first device opens — otherwise every device resolves `local`

@@ -9,6 +9,163 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### The whole bench from a shell — 324 CLI subcommands, generated
+
+`benchctrl` reached seven drivers with ten hand-written Arc-only commands. Every
+other device was Python-or-MCP only, so "tell me the relay state" meant writing
+a script. Now every MCP tool is a shell command:
+
+```bash
+benchctrl adu218 relay-states
+benchctrl --yes adu218 set-relay-state 0 on
+benchctrl --remote unoq.local sdm4065a measure-dc-voltage
+```
+
+**Nothing is hand-written per device.** The subcommands are built by reflection
+over each driver's `_TOOLS` tuple — the same tuple the MCP server registers — so
+a tool added to a driver becomes a shell command with no edit to the CLI. 324
+across nine groups: arc 23, qr10x 11, dl3031a 45, dp2031 134, sdm4065a 54,
+pdu41002 15, cp2112 10, adu218 19, framework 13. The parity tests in
+`test_mcp.py` were decorative before and are load-bearing now.
+
+`_TOOLS` rather than asking a live server, for two reasons and the second one
+decided it. Importing `benchctrl.mcp` costs ~0.64 s (FastMCP alone is 0.44 s of
+it) against 0.06 s for all eight drivers, and a full remote round trip is 63 ms
+— so introspecting a server would be slower than every call the CLI makes. More
+decisively, it would hard-depend the `benchctrl` console script on the optional
+`[mcp]` extra, which needs Python ≥3.10 while the package declares
+`requires-python = ">=3.9"`.
+
+**Risk is the part that is *not* generated**, and that is the whole design.
+`cli_tiers.py` classifies all 324 tools explicitly — 163 read, 125 tier 2, 33
+needing `--yes`, 3 needing `--yes` *and* a named environment variable — and a
+tool with no entry raises rather than defaulting to safe. Two tests assert
+completeness in both directions, so adding a driver tool fails the suite until
+somebody decides what it can do to the hardware.
+
+Reusing the agent's `dispatch.is_mutator()` was the obvious move and is measurably
+wrong. It is a bare name-prefix match: `is_mutator("write")` is **False** — the
+raw SCPI passthrough on all three SCPI drivers — while `take_snapshot` matches
+and only samples, and `step_voltage_up` moves a live output and matches nothing.
+A CLI keying its read/write split on that predicate would file arbitrary SCPI
+under "safe". A test asserts `is_mutator` still disagrees, so if the drivers are
+ever renamed the table can be simplified deliberately rather than by accident.
+
+Four tiers, not two, because a confirmation nobody reads protects nothing.
+`set_voltage` on a de-energised output needs no `--yes`: requiring one for every
+setpoint would make the flag reflexive, which is how a real prompt gets waved
+through. And the *de-energising* direction is deliberately frictionless —
+`adu218 reset-relays` and `cp2112 reset-lines` are tier 2, with a test asserting
+de-energising is never gated harder than energising. An operator fighting a live
+output should not meet a gate on the way to safety.
+
+The three environment gates are for effects that outlive the command:
+`BENCHCTRL_PDU_ALLOW_SWITCHING` for `pdu41002 set-outlet-state` / `reset-outlet`
+(it switches mains) and `BENCHCTRL_ADU218_ARM_WATCHDOG` for `adu218
+set-watchdog` (`WDn` sets *and* arms, and the relay opens later, after the CLI
+has exited). Separate variables because one authorisation must not grant the
+other: `--yes` says you meant to run a command, the variable says you know what
+is physically attached, and those are different claims. `--help` marks the two
+tiers `[!]` and `[!!]` so an operator can see which commands move hardware
+before typing one.
+
+**`bool("off")` is `True`, and a CLI passes strings.** A boolean parameter routed
+through `argparse`'s `type=bool` would energise on *every* spelling, including
+the ones that mean no. Every boolean takes an explicit word instead — `on`/`off`,
+`true`/`false`, `1`/`0`, `yes`/`no`, `enable`/`disable` — and anything else is
+refused by argparse. The PDU driver's `isinstance(on, bool)` guard would have
+caught the resulting non-bool, but a CLI that is only safe because a driver three
+layers down is defensive is not safe.
+
+**A one-shot needs a lifecycle a server does not**, and four things follow that
+reflection cannot infer (`cli_lifecycle.py`):
+
+- **Teardown depends on the mode.** Locally, the driver's `*_close` tool.
+  Remotely, `close()` is *refused* by the proxy — closing is governor-mediated so
+  an armed output is never orphaned — and the correct exit is a clean client
+  disconnect, which the agent reads as consent to release the writer claim.
+  `agent.close` is **not** the remote equivalent: it trips the governor
+  bench-wide, so one command finishing would drive every armed device on the
+  bench to safe, including instruments the command never touched.
+- **A one-shot must not disarm what a previous one armed.** `adu218_open`
+  defaults `disarm_watchdog=True` and its connect path sends `WD0`. Right for a
+  long-lived server, since the watchdog setting reads 0 for both "timed out" and
+  "never enabled" (§ F-22) so a fresh session cannot interpret an inherited
+  value — and wrong here, where *every* invocation is a fresh session. Left
+  alone, `benchctrl adu218 relay-states` would silently disarm a watchdog the
+  previous command armed. The CLI overrides the default; the driver is unchanged.
+- **A failed de-energise is a dict key, not an exception.** `dl3031a_close`
+  disables the load input and `dp2031_close` disables three outputs, and both
+  report failure as `input_off_failed` / `outputs_off_failed` in their *result*
+  while the close itself completes. A CLI checking only for exceptions would
+  print your measurement and exit 0 with the load still sinking current. Hence
+  **exit code 4**: the reading still prints, the warning goes to stderr so
+  `--json` stays parseable, and the shell learns something went wrong. Losing the
+  measurement to a teardown problem would make the CLI unusable exactly when the
+  bench is misbehaving.
+- **The open is implicit**, and its arguments come from the `open` block of
+  `~/.config/benchctrl/config.json` — the same dict the MCP server and the agent
+  already forward — so `allowed_outlets` and the port live in one reviewable
+  file rather than a second CLI-only one that would eventually disagree.
+
+**`--remote` / `--local` / `--sim` now exist.** `docs/remote.md:52` had
+documented them as CLI flags since remote mode landed, and until now only
+`benchctrl-agent` had them. Any non-local binding is announced on stderr
+(`benchctrl: ontrak_adu218 -> sim`), so *"why did that read a simulator"* has an
+answer; silence means everything resolved local, because a line per device would
+train you to ignore the one that matters. With no flags the CLI installs no
+config object at all — an empty one would count as an override and beat the
+environment and the config file, which have documented precedence.
+
+Exit codes are a contract: 0 ran, 1 ran but found nothing, 2 the device or
+library refused, 3 the *CLI* refused, 4 teardown could not de-energise, 130
+interrupted. 2 and 3 are distinct so a script can tell "the device is not there"
+from "you did not authorise this", and a refusal happens before anything is
+configured or opened and says `Nothing has been sent to the device.`
+
+Catching only `BenchError` would have let ordinary failures escape as tracebacks:
+**no driver exception subclasses it** — `ADU218Error`, `PDU41002Error`,
+`QR10xError` and the rest all descend straight from `RuntimeError` — so "device
+not plugged in" would have exited 1 with a traceback, and 1 is already
+`discover`'s code for "found nothing". The class list comes from
+`net/errors._registry()`, which is maintained anyway so exceptions survive the
+RPC wire, filtered to `benchctrl.`-owned classes so a bare `ValueError` from a
+CLI bug is not disguised as an instrument refusing something.
+
+A claim conflict gets its own explanation, because the server's wording is aimed
+at a protocol client: it names an opaque session id and says this session "is a
+read-only observer", which reads as though the operator asked for that. From a
+shell it is nearly always a second `benchctrl` process or a dashboard that got
+there first, and `RemoteClient.attach` calls `agent.claim` once with no retry and
+no backoff anywhere in `net/client.py` — so the advice is to wait, and the device
+is untouched. Keying on message text is fragile and is contained by a test that
+produces the error from a **real** agent with two connected clients, so a
+reworded server message fails the test rather than silently turning the
+explanation off.
+
+Also fixed on the way through: `_render_scalar` JSON-dumped nested collections,
+so `benchctrl adu218 relay-states` printed `relays: {"0": false, ...}` from the
+*non-JSON* output mode — the on/off rendering never reached the values that
+needed it most, on the one device where on/off is the whole answer. Found by
+running every example in the new documentation instead of trusting it.
+
+The ten legacy Arc commands are untouched and still open the Arc directly, so
+`--sim` and `--remote` do not apply to them; `benchctrl set-voltage 3.3` and
+`benchctrl arc set-voltage 3.3` are different commands reaching the same
+instrument until the legacy ten are removed.
+
+Two limits are documented rather than fixed. **Local mode has no governor** —
+`SafetyGovernor` is built only by `AgentServer`, so a local one-shot has no arm
+tracking and no deadman while `--remote` has both (§ A-6); the ADU218 is covered
+anyway by its hardware watchdog and the PDU is exempt by design, but the Arc and
+the two Rigols are real exposure. And **mains switching is now one shell line**,
+which does not change the cabling invariant that makes self-kill impossible but
+does raise the cost of anyone ever changing it (§ F-12).
+
+New: `src/benchctrl/cli_generated.py`, `cli_tiers.py`, `cli_lifecycle.py`,
+[`docs/cli.md`](docs/cli.md), and 140 tests across `test_cli_generated.py`,
+`test_cli_tiers.py` and `test_cli_main.py`.
+
 ### Ontrak ADU218 relay / digital I/O interface — zero dependencies
 
 Eight 1 A solid-state relays, eight opto-isolated digital inputs with

@@ -303,6 +303,8 @@ exists, rather than failing quietly.
 
 ## CLI
 
+These six are Arc-only and are the original commands:
+
 ```bash
 benchctrl discover                              # list devices
 benchctrl info                                  # show state
@@ -311,6 +313,22 @@ benchctrl set-output on                         # enable output
 benchctrl capture 5.0 run.csv -c mc mv          # record for 5 s
 benchctrl stream 10                             # live print
 ```
+
+Every other device is reachable too — all 324 MCP tools are shell commands,
+grouped by device:
+
+```bash
+benchctrl adu218 relay-states                   # a read
+benchctrl sdm4065a measure-dc-voltage
+benchctrl --yes adu218 set-relay-state 0 on     # a write needs --yes
+benchctrl --remote unoq.local dp2031 info
+```
+
+Reads run unannounced; anything that changes what the hardware is doing needs
+`--yes`, and a few whose effect outlives the command need a named environment
+variable as well. `--help` marks them `[!]` and `[!!]`.
+[`cli.md`](cli.md) is the full reference: the authorisation tiers, the exit
+codes, `--remote`/`--sim`, and why a one-shot command needs its own lifecycle.
 
 Two more entry points ship with the package:
 
@@ -321,6 +339,7 @@ benchctrl-agent --token <token>  # bench-side server for remote mode
 
 ## Next steps
 
+- [`cli.md`](cli.md) — every device from a shell, and the authorisation model
 - [`api_reference.md`](api_reference.md) — every class and method
 - [`drivers.md`](drivers.md) — the QR10x, DL3031A, DP2031, SDM4065A,
   PDU41002, ADU218 and CP2112 drivers
