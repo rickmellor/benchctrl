@@ -341,13 +341,32 @@ def render_result(value: Any, *, as_json: bool) -> str:
     return str(value)
 
 
-def _render_scalar(v: Any) -> str:
+def _render_scalar(v: Any, *, nested: bool = False) -> str:
+    """One value as a line fragment. ``nested`` bracket-wraps a collection.
+
+    Recursing rather than JSON-dumping matters because a nested dict is the
+    *normal* shape for the per-channel reads: ``adu218_relay_states`` returns
+    ``{"relays": {0: False, ...}}``, so dumping produced
+    ``relays: {"0": false, ...}`` on the one device where on/off is the whole
+    answer — the bool rendering never reached the values that needed it most.
+
+    Brackets appear only one level down, where the separators would otherwise
+    collide: ``ports: A=off, off, off, B=…`` cannot be read, and
+    ``ports: A=[off, off, off], B=[…]`` can. At the top level they would be
+    noise, since the key already delimits.
+    """
     if isinstance(v, bool):
         return "on" if v else "off"
     if isinstance(v, (list, tuple)):
-        return ", ".join(_render_scalar(x) for x in v) if v else "-"
+        if not v:
+            return "-"
+        inner = ", ".join(_render_scalar(x, nested=True) for x in v)
+        return f"[{inner}]" if nested else inner
     if isinstance(v, dict):
-        return json.dumps(v, default=str)
+        if not v:
+            return "-"
+        inner = ", ".join(f"{k}={_render_scalar(x, nested=True)}" for k, x in v.items())
+        return f"{{{inner}}}" if nested else inner
     if v is None:
         return "-"
     return str(v)

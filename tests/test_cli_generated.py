@@ -16,6 +16,7 @@ hypothetical:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import inspect
 import sys
@@ -363,6 +364,78 @@ def test_an_empty_collection_renders_as_a_dash_not_as_nothing():
     assert cli_generated.render_result({"energised": []}, as_json=False) == (
         "energised: -"
     )
+
+
+def test_a_nested_dict_of_bools_still_renders_as_on_off():
+    """The defect this closes, found by running the commands in ``docs/cli.md``.
+
+    A nested dict is the *normal* shape for the per-channel reads, not an edge
+    case: ``adu218_relay_states`` returns ``{"relays": {0: False, ...}}``. The
+    renderer used to ``json.dumps`` a nested dict, so the primary read on the
+    relay device printed
+
+        relays: {"0": false, "1": false, ...}
+
+    — the ``on``/``off`` rendering the module goes out of its way to do never
+    reached the values that need it most, and the operator got raw JSON from the
+    non-JSON output mode.
+    """
+    out = cli_generated.render_result(
+        {"relays": {0: False, 1: True}, "mask": 2}, as_json=False
+    )
+    assert out == "relays: 0=off, 1=on\nmask: 2"
+    assert "false" not in out and "{" not in out
+
+
+def test_a_collection_one_level_down_is_bracketed_so_the_separators_do_not_merge():
+    """``adu218_input_states`` returns a dict *of lists*: ``{"A": [...], "B": [...]}``.
+
+    Without brackets the two separators are the same character sequence and the
+    line cannot be parsed by eye — ``ports: A=off, off, off, B=off`` gives no
+    clue where port A ends. This is the case a single-level fix would miss.
+    """
+    out = cli_generated.render_result(
+        {"ports": {"A": [False, True], "B": [True, False]}}, as_json=False
+    )
+    assert out == "ports: A=[off, on], B=[on, off]"
+
+
+def test_a_top_level_list_is_not_bracketed():
+    """Brackets one level down, not at the top, where the key already delimits
+    and they would be noise on every line."""
+    assert cli_generated.render_result({"energised": [1, 2]}, as_json=False) == (
+        "energised: 1, 2"
+    )
+
+
+def test_the_real_relay_read_renders_without_json_punctuation(monkeypatch):
+    """Asserted against the *driver's* actual return value, not a hand-built one.
+
+    The hand-built cases above pin the renderer; this pins the shape. A test
+    built only from literals would have kept passing through the original bug,
+    because I wrote the literals from the same wrong assumption that produced
+    it — that a tool returns a flat dict of scalars.
+    """
+    from benchctrl import config, session
+    from benchctrl.drivers.ontrak_adu218 import mcp_tools
+
+    session.configure(config.build(sim_devices=["ontrak_adu218"]))
+    try:
+        mcp_tools.adu218_open(disarm_watchdog=False)
+        result = mcp_tools.adu218_relay_states()
+    finally:
+        with contextlib.suppress(Exception):  # teardown
+            mcp_tools.adu218_close()
+        session.configure(config.Config())
+
+    assert isinstance(result["relays"], dict), (
+        "the shape assumed by this test changed; the renderer test above is now "
+        "pinning something the driver no longer returns"
+    )
+    out = cli_generated.render_result(result, as_json=False)
+    for punctuation in ('{"', '": ', "false", "true"):
+        assert punctuation not in out, f"raw JSON leaked into the plain output: {out}"
+    assert "0=off" in out
 
 
 # ---------------------------------------------------------------------------
