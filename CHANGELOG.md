@@ -58,6 +58,13 @@ console-booting Raspberry Pi needs that the Uno Q had: an Xorg snippet
 binding the display to the vc4 device (`deploy/xorg/`), the `autologin`
 group, and `graphical.target`.
 
+The dashboard's former supply/load scope quadrant, which had no waveform to
+draw, is now **VISION · LIVE**: the camera's stream, relayed by the FUI
+server from the sidecar's loopback so it works on the kiosk and over a
+tunnel alike. The sidecar gained a read-only **view listener** (`VIEW_PORT`,
+8096 on the LAN) serving only `/stream`, `/frame.jpg` and `/health`; the
+control port stays on loopback.
+
 ### Raspberry Pi 5 as a second agent platform
 
 The bench agent now deploys to a Raspberry Pi 5 with the same
