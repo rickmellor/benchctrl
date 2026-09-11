@@ -32,6 +32,13 @@ so proving it would prove the wrong thing.
 one capability that does not carry across is PCIe — the Metis vision
 accelerator is Pi/desktop only.
 
+Bringing the Pi up closed a ROADMAP item that had waited for exactly this
+host: the kernel-first CH341 path in `transports.autoserial` is now
+observed, not just asserted, on the same QR10x the userspace path was
+verified with. It also found that a kernel tty is not exclusive — two
+processes can open `/dev/ttyUSB1` — which the libusb claim had ruled out
+on the Uno Q; that is a new ROADMAP item, not a change here.
+
 ### Silicon Labs CP2112 — open-drain control lines for hardware reset
 
 The bench can now assert and release a DUT's reset line with a ~$15 USB
