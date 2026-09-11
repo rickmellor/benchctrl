@@ -35,8 +35,21 @@ from the API. Registered everywhere a device key must be: config, agent
 opener, sim factory, codec, wire errors, MCP, the FUI rail, and discovery
 (a new read-only `scan_usb()` for instruments that are only a USB
 descriptor). No MCP tool returns image bytes — `save_to` writes the JPEG
-host-side. The sidecar itself (`benchctrl-vision`, `deploy/vision/`) lands
-in the next change; see `docs/vision.md`.
+host-side.
+
+The sidecar ships too: `benchctrl-vision` (`benchctrl.vision.camera`,
+`.detector`, `.server` — pypylon, OpenCV, onnxruntime and the Axelera
+runtime, imported by nothing else) and `deploy/vision/` — a Dockerfile
+that builds the same on arm64 and amd64, a privileged loopback-only
+container run script, `benchctrl-vision.service`, an idempotent installer,
+a Debian-native `metis-dkms` installer that pins the package checksum and
+finds the card by vendor id, and a model fetcher that records SHA-256s.
+Brought up on `benchpi` 2026-09-11: driver built by DKMS against the Pi
+kernel, card bound as `axl`. `pyproject` gains a `vision` extra (the
+sidecar's wheels) and a `bench-visa-py` extra (`pyvisa-py` + `pyusb`),
+because on a Pi the kernel binds `usbtmc` and only pyusb lets pyvisa-py
+claim the interface — without it the DMM and both Rigols are invisible to
+VISA. See `docs/vision.md` and `deploy/vision/README.md`.
 
 ### Raspberry Pi 5 as a second agent platform
 

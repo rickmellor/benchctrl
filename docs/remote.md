@@ -376,7 +376,7 @@ is unnecessary. Verified on a Pi 5 8 GB, Pi OS Lite trixie, Python 3.13.
 ```bash
 git clone https://github.com/rickmellor/benchctrl ~/benchctrl
 cd ~/benchctrl
-python3 -m venv .venv && .venv/bin/pip install -e ".[bench,bench-visa,mcp]"
+python3 -m venv .venv && .venv/bin/pip install -e ".[bench,bench-visa-py,mcp]"
 .venv/bin/pytest -m "not hardware" -q          # optional, ~20 min on a Pi 5
 sudo install -m 0644 deploy/udev/64-benchctrl-cp2112.rules /etc/udev/rules.d/
 sudo install -m 0644 deploy/udev/61-benchctrl-usbtmc.rules /etc/udev/rules.d/
@@ -396,15 +396,27 @@ What is different from the Uno Q:
   `verify-ch341-qr10x.sh` here prints "kernel ch341 driver present" and
   installs nothing.
 - **USB-TMC has a kernel driver too.** `pyvisa-py` still drives the
-  instruments over libusb (the `bench-visa` extra), so the udev rule is still
-  needed for write access to `/dev/bus/usb/…`; pyusb detaches the kernel
-  `usbtmc` binding when it claims the interface.
+  instruments over libusb, so the udev rule is still needed for write access
+  to `/dev/bus/usb/…`, and **`pyusb` must be installed** — that is what lets
+  pyvisa-py claim the interface and detach the kernel `usbtmc` binding. The
+  `bench-visa-py` extra carries both; with `pyvisa` alone the instruments show
+  up as `/dev/usbtmc*` and are invisible to VISA (verified on benchpi: the DMM
+  and both Rigols opened over the kernel-bound interface once pyusb was present).
 - **`hidraw` nodes are `root:root 0600`** until the CP2112 rule is installed
   — same as the Uno Q, same rule.
 - **Storage is the SD card.** Blobs stay in RAM below 4 MB; only recordings
   spill. For long recordings point `blob_dir` at a USB SSD.
-- Nothing display-related to install. `install-fui.sh` / `install-kiosk.sh`
-  work unchanged if you want the status panel on the Pi's HDMI.
+- **The dashboard on the Pi's HDMI needs a display stack first.** Pi OS Lite
+  ships none; the Uno Q had Xorg, lightdm and Chromium preinstalled. Then the
+  same two installers apply:
+  ```bash
+  sudo apt install --no-install-recommends xserver-xorg xinit x11-xserver-utils \
+      lightdm lightdm-gtk-greeter chromium
+  sudo ./deploy/install-fui.sh        # the launcher; test over an ssh tunnel first
+  sudo ./deploy/install-kiosk.sh      # boot straight into it (autologin as $SUDO_USER)
+  ```
+  The launcher finds the package through `/etc/benchctrl/agent.env`, so no
+  per-board `BENCHCTRL_SRC_DIR` is needed.
 
 Keep the checkout current with `git pull` (the agent imports drivers lazily,
 so restart it after pulling — see `deploy/README.md`).

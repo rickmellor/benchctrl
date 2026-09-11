@@ -149,6 +149,42 @@ someone re-flashes regularly, and the SSH tunnel is a complete answer
 for the deployments we have. Worth revisiting if benchctrl ends up on
 a network where a tunnel isn't practical.
 
+## Vision
+
+### LED / indicator classifier on the Metis
+**Status**: the vision device ships with COCO-80 object detection (YOLOv8n),
+which is a proof that the pipeline works, not the model the bench needs. The
+bench needs "is this LED on, what colour, what blink code", and no such model
+exists yet.
+
+**Scope when picked up**: collect real frames against *commanded* state (the
+capture-and-label loop: command a PDU outlet or a CP2112 line, settle, capture
+N frames tagged with `seq`, label from the command), train a small classifier
+on scrub with the Axelera devkit, compile to `.axm`, serve it from the same
+sidecar with a `read_indicators()`-shaped call. Lessons from the metis repo's
+board-reader experiment apply verbatim: synthetic-only collapsed to 48 %,
+200 real frames gave 100 %; tune exposure before anything else; keep a
+classical-CV sanity channel and parity-check against the commanded state;
+require `N` consistent frames before acting on a transition.
+
+### Hardware trigger for the camera
+**Status**: capture is software-triggered from the sidecar, tagged with `seq`.
+The Basler's opto-isolated trigger input and the cable are on the bench; wiring
+it to a CP2112 line (or a Pi GPIO) would let a *bench event* — a reset pulse,
+a PDU switch — fire the exposure with microsecond alignment. Lands on the same
+`TriggerSource` seam in `benchctrl.vision.camera` (`Line1` instead of
+`Software`); the driver and the wire need nothing. Open question: how `seq`
+is assigned to a frame the sidecar did not fire — probably by the agent
+stamping the event that pulsed the line.
+
+### A tool that lets a model *look* at the bench
+**Status**: `vision_frame`/`vision_trigger_capture` return metadata and write
+the JPEG to `save_to`; no tool returns an image. FastMCP can return an `Image`
+content block, which would let an agent see the frame directly. Deferred
+because there is no image-return precedent in this server and the transcript
+cost of a 300 KB frame per call wants a deliberate design (downscale, crop to
+ROI, rate-limit), not a one-line addition.
+
 ## Foundation hardening
 
 ### Strict mypy

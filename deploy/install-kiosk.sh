@@ -12,7 +12,14 @@
 
 set -eu
 
-RUN_USER=${RUN_USER:-arduino}
+# The autologin user: whoever invoked sudo (the Pi's login user), else the Uno
+# Q's `arduino`. Never root — see install-agent.sh for the same rule.
+if [ -z "${RUN_USER:-}" ]; then
+    case "${SUDO_USER:-}" in
+        ""|root) RUN_USER=arduino ;;
+        *)       RUN_USER=$SUDO_USER ;;
+    esac
+fi
 DROPIN=/etc/lightdm/lightdm.conf.d/90-benchctrl-kiosk.conf
 SESSION=/usr/share/xsessions/benchctrl-kiosk.desktop
 

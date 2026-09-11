@@ -74,11 +74,31 @@ bench-visa = [
     "benchctrl[bench]",
     "pyvisa>=1.13",
 ]
+# The pure-Python VISA backend, for hosts without NI-VISA: every Linux bench
+# box. pyusb is what lets pyvisa-py claim a USB-TMC interface (and detach the
+# kernel usbtmc driver where one is bound, as on a Raspberry Pi); without it
+# the instruments are listed by the kernel and invisible to VISA.
+bench-visa-py = [
+    "benchctrl[bench-visa]",
+    "pyvisa-py>=0.7",
+    "pyusb>=1.2",
+]
+# The vision SIDECAR's Python half (benchctrl.vision.camera / .detector /
+# .server). The driver needs none of this. The Axelera runtime (axelera-rt) is
+# not on PyPI and only works in its container — deploy/vision/Dockerfile
+# installs all of this there; the extra exists for a camera-only host.
+vision = [
+    "numpy>=1.20",
+    "opencv-python-headless>=4.8",
+    "pypylon>=4.0",
+    "onnxruntime>=1.16",
+]
 
 [project.scripts]
 benchctrl = "benchctrl.cli:main"
 benchctrl-mcp = "benchctrl.mcp:main"
 benchctrl-agent = "benchctrl.agent.main:main"
+benchctrl-vision = "benchctrl.vision.server:main"
 
 [project.urls]
 Documentation = "https://github.com/rickmellor/benchctrl#readme"

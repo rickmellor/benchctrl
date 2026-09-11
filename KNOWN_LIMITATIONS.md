@@ -1234,6 +1234,18 @@ and that type survives the agent wire on purpose: the remedy is to fall back
 (classical CV, a human), never to retry. `aipu_present` says which kind of host
 you are on before you ask.
 
+### V-2. The sidecar container runs privileged
+The Axelera runtime maps the card's PCIe BARs from user space, which needs
+`CAP_SYS_RAWIO`, and enumerates the device through `/sys/class/metis`. The
+invocation that works — `--privileged -v /dev:/dev -v /sys:/sys` — is the one
+verified on scrub and reused unchanged in `deploy/vision/run-vision.sh`. A
+narrower grant (`--cap-add SYS_RAWIO,SYS_ADMIN --device /dev/metis-… --device
+/dev/dma_heap/system`, `/sys/class/metis` and `/sys/bus/pci` read-only,
+`/dev/bus/usb` for the camera) is written out in that script for the day it is
+worth the experiment; it has not been proven. Until then the container sees
+the whole of `/dev`, which is one more reason the sidecar stays on loopback
+(§ V-3) and the box it runs on is a bench appliance, not a workstation.
+
 ### V-3. The sidecar is unauthenticated and must stay on loopback
 `benchctrl-vision` binds `127.0.0.1` by default and has no auth of its own. The
 agent is the network face, exactly as for every other instrument: a remote
@@ -1249,6 +1261,31 @@ hardware trigger wired before the cable lands on the same `TriggerSource` seam,
 produces untagged frames (`seq=-1`) which `/capture` refuses and `read_frame`
 returns as what they are. A frame's `seq` says "the sidecar fired this on
 request N"; it does not yet say when in the exposure the LED changed.
+
+### V-5. On a Raspberry Pi the blob spill is the SD card
+Frames are small enough to stay in the agent's RAM blob store (a 1920x1200
+q80 JPEG is ~150-300 KB; the spill threshold is 4 MB), so vision alone never
+touches the card. Recordings do spill, and on `benchpi` `blob_dir` is on the
+microSD. For long recordings point `blob_dir` at a USB SSD (`STATE_DIR=` on
+`install-agent.sh`, or edit `agent.json`).
+
+### V-6. The Metis link is Gen2 x1 behind a switch HAT
+A Pi 5 has one PCIe lane. The Metis is a 2280 card, so the official M.2 HAT+
+(2230/2242) does not fit; the dual-slot HAT that does carries an ASM1182e
+switch, which is Gen2, so the card that advertises Gen3 x4 runs at 5 GT/s x1
+(4 Gb/s). The Pi's root port is correctly at Gen3 (`dtparam=pciex1_gen=3`);
+the switch is the whole cap. Ample for YOLOv8n-class work (~0.6 Gb/s at
+60 fps); a switchless 2280 board (Pimoroni NVMe Base, Geekworm X1001) would
+give Gen3 x1. `install-metis-driver.sh` prints the negotiated link.
+
+### V-7. `aipu_temp_c` is whatever `axcmd` says, or `None`
+The Axelera Python runtime exposes no thermal call we know of, so the sidecar
+shells out to `axcmd --board-temp` inside its container and parses the first
+temperature it prints, cached for a few seconds. Any failure — no `axcmd`, a
+changed output format, a card mid-reset — reads as `None`. It is never
+estimated from anything else. Firmware ≥ 1.4 has its own thermal management
+(HW throttle at 105 °C; 1.8.0 is what the bench runs); on 1.3.0 the card
+hard-hung under load and no software reading would have warned you.
 
 ## What's not in this list
 

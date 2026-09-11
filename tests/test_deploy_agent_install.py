@@ -58,7 +58,7 @@ def test_install_scripts_pass_shell_syntax_check(name):
     assert out.returncode == 0, f"{name}: {out.stderr}"
 
 
-@pytest.mark.parametrize("name", ("install-agent.sh", "install-fui.sh"))
+@pytest.mark.parametrize("name", ("install-agent.sh", "install-fui.sh", "install-kiosk.sh"))
 def test_run_user_is_derived_from_sudo_user_but_never_root(name):
     """``sudo`` from a login shell installs for that login; from root, not for root."""
     code = _code_lines(name)
@@ -130,3 +130,16 @@ def test_the_ch341_verifier_stops_where_the_kernel_has_the_driver():
     # exit 0, not 1: "not needed here" is not a failure.
     tail = code[guard : guard + 600]
     assert "exit 0" in tail
+
+
+def test_the_fui_launcher_finds_the_package_through_the_agents_env_file():
+    """The kiosk session cannot set BENCHCTRL_SRC_DIR; /etc/benchctrl/agent.env
+    already holds the right PYTHONPATH on every platform, so the launcher reads
+    it before falling back to the Uno Q path. An explicit BENCHCTRL_SRC_DIR
+    still wins."""
+    code = _code_lines("benchctrl-fui")
+    assert "/etc/benchctrl/agent.env" in code
+    fallback = code.index("SRC_DIR=${BENCHCTRL_SRC_DIR:-/home/arduino/benchctrl-1.2.0/src}")
+    env_read = code.index("s/^PYTHONPATH=//p")
+    assert env_read < fallback, "the env file must be consulted before the fixed path"
+    assert 'if [ -z "${BENCHCTRL_SRC_DIR:-}" ]' in code, "an explicit BENCHCTRL_SRC_DIR must win"
