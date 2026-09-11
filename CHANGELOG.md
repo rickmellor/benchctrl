@@ -9,6 +9,29 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### Raspberry Pi 5 as a second agent platform
+
+The bench agent now deploys to a Raspberry Pi 5 with the same
+`deploy/install-agent.sh` that serves the Arduino Uno Q. Nothing in the
+wire protocol or the agent was Uno-Q-specific; what was specific were the
+installer's *defaults* — user `arduino`, an unzipped tree at a fixed path,
+the system python — and those are now derived from what sits next to the
+script (a git checkout with `src/` and `.venv/`) and from `SUDO_USER`,
+falling back to the Uno Q values when neither applies. The resolved values
+are printed before systemd is touched. `RUN_USER` never resolves to
+`root`.
+
+A fresh `agent.json` gets `blob_dir`/`runs_dir` under the service user's
+home rather than the example's `/home/arduino`, because the code-level
+fallbacks know only the Uno Q and a systemd service's cwd is a read-only
+`/`. `verify-ch341-qr10x.sh` now stops, with exit 0, on a host whose
+kernel already has `ch341`: there the userspace bridge is never selected,
+so proving it would prove the wrong thing.
+
+`docs/remote.md` gains a Pi section and a platform capability table. The
+one capability that does not carry across is PCIe — the Metis vision
+accelerator is Pi/desktop only.
+
 ### Silicon Labs CP2112 — open-drain control lines for hardware reset
 
 The bench can now assert and release a DUT's reset line with a ~$15 USB

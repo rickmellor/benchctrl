@@ -20,6 +20,18 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# --- 0. is this even the right host for the userspace path? ---------------
+# Where the kernel has ch341, the bridge is never used: autoserial prefers the
+# kernel tty and a udev rule for libusb would be harmless but pointless. Say
+# so and stop, rather than "proving" a transport the agent will not select.
+if [ -d /sys/bus/usb-serial/drivers/ch341 ] || [ -d /sys/bus/usb/drivers/ch341 ]; then
+    echo "kernel ch341 driver present — the userspace bridge is not needed here."
+    echo "autoserial will use the kernel tty:"
+    ls -l /dev/ttyUSB* 2>/dev/null || echo "  (no /dev/ttyUSB* yet — is the QR10x plugged in?)"
+    echo "Nothing installed. See KNOWN_LIMITATIONS.md § N-6."
+    exit 0
+fi
+
 # --- 1. the udev rule ------------------------------------------------------
 if [ -f "$here/udev/$RULE" ]; then
     rule_src="$here/udev/$RULE"

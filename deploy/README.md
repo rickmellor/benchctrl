@@ -6,7 +6,7 @@ none of it; see [`docs/remote.md`](../docs/remote.md) for the client config.
 
 | | |
 |---|---|
-| [`install-agent.sh`](install-agent.sh) | the agent as a systemd service, disarming the bench on stop |
+| [`install-agent.sh`](install-agent.sh) | the agent as a systemd service, disarming the bench on stop — Uno Q or Raspberry Pi, autodetected |
 | [`install-display-hotplug.sh`](install-display-hotplug.sh) | optional: makes HDMI-through-a-USB-C-hub work on an Uno Q |
 | [`verify-ch341-qr10x.sh`](verify-ch341-qr10x.sh) | required for a QR10x on a kernel without `ch341`: installs the udev rule, then proves the instrument end to end |
 | [`install-fui.sh`](install-fui.sh) | optional: the read-only HDMI status display (`benchctrl-fui`) |
@@ -46,12 +46,26 @@ Installed layout:
 | `/etc/benchctrl/agent.json` | 0640 `root:arduino` | config **and token** |
 | `/etc/benchctrl/agent.env` | 0644 | `PYTHONPATH`, no secrets |
 
-Tune with environment variables:
+The defaults are **derived, then printed**, before anything is installed:
+
+| | git checkout beside `deploy/` (Raspberry Pi, desktop) | unzipped tree (Uno Q) |
+|---|---|---|
+| `SRC_DIR` | `<checkout>/src` | `/home/arduino/benchctrl-1.2.0/src` |
+| `PYTHON` | `<checkout>/.venv/bin/python` if present | `/usr/bin/python3` |
+| `RUN_USER` | `$SUDO_USER` | `arduino` (also when `SUDO_USER` is empty or `root`) |
+| `STATE_DIR` | `/home/$RUN_USER/benchctrl` (`blob_dir`, `runs_dir` in a fresh `agent.json`) | same |
+
+Override any of them with environment variables:
 
 ```bash
 sudo SRC_DIR=/opt/benchctrl/src RUN_USER=bench ./install-agent.sh
 sudo PYTHON=/opt/venv/bin/python ./install-agent.sh     # pip/venv install
+sudo STATE_DIR=/mnt/ssd/benchctrl ./install-agent.sh    # blobs/runs off the SD card
 ```
+
+`RUN_USER` never resolves to `root`: the unit drops privileges on purpose, and a
+bare `sudo` from a root shell falls back to `arduino` rather than installing a
+root-owned service.
 
 `SRC_DIR` is the directory holding **both** `benchctrl/` and `serial/`. The
 script imports them before touching systemd, because a wrong `PYTHONPATH`
@@ -129,8 +143,13 @@ needs root. Two settings are deliberately *not* tightened:
 
 ## The QR10x on a kernel without `ch341`
 
-Only needed where the kernel omits the CH340/CH341 driver — Arduino's Uno Q
-does (`# CONFIG_USB_SERIAL_CH341 is not set`, and no generic fallback). The
+Only needed where the kernel omits the CH340/CH341 driver. On a host that has
+it (Raspberry Pi OS, any desktop distro) `verify-ch341-qr10x.sh` prints
+"kernel ch341 driver present" and exits 0 without installing anything —
+`autoserial` will use `/dev/ttyUSB*` and never touch the bridge.
+
+Arduino's Uno Q omits the driver (`# CONFIG_USB_SERIAL_CH341 is not set`, and
+no generic fallback). The
 symptom is a device that enumerates as `USB Serial` but binds no driver, so no
 `/dev/ttyUSB*` appears and the QR10x is unreachable.
 

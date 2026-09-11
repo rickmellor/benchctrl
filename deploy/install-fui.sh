@@ -14,8 +14,22 @@
 
 set -eu
 
-RUN_USER=${RUN_USER:-arduino}
-SRC_DIR=${SRC_DIR:-/home/arduino/benchctrl-1.2.0/src}
+here_early=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Same two layouts as install-agent.sh: a git checkout next to this script, or
+# the Uno Q's unzipped tree. Knobs win when set.
+if [ -z "${RUN_USER:-}" ]; then
+    case "${SUDO_USER:-}" in
+        ""|root) RUN_USER=arduino ;;
+        *)       RUN_USER=$SUDO_USER ;;
+    esac
+fi
+if [ -z "${SRC_DIR:-}" ]; then
+    if [ -d "$here_early/../src/benchctrl" ]; then
+        SRC_DIR=$(CDPATH= cd -- "$here_early/../src" && pwd)
+    else
+        SRC_DIR=/home/arduino/benchctrl-1.2.0/src
+    fi
+fi
 SYSTEM_PYTHON=${SYSTEM_PYTHON:-/usr/bin/python3}
 PORT=${BENCHCTRL_FUI_PORT:-8600}
 
