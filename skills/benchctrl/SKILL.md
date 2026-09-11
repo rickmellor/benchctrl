@@ -424,6 +424,29 @@ dl.set_input(True)
 | Sub-ms / sub-100 ms transients | DL3031A LIST or transient mode |
 | Built-in battery discharge characterization | DL3031A |
 
+### Bench vision (camera + Metis NPU)
+
+`bench_vision` reads the bench through a Basler camera and, on a host with
+PCIe (Raspberry Pi 5, desktop — **not** an Uno Q), runs YOLOv8n on an Axelera
+Metis NPU. The driver is a stdlib HTTP client to a loopback sidecar, so it
+works in local, remote and sim mode unchanged. Full contract: `docs/vision.md`.
+
+```python
+from benchctrl.drivers.bench_vision import BenchVision
+
+with BenchVision.open() as cam:            # $BENCHCTRL_VISION_URL or loopback :8095
+    cam.set_exposure_us(6000)               # tune exposure FIRST; SNR beats fps
+    cam.set_crop(640, 300, 400, 300)        # where the LEDs are
+    f = cam.trigger_capture(seq=42, infer=True)
+    assert f.seq == 42                      # guaranteed, or it raised VisionCaptureError
+    print([(d.label, d.score) for d in f.detections.items])
+```
+
+Rules: **choose `seq` yourself** when correlating a capture with a commanded
+state, and treat a `VisionCaptureError` as "discard, never label". A
+`VisionCapabilityError` means no NPU on this host — fall back, don't retry.
+MCP tools are `vision_*`; none returns image bytes, pass `save_to=`.
+
 ## Anti-patterns — don't do these
 
 - **Don't reach for a vendor TCP server / external client library.**

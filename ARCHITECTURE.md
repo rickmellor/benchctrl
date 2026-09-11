@@ -15,7 +15,7 @@ any concrete driver.
 ```
                            ┌──────────────────────────────────────────┐
                            │   MCP server  (benchctrl.mcp)            │
-                           │   280 tools — orchestrator that calls    │
+                           │   317 tools — orchestrator that calls    │
                            │   each driver's register_mcp_tools(mcp)  │
                            └──────────────────────────────────────────┘
                                           │
@@ -215,8 +215,11 @@ Tool inventory:
 | Rigol DL3031A | 45 |
 | Rigol DP2031 | 134 |
 | Siglent SDM4065A | 54 |
+| CyberPower PDU41002 | 15 |
+| Silicon Labs CP2112 | 10 |
+| Bench vision (camera + Metis NPU) | 12 |
 | Cross-driver (recording I/O, battery, emulator) | 13 |
-| **Total** | **280** |
+| **Total** | **317** |
 
 The MCP layer is intentionally thin: each tool wraps one SDK method,
 coerces JSON-friendly argument types where needed, returns a dict.
@@ -350,7 +353,7 @@ is `local` and behaviour is unchanged.
    host laptop                                    bench (e.g. Uno Q)
    ┌────────────────────────┐                     ┌──────────────────────────┐
    │ benchctrl.mcp          │                     │ benchctrl-agent          │
-   │   280 tools, unchanged │                     │   registry / dispatch    │
+   │   317 tools, unchanged │                     │   registry / dispatch    │
    │        │               │                     │   DeviceWorker per device│
    │        ▼               │                     │   SafetyGovernor         │
    │ session.resolve()      │   length-prefixed   │   RunManager             │

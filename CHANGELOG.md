@@ -9,6 +9,35 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### Bench vision — a camera and a Metis NPU as a device (`bench_vision`)
+
+The bench can now be *read* through a camera. A Basler a2A1920-160uc USB3
+Vision camera and an Axelera Metis M.2 NPU (YOLOv8n, ~510 FPS on-device in
+the `metis` R&D repo) are fronted by a loopback HTTP sidecar that owns the
+heavy SDKs, and benchctrl's driver is a **stdlib** HTTP client to it. That
+split is the whole design: the same driver, the same twelve `vision_*`
+tools and the same config work in local, remote and sim mode, whether the
+camera and NPU sit in a Raspberry Pi 5, a desktop, or the host itself. The
+Metis needs PCIe, so on an Arduino Uno Q the device is camera-only and
+detection raises `VisionCapabilityError` — a type that survives the wire
+so a caller falls back rather than retries.
+
+`trigger_capture(seq=N)` returns *the* frame tagged `N` or raises; a frame
+from an earlier trigger is never passed off as this one. That guarantee is
+what a labelled dataset and an LED-state assertion rest on. Frames cross the
+agent link as bytes and ride the existing blob store above 64 KB with no
+vision-specific code in `net/`.
+
+The simulator serves the *same* HTTP router the production sidecar runs
+(`benchctrl.vision.service`), with a synthetic camera and canned boxes, so
+CI exercises the driver's real socket path and the simulator cannot drift
+from the API. Registered everywhere a device key must be: config, agent
+opener, sim factory, codec, wire errors, MCP, the FUI rail, and discovery
+(a new read-only `scan_usb()` for instruments that are only a USB
+descriptor). No MCP tool returns image bytes — `save_to` writes the JPEG
+host-side. The sidecar itself (`benchctrl-vision`, `deploy/vision/`) lands
+in the next change; see `docs/vision.md`.
+
 ### Raspberry Pi 5 as a second agent platform
 
 The bench agent now deploys to a Raspberry Pi 5 with the same

@@ -19,6 +19,7 @@ Each driver is independent and optional. Import only what you need.
 | Siglent SDM4065A 6½-digit bench DMM | `benchctrl.drivers.siglent_sdm4065a.SiglentSDM4065A` | USB-TMC + SCPI via pyvisa | **shipped (unreleased)** |
 | CyberPower PDU41002 8-outlet switched PDU | `benchctrl.drivers.cyberpower_pdu41002.CyberPowerPDU41002` | vendor CLI over USB-Serial (FTDI) **or** SSH | **shipped (unreleased)** — switches mains |
 | Silicon Labs CP2112 GPIO control lines | `benchctrl.drivers.silabs_cp2112.CP2112` | USB HID feature reports over `hidraw` | **shipped (unreleased)** — open-drain reset lines |
+| Bench vision — Basler a2A1920-160uc camera + Axelera Metis NPU | `benchctrl.drivers.bench_vision.BenchVision` | HTTP/JSON to the `benchctrl-vision` sidecar on loopback | **shipped (unreleased)** — driver + simulator; sidecar lands with `deploy/vision/` |
 
 ## QR10x — programmable resistance
 
@@ -1479,3 +1480,28 @@ address handling, clock configuration and transfer-status polling — a
 second protocol with its own failure modes, for a capability nothing on
 the bench currently needs. The report IDs are documented in `driver.py`
 if that changes.
+
+## Bench vision — camera + Metis NPU
+
+`bench_vision` is a camera (Basler a2A1920-160uc, USB3 Vision) and, on a host
+with PCIe, an Axelera Metis M.2 NPU running YOLOv8n — fronted by a loopback
+HTTP sidecar that owns the heavy SDKs, with a **stdlib** driver in benchctrl.
+That split is what lets the same driver, tools and config run in local, remote
+and sim mode. The full description — the `seq` correlation guarantee, the
+driver surface, the sidecar contract, the simulator and tuning notes — is in
+[`vision.md`](vision.md).
+
+```python
+from benchctrl.drivers.bench_vision import BenchVision
+
+with BenchVision.open() as cam:
+    cam.set_exposure_us(6000)
+    frame = cam.trigger_capture(seq=42, infer=True)   # returns the seq=42 frame or raises
+    print(frame.detections.items)
+```
+
+MCP tools: `vision_*` (12) — `open`, `close`, `info`, `status`, `frame`,
+`trigger_capture`, `detect`, `set_exposure_us`, `set_gain_db`, `set_fps`,
+`set_crop`, `clear_crop`. No tool returns image bytes; `save_to` writes the
+JPEG host-side.
+

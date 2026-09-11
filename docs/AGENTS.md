@@ -30,14 +30,16 @@ to LLM agents through MCP. The Arc wire protocol is documented in
 - **`benchctrl.drivers`** — instrument drivers, all peers: Otii Arc
   (SMU), Eastwood QR10x (programmable resistor), Rigol DL3031A
   (electronic load), Rigol DP2031 (triple-output PSU), Siglent
-  SDM4065A (6½-digit DMM — the only measurement-only one)
+  SDM4065A (6½-digit DMM), CyberPower PDU41002 (switched mains),
+  Silicon Labs CP2112 (open-drain reset lines), bench vision (Basler
+  camera + Axelera Metis NPU behind a loopback sidecar — `docs/vision.md`)
 - **`benchctrl.interfaces`** — the `SourceMeasurementUnit` Protocol
   that drivers conform to; vendor-agnostic subsystems depend on this,
   never on a concrete driver
 - **`benchctrl.battery`** — battery characterisation + emulation:
   profile I/O, life calculator, hardware profiler, 100 Hz host-side
   emulator
-- **`benchctrl.mcp`** — MCP server, **280 tools**, orchestrator that
+- **`benchctrl.mcp`** — MCP server, **317 tools**, orchestrator that
   calls each driver's `register_mcp_tools(mcp)`
 - **`benchctrl.session`** — the local/remote/sim seam. `resolve()`
   decides *per device key* what a driver singleton actually gets

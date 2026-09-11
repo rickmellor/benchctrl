@@ -1150,3 +1150,90 @@ def test_no_driver_closes_the_manager_it_was_handed(monkeypatch, module):
     drv = importlib.import_module(module)
     assert drv._autodiscover(FakeRM())
     assert not closed, f"{module} closed the ResourceManager it was given"
+
+
+# ---------------------------------------------------------------------------
+# scan_usb: instruments that are only a USB descriptor
+# ---------------------------------------------------------------------------
+
+
+def _fake_sysfs(tmp_path, devices):
+    root = tmp_path / "usb"
+    root.mkdir()
+    for name, attrs in devices.items():
+        d = root / name
+        d.mkdir()
+        for k, v in attrs.items():
+            (d / k).write_text(v + "\n")
+    return str(root)
+
+
+def test_scan_usb_finds_the_basler_camera(tmp_path):
+    from benchctrl import discovery
+
+    root = _fake_sysfs(tmp_path, {
+        "2-1": {"idVendor": "2676", "idProduct": "ba05", "serial": "41976136",
+                "manufacturer": "Basler", "product": "a2A1920-160ucBAS"},
+    })
+    found = discovery.scan_usb(root)
+    assert len(found) == 1
+    cam = found[0]
+    assert cam.device_key == "bench_vision" and cam.transport == "usb"
+    assert cam.serial_number == "41976136" and cam.confidence == discovery.EXACT
+    assert cam.path.endswith("2-1")
+
+
+def test_scan_usb_does_not_double_report_tty_or_hidraw_instruments(tmp_path):
+    """Every tty and hidraw instrument is also a USB device. Reporting them here
+    would list the Arc and the CP2112 twice; only ``transport="usb"``
+    signatures belong to this scanner."""
+    from benchctrl import discovery
+
+    root = _fake_sysfs(tmp_path, {
+        "1-1": {"idVendor": "0fce", "idProduct": "d1e6"},   # Otii Arc (serial)
+        "1-2": {"idVendor": "10c4", "idProduct": "ea90"},   # CP2112 (hidraw)
+        "1-3": {"idVendor": "1ab1", "idProduct": "0e11"},   # Rigol DL (usbtmc)
+        "1-4": {"idVendor": "2109", "idProduct": "2822"},   # a hub
+        "1-5": {"idVendor": "2676", "idProduct": "ba05"},   # the camera
+        "usb1": {"idVendor": "1d6b", "idProduct": "0002"},  # root hub
+    })
+    found = discovery.scan_usb(root)
+    assert [d.device_key for d in found] == ["bench_vision"]
+
+
+def test_scan_usb_survives_a_missing_sysfs(tmp_path):
+    from benchctrl import discovery
+
+    assert discovery.scan_usb(str(tmp_path / "nope")) == []
+
+
+def test_scan_usb_ignores_garbled_ids(tmp_path):
+    from benchctrl import discovery
+
+    root = _fake_sysfs(tmp_path, {"1-1": {"idVendor": "zz", "idProduct": "ba05"}})
+    assert discovery.scan_usb(root) == []
+
+
+def test_discover_includes_usb_only_instruments(monkeypatch):
+    from benchctrl import discovery
+
+    cam = discovery.DiscoveredDevice(path="/sys/bus/usb/devices/2-1", transport="usb",
+                                     device_key="bench_vision", vid=0x2676, pid=0xBA05)
+    monkeypatch.setattr(discovery, "scan_serial", lambda: [])
+    monkeypatch.setattr(discovery, "scan_driverless_bridges", lambda: [])
+    monkeypatch.setattr(discovery, "scan_usbtmc", lambda: [])
+    monkeypatch.setattr(discovery, "scan_visa", lambda rm=None: [])
+    monkeypatch.setattr(discovery, "scan_hidraw", lambda: [])
+    monkeypatch.setattr(discovery, "scan_usb", lambda: [cam])
+    assert discovery.discover() == [cam]
+    assert discovery.discover(usb=False) == []
+
+
+def test_the_vision_signature_is_vendor_exact_and_usb_only():
+    """The key is capability-named (``bench_vision``) but the *signature* stays
+    vendor-exact: the bus can decide "a Basler ace 2 is present", nothing more."""
+    from benchctrl import discovery
+
+    sig = next(s for s in discovery.SIGNATURES if s.device_key == "bench_vision")
+    assert (sig.vid, sig.pid) == (0x2676, 0xBA05)
+    assert sig.transport == "usb" and sig.confidence == discovery.EXACT

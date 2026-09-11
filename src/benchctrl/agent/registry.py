@@ -288,6 +288,16 @@ def build_default_registry(
         # intended failure -- quieter than discovering it by toggling a pin.
         return CP2112.open(**kw)
 
+    def _vision(**kw):
+        from benchctrl.drivers.bench_vision import BenchVision
+
+        # No URL injected here. The sidecar's address comes from agent.json
+        # (`open.bench_vision.url`) or BENCHCTRL_VISION_URL in *this agent's*
+        # environment, defaulting to loopback. The host never needs to know
+        # it: in remote mode the agent is the network face and the sidecar
+        # is unauthenticated on purpose, so it must stay on loopback.
+        return BenchVision.open(**kw)
+
     openers = {
         "otii_arc": _arc,
         "eastwood_qr10x": _qr,
@@ -296,6 +306,7 @@ def build_default_registry(
         "siglent_sdm4065a": _dmm,
         "cyberpower_pdu41002": _pdu,
         "silabs_cp2112": _cp2112,
+        "bench_vision": _vision,
     }
 
     for key in keys:

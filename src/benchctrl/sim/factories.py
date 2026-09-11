@@ -195,6 +195,33 @@ def make_cp2112(**kwargs) -> Any:
     return _bind_lifetime(driver, sim)
 
 
+def make_bench_vision(**kwargs) -> Any:
+    """A real ``BenchVision`` driving a :py:class:`SimulatedVisionSidecar`.
+
+    Like ``make_cp2112`` this substitutes below the driver rather than behind a
+    pty — the seam here is HTTP on loopback, and the simulator serves the
+    *same* ``VisionService`` router the production sidecar runs, with a
+    synthetic camera and a canned detector plugged in. So the driver's real
+    ``urllib`` path, the wire contract and the codec are all exercised; only
+    pylon and the Axelera runtime are not. ``sim`` kwargs go to the sidecar
+    (``aipu=False`` for a camera-only host, ``frame_bytes=200_000`` to push
+    frames over the blob threshold); ``url`` is ignored, the simulator picks
+    its own port.
+    """
+    from benchctrl.drivers.bench_vision import BenchVision
+    from benchctrl.sim.vision import SimulatedVisionSidecar
+
+    sim_kwargs = dict(kwargs.pop("sim", {}))
+    kwargs.pop("url", None)  # the simulator's socket is the only one that exists
+    sim = SimulatedVisionSidecar(**sim_kwargs)
+    try:
+        driver = BenchVision.open(sim.url, **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
 FACTORIES: dict[str, Callable[..., Any]] = {
     "otii_arc": make_otii_arc,
     "eastwood_qr10x": make_qr10x,
@@ -203,6 +230,7 @@ FACTORIES: dict[str, Callable[..., Any]] = {
     "siglent_sdm4065a": make_sdm4065a,
     "cyberpower_pdu41002": make_pdu41002,
     "silabs_cp2112": make_cp2112,
+    "bench_vision": make_bench_vision,
 }
 
 

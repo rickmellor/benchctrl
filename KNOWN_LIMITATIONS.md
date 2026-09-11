@@ -1223,6 +1223,33 @@ serial transport selection*. Two things remain:
   selection is untested on hardware regardless: only one CH340 has ever been
   attached here at a time.
 
+## Vision (camera + Metis NPU)
+
+### V-1. The Metis needs PCIe, so the Arduino Uno Q is camera-only at best
+The Axelera Metis M.2 is a PCIe device. A Raspberry Pi 5 (M.2 HAT) or a desktop
+has a slot; an Uno Q does not, and no USB path exists. On such a host the
+`bench_vision` sidecar can still serve the camera, but every detection call —
+`detect()`, `trigger_capture(infer=True)` — raises `VisionCapabilityError`,
+and that type survives the agent wire on purpose: the remedy is to fall back
+(classical CV, a human), never to retry. `aipu_present` says which kind of host
+you are on before you ask.
+
+### V-3. The sidecar is unauthenticated and must stay on loopback
+`benchctrl-vision` binds `127.0.0.1` by default and has no auth of its own. The
+agent is the network face, exactly as for every other instrument: a remote
+client reaches the camera only through the agent's HMAC handshake and claim
+gate. Binding the sidecar to `0.0.0.0` would expose a trigger-and-capture
+surface to the LAN with no credential. Don't; if a second host needs frames,
+give it an agent.
+
+### V-4. `seq` correlation is only as good as the trigger path
+`trigger_capture(seq=N)` returns the frame tagged `N` or raises — but the tag is
+stamped by the *software* trigger in the sidecar. A free-run camera, or a
+hardware trigger wired before the cable lands on the same `TriggerSource` seam,
+produces untagged frames (`seq=-1`) which `/capture` refuses and `read_frame`
+returns as what they are. A frame's `seq` says "the sidecar fired this on
+request N"; it does not yet say when in the exposure the LED changed.
+
 ## What's not in this list
 
 Things we **don't** consider limits — they're just facts:

@@ -85,6 +85,19 @@ def _wire_types() -> dict[str, type]:
         "CP2112LineState",
         "CP2112GpioConfig",
     )
+    add(
+        "benchctrl.drivers.bench_vision.driver",
+        # Frame carries the JPEG as bytes: inline below 64 KB, a blob reference
+        # above, with nothing vision-specific in the codec. Detections nests
+        # Detection in a tuple, which arrives as a list and is re-tupled in
+        # __post_init__.
+        "Crop",
+        "Detection",
+        "Detections",
+        "Frame",
+        "VisionInfo",
+        "VisionStatus",
+    )
     add("benchctrl.battery.profile", "BatteryProfile", "DischargeStep")
     add("benchctrl.battery.emulator", "EmulatorState")
 

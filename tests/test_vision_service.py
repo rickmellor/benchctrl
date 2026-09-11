@@ -1,0 +1,280 @@
+"""The vision sidecar's HTTP surface, driven directly and over a socket.
+
+:py:mod:`benchctrl.vision.service` is the one router both the production
+sidecar and the simulator run, so its behaviour *is* the contract the driver
+is written against. These tests pin the parts of that contract a driver could
+otherwise silently get wrong: the error document shape and status per type,
+``seq`` landing on the next frame only, a wrong-``seq`` frame being refused
+rather than returned, and the long-poll timing out when nothing triggers.
+
+The last test is the import rule: the router and the label loop must import
+with no image library, no camera SDK and no NPU runtime present, because the
+simulator (and therefore CI) runs them and the agent's core never pays for
+them.
+"""
+
+from __future__ import annotations
+
+import base64
+import http.client
+import json
+import sys
+import threading
+import time
+
+import pytest
+
+from benchctrl.sim.vision import (
+    TINY_JPEG,
+    CannedDetector,
+    SimulatedVisionSidecar,
+    SyntheticCamera,
+    padded_jpeg,
+)
+from benchctrl.vision.service import (
+    ERROR_STATUS,
+    MAX_WAIT_S,
+    VisionService,
+)
+
+
+def call(service: VisionService, method: str, target: str, body: dict | None = None):
+    payload = json.dumps(body).encode() if body is not None else b""
+    status, ctype, raw = service.handle(method, target, payload)
+    doc = json.loads(raw) if ctype == "application/json" else raw
+    return status, doc
+
+
+@pytest.fixture
+def service():
+    cam = SyntheticCamera()
+    svc = VisionService(cam, CannedDetector(), version="test")
+    yield svc
+    svc.close()
+
+
+# ------------------------------------------------------------- the contract
+
+
+def test_health_reports_camera_and_aipu(service):
+    status, doc = call(service, "GET", "/health")
+    assert status == 200
+    assert doc["ok"] is True and doc["camera"] is True and doc["aipu"] is True
+
+
+def test_health_reports_no_aipu_when_the_detector_is_absent():
+    svc = VisionService(SyntheticCamera(), None, version="t")
+    _, doc = call(svc, "GET", "/health")
+    assert doc["aipu"] is False
+
+
+def test_an_unknown_route_is_a_json_error_not_html(service):
+    status, doc = call(service, "GET", "/nope")
+    assert status == 404
+    assert doc["error"]["type"] == "not_found"
+
+
+@pytest.mark.parametrize("etype,status", sorted(ERROR_STATUS.items()))
+def test_every_error_type_has_a_distinct_client_facing_status(etype, status):
+    """The driver keys on ``type``; curl users key on status. Both must exist."""
+    assert 400 <= status < 600
+
+
+def test_a_frame_needs_a_trigger_in_triggered_mode(service):
+    status, doc = call(service, "GET", "/frame.json")
+    assert status == ERROR_STATUS["capture"]
+    assert doc["error"]["type"] == "capture"
+
+
+def test_a_long_poll_times_out_when_nothing_triggers(service):
+    t0 = time.monotonic()
+    status, doc = call(service, "GET", "/frame.json?wait=0&wait_s=0.2")
+    assert status == ERROR_STATUS["timeout"] and doc["error"]["type"] == "timeout"
+    assert time.monotonic() - t0 >= 0.2
+
+
+def test_wait_s_is_bounded(service):
+    status, doc = call(service, "GET", f"/frame.json?wait=0&wait_s={MAX_WAIT_S + 1}")
+    assert status == 400 and doc["error"]["type"] == "value"
+
+
+def test_capture_returns_the_frame_with_the_requested_seq(service):
+    status, doc = call(service, "POST", "/capture", {"seq": 7})
+    assert status == 200
+    assert doc["seq"] == 7 and doc["frame_id"] == 1
+    assert base64.b64decode(doc["jpeg_b64"]) == TINY_JPEG
+    assert doc["detections"] is None
+
+
+def test_seq_lands_on_the_next_frame_only(service):
+    call(service, "POST", "/capture", {"seq": 1})
+    call(service, "POST", "/capture", {"seq": 2})
+    _, doc = call(service, "GET", "/frame.json")
+    assert doc["seq"] == 2 and doc["frame_id"] == 2
+    _, st = call(service, "GET", "/status")
+    assert st["camera"]["trigger_seq"] == 2 and st["camera"]["dropped"] == 0
+
+
+def test_a_frame_carrying_the_wrong_seq_is_refused(service):
+    """The property everything downstream rests on.
+
+    Make the camera produce a frame with another seq between the trigger and
+    the wait: the service must refuse it, not hand it back as seq=9.
+    """
+    cam = service.camera
+    real_trigger = cam.trigger
+
+    def trigger_then_stale(seq):
+        real_trigger(seq)  # produces the frame for seq…
+        cam._pending = 999  # …and a stale one lands on top before we look
+        cam._produce()
+
+    cam.trigger = trigger_then_stale
+    status, doc = call(service, "POST", "/capture", {"seq": 9})
+    assert status == ERROR_STATUS["capture"]
+    assert doc["error"]["type"] == "capture"
+    assert "999" in doc["error"]["message"]
+
+
+def test_a_camera_that_will_not_fire_is_a_capture_error(service):
+    service.camera.fail_next_trigger = True
+    status, doc = call(service, "POST", "/capture", {"seq": 3})
+    assert status == ERROR_STATUS["capture"] and doc["error"]["type"] == "capture"
+
+
+def test_infer_without_a_detector_is_a_capability_error_before_the_trigger():
+    cam = SyntheticCamera()
+    svc = VisionService(cam, None, version="t")
+    status, doc = call(svc, "POST", "/capture", {"seq": 1, "infer": True})
+    assert status == ERROR_STATUS["capability"] and doc["error"]["type"] == "capability"
+    assert cam.frame_id == 0, "the camera was fired for a result that could not be produced"
+
+
+def test_detect_runs_on_the_latest_frame_without_a_new_one(service):
+    call(service, "POST", "/capture", {"seq": 5})
+    status, doc = call(service, "POST", "/detect", {"min_conf": 0.8})
+    assert status == 200
+    assert doc["frame_id"] == 1 and doc["seq"] == 5
+    assert [d["label"] for d in doc["items"]] == ["person"], "min_conf was not applied"
+    assert service.camera.frame_id == 1
+
+
+def test_config_put_returns_read_back_values_not_the_request(service):
+    _, doc = call(service, "PUT", "/config", {"exposure_us": 0.5, "gain_db": 99})
+    assert doc["exposure_us"] == SyntheticCamera.EXPOSURE_RANGE_US[0]
+    assert doc["gain_db"] == SyntheticCamera.GAIN_RANGE_DB[1]
+
+
+def test_config_refuses_unknown_keys(service):
+    status, doc = call(service, "PUT", "/config", {"exposure": 100})
+    assert status == 400 and "exposure" in doc["error"]["message"]
+
+
+def test_a_crop_changes_the_reported_dimensions(service):
+    call(service, "PUT", "/config", {"crop": [10, 20, 300, 200]})
+    _, doc = call(service, "POST", "/capture", {"seq": 1})
+    assert (doc["width"], doc["height"]) == (300, 200) and doc["crop"] == [10, 20, 300, 200]
+    call(service, "PUT", "/config", {"crop": None})
+    _, doc = call(service, "POST", "/capture", {"seq": 2})
+    assert (doc["width"], doc["height"]) == (1920, 1200) and doc["crop"] is None
+
+
+def test_the_browser_crop_endpoint_still_works(service):
+    """``/crop?x=&y=&w=&h=`` and ``/crop?off`` are kept for the focus workflow."""
+    _, doc = call(service, "GET", "/crop?x=1&y=2&w=3&h=4")
+    assert doc["crop"] == [1, 2, 3, 4]
+    _, doc = call(service, "GET", "/crop?off")
+    assert doc["crop"] is None
+
+
+def test_frame_jpg_returns_the_bytes(service):
+    call(service, "GET", "/trigger?seq=4")
+    status, ctype, raw = service.handle("GET", "/frame.jpg", b"")
+    assert status == 200 and ctype == "image/jpeg" and raw == TINY_JPEG
+
+
+def test_a_non_json_body_is_a_value_error(service):
+    status, ctype, raw = service.handle("POST", "/capture", b"not json")
+    assert status == 400 and json.loads(raw)["error"]["type"] == "value"
+
+
+# ----------------------------------------------------------- over a socket
+
+
+def test_the_simulated_sidecar_serves_the_same_router_over_http():
+    with SimulatedVisionSidecar() as sim:
+        host, port = sim.url[len("http://") :].split(":")
+        conn = http.client.HTTPConnection(host, int(port), timeout=5)
+        conn.request(
+            "POST",
+            "/capture",
+            body=json.dumps({"seq": 11}),
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        doc = json.loads(resp.read())
+        assert resp.status == 200 and doc["seq"] == 11
+        conn.request("GET", "/status")
+        assert json.loads(conn.getresponse().read())["camera"]["frame_id"] == 1
+        conn.close()
+        assert ("POST", "/capture") in sim.request_log
+
+
+def test_the_stream_endpoint_emits_mjpeg_parts_until_the_client_leaves():
+    with SimulatedVisionSidecar() as sim:
+        host, port = sim.url[len("http://") :].split(":")
+        conn = http.client.HTTPConnection(host, int(port), timeout=5)
+        conn.request("GET", "/stream")
+        resp = conn.getresponse()
+        assert resp.status == 200
+        assert resp.getheader("Content-Type").startswith("multipart/x-mixed-replace")
+        threading.Thread(target=lambda: sim.camera.trigger(1), daemon=True).start()
+        chunk = resp.fp.read(len(b"--frame\r\nContent-Type: image/jpeg\r\n"))
+        assert chunk.startswith(b"--frame")
+        conn.close()
+
+
+# ----------------------------------------------------------- the JPEG trick
+
+
+@pytest.mark.parametrize("size", [0, 200, 300, 70_000, 200_000, 70_003])
+def test_a_padded_jpeg_is_still_a_jpeg(size):
+    b = padded_jpeg(size)
+    assert b[:2] == b"\xff\xd8" and b[-2:] == b"\xff\xd9"
+    assert len(b) == max(size, len(TINY_JPEG))
+    pil = pytest.importorskip("PIL.Image")
+    import io
+
+    im = pil.open(io.BytesIO(b))
+    im.load()
+    assert im.size == (16, 16)
+
+
+# ----------------------------------------------------------- the import rule
+
+
+def test_the_router_and_label_loop_import_with_no_heavy_dependency(monkeypatch):
+    """Poison every heavy import, then import the stdlib half fresh.
+
+    The simulator, the agent's sim mode and CI all run these modules; if one
+    of them grew an ``import numpy`` at module level, the failure would appear
+    as an ImportError on the Uno Q, not here — unless this test exists.
+    """
+    for name in (
+        "numpy",
+        "cv2",
+        "pypylon",
+        "pypylon.pylon",
+        "axelera",
+        "axelera.runtime",
+        "onnxruntime",
+        "PIL",
+    ):
+        monkeypatch.setitem(sys.modules, name, None)
+    for mod in (
+        "benchctrl.vision.service",
+        "benchctrl.sim.vision",
+        "benchctrl.drivers.bench_vision.driver",
+    ):
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+        __import__(mod)
