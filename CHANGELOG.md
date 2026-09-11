@@ -51,6 +51,13 @@ because on a Pi the kernel binds `usbtmc` and only pyusb lets pyvisa-py
 claim the interface — without it the DMM and both Rigols are invisible to
 VISA. See `docs/vision.md` and `deploy/vision/README.md`.
 
+The Pi's HDMI panel runs the dashboard too. `deploy/benchctrl-fui` finds the
+package through `/etc/benchctrl/agent.env`, and `deploy/install-kiosk.sh`
+derives its autologin user like the other installers and handles what a
+console-booting Raspberry Pi needs that the Uno Q had: an Xorg snippet
+binding the display to the vc4 device (`deploy/xorg/`), the `autologin`
+group, and `graphical.target`.
+
 ### Raspberry Pi 5 as a second agent platform
 
 The bench agent now deploys to a Raspberry Pi 5 with the same
