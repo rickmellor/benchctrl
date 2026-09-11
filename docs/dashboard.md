@@ -434,6 +434,25 @@ Design questions still open, and deliberately not guessed at:
   artifact log has to be able to answer "which one did the operator press"
   afterwards, which argues for two.
 
+## VISION · LIVE — the camera in the detail quadrant
+
+The right-hand detail panel was a supply/load scope with no waveform to draw
+(the status payload carries none), so it showed a graticule reading NO SIGNAL
+forever. It now shows the bench camera's MJPEG stream. The FUI server relays
+`/vision/stream` and `/vision/frame.jpg` from the vision sidecar's loopback
+(`BENCHCTRL_VISION_URL`, default `http://127.0.0.1:8095`) under the page's own
+origin, so the picture works on the kiosk and through an ssh tunnel to the FUI,
+and the sidecar's unauthenticated control port is never published. Only those
+two paths are relayed; a control path through the FUI is refused by the static
+handler and never reaches the sidecar (`tests/test_fui_vision.py`).
+
+Two facts are kept apart in the quadrant: the verdict is the VISION rail slot's
+word (what the *agent* says about the device), and NO FEED means the *sidecar*
+did not answer — the picture is absent even if the agent lists the device. The
+`<img>` is armed once and left alone (an MJPEG connection repaints itself); on
+error the note returns and a retry backs off to 30 s so a bench with no camera
+does not hammer a dead port.
+
 ## Display takeover
 
 The board currently boots to the lightdm greeter. The panel is

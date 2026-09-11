@@ -145,3 +145,15 @@ def test_the_udev_rule_is_axeleras_own():
     assert RULES_SHA256 == "965a870995e75f30b0defbe7c4f489d41ffcf55b82d7a7ed8d78446fe89a875b"
     rule = (VISION / "udev" / "72-axelera.rules").read_text(encoding="utf-8")
     assert 'GROUP="axelera"' in rule and "dma_heap" in rule
+
+
+def test_only_the_view_port_may_be_published_on_the_lan():
+    """The control port stays on 127.0.0.1; the LAN publish is the view port,
+    and only when VIEW_PORT is set. A ``-p "$PORT:$PORT"`` form would be the
+    unauthenticated control surface on the network."""
+    code = _code("run-vision.sh")
+    assert 'view_publish="-p $VIEW_PORT:$VIEW_PORT"' in code
+    assert "--view-port $VIEW_PORT" in code
+    assert 'if [ "$VIEW_PORT" != "0" ]' in code
+    lan_publishes = re.findall(r'-p\s+"?\$([A-Z_]+):', code)
+    assert lan_publishes == ["VIEW_PORT"], lan_publishes

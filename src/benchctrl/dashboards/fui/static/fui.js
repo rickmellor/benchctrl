@@ -974,9 +974,54 @@ function render(v) {
   $('dmm-pills').innerHTML = ['Vdc', 'Vac', 'Idc', 'Iac', 'Ω']
     .map((m) => `<span class="pill">${m}</span>`).join('');
 
-  const psu = v.instruments.find((i) => i.kind === 'psu');
-  $('psu-verdict').textContent = psu && psu.linked ? psu.status : 'NO LINK';
+  renderVision(v);
   $('dut-verdict').textContent = dutLabel(v);
+}
+
+/* The VISION · LIVE quadrant: the camera's MJPEG stream, relayed by the FUI
+ * server from the sidecar on the bench box.
+ *
+ * Two facts, kept apart on purpose:
+ *
+ *   verdict  the VISION rail slot's word (STANDBY, OPEN, ABSENT, NOT SERVED…)
+ *            — what the *agent* says about the device
+ *   NO FEED  the *sidecar* did not answer /vision/stream — the picture is
+ *            absent even if the agent lists the device
+ *
+ * The <img> is armed once and left alone: an MJPEG connection stays open and
+ * repaints itself, so re-setting src every poll would reconnect twice a second.
+ * On error the note comes back and a retry is scheduled, backing off so a
+ * bench with no camera does not hammer a port nothing listens on.
+ */
+const VISION = { armed: false, retryMs: 2000, timer: null };
+
+function renderVision(v) {
+  const slot = v && v.instruments ? v.instruments.find((i) => i.key === 'bench_vision') : null;
+  $('vision-verdict').textContent = slot && slot.linked ? slot.status : 'NO LINK';
+  if (!VISION.armed) armVision();
+}
+
+function armVision() {
+  const img = $('vision-stream');
+  const note = $('vision-note');
+  if (!img || !note) return;
+  VISION.armed = true;
+  img.onload = () => {
+    img.classList.remove('hidden');
+    note.classList.add('hidden');
+    VISION.retryMs = 2000;
+  };
+  img.onerror = () => {
+    img.classList.add('hidden');
+    note.classList.remove('hidden');
+    note.textContent = 'NO FEED';
+    clearTimeout(VISION.timer);
+    VISION.timer = setTimeout(() => {
+      VISION.retryMs = Math.min(VISION.retryMs * 2, 30000);
+      img.src = `/vision/stream?_=${Date.now()}`;
+    }, VISION.retryMs);
+  };
+  img.src = `/vision/stream?_=${Date.now()}`;
 }
 
 /* What to print beside DEVICE UNDER TEST. Extracted for the same reason
@@ -1065,11 +1110,6 @@ function frame(t) {
 
   const [dctx, dw, dh] = fitCanvas($('dut'), q.res);
   drawDut(dctx, dw, dh, t, { live, alarm, glow: q.glow });
-
-  const [tctx, tw, th] = fitCanvas($('trace'), q.res);
-  // null series: there is no waveform data in the status payload, so the scope
-  // shows its graticule and says NO SIGNAL rather than plotting an invention.
-  drawTrace(tctx, tw, th, null, { alarm, glow: q.glow });
 
   // Let the governor see how late this frame was relative to the tier's target.
   governFrame(t);

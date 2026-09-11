@@ -18,23 +18,43 @@ What it will not do
 - **No blocking the bench.** Every request reads a snapshot the feed thread
   already assembled. A wedged browser costs the panel its freshness and the
   bench nothing.
+
+The one exception to "one JSON endpoint" is the camera. ``/vision/stream`` and
+``/vision/frame.jpg`` relay the vision sidecar's MJPEG stream and still frame
+from the bench box's loopback (``BENCHCTRL_VISION_URL``, default
+``http://127.0.0.1:8095``), so the page gets video on its own origin — in the
+kiosk and through an ssh tunnel alike — without the sidecar's unauthenticated
+control port ever being published. Only those two paths are relayed; they can
+fire nothing and configure nothing.
 """
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import mimetypes
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from benchctrl.config import EndpointConfig
 from benchctrl.dashboards.feed import AgentFeed
 from benchctrl.dashboards.fui.view import build_view
 
 log = logging.getLogger("benchctrl.dashboards.fui")
+
+#: Where the vision sidecar listens on the bench box. The FUI runs beside it.
+DEFAULT_VISION_URL = "http://127.0.0.1:8095"
+
+#: The only sidecar paths the FUI relays. Both are reads a human watches.
+VISION_RELAY: dict[str, str] = {
+    "/vision/stream": "/stream",
+    "/vision/frame.jpg": "/frame.jpg",
+}
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -56,6 +76,8 @@ class _Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/view":
             self._send_view()
+        elif path in VISION_RELAY:
+            self._relay_vision(VISION_RELAY[path])
         elif path in ("/", "/index.html"):
             self._send_static("index.html")
         else:
@@ -79,6 +101,50 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _relay_vision(self, sidecar_path: str) -> None:
+        """Copy one sidecar response through, chunk by chunk, until an end.
+
+        For ``/stream`` that end is the browser leaving; for the still it is the
+        sidecar's ``Content-Length``. A sidecar that is down answers 503 with a
+        reason, which the page renders as NO FEED rather than a broken image.
+        """
+        base = urlsplit(self.server.vision_url)  # type: ignore[attr-defined]
+        conn = http.client.HTTPConnection(base.hostname or "127.0.0.1", base.port or 80, timeout=5)
+        try:
+            conn.request("GET", sidecar_path, headers={"Accept": "*/*"})
+            upstream = conn.getresponse()
+        except OSError as exc:
+            conn.close()
+            self.send_error(503, f"no vision feed ({exc.__class__.__name__})")
+            return
+        try:
+            if upstream.status != 200:
+                self.send_error(503, f"vision sidecar answered {upstream.status}")
+                return
+            self.send_response(200)
+            self.send_header(
+                "Content-Type", upstream.getheader("Content-Type") or "application/octet-stream"
+            )
+            length = upstream.getheader("Content-Length")
+            if length:
+                self.send_header("Content-Length", length)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            while True:
+                # read1, not read: the stream has no length and never ends, so a
+                # full-buffer read would wait for 16 KB of frames before forwarding
+                # the first. read1 hands over whatever has arrived.
+                chunk = upstream.read1(16384)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                if not length:
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return  # the browser left; the sidecar keeps running
+        finally:
+            conn.close()
 
     def _send_static(self, name: str) -> None:
         # resolve() then check containment: the only defence that survives
@@ -112,11 +178,14 @@ class FuiServer:
         host: str = "127.0.0.1",
         port: int = 8600,
         feed: Optional[AgentFeed] = None,
+        vision_url: Optional[str] = None,
     ) -> None:
         self.feed = feed or AgentFeed(endpoint)
+        self.vision_url = vision_url or os.environ.get("BENCHCTRL_VISION_URL") or DEFAULT_VISION_URL
         self._httpd = ThreadingHTTPServer((host, port), _Handler)
         self._httpd.daemon_threads = True
         self._httpd.feed = self.feed  # type: ignore[attr-defined]
+        self._httpd.vision_url = self.vision_url  # type: ignore[attr-defined]
         self._thread: Optional[threading.Thread] = None
 
     @property
@@ -166,6 +235,11 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - entry p
         type=int,
         default=int(os.environ.get("BENCHCTRL_DASHBOARD_PORT", DEFAULT_PORT)),
     )
+    parser.add_argument(
+        "--vision-url",
+        default=os.environ.get("BENCHCTRL_VISION_URL", DEFAULT_VISION_URL),
+        help="the vision sidecar whose stream the page shows (loopback on the bench box)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -174,7 +248,7 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - entry p
         port=args.agent_port,
         token=os.environ.get("BENCHCTRL_TOKEN", ""),
     )
-    server = FuiServer(endpoint, host=args.host, port=args.port).start()
+    server = FuiServer(endpoint, host=args.host, port=args.port, vision_url=args.vision_url).start()
     try:
         threading.Event().wait()
     except KeyboardInterrupt:

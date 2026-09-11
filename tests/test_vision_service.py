@@ -278,3 +278,72 @@ def test_the_router_and_label_loop_import_with_no_heavy_dependency(monkeypatch):
     ):
         monkeypatch.delitem(sys.modules, mod, raising=False)
         __import__(mod)
+
+
+# ----------------------------------------------------------- the view listener
+
+
+def _view_server():
+    import threading
+
+    from benchctrl.vision.service import VIEW_ROUTES, serve
+
+    cam = SyntheticCamera()
+    svc = VisionService(cam, CannedDetector(), version="t")
+    srv = serve(svc, bind="127.0.0.1", port=0, allow=VIEW_ROUTES)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    return cam, svc, srv
+
+
+def _get(srv, method, path, body=None):
+    host, port = srv.server_address[:2]
+    conn = http.client.HTTPConnection(str(host), int(port), timeout=5)
+    conn.request(
+        method, path, body=body, headers={"Content-Type": "application/json"} if body else {}
+    )
+    resp = conn.getresponse()
+    data = resp.read()
+    conn.close()
+    return resp.status, resp.getheader("Content-Type"), data
+
+
+def test_the_view_listener_serves_only_the_stream_and_the_still():
+    """A LAN-facing port must be able to fire nothing and configure nothing.
+
+    ``VIEW_ROUTES`` is the whole allowlist; everything else — including reads
+    of structured state — is refused before the service sees it, so a widened
+    ``allow`` set would show up here as a passing request that must fail.
+    """
+    cam, svc, srv = _view_server()
+    try:
+        cam.trigger(1)
+        status, ctype, data = _get(srv, "GET", "/frame.jpg")
+        assert status == 200 and ctype == "image/jpeg" and data == TINY_JPEG
+        assert _get(srv, "GET", "/health")[0] == 200
+        before = cam.frame_id
+        for method, path, body in (
+            ("POST", "/capture", json.dumps({"seq": 9})),
+            ("GET", "/trigger?seq=9", None),
+            ("PUT", "/config", json.dumps({"exposure_us": 1})),
+            ("GET", "/crop?off", None),
+            ("POST", "/detect", json.dumps({})),
+            ("GET", "/status", None),
+            ("GET", "/frame.json", None),
+        ):
+            status, ctype, data = _get(srv, method, path, body)
+            assert status == 403, f"{method} {path} was served on the view port"
+            assert json.loads(data)["error"]["type"] == "forbidden"
+        assert cam.frame_id == before, "a refused request still fired the camera"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        svc.close()
+
+
+def test_the_control_listener_is_unrestricted_by_default():
+    with SimulatedVisionSidecar() as sim:
+        host, port = sim.url[len("http://") :].split(":")
+        conn = http.client.HTTPConnection(host, int(port), timeout=5)
+        conn.request("GET", "/status")
+        assert conn.getresponse().status == 200
+        conn.close()

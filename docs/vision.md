@@ -171,6 +171,21 @@ Error types → status: `value` 400, `not_found` 404, `capability` 409,
 --fps --triggered|--free-run --model /models/yolov8n-coco.axm --aipu-cores 4
 --no-aipu --jpeg-quality 80`.
 
+## Watching the camera
+
+Two read-only views, neither able to trigger or configure:
+
+- **The dashboard.** The FUI's VISION · LIVE quadrant shows the stream, relayed
+  by the FUI server from the sidecar's loopback (`/vision/stream`), so it works
+  on the kiosk panel and through an ssh tunnel to the FUI alike.
+- **A browser on the LAN.** With `VIEW_PORT=8096` in `vision.env` the sidecar
+  also serves `/stream`, `/frame.jpg` and `/health` on
+  `http://<bench-box>:8096/`, and refuses everything else there with 403.
+
+To focus: put the sidecar in free-run (`TRIGGER_MODE=free-run`, restart) so the
+picture follows the lens, turn the ring until label text reads, then put
+`TRIGGER_MODE` back to `triggered`.
+
 ## Tuning notes (from the metis R&D write-up)
 
 - **Exposure first.** Signal-to-noise beats frame rate for LED and indicator

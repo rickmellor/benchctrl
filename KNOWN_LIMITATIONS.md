@@ -1250,9 +1250,17 @@ the whole of `/dev`, which is one more reason the sidecar stays on loopback
 `benchctrl-vision` binds `127.0.0.1` by default and has no auth of its own. The
 agent is the network face, exactly as for every other instrument: a remote
 client reaches the camera only through the agent's HMAC handshake and claim
-gate. Binding the sidecar to `0.0.0.0` would expose a trigger-and-capture
-surface to the LAN with no credential. Don't; if a second host needs frames,
-give it an agent.
+gate. Binding the sidecar's control port to `0.0.0.0` would expose a
+trigger-and-capture surface to the LAN with no credential. Don't; if a second
+host needs to *drive* the camera, give it an agent.
+
+Two read-only ways to *watch* exist, and both are deliberately unable to fire
+or configure anything: the sidecar's optional **view listener** (`VIEW_PORT`,
+default 8096 on the LAN) serves `/stream`, `/frame.jpg` and `/health` and
+answers everything else 403; and the FUI relays exactly those two paths from
+the sidecar's loopback under its own origin (`/vision/stream`,
+`/vision/frame.jpg`) for the kiosk's VISION · LIVE quadrant. Neither carries
+`/status`, so a watcher cannot read the bench's structured state either.
 
 ### V-4. `seq` correlation is only as good as the trigger path
 `trigger_capture(seq=N)` returns the frame tagged `N` or raises — but the tag is

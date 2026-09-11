@@ -35,6 +35,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bind", default="127.0.0.1", help="address to listen on (default loopback)")
     p.add_argument("--port", type=int, default=8095)
     p.add_argument("--camera-serial", default=None, help="pick one camera by serial number")
+    p.add_argument(
+        "--view-port",
+        type=int,
+        default=0,
+        help="also serve /stream and /frame.jpg (read-only) on this port, on --view-bind; 0 = off",
+    )
+    p.add_argument(
+        "--view-bind",
+        default="0.0.0.0",
+        help="address for the read-only view listener (default all interfaces)",
+    )
     mode = p.add_mutually_exclusive_group()
     mode.add_argument(
         "--triggered",
@@ -64,7 +75,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
     from benchctrl.vision.camera import PylonCamera
-    from benchctrl.vision.service import VisionService, serve
+    from benchctrl.vision.service import VIEW_ROUTES, VisionService, serve
 
     camera = PylonCamera(
         serial=args.camera_serial,
@@ -81,6 +92,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         detector = load_detector(args.model, aipu_cores=args.aipu_cores)
     service = VisionService(camera, detector, version=__version__)
     server = serve(service, bind=args.bind, port=args.port)
+    view = None
+    if args.view_port:
+        view = serve(service, bind=args.view_bind, port=args.view_port, allow=VIEW_ROUTES)
     stop = threading.Event()
 
     def _stop(signum, _frame):
@@ -93,6 +107,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True
     )
     thread.start()
+    if view is not None:
+        threading.Thread(
+            target=view.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True
+        ).start()
+        log.info(
+            "view listener (stream + still only) on http://%s:%d", args.view_bind, args.view_port
+        )
     log.info(
         "benchctrl-vision %s serving %s (%s) on http://%s:%d — aipu=%s",
         __version__,
@@ -112,6 +133,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     finally:
         server.shutdown()
         server.server_close()
+        if view is not None:
+            view.shutdown()
+            view.server_close()
         service.close()
     return 0
 

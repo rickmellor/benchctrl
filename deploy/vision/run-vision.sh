@@ -32,6 +32,7 @@ TRIGGER_MODE=${TRIGGER_MODE:-triggered}
 JPEG_QUALITY=${JPEG_QUALITY:-80}
 AIPU_CORES=${AIPU_CORES:-4}
 NO_AIPU=${NO_AIPU:-0}
+VIEW_PORT=${VIEW_PORT:-0}
 NAME=benchctrl-vision
 
 detach=-d
@@ -63,7 +64,16 @@ fi
 # A stale container from a previous run must not block this one.
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
-# The port is published on loopback only: the sidecar has no authentication.
+# The read-only view listener (MJPEG stream + still) may go on the LAN: it
+# can fire nothing and configure nothing. VIEW_PORT=0 leaves it off.
+view_publish=""
+view_args=""
+if [ "$VIEW_PORT" != "0" ]; then
+    view_publish="-p $VIEW_PORT:$VIEW_PORT"
+    view_args="--view-port $VIEW_PORT --view-bind 0.0.0.0"
+fi
+
+# The control port is published on loopback only: the sidecar has no authentication.
 # shellcheck disable=SC2086
 exec docker run --rm $detach --name "$NAME" \
     --privileged \
@@ -72,8 +82,9 @@ exec docker run --rm $detach --name "$NAME" \
     -v "$SRC_DIR:/opt/benchctrl/src:ro" \
     -v "$MODEL_DIR:/models:ro" \
     -p "127.0.0.1:$PORT:$PORT" \
+    $view_publish \
     "$IMAGE" \
-    --bind 0.0.0.0 --port "$PORT" \
+    --bind 0.0.0.0 --port "$PORT" $view_args \
     $mode_flag --exposure-us "$EXPOSURE_US" --gain-db "$GAIN_DB" --fps "$FPS" \
     --jpeg-quality "$JPEG_QUALITY" $model_args
 

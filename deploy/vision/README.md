@@ -15,6 +15,11 @@ contract are in [`docs/vision.md`](../../docs/vision.md).
 | [`run-vision.sh`](run-vision.sh) | what the unit runs: the privileged container, port on loopback |
 | [`udev/72-axelera.rules`](udev/72-axelera.rules) | reference copy of the rule the driver package installs |
 
+`vision.env` knobs: `IMAGE`, `SRC_DIR`, `MODEL_DIR`, `MODEL`, `PORT` (control,
+loopback only), `VIEW_PORT` (read-only stream + still on the LAN; 0 = off),
+`EXPOSURE_US`, `GAIN_DB`, `FPS`, `TRIGGER_MODE`, `JPEG_QUALITY`, `AIPU_CORES`,
+`NO_AIPU`.
+
 All scripts are POSIX `sh`. The two `install-*` and the driver installer are
 root-only and idempotent; `build.sh` and `fetch-model.sh` run as the user.
 
@@ -76,11 +81,13 @@ must return `seq == 42` and a detection list.
 
 ### Focusing and exposure
 
-Open `http://<pi>:8095/stream` is **not** reachable — the port is loopback
-only. Tunnel it: `ssh -L 8095:127.0.0.1:8095 rick@benchpi` and open
-`http://127.0.0.1:8095/stream` locally. Set exposure and gain with
-`vision_set_exposure_us` / `vision_set_gain_db` (or `PUT /config`), then crop.
-Exposure first: signal-to-noise beats frame rate for LED reading.
+The control port is loopback only, but the read-only **view port**
+(`VIEW_PORT=8096` in `vision.env`) serves `/stream` and `/frame.jpg` on the LAN:
+open `http://benchpi.home.arpa:8096/stream`, or watch the dashboard's VISION
+quadrant. Put the sidecar in free-run (`TRIGGER_MODE=free-run`, restart) while
+focusing so the picture follows the lens; back to `triggered` afterwards. Set
+exposure and gain with `vision_set_exposure_us` / `vision_set_gain_db` (or
+`PUT /config`), then crop. Exposure first: signal-to-noise beats frame rate.
 
 ### Link speed and the HAT
 

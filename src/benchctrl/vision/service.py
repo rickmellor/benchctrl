@@ -61,12 +61,22 @@ MAX_WAIT_S = 10.0
 #: status is for humans with curl.
 ERROR_STATUS: dict[str, int] = {
     "value": 400,
+    "forbidden": 403,
     "not_found": 404,
     "capability": 409,
     "capture": 503,
     "timeout": 504,
     "internal": 500,
 }
+
+
+#: What the LAN-facing *view* listener may serve: a human watching the camera,
+#: nothing that fires, configures or reads back structured state. Everything
+#: else on that listener is refused with a ``forbidden`` error. The control
+#: surface stays on loopback, where the benchctrl agent is the only client.
+VIEW_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {("GET", "/stream"), ("GET", "/frame.jpg"), ("GET", "/health")}
+)
 
 
 class ServiceError(Exception):
@@ -397,11 +407,14 @@ def make_handler(
     service: VisionService,
     *,
     on_request: Optional[Callable[[str, str], None]] = None,
+    allow: Optional[frozenset[tuple[str, str]]] = None,
 ) -> type:
     """A ``BaseHTTPRequestHandler`` bound to ``service``.
 
     ``on_request`` is the simulator's hook for its request log; production
-    passes nothing.
+    passes nothing. ``allow`` restricts the handler to those ``(method, path)``
+    pairs — the view listener passes :py:data:`VIEW_ROUTES` — and everything
+    else is refused before it reaches the service.
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -414,7 +427,23 @@ def make_handler(
         def _dispatch(self, method: str) -> None:
             if on_request is not None:
                 on_request(method, self.path)
-            if method == "GET" and urlsplit(self.path).path == "/stream":
+            route = urlsplit(self.path).path
+            if allow is not None and (method, route) not in allow:
+                payload = json.dumps(
+                    {
+                        "error": {
+                            "type": "forbidden",
+                            "message": f"{method} {route} is not served on the view port",
+                        }
+                    }
+                ).encode("utf-8")
+                self.send_response(ERROR_STATUS["forbidden"])
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if method == "GET" and route == "/stream":
                 return self._stream()
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
@@ -462,9 +491,17 @@ def serve(
     bind: str = "127.0.0.1",
     port: int = 8095,
     on_request: Optional[Callable[[str, str], None]] = None,
+    allow: Optional[frozenset[tuple[str, str]]] = None,
 ) -> ThreadingHTTPServer:
-    """Bind and return a server; the caller runs ``serve_forever`` (or a thread)."""
-    server = ThreadingHTTPServer((bind, port), make_handler(service, on_request=on_request))
+    """Bind and return a server; the caller runs ``serve_forever`` (or a thread).
+
+    Two are normally run against one service: the control listener on loopback
+    (``allow=None``) and, optionally, a view listener on the LAN with
+    ``allow=VIEW_ROUTES``.
+    """
+    server = ThreadingHTTPServer(
+        (bind, port), make_handler(service, on_request=on_request, allow=allow)
+    )
     server.daemon_threads = True
     return server
 
