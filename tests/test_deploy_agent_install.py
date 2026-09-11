@@ -143,3 +143,17 @@ def test_the_fui_launcher_finds_the_package_through_the_agents_env_file():
     env_read = code.index("s/^PYTHONPATH=//p")
     assert env_read < fallback, "the env file must be consulted before the fixed path"
     assert 'if [ -z "${BENCHCTRL_SRC_DIR:-}" ]' in code, "an explicit BENCHCTRL_SRC_DIR must win"
+
+
+def test_the_kiosk_installer_handles_a_console_booting_pi():
+    """Three things a Raspberry Pi OS Lite board needs that the Uno Q had
+    already: the vc4 Xorg snippet (or X never starts), membership of the
+    ``autologin`` group (or the drop-in is silently ignored), and the graphical
+    target (or lightdm is never started at boot). Each is conditional so the
+    Uno Q path is untouched."""
+    code = _code_lines("install-kiosk.sh")
+    assert "/sys/module/vc4" in code and "xorg/20-benchctrl-vc4.conf" in code
+    assert "usermod -aG autologin" in code
+    assert "systemctl set-default graphical.target" in code
+    conf = (DEPLOY / "xorg" / "20-benchctrl-vc4.conf").read_text(encoding="utf-8")
+    assert 'MatchDriver "vc4"' in conf and 'Driver "modesetting"' in conf

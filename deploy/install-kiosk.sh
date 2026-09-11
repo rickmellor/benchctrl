@@ -74,6 +74,32 @@ esac
 install -m 0755 "$here/benchctrl-kiosk" /usr/local/bin/
 install -m 0644 "$here/xsessions/benchctrl-kiosk.desktop" "$SESSION"
 
+# A Raspberry Pi's Xorg needs to be told which of its two DRM devices has the
+# HDMI ports, or it never starts (see deploy/xorg/20-benchctrl-vc4.conf). Only
+# where the vc4 driver is present: the Uno Q's msm display is unaffected.
+if [ -d /sys/module/vc4 ] || [ -d /sys/bus/platform/drivers/vc4-drm ]; then
+    install -d -m 0755 /etc/X11/xorg.conf.d
+    install -m 0644 "$here/xorg/20-benchctrl-vc4.conf" /etc/X11/xorg.conf.d/
+    echo "installed /etc/X11/xorg.conf.d/20-benchctrl-vc4.conf (vc4 display)"
+fi
+
+# Debian's lightdm-autologin PAM stack admits only members of `autologin`.
+# Without this the drop-in below is silently ignored and the greeter appears.
+if ! getent group autologin >/dev/null; then
+    groupadd autologin
+fi
+if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx autologin; then
+    usermod -aG autologin "$RUN_USER"
+    echo "added $RUN_USER to the autologin group"
+fi
+
+# A board that boots to the console never starts a display manager, however
+# enabled it is: lightdm is pulled in by graphical.target only.
+if [ "$(systemctl get-default)" != "graphical.target" ]; then
+    systemctl set-default graphical.target
+    echo "default target -> graphical.target (was multi-user)"
+fi
+
 install -d -m 0755 /etc/lightdm/lightdm.conf.d
 sed "s/^autologin-user=.*/autologin-user=$RUN_USER/" \
     "$here/lightdm/90-benchctrl-kiosk.conf" > "$DROPIN"
