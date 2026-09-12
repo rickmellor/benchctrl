@@ -209,9 +209,13 @@ def _firmware_version() -> Optional[str]:
 
 
 def _board_temp_c() -> Optional[float]:
-    """The first temperature ``axcmd --board-temp`` prints, or None."""
+    """The first sensor ``axcmd --board-temp`` prints, or None.
+
+    The line looks like ``0: temp_sensor0@48 = 50.25`` — a value in degrees C
+    with no unit suffix (verified on scrub, firmware 1.8.0).
+    """
     out = _run(["axcmd", "--board-temp"])
-    m = re.search(r"(-?\d+(?:\.\d+)?)\s*C\b", out or "")
+    m = re.search(r"temp_sensor\d+@\d+\s*=\s*(-?\d+(?:\.\d+)?)", out or "")
     return float(m.group(1)) if m else None
 
 
