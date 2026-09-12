@@ -8,10 +8,11 @@ proven in the `metis` R&D repository at YOLOv8n ≈ 510 FPS on-device and ~46 FP
 end to end. This document is the benchctrl half: the driver, the tools, the
 sidecar contract, and what carries across local, remote and sim mode.
 
-The Metis needs PCIe. A **Raspberry Pi 5** (M.2 HAT) or a desktop has it; an
+The Metis needs PCIe. A **Raspberry Pi 5** (M.2 HAT+) or a desktop has it; an
 **Arduino Uno Q does not**, so on that board the device is camera-only at best
 and every detection call raises `VisionCapabilityError`. See
-[`KNOWN_LIMITATIONS.md`](../KNOWN_LIMITATIONS.md) § V-1.
+[`KNOWN_LIMITATIONS.md`](../KNOWN_LIMITATIONS.md) § V-1 — and § V-8 for the
+three host-side fixes a Pi 5 needs, all shipped by `deploy/vision/`.
 
 ## The split, and why it is what makes the device portable
 

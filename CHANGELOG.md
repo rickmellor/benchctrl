@@ -51,6 +51,19 @@ because on a Pi the kernel binds `usbtmc` and only pyusb lets pyvisa-py
 claim the interface — without it the DMM and both Rigols are invisible to
 VISA. See `docs/vision.md` and `deploy/vision/README.md`.
 
+**The Metis works on the Pi 5.** Three host-side faults stacked, none
+visible through the others: the card resets its BARs a few seconds after
+the Pi's early enumeration (a boot-time `benchctrl-metis-rescan.service`
+re-enumerates it), the card's DMA is 32-bit while the Pi maps RAM to PCIe
+above 4 GB (`dtoverlay=pcie-32bit-dma-pi5`), and the root port's 512-byte
+Max Payload Size against the card's 128 made every completion malformed
+(the rescan service aligns both to 128 every boot). Plus one vendor
+module option, `single_msi=1`, because with 32 vectors the card's firmware
+signals DMA completion with bare vector indices a Broadcom host does not
+decode. Diagnosed from the driver's debugfs and the PCIe error bits;
+written up in `KNOWN_LIMITATIONS.md` § V-8. Remote capture-and-detect
+through the agent runs at ~100 ms per frame on the Pi.
+
 The Pi's HDMI panel runs the dashboard too. `deploy/benchctrl-fui` finds the
 package through `/etc/benchctrl/agent.env`, and `deploy/install-kiosk.sh`
 derives its autologin user like the other installers and handles what a

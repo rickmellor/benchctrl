@@ -157,3 +157,42 @@ def test_only_the_view_port_may_be_published_on_the_lan():
     assert 'if [ "$VIEW_PORT" != "0" ]' in code
     lan_publishes = re.findall(r'-p\s+"?\$([A-Z_]+):', code)
     assert lan_publishes == ["VIEW_PORT"], lan_publishes
+
+
+def test_the_rescan_runs_once_per_boot_before_the_sidecar_and_only_when_needed():
+    """The Metis resets its BARs a few seconds after power-on, after a Pi has
+    already enumerated it; a remove+rescan re-assigns them. It must be
+    idempotent (a healthy card is left alone), verified by the driver's own
+    log rather than assumed, and ordered before the sidecar that needs it."""
+    code = _code("metis-rescan.sh")
+    assert "vmsi configured" in code and "vmsi (configured|not available)" in code
+    assert "/sys/bus/pci/rescan" in code and "/remove" in code
+    assert "1f9d:1100" in code
+    assert re.search(r"if healthy .*; then\s*\n\s*echo .*nothing to do", code)
+    unit = (VISION / "systemd" / "benchctrl-metis-rescan.service").read_text(encoding="utf-8")
+    assert "Type=oneshot" in unit and "Before=benchctrl-vision.service" in unit
+    assert "ExecStart=/usr/local/bin/benchctrl-metis-rescan" in unit
+    vision = (VISION / "systemd" / "benchctrl-vision.service").read_text(encoding="utf-8")
+    assert "benchctrl-metis-rescan.service" in vision
+    installer = _code("install-vision.sh")
+    assert (
+        "benchctrl-metis-rescan" in installer
+        and "systemctl enable benchctrl-metis-rescan.service" in installer
+    )
+
+
+def test_the_rescan_aligns_the_payload_size_on_both_ends_every_time():
+    """The Pi 5 root port defaults to a 512-byte Max Payload Size; the Metis runs
+    at 128. Left unequal, every completion the root port returns is malformed
+    to the card and its firmware DMA never lands. Aligned on the healthy path
+    and after a rescan alike, because re-enumeration re-derives it."""
+    code = _code("metis-rescan.sh")
+    assert code.count("align_payload") >= 3, "align on the healthy path and after a rescan"
+    assert "CAP_EXP+0x8.w" in code and "0x70e0" in code
+    assert "CAP_EXP+0xa.w=000f" in code, "clear the error bits the mismatch left behind"
+
+
+def test_the_driver_installer_pins_a_single_msi_vector():
+    code = _code("install-metis-driver.sh")
+    assert "options metis single_msi=1" in code
+    assert "/etc/modprobe.d/metis.conf" in code

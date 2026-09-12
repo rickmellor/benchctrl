@@ -79,6 +79,14 @@ if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx axelera; then
     echo "  added $RUN_USER to axelera (re-login to take effect)"
 fi
 printf 'metis\n' > /etc/modules-load.d/metis.conf
+# One MSI vector, always. With 32 vectors the card's firmware programs its DMA
+# completion interrupts with bare vector indices, which a Broadcom brcmstb host
+# (Raspberry Pi 5) encodes as 0x6540|index, so no DMA ever completes. One
+# vector is the virtual-MSI path the card uses on x86 anyway.
+cat > /etc/modprobe.d/metis.conf <<'EOF'
+# benchctrl deploy/vision/install-metis-driver.sh — see KNOWN_LIMITATIONS.md § V-8
+options metis single_msi=1
+EOF
 udevadm control --reload-rules && udevadm trigger && udevadm settle || true
 modprobe metis
 

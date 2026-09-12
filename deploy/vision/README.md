@@ -51,9 +51,15 @@ HAT and visible to `lspci -d 1f9d:1100`, the Basler on USB 3.
 ```bash
 cd ~/benchctrl
 
-# 1. kernel driver — DKMS builds against the running kernel (~1 min on a Pi 5)
+# 0. Pi-only config (KNOWN_LIMITATIONS.md § V-8): in /boot/firmware/config.txt
+#      dtparam=pciex1_gen=3
+#      dtoverlay=pcie-32bit-dma-pi5
+#    and a 5 V / 5 A USB-C PD supply on the Pi (the 27 W official one).
+
+# 1. kernel driver — DKMS builds against the running kernel (~1 min on a Pi 5);
+#    also writes /etc/modprobe.d/metis.conf (single_msi=1)
 sudo DEB=~/metis-dkms_1.6.2_all.deb ./deploy/vision/install-metis-driver.sh
-ls -l /dev/metis*                     # metis-1-3-0 and its colon symlink
+ls -l /dev/metis*                     # metis-1-1-0 and its colon symlink
 #   the bus address moves with the HAT slot; the script finds the card by 1f9d:1100
 
 # 2. the image (~3.5 GB; 15–25 min on a Pi 5, once)
@@ -65,8 +71,11 @@ docker run --rm --privileged -v /dev:/dev -v /sys:/sys --entrypoint axdevice ben
 # 3. the model (compiled on scrub with the devkit; never on the Pi)
 ./deploy/vision/fetch-model.sh        # scp from scrub, sha256 into models/MANIFEST
 
-# 4. the service
+# 4. the service (+ benchctrl-metis-rescan.service: re-enumerates the card once
+#    per boot and aligns Max Payload Size — the Pi enumerates before the card
+#    has booted; see § V-8)
 sudo ./deploy/vision/install-vision.sh
+journalctl -u benchctrl-metis-rescan -b   # want: "healthy after rescan" + "MaxPayload/MaxReadReq 128"
 curl -s localhost:8095/health         # {"ok": true, "camera": true, "aipu": true, …}
 curl -s localhost:8095/status | python3 -m json.tool
 

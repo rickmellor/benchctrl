@@ -38,6 +38,8 @@ install -d -m 0755 "$CONF_DIR"
 install -d -m 0755 -o "$RUN_USER" -g "$RUN_USER" "$MODEL_DIR"
 
 install -m 0755 "$here/run-vision.sh" /usr/local/bin/benchctrl-vision-run
+install -m 0755 "$here/metis-rescan.sh" /usr/local/bin/benchctrl-metis-rescan
+install -m 0644 "$here/systemd/benchctrl-metis-rescan.service" /etc/systemd/system/
 
 if [ -f "$CONF_DIR/vision.env" ]; then
     echo "keeping existing $CONF_DIR/vision.env"
@@ -51,6 +53,10 @@ fi
 
 install -m 0644 "$here/systemd/$UNIT" "/etc/systemd/system/$UNIT"
 systemctl daemon-reload
+# The rescan runs once per boot; run it now too, so a first install on a host
+# whose card is currently in the bad state comes up without a reboot.
+systemctl enable benchctrl-metis-rescan.service
+systemctl restart benchctrl-metis-rescan.service || true
 systemctl enable "$UNIT"
 systemctl restart "$UNIT"
 

@@ -1277,14 +1277,12 @@ touches the card. Recordings do spill, and on `benchpi` `blob_dir` is on the
 microSD. For long recordings point `blob_dir` at a USB SSD (`STATE_DIR=` on
 `install-agent.sh`, or edit `agent.json`).
 
-### V-6. The Metis link is Gen2 x1 behind a switch HAT
-A Pi 5 has one PCIe lane. The Metis is a 2280 card, so the official M.2 HAT+
-(2230/2242) does not fit; the dual-slot HAT that does carries an ASM1182e
-switch, which is Gen2, so the card that advertises Gen3 x4 runs at 5 GT/s x1
-(4 Gb/s). The Pi's root port is correctly at Gen3 (`dtparam=pciex1_gen=3`);
-the switch is the whole cap. Ample for YOLOv8n-class work (~0.6 Gb/s at
-60 fps); a switchless 2280 board (Pimoroni NVMe Base, Geekworm X1001) would
-give Gen3 x1. `install-metis-driver.sh` prints the negotiated link.
+### V-6. The Metis link depends on the HAT
+A Pi 5 has one PCIe lane. The official M.2 HAT+ is 2230/2242 and the Metis is
+2280, so it overhangs and needs securing (kapton tape on benchpi), but it is
+switchless and gives Gen3 x1 (8 GT/s). A dual-slot HAT with an ASM1182e switch
+caps the link at Gen2 x1 (4 Gb/s). Either is ample for YOLOv8n-class work
+(~0.6 Gb/s at 60 fps). `install-metis-driver.sh` prints the negotiated link.
 
 ### V-7. `aipu_temp_c` is whatever `axcmd` says, or `None`
 The Axelera Python runtime exposes no thermal call we know of, so the sidecar
@@ -1294,6 +1292,37 @@ changed output format, a card mid-reset — reads as `None`. It is never
 estimated from anything else. Firmware ≥ 1.4 has its own thermal management
 (HW throttle at 105 °C; 1.8.0 is what the bench runs); on 1.3.0 the card
 hard-hung under load and no software reading would have warned you.
+
+### V-8. The Metis on a Raspberry Pi 5 needs three host-side fixes, all shipped
+Found 2026-09-12 after every hardware variable had been ruled out (the card
+was fine in an x86 desktop). Each fails in its own way and they stack, which
+is why no single change looked like it helped:
+
+1. **The card resets its BARs after the kernel enumerates it.** The Pi
+   enumerates PCIe ~7 s after power-on; the card's firmware finishes booting
+   a few seconds later and resets its PCIe configuration, so the BARs no
+   longer hold what the kernel wrote. Every host read of the card returns
+   0xFF, the driver logs `vmsi not available`, every command ends in
+   `IRQ MSI timeout`. An x86 BIOS enumerates tens of seconds later and never
+   sees this. `benchctrl-metis-rescan.service` removes and rescans the device
+   once per boot when the driver reports it unhealthy.
+2. **The card's DMA is 32-bit; the Pi maps RAM to PCIe above 4 GB.** Needs
+   `dtoverlay=pcie-32bit-dma-pi5` (bounce-buffered 2 GB inbound window), which
+   also moves the MSI doorbell below 4 GB. Without it the runtime's firmware
+   load times out (`USR_DMA_XFER failed`).
+3. **Max Payload Size mismatch.** The root port defaults to 512 bytes, the
+   card to 128, `pci=pcie_bus_safe` notwithstanding; every completion the
+   root port returns is malformed to the card (`UESta MalfTLP+ CmpltTO+`) and
+   the same DMA times out. The rescan service sets both ends to 128 on every
+   boot, after a rescan too, because re-enumeration re-derives them.
+
+Also pinned: `options metis single_msi=1`. With 32 MSI vectors the card's
+firmware programs its DMA-completion interrupts with bare vector indices,
+which a Broadcom brcmstb host encodes as `0x6540|index`; one vector is the
+virtual-MSI path the card uses on x86 anyway. `install-metis-driver.sh`
+writes it. Diagnosed with the driver's debugfs (`/sys/kernel/debug/metis/…`:
+`dma-statistics`, `dma-regs`, `vmsi`) and `lspci -vv` error bits on both ends
+of the link, which is the order to look in if it ever regresses.
 
 ## What's not in this list
 
