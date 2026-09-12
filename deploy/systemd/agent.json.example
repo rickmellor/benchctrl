@@ -7,6 +7,8 @@
   "devices": ["otii_arc"],
   "_safe_stop_exempt": "Bench INFRASTRUCTURE the safe-stop and the governor must leave alone: a supply that powers the NPU/fan is armed for the life of the bench and disarming it is the outage. Keys here are never tracked as armed and never driven to a safe state. Rename to safe_stop_exempt to enable.",
   "_safe_stop_exempt_example": ["rigol_dp2031"],
+  "_open_example": "Per-device open() keyword arguments, keyed by device key, under \"open\". The SDG1032X takes its channel grant, the driver-side amplitude cap, and (optional) the LAN socket address used for arbitrary-waveform transfer; unset, the driver asks the instrument for its own IP.",
+  "_open_example_value": {"siglent_sdg1032x": {"allowed_channels": [1, 2], "max_amplitude_vpp": 5.0, "lan_host": "sdg1032x.home.arpa"}},
 
   "deadman_s": 15,
   "heartbeat_s": 5,

@@ -133,6 +133,14 @@ def make_sdg1032x(**kwargs) -> Any:
     own default, and against a simulator there is no DUT to protect, so the
     factory adds no policy of its own — a test narrows the grant to exercise
     the policy errors.
+
+    Arbitrary-waveform transfer goes over the instrument's LAN socket (USB
+    drops it on the bench firmware), and the simulator serves that socket on
+    loopback at an ephemeral port. The port cannot be discovered over SCPI,
+    so unless the caller names ``lan_host``/``lan_port`` the factory hands
+    the driver ``lan_host="127.0.0.1", lan_port=sim.lan_port``. Pass
+    ``sim={"lan": False}`` for a unit with no Ethernet: the factory then
+    passes nothing and the driver's no-LAN error path runs.
     """
     from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X
     from benchctrl.sim.sdg1032x import SimulatedSDG1032X
@@ -141,6 +149,9 @@ def make_sdg1032x(**kwargs) -> Any:
     kwargs.pop("resource", None)
     sim = SimulatedSDG1032X(**sim_kwargs)
     sim.start()
+    if sim.lan_port is not None and "lan_host" not in kwargs and "lan_port" not in kwargs:
+        kwargs["lan_host"] = "127.0.0.1"
+        kwargs["lan_port"] = sim.lan_port
     try:
         driver = SiglentSDG1032X.open(_asrl(sim.port), **kwargs)
     except Exception:

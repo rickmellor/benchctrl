@@ -1047,7 +1047,7 @@ comma, all bench-measured: ``VOLTPRT?`` → ``ON``; the three LAN queries → a
 quoted dotted quad; ``C1:HARM?`` when on → ``C1:HARM ,HARMSTATE,ON,…``. The
 parser accepts all four and the simulator renders them the same way.
 
-### F-23. Firmware 1.01.01.33R1B6 deviates from the programming guide in six places
+### F-23. Firmware 1.01.01.33R1B6 deviates from the programming guide in eight places
 Measured on the bench unit; the driver follows the instrument, not the guide:
 ``MODE?`` answers ``PHASE-LOCKED`` and the *set* form must be ``MODE
 PHASE-LOCKED`` (the guide's ``PHASELOCKED`` is silently ignored — the driver
@@ -1061,7 +1061,11 @@ command that carries ``WVTP`` **together with** other fields makes the
 instrument swallow exactly one following message (the read-back query times
 out; the one after answers) — no delay helps, ``WVTP`` alone or fields
 without it answer at once — so ``set_basic_wave`` sends the wave type in its
-own command first. The simulator models the swallow.
+own command first. ``HARM?`` goes unanswered unless the channel's wave is
+SINE, so ``get_harmonics`` answers "disabled" without asking on any other
+wave and ``set_harmonics`` refuses. And the first query after selecting a
+large user waveform (``ARWV NAME``) is lost while the channel loads it —
+``select_arb`` polls. The simulator models the swallows.
 
 ### F-24. `MAX_OUTPUT_AMP` is accepted, never echoed, and not enforced
 The guide's instrument-side amplitude cap does nothing on this firmware: after
@@ -1072,16 +1076,25 @@ therefore does not rely on it: ``max_amplitude_vpp`` (``open()``,
 bypasses it — which is why ``allowed_channels`` and the cap are the driver's
 policy, and the agent's writer claim is the bench's.
 
-### F-25. Arbitrary-waveform upload (`WVDT`) does not land over USB-TMC on this firmware
-Three framings were tried on the bench (the guide's, with and without a
-``LENGTH`` field, with and without a terminator, as pyvisa-py's 512-byte
-USB-TMC pieces and as one 32 KB transfer). None stored a user waveform; the
-small ones left the next query with a USB pipe error and the 32 KB one stalled
-the instrument's USB stack until a front-panel power cycle. The driver's
-``write_arb``/``read_arb`` implement the guide's protocol and are verified
-against the simulator only; ``list_arbs``, ``select_arb`` (built-ins by index)
-and ``get_arb`` work on the bench. Next step is in ``ROADMAP.md``: the upload
-over the instrument's LAN socket (port 5025), where the framing is not USB-TMC.
+### F-25. Arbitrary-waveform upload works only over the LAN socket, which is line-terminated
+Over USB-TMC the bench firmware (1.01.01.33R1B6) **silently drops** every
+`WVDT` upload framing tried — with or without `LENGTH`, with or without a
+terminator, newline-free payloads included, chunked or as one transfer (the
+32 KB single transfer stalled the USB stack until a rear-switch power cycle).
+Over the instrument's raw SCPI socket (Ethernet, port 5025) the upload lands
+and a full 16384-point waveform reads back byte-exact. That socket server is
+**line-oriented**: a message ends at the first `0x0A` byte, payload included,
+and `LENGTH` is ignored — so the driver escapes newline bytes first
+(`escape_codes`: a sample whose low byte is `0x0A` moves one code, below the
+14-bit DAC's resolution; one whose high byte is `0x0A` moves to the nearer of
+2559/2816, up to 128 codes on the ~0.4 % of samples in that band) and reports
+the count as `ArbData.nudged`. `write_arb`/`read_arb` use the LAN only, never
+USB; the address is `lan_host` from `open()`/`agent.json` or the one the
+instrument reports for itself. Read-back is `WVDT POS, /Local, WVNM, <name>,
+LENGTH, <n>B, TYPE, 6, WAVEDATA, ` + n bytes; it carries no wave parameters.
+A user waveform selects **by name** and reads back as `NAME,<name>.bin`. There
+is no delete command in the SDG1000X set: stale user waveforms are removed
+from the front panel (Store/Recall).
 
 ### F-26. `STL? BUILDIN` names differ from the `ARWV INDEX` table
 The built-in list the instrument returns (``M4, StairUD``, ``M12, LogFall``…)

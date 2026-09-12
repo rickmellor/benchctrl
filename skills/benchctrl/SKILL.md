@@ -433,9 +433,10 @@ clamped; do not retry blindly, pick a representable value. `open()` energises
 nothing; `set_output(ch, True)` arms the BNC (know what is attached); the
 driver's `max_amplitude_vpp` is the amplitude cap (the instrument's own is
 not honoured); `disable_outputs()` is the disarm. Built-in arbs select by
-index, user arbs by name; upload over USB does not work on the bench unit
-yet. `sdg1032x_read_screen(save_to=…)` grabs the instrument's screen; the FUI
-shows it live. Full contract: `docs/drivers.md` § Siglent SDG1032X.
+index, user arbs by name; `write_arb` goes over the instrument's LAN socket
+(`lan_host`, or the IP it reports itself — USB drops uploads) and reports
+`nudged` newline-escaped samples. `sdg1032x_read_screen(save_to=…)` grabs the
+instrument's screen; the FUI shows it live. Full contract: `docs/drivers.md` § Siglent SDG1032X.
 
 ```python
 from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X

@@ -26,6 +26,13 @@ programming guide and one where it ignores a documented command
 the instrument. Arbitrary-waveform upload over USB-TMC does not land on
 this firmware and is documented rather than shipped.
 
+**Arbitrary waveforms upload over the instrument's LAN.** USB-TMC drops
+every `WVDT` framing on this firmware; the raw SCPI socket takes it, but
+ends a message at the first newline byte, payload included, so the driver
+escapes those (`escape_codes`, reported as `ArbData.nudged`) and verifies by
+reading the stored codes back. The socket address is `lan_host` in
+`agent.json`/`open()` or what the instrument reports for itself.
+
 **The bench watches the generator two ways.** The FUI's former DMM pane
 shows the SDG's own screen (`read_screen`, a 480×272 bitmap every two
 seconds while somebody is looking), relayed from the dashboard's observer

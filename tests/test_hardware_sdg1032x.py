@@ -118,3 +118,23 @@ def test_output_arms_at_one_volt_and_disarms(gen):
     assert gen.set_output(1, True).enabled is True
     states = gen.disable_outputs()
     assert not states[1].enabled and not states[2].enabled
+
+
+def test_arb_round_trips_over_the_lan(gen):
+    """The upload path USB refuses: a full-length float waveform lands over the
+    instrument's socket and reads back byte-exact after newline escaping."""
+    import math
+
+    from benchctrl.drivers.siglent_sdg1032x import SDG1032XConnectionError
+
+    n = 16384
+    sine = [math.sin(2 * math.pi * i / n) for i in range(n)]
+    try:
+        arb = gen.write_arb("bench_sine16k", sine, frequency_hz=1000, amplitude_vpp=1.0)
+    except SDG1032XConnectionError as exc:
+        pytest.skip(f"generator not on the LAN: {exc}")
+    assert len(arb.codes) == 2 * n
+    assert 0 < arb.nudged < n // 50, "escaping touched an implausible number of samples"
+    assert gen.read_arb("bench_sine16k").codes == arb.codes
+    assert gen.select_arb(1, name="bench_sine16k").name == "bench_sine16k"
+    assert "bench_sine16k" in [a.name for a in gen.list_arbs("user")]
