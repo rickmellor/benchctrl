@@ -997,7 +997,10 @@ const VISION = { armed: false, retryMs: 2000, timer: null };
 
 function renderVision(v) {
   const slot = v && v.instruments ? v.instruments.find((i) => i.key === 'bench_vision') : null;
-  $('vision-verdict').textContent = slot && slot.linked ? slot.status : 'NO LINK';
+  // The rail's word, whether or not a client holds the device: the picture
+  // beside it is live regardless, and a NO LINK next to a live feed reads as a
+  // contradiction rather than as "nobody has opened it".
+  $('vision-verdict').textContent = slot ? slot.status : 'NO LINK';
   if (!VISION.armed) armVision();
 }
 
