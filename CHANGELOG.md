@@ -78,6 +78,22 @@ tunnel alike. The sidecar gained a read-only **view listener** (`VIEW_PORT`,
 8096 on the LAN) serving only `/stream`, `/frame.jpg` and `/health`; the
 control port stays on loopback.
 
+### Capture-and-label: a training set from states benchctrl commanded
+
+`benchctrl.vision.labelloop` (stdlib) commands a state — a PDU outlet, a
+CP2112 line, or the bench box's own status LED via sysfs — settles, fires
+N `seq`-tagged captures and labels each frame with the state that was
+commanded when it was taken. A wrong-`seq` frame is a recorded discard,
+never a label; states are interleaved across rounds so drift cannot
+become a class; every actuator is restored as found, also on failure, and
+the far side of the link is checked in the tests. Output is
+`frames/<label>/<seq>.jpg` with a manifest (spec digest, camera settings
+read back, per-frame checksum and actuator state, optional sanity read)
+and `labels.csv`. CLI `python -m benchctrl.vision.labelloop`, MCP tool
+`vision_label_capture`. First real dataset on benchpi: the Pi's ACT LED,
+200 frames in 15 s, zero discards. `deploy/vision/` gains a udev rule for
+the host LEDs.
+
 ### Raspberry Pi 5 as a second agent platform
 
 The bench agent now deploys to a Raspberry Pi 5 with the same

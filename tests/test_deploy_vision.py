@@ -196,3 +196,11 @@ def test_the_driver_installer_pins_a_single_msi_vector():
     code = _code("install-metis-driver.sh")
     assert "options metis single_msi=1" in code
     assert "/etc/modprobe.d/metis.conf" in code
+
+
+def test_the_host_led_rule_is_installed_only_where_the_host_has_one():
+    code = _code("install-vision.sh")
+    assert "70-benchctrl-host-leds.rules" in code
+    assert "/sys/class/leds/ACT" in code.split("70-benchctrl-host-leds.rules")[0]
+    rule = (VISION / "udev" / "70-benchctrl-host-leds.rules").read_text(encoding="utf-8")
+    assert 'SUBSYSTEM=="leds"' in rule and "ACT|PWR" in rule and "chmod g+w" in rule

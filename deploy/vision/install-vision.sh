@@ -39,6 +39,13 @@ install -d -m 0755 -o "$RUN_USER" -g "$RUN_USER" "$MODEL_DIR"
 
 install -m 0755 "$here/run-vision.sh" /usr/local/bin/benchctrl-vision-run
 install -m 0755 "$here/metis-rescan.sh" /usr/local/bin/benchctrl-metis-rescan
+# The host's own status LEDs as label-loop actuators (Raspberry Pi: ACT, PWR).
+if [ -e /sys/class/leds/ACT ]; then
+    install -m 0644 "$here/udev/70-benchctrl-host-leds.rules" /etc/udev/rules.d/
+    udevadm control --reload-rules
+    udevadm trigger --action=add --subsystem-match=leds
+    echo "installed 70-benchctrl-host-leds.rules (ACT/PWR writable by group gpio)"
+fi
 install -m 0644 "$here/systemd/benchctrl-metis-rescan.service" /etc/systemd/system/
 
 if [ -f "$CONF_DIR/vision.env" ]; then

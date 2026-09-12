@@ -157,11 +157,11 @@ which is a proof that the pipeline works, not the model the bench needs. The
 bench needs "is this LED on, what colour, what blink code", and no such model
 exists yet.
 
-**Scope when picked up**: collect real frames against *commanded* state (the
-capture-and-label loop: command a PDU outlet or a CP2112 line, settle, capture
-N frames tagged with `seq`, label from the command), train a small classifier
-on scrub with the Axelera devkit, compile to `.axm`, serve it from the same
-sidecar with a `read_indicators()`-shaped call. Lessons from the metis repo's
+**Scope when picked up**: the capture-and-label loop **shipped** (2026-09-12,
+`benchctrl.vision.labelloop`; first dataset: the Pi's own ACT LED, 200 frames,
+100 per class). Remaining: train a small classifier on scrub with the Axelera
+devkit, compile to `.axm`, serve it from the same sidecar with a
+`read_indicators()`-shaped call. Lessons from the metis repo's
 board-reader experiment apply verbatim: synthetic-only collapsed to 48 %,
 200 real frames gave 100 %; tune exposure before anything else; keep a
 classical-CV sanity channel and parity-check against the commanded state;

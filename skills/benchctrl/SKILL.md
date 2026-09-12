@@ -447,6 +447,12 @@ state, and treat a `VisionCaptureError` as "discard, never label". A
 `VisionCapabilityError` means no NPU on this host — fall back, don't retry.
 MCP tools are `vision_*`; none returns image bytes, pass `save_to=`.
 
+**Building a training set** (`docs/vision.md` § Label loop): write a spec of
+states (PDU outlet / CP2112 line / host `sysfs_led`) with labels, then
+`python -m benchctrl.vision.labelloop spec.json out/ --sanity` on the bench
+box, or `vision_label_capture(spec, out_dir)` over MCP. Labels come from the
+commanded state; a wrong-`seq` frame is discarded; actuators are restored.
+
 ## Anti-patterns — don't do these
 
 - **Don't reach for a vendor TCP server / external client library.**

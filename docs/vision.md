@@ -187,6 +187,48 @@ To focus: put the sidecar in free-run (`TRIGGER_MODE=free-run`, restart) so the
 picture follows the lens, turn the ring until label text reads, then put
 `TRIGGER_MODE` back to `triggered`.
 
+## Label loop — a training set from states benchctrl commanded
+
+`benchctrl.vision.labelloop` builds the labelled frame set the bench's own
+model needs (LED lit/dark, colour, later blink codes) from ground truth
+benchctrl already has: it commands a state, settles, fires N `seq`-tagged
+captures and labels each frame with the state that was commanded when it was
+taken. Actuators: a PDU outlet, a CP2112 line, or the bench box's own status
+LED (`sysfs_led`, e.g. a Raspberry Pi's `ACT`). Rules, each earned by the metis
+board-reader experiment: label from the command and verify from the frame (a
+wrong-`seq` frame is a recorded discard, never a label; an optional sanity read
+of a region is stored beside every frame); interleave states across rounds so
+drift cannot become a class; restore every actuator as found, also on failure.
+
+```json
+{
+  "name": "benchpi-act-led",
+  "states": [
+    {"label": "lit",  "actuator": {"device": "sysfs_led", "led": "ACT", "brightness": 0}},
+    {"label": "dark", "actuator": {"device": "sysfs_led", "led": "ACT", "brightness": 1}}
+  ],
+  "frames_per_state": 25, "rounds": 4, "settle_s": 0.6, "seq_start": 10000,
+  "crop": [1040, 620, 160, 160], "exposure_us": 40000, "sanity_roi": [45, 50, 70, 45]
+}
+```
+
+```bash
+python -m benchctrl.vision.labelloop act-led.json ~/datasets/benchpi-act-led --sanity
+```
+
+(on the bench box in local mode, or from a host in remote mode — devices
+resolve through `benchctrl.session`; `sysfs_led` only exists where the loop
+runs). Output: `frames/<label>/<seq>.jpg`, `manifest.json` (spec + digest,
+camera settings *read back*, per-frame seq/frame_id/sha256/actuator state/
+sanity, discards, as-found, restored) and `labels.csv`. The MCP tool is
+`vision_label_capture(spec, out_dir, sanity)`, using the devices the other
+tools opened and their allow-lists.
+
+Note the Pi 5's `ACT` LED is active-low: brightness 0 is *lit*. The spec spells
+the raw value per state and labels it; the truth is the label. First real
+dataset, 2026-09-12: 200 frames in 15 s, 100 per class, zero discards, sanity
+read separating the classes cleanly.
+
 ## Tuning notes (from the metis R&D write-up)
 
 - **Exposure first.** Signal-to-noise beats frame rate for LED and indicator
