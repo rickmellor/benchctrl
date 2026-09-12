@@ -157,3 +157,17 @@ def test_the_kiosk_installer_handles_a_console_booting_pi():
     assert "systemctl set-default graphical.target" in code
     conf = (DEPLOY / "xorg" / "20-benchctrl-vc4.conf").read_text(encoding="utf-8")
     assert 'MatchDriver "vc4"' in conf and 'Driver "modesetting"' in conf
+
+
+def test_the_kiosk_browser_takes_per_board_flags_from_an_env_file():
+    """On a Raspberry Pi the renderer sandbox fails and the kiosk paints a flat
+    grey window. The installer writes --no-sandbox to /etc/benchctrl/kiosk.env
+    there, and the launcher applies whatever that file says — so the trade is
+    visible on the board and reversible by deleting one file, never baked in."""
+    launcher = _code_lines("benchctrl-kiosk")
+    assert "/etc/benchctrl/kiosk.env" in launcher
+    assert "$BENCHCTRL_KIOSK_EXTRA_FLAGS" in launcher
+    assert "--no-sandbox" not in launcher, "the launcher itself must not hardcode it"
+    installer = _code_lines("install-kiosk.sh")
+    assert "BENCHCTRL_KIOSK_EXTRA_FLAGS=--no-sandbox" in installer
+    assert "/sys/module/vc4" in installer.split("kiosk.env")[0], "conditional on the Pi's display driver"

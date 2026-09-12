@@ -83,6 +83,23 @@ if [ -d /sys/module/vc4 ] || [ -d /sys/bus/platform/drivers/vc4-drm ]; then
     echo "installed /etc/X11/xorg.conf.d/20-benchctrl-vc4.conf (vc4 display)"
 fi
 
+# On a Raspberry Pi, Chromium's renderer sandbox fails under this kernel and
+# the kiosk paints a flat grey window with no error anywhere (the same page
+# renders headless and unsandboxed). The panel shows the FUI on loopback and
+# nothing else, so run it unsandboxed there — written to a file the launcher
+# reads, so the decision is visible on the board and reversible by deleting it.
+if [ -d /sys/module/vc4 ] || [ -d /sys/bus/platform/drivers/vc4-drm ]; then
+    install -d -m 0755 /etc/benchctrl
+    if [ ! -f /etc/benchctrl/kiosk.env ]; then
+        cat > /etc/benchctrl/kiosk.env <<'EOF'
+# Written by deploy/install-kiosk.sh (Raspberry Pi): the renderer sandbox fails
+# on this kernel and the kiosk paints nothing. The page is the FUI on loopback.
+BENCHCTRL_KIOSK_EXTRA_FLAGS=--no-sandbox
+EOF
+        echo "wrote /etc/benchctrl/kiosk.env (--no-sandbox for the kiosk browser)"
+    fi
+fi
+
 # Debian's lightdm-autologin PAM stack admits only members of `autologin`.
 # Without this the drop-in below is silently ignored and the greeter appears.
 if ! getent group autologin >/dev/null; then

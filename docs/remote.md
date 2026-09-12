@@ -417,13 +417,16 @@ What is different from the Uno Q:
   ```
   The launcher finds the package through `/etc/benchctrl/agent.env`, so no
   per-board `BENCHCTRL_SRC_DIR` is needed. `install-kiosk.sh` also does the
-  three things a console-booting Pi needs that the Uno Q had already: an Xorg
+  four things a console-booting Pi needs that the Uno Q had already: an Xorg
   snippet binding the display to the vc4 device (without it Xorg dies with
   "Cannot run in framebuffer mode" and lightdm loops), membership of the
   `autologin` group (Debian's PAM stack ignores the autologin drop-in
-  otherwise), and `graphical.target` as the default (lightdm is never started
-  from `multi-user`). Verified on benchpi 2026-09-12: 1440x900 panel, dashboard
-  up within a second of the session starting.
+  otherwise), `graphical.target` as the default (lightdm is never started
+  from `multi-user`), and `--no-sandbox` for the kiosk browser via
+  `/etc/benchctrl/kiosk.env` (Chromium's renderer sandbox fails on the Pi
+  kernel and paints a flat grey window; the page is the FUI on loopback and
+  nothing else). Verified on benchpi 2026-09-12: 1440x900 panel, dashboard up
+  within a second of the session starting.
 
 Keep the checkout current with `git pull` (the agent imports drivers lazily,
 so restart it after pulling — see `deploy/README.md`).

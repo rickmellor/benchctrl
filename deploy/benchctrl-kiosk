@@ -121,6 +121,17 @@ done
 log "dashboard reachable after ${waited}s (or gave up)"
 
 # --- the browser ----------------------------------------------------------
+# Per-board browser flags, written by install-kiosk.sh. Today that is
+# --no-sandbox on a Raspberry Pi: Chromium's renderer sandbox fails there and
+# the kiosk paints a flat grey window with no error anywhere. The page is the
+# FUI on loopback and nothing else, so the sandbox was guarding a trusted
+# document; on a bench appliance that is the right trade, made explicit here
+# rather than silently.
+if [ -r /etc/benchctrl/kiosk.env ]; then
+    # shellcheck disable=SC1091
+    . /etc/benchctrl/kiosk.env
+fi
+BENCHCTRL_KIOSK_EXTRA_FLAGS=${BENCHCTRL_KIOSK_EXTRA_FLAGS:-}
 for candidate in chromium chromium-browser google-chrome firefox; do
     command -v "$candidate" >/dev/null 2>&1 && BROWSER="$candidate" && break
 done
@@ -158,6 +169,7 @@ firefox)
         --no-first-run \
         --check-for-update-interval=31536000 \
         --password-store=basic \
+        $BENCHCTRL_KIOSK_EXTRA_FLAGS \
         --app="$URL"
     ;;
 esac
