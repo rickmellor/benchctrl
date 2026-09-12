@@ -184,17 +184,12 @@ ROI, rate-limit), not a one-line addition.
 
 ## Signal sources and the scope loop
 
-### SDG1032X arbitrary-waveform upload over LAN
-**Status**: the driver implements the guide's `WVDT` upload and it works
-against the simulator, but on the bench unit (firmware 1.01.01.33R1B6) no
-USB-TMC framing tried landed a user waveform, and a 32 KB single transfer
-stalled the instrument's USB stack (`KNOWN_LIMITATIONS.md` § F-25).
-
-**Scope when picked up**: a LAN transport for the SDG (raw socket, port 5025 —
-the instrument has an Ethernet port and `SYST:COMM:LAN:*` is already in the
-driver), then `write_arb` over it, then a hardware test that uploads, selects
-and reads back a waveform. Same driver, second transport — the resource string
-already decides which pyvisa backend speaks.
+### SDG1032X arbitrary-waveform upload over LAN — **shipped 2026-09-12**
+The SDG is on the bench LAN (`sdg1032x.home.arpa`, 192.168.1.230, static, set
+over SCPI). `write_arb`/`read_arb` go over its port-5025 socket with newline
+escaping; 16384-point waveforms round-trip byte-exact. Details and the
+USB-TMC finding in `KNOWN_LIMITATIONS.md` § F-25. Left: a hardware trigger
+and the scope loop below make an uploaded waveform *observable*.
 
 ### Rigol DS1000Z oscilloscope driver, then generator→scope sweeps
 **Status**: the scope (`1ab1:04ce`) is on the bench and shows as unclaimed.

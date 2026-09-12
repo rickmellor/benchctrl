@@ -72,6 +72,8 @@ def sdg1032x_open(
     resource: Optional[str] = None,
     allowed_channels: Sequence[int] = (1, 2),
     max_amplitude_vpp: Optional[float] = None,
+    lan_host: Optional[str] = None,
+    lan_port: int = 5025,
     timeout_ms: int = 5000,
 ) -> dict:
     """Open a VISA session to a Siglent SDG1032X waveform generator. Energises
@@ -84,9 +86,12 @@ def sdg1032x_open(
     amplitude this driver sends (the instrument's own ``MAX_OUTPUT_AMP`` is
     accepted but not enforced by the bench firmware, so the cap is the
     driver's check); it can be lowered later with
-    ``sdg1032x_set_max_amplitude`` but never raised. Opening changes nothing
-    on the instrument. Returns the identity, the resource string and the
-    policy in force.
+    ``sdg1032x_set_max_amplitude`` but never raised. ``lan_host``/``lan_port``
+    name the instrument's raw SCPI socket, used only for arbitrary-waveform
+    transfer (USB-TMC drops uploads on the bench firmware); unset, the driver
+    asks the instrument for its own IP when first needed. Opening changes
+    nothing on the instrument. Returns the identity, the resource string and
+    the policy in force.
     """
     global _sdg1032x
     from benchctrl import session
@@ -106,6 +111,8 @@ def sdg1032x_open(
                 "resource": resource,
                 "allowed_channels": tuple(allowed_channels),
                 "max_amplitude_vpp": max_amplitude_vpp,
+                "lan_host": lan_host,
+                "lan_port": lan_port,
                 "timeout_ms": timeout_ms,
             },
         )
@@ -398,10 +405,13 @@ def sdg1032x_write_arb(
     either all int16 codes (-32768..32767) or all floats in [-1, 1] scaled to
     full range; 2..16384 of them. SAFETY: ``amplitude_vpp`` (default 1.0) is
     the amplitude the waveform plays at when selected on a channel whose
-    output is on; the session's ``max_amplitude_vpp`` cap is enforced. The
-    upload is verified by reading the waveform back and comparing the codes
-    (a verify error means the instrument resampled or rejected it). Returns
-    the read-back metadata and sample count, never the samples."""
+    output is on; the session's ``max_amplitude_vpp`` cap is enforced. Goes
+    over the instrument's LAN socket (USB-TMC drops uploads on this firmware
+    — a connection error here means the generator is not on the network);
+    newline bytes in the payload are escaped and the count of moved samples
+    is returned as ``nudged`` (one code where harmless, up to 128 on the few
+    samples whose high byte is 0x0A). Verified by reading the stored codes
+    back. Returns the metadata and sample count, never the samples."""
     got = _get_sdg().write_arb(
         name,
         samples,
@@ -417,11 +427,13 @@ def sdg1032x_write_arb(
 
 
 def sdg1032x_read_arb(name: str, save_to: Optional[str] = None) -> dict:
-    """Read a user waveform back from the instrument (``WVDT? USER,<name>``):
-    its frequency, amplitude, offset, phase, sample count and byte count, plus
-    the SHA-256 of the raw int16 little-endian codes. Pass ``save_to`` to
-    write the raw codes host-side and get the ``path`` back; the result never
-    carries the sample data. An unknown name goes unanswered (timeout)."""
+    """Read a user waveform back from the instrument over its LAN socket
+    (``WVDT? USER,<name>``): sample count, byte count and the SHA-256 of the
+    raw int16 little-endian codes (the firmware's read-back header carries no
+    frequency/amplitude, so those are null — ask the channel). Pass
+    ``save_to`` to write the raw codes host-side and get the ``path`` back;
+    the result never carries the sample data. An unknown name goes
+    unanswered (timeout)."""
     got = _get_sdg().read_arb(name)
     out = got.to_dict()
     out.update(_bytes_result(got.codes, save_to))

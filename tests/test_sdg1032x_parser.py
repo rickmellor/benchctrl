@@ -344,7 +344,7 @@ def test_get_burst_inf_cycles_is_none():
 
 
 def test_get_harmonics_stray_comma_and_off():
-    gen, _ = make({"C1:HARM?": HARM_ON})
+    gen, _ = make({"C1:HARM?": HARM_ON, "C1:BSWV?": BSWV})  # a SINE wave: HARM? answers
     h = gen.get_harmonics(1)
     assert h.enabled is True
     assert h.type == "EVEN"
@@ -353,7 +353,7 @@ def test_get_harmonics_stray_comma_and_off():
     assert h.amplitude_dbc == -6.0
     assert h.phase_deg == 0.0
 
-    gen, _ = make({"C1:HARM?": "C1:HARM HARMSTATE,OFF"})
+    gen, _ = make({"C1:HARM?": "C1:HARM HARMSTATE,OFF", "C1:BSWV?": BSWV})
     h = gen.get_harmonics(1)
     assert h.enabled is False and h.type is None and h.order is None
 
@@ -538,7 +538,9 @@ def test_set_frequency_verify_error_carries_wanted_and_got():
 def test_set_basic_wave_sends_wave_type_first():
     gen, inst = make({"C2:BSWV?": BSWV.replace("C1", "C2").replace("SINE", "SQUARE")})
     gen.set_basic_wave(2, frequency_hz=1000, wave_type="square", amplitude_vpp=4)
-    assert inst.writes[0] == "C2:BSWV WVTP,SQUARE,FRQ,1000,AMP,4"
+    # The wave type travels alone: a combined WVTP+fields command makes the
+    # bench unit swallow the next message.
+    assert inst.writes[:2] == ["C2:BSWV WVTP,SQUARE", "C2:BSWV FRQ,1000,AMP,4"]
 
 
 def test_set_output_on_off_verified():
@@ -605,7 +607,7 @@ def test_silent_rejection_duty_quantised_at_20mhz():
     )
     with pytest.raises(SDG1032XVerifyError) as ei:
         gen.set_basic_wave(1, wave_type="SQUARE", frequency_hz=20e6, duty_pct=99)
-    assert inst.writes[0] == "C1:BSWV WVTP,SQUARE,FRQ,20000000,DUTY,99"
+    assert inst.writes[:2] == ["C1:BSWV WVTP,SQUARE", "C1:BSWV FRQ,20000000,DUTY,99"]
     assert (ei.value.field, ei.value.wanted, ei.value.got) == ("duty_pct", 99.0, 59.0)
 
 
@@ -690,44 +692,123 @@ def test_read_screen_not_a_bmp():
         gen.read_screen()
 
 
-def test_read_arb_parses_header_and_codes():
-    codes = struct.pack("<4h", 0, 1000, -1000, 32767)
-    head = b"C1:WVDT WVNM,wave1,LENGTH,8B,FREQ,1000HZ,AMPL,2V,OFST,0V,PHASE,0,WAVEDATA,"
-    gen, inst = make({}, raw=head + codes + b"\n")
-    a = gen.read_arb("wave1")
-    assert inst.writes == ["WVDT? USER,wave1"]
-    assert a.name == "wave1"
-    assert (a.frequency_hz, a.amplitude_vpp, a.offset_v, a.phase_deg) == (1000.0, 2.0, 0.0, 0.0)
-    assert a.codes == codes
-    assert a.samples == (0, 1000, -1000, 32767)
-    assert a.to_dict()["samples"] == 4 and a.to_dict()["bytes"] == 8
-    with pytest.raises(SDG1032XValueError):
-        gen.read_arb("bad name!")
+# ------------------------------------------------------------- LAN arb path
 
 
-def test_write_arb_frame_has_no_terminator_and_verifies():
-    class RawInst(FakeInst):
-        def write_raw(self, frame: bytes) -> None:
-            self.frame = frame
-            # The instrument stores it; read_arb then sees it back.
-            n = len(frame.rsplit(b"WAVEDATA,", 1)[1])
-            self.buffer = bytearray(
-                b"C1:WVDT WVNM,w,LENGTH," + str(n).encode() + b"B,FREQ,1000HZ,AMPL,1V,OFST,0V,"
-                b"PHASE,0,WAVEDATA," + frame.rsplit(b"WAVEDATA,", 1)[1] + b"\n"
-            )
+def test_escape_codes_moves_only_newline_bytes_and_counts_them():
+    import struct
 
-    inst = RawInst()
-    gen = SiglentSDG1032X(inst, resource_string="SIM", max_amplitude_vpp=2.0)
-    got = gen.write_arb("w", [0.0, 0.5, -0.5, 1.0])
-    assert inst.frame.startswith(
-        b"C1:WVDT WVNM,w,FREQ,1000,AMPL,1,OFST,0,PHASE,0,LENGTH,8B,WAVEDATA,"
+    from benchctrl.drivers.siglent_sdg1032x import escape_codes
+
+    raw = struct.pack("<16h", *range(16))  # sample 10 is 0x000A: a newline low byte
+    out, nudged = escape_codes(raw)
+    assert nudged == 1
+    assert list(struct.unpack("<16h", out)) == [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        11,
+        12,
+        13,
+        14,
+        15,
+    ]
+    assert b"\n" not in out
+    # high byte 0x0A: 2560..2815 moves to the nearer boundary
+    out, nudged = escape_codes(struct.pack("<3h", 2560, 2700, 2815))
+    assert list(struct.unpack("<3h", out)) == [2559, 2816, 2816] and nudged == 3
+    # 0x0A0A: low-byte nudge lands on a high-byte newline, both handled
+    out, nudged = escape_codes(struct.pack("<1h", 0x0A0A))
+    assert b"\n" not in out and nudged == 2
+    # untouched payloads stay untouched
+    clean = struct.pack("<4h", -32768, -1, 0, 32767)
+    assert escape_codes(clean) == (clean, 0)
+
+
+class _FakeLanSocket:
+    """Enough of a socket for ``_read_arb_on``: the bench read-back format."""
+
+    def __init__(self, reply: bytes) -> None:
+        self.sent = b""
+        self._buf = reply
+        self.timeout = None
+
+    def sendall(self, data: bytes) -> None:
+        self.sent += data
+
+    def recv(self, n: int) -> bytes:
+        out, self._buf = self._buf[:n], self._buf[n:]
+        if not out:
+            raise TimeoutError("no data")
+        return out
+
+    def settimeout(self, t) -> None:
+        self.timeout = t
+
+
+def test_read_arb_parses_the_bench_read_back_format():
+    """``WVDT POS, /Local, WVNM, x, LENGTH, 16B, TYPE, 6, WAVEDATA, `` + bytes + newline,
+    exactly as firmware 1.01.01.33R1B6 answers over the LAN socket."""
+    import struct
+
+    from benchctrl.drivers.siglent_sdg1032x.driver import SiglentSDG1032X
+
+    codes = struct.pack("<8h", 0, 1, 2, 3, -1, -2, 32767, -32768)
+    reply = b"WVDT POS, /Local, WVNM, lan_t8, LENGTH, 16B, TYPE, 6, WAVEDATA," + codes + b"\n"
+    gen = SiglentSDG1032X(FakeInst(), resource_string="SIM")
+    sock = _FakeLanSocket(reply)
+    arb = gen._read_arb_on(sock, "lan_t8")
+    assert sock.sent == b"WVDT? USER,lan_t8\n"
+    assert arb.name == "lan_t8" and arb.codes == codes
+    assert arb.samples == (0, 1, 2, 3, -1, -2, 32767, -32768)
+    assert arb.frequency_hz is None, "the bench header carries no FREQ"
+
+
+def test_read_arb_of_an_unknown_wave_is_a_timeout():
+    from benchctrl.drivers.siglent_sdg1032x import SDG1032XTimeoutError
+    from benchctrl.drivers.siglent_sdg1032x.driver import SiglentSDG1032X
+
+    gen = SiglentSDG1032X(FakeInst(), resource_string="SIM")
+    with pytest.raises(SDG1032XTimeoutError):
+        gen._read_arb_on(_FakeLanSocket(b""), "nope")
+
+
+def test_no_lan_is_a_connection_error_that_says_what_to_plug_in():
+    """The instrument's factory address (10.11.13.230) means "not on the bench
+    LAN"; the driver must say so rather than try USB, which drops uploads."""
+    from benchctrl.drivers.siglent_sdg1032x import SDG1032XConnectionError
+    from benchctrl.drivers.siglent_sdg1032x.driver import SiglentSDG1032X
+
+    inst = FakeInst(
+        {
+            "SYST:COMM:LAN:IPAD?": '"10.11.13.230"',
+            "SYST:COMM:LAN:SMAS?": '"255.0.0.0"',
+            "SYST:COMM:LAN:GAT?": '"10.11.13.1"',
+        }
     )
-    assert not inst.frame.endswith(b"\n")
-    assert got.samples == (0, 16384, -16384, 32767)
+    gen = SiglentSDG1032X(inst, resource_string="SIM")
+    with pytest.raises(SDG1032XConnectionError, match="LAN"):
+        gen.read_arb("anything")
 
-    from benchctrl.drivers.siglent_sdg1032x.driver import SDG1032XPolicyError
 
-    with pytest.raises(SDG1032XPolicyError):
-        gen.write_arb("w", [0.0, 1.0], amplitude_vpp=5.0)
-    with pytest.raises(SDG1032XValueError):
-        gen.write_arb("w", [0.0])
+def test_harmonics_are_not_queried_off_a_sine_wave():
+    """Bench: ``HARM?`` never answers unless the wave is SINE; the driver must
+    not spend a timeout finding that out."""
+    from benchctrl.drivers.siglent_sdg1032x import SDG1032XValueError
+    from benchctrl.drivers.siglent_sdg1032x.driver import SiglentSDG1032X
+
+    inst = FakeInst({"C1:BSWV?": BSWV.replace("SINE", "SQUARE")})
+    gen = SiglentSDG1032X(inst, resource_string="SIM")
+    h = gen.get_harmonics(1)
+    assert h.enabled is False and "C1:HARM?" not in inst.writes
+    with pytest.raises(SDG1032XValueError, match="SINE"):
+        gen.set_harmonics(1, enabled=True)
+    assert not any(w.startswith("C1:HARM ") for w in inst.writes)

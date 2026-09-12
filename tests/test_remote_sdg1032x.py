@@ -343,7 +343,14 @@ def test_arb_codes_survive_the_wire_intact(remote_awg):
     # waveform round-trips bit-for-bit through whichever path it takes.
     big = [((i * 37) % 65536) - 32768 for i in range(ARB_MAX_SAMPLES)]
     uploaded = remote_awg.proxy.write_arb("rmt_big", big)
-    assert uploaded.samples == tuple(big)
+    # The stored codes are the *escaped* ones (newline bytes moved, counted
+    # in ``nudged``); what must survive the wire is the instrument's copy.
+    import struct
+
+    from benchctrl.drivers.siglent_sdg1032x import escape_codes
+
+    expected, nudged = escape_codes(struct.pack(f"<{len(big)}h", *big))
+    assert uploaded.codes == expected and uploaded.nudged == nudged > 0
     assert (
         hashlib.sha256(uploaded.codes).hexdigest()
         == hashlib.sha256(remote_awg.driver.read_arb("rmt_big").codes).hexdigest()

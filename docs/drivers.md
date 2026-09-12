@@ -1580,10 +1580,15 @@ modulation reports only `enabled`). `read_screen()` is a 480×272 BMP as
 Built-ins are selected **by index** (2–198, `list_arbs("builtin")`), user
 waveforms **by name**. `write_arb(name, samples)` takes int16 codes or floats in
 [-1, 1] (numpy arrays accepted, numpy never imported), 2–16384 samples, and
-reads the waveform back to verify. **Upload does not land on the bench unit's
-firmware over USB-TMC** — three framings were tried; the instrument stalls
-(`KNOWN_LIMITATIONS.md` § F-25). It is verified against the simulator and
-waits for the LAN path (`ROADMAP.md`).
+reads the stored codes back to verify. It goes over the instrument's **LAN
+socket** (port 5025) — USB-TMC silently drops the upload on the bench firmware
+— using `lan_host` from `open()`/`agent.json`, or the address the instrument
+reports for itself. The socket ends a message at the first newline byte, so
+the driver escapes those and returns the count as `ArbData.nudged` (one code
+where harmless, up to 128 codes on the few samples whose high byte is 0x0A;
+`KNOWN_LIMITATIONS.md` § F-25). `read_arb(name)` returns the stored codes;
+the firmware's read-back header carries no wave parameters, so those are
+`None` — ask the channel.
 
 ### Quirks (all bench-measured, all in the parser and the simulator)
 
@@ -1598,8 +1603,10 @@ undocumented (§ F-27).
 ### Simulator
 
 `benchctrl.sim.sdg1032x.SimulatedSDG1032X` (`make_sdg1032x`) renders every
-answer byte-exact as the bench unit does, models the silent clamping and the
-no-reply on unknown queries, couples AMP/OFST with HLEV/LLEV and FRQ with
+answer byte-exact as the bench unit does, models the silent clamping, the
+no-reply on unknown queries (and on `HARM?` off a sine), the swallowed message
+after a combined `WVTP` command, the line-terminated LAN socket for arb
+transfer (USB uploads dropped, as on the bench), couples AMP/OFST with HLEV/LLEV and FRQ with
 PERI, makes modulation/sweep/burst mutually exclusive, and answers `SCDP`
 with a real BMP (`sim={"screen_px": 200}` for a blob-sized one).
 

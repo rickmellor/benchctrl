@@ -38,13 +38,28 @@ verify step is the only way a test can see it — exactly as on the bench.
   (recorded as rejections otherwise) — the reason the driver sends
   ``STATE`` first.
 * **Unanswered queries.** A header this firmware does not implement
-  (``CURRPRT?``, ``VOLTSTAT?``) produces *no reply at all*; the sim records
-  it in :py:attr:`unanswered_queries` and lets the driver's timeout path run.
+  (``CURRPRT?``, ``VOLTSTAT?``) produces *no reply at all*, and so does
+  ``Cn:HARM?`` while that channel's wave is not SINE; the sim records it in
+  :py:attr:`unanswered_queries` and lets the driver's timeout path run.
   Unlike the SDM4065A the next query still works, and so it does here.
-* **Binary framing.** ``WVDT`` uploads arrive with no terminator and a
-  payload that may contain ``0x0A``; :py:meth:`on_frame_bytes` is
-  length-aware for exactly that frame. An upload without ``LENGTH`` cannot
-  be delimited and is a silent rejection.
+* **Two transports, as on the bench.** A ``WVDT`` upload over USB-TMC is
+  *silently dropped* by this firmware in every framing (measured
+  2026-09-12: with/without ``LENGTH``, with/without a terminator, chunked or
+  not), so the pty path consumes the frame — :py:meth:`on_frame_bytes` stays
+  length-aware so the binary payload does not choke the line splitter — and
+  stores nothing, recording the drop in :py:attr:`rejections`. Uploads work
+  over the instrument's **LAN SCPI socket** (TCP 5025), which the sim serves
+  on loopback at :py:attr:`lan_port`. That socket is *line-oriented*: a
+  message ends at the first ``0x0A`` byte, payload included, and a
+  ``LENGTH`` field in the header is ignored — so an unescaped payload is
+  truncated at its first newline byte exactly as the bench unit truncates
+  it (recorded in :py:attr:`lan_truncated`). ``WVDT? USER,<name>`` reads the
+  stored bytes back byte-exact behind the firmware's ``WVDT POS, /Local,
+  WVNM, <name>, LENGTH, <n>B, TYPE, 6, WAVEDATA,`` header; every other line
+  on the socket goes through the same command/query machinery as the pty.
+  ``C1:ARWV NAME,<name>`` (bare name; quotes tolerated here, ignored by the
+  firmware) selects a stored wave, which reads back as
+  ``C1:ARWV NAME,<name>.bin``.
 * **Clamp, don't ignore.** Where the bench unit was measured, an
   out-of-range number is clamped to the nearest limit (``AMP,0.001`` at HiZ
   reads back ``0.002V``; ``DUTY,99`` on a 20 MHz square reads back in the
@@ -65,10 +80,13 @@ hardware tests cover them.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import re
+import socket
 import struct
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -403,9 +421,13 @@ class SimulatedSDG1032X(ScpiDevice):
             (``STATE,ON,AM,…``); the driver accepts both.
         rosc_reports_10mout: append ``,10MOUT,OFF`` to ``ROSC?``; the bench
             unit does not, so the default is False.
-        arb_pad_to: when an int, uploaded waveforms are padded with their
-            last sample to that many samples — a possible real-instrument
-            behaviour the driver's verify tolerates (it compares the prefix).
+        lan: serve the instrument's LAN SCPI socket (the bench unit's TCP
+            port 5025) on ``127.0.0.1``; False models a unit with no
+            Ethernet, so the driver's no-LAN error path can be tested.
+        lan_port: the port to listen on; 0 (default) picks a free one —
+            read :py:attr:`lan_port` after construction. The instrument's
+            port is fixed and cannot be discovered over SCPI, so a caller
+            passes the sim's port to the driver explicitly.
     """
 
     #: Shaped like a real unit's ``*IDN?``. The serial is deliberately
@@ -421,7 +443,8 @@ class SimulatedSDG1032X(ScpiDevice):
         swwv_header_space: bool = True,
         mdwv_guide_form: bool = False,
         rosc_reports_10mout: bool = False,
-        arb_pad_to: Optional[int] = None,
+        lan: bool = True,
+        lan_port: int = 0,
         loopback: Optional[SerialLoopback] = None,
         free_run: bool = True,
     ) -> None:
@@ -436,7 +459,6 @@ class SimulatedSDG1032X(ScpiDevice):
         self.swwv_header_space = swwv_header_space
         self.mdwv_guide_form = mdwv_guide_form
         self.rosc_reports_10mout = rosc_reports_10mout
-        self.arb_pad_to = arb_pad_to
 
         self.channels: dict[int, ChannelState] = {1: ChannelState(), 2: ChannelState()}
         self.rosc = "INT"
@@ -450,12 +472,18 @@ class SimulatedSDG1032X(ScpiDevice):
         self.nbfm: dict[str, str] = {"PNT": "DOT", "SEPT": "SPACE"}
         self.lagg = "EN"
         self.scfg = "DEFAULT"
+        #: ``SYST:COMM:LAN:*`` read-backs. The address is the loopback one so
+        #: the driver's auto-discovery (``IPAD?`` when ``lan_host`` is unset)
+        #: lands on this sim's socket server; the factory-default
+        #: ``10.11.13.230`` would be read by the driver as "no LAN".
         self.lan: dict[str, str] = {
-            "IPAD": "10.11.13.230",
+            "IPAD": "127.0.0.1",
             "SMAS": "255.255.255.0",
-            "GAT": "10.11.13.1",
+            "GAT": "127.0.0.1",
         }
-        #: Uploaded waveforms: name -> {freq, ampl, ofst, phase, codes}.
+        #: Uploaded waveforms: name -> {freq, ampl, ofst, phase, codes}. Only
+        #: the LAN socket fills this; ``codes`` is exactly the byte string that
+        #: arrived after ``WAVEDATA,`` up to the terminating newline.
         self.user_arbs: dict[str, dict[str, Any]] = {}
         self.builtin_arbs: dict[int, str] = dict(BUILTIN_ARBS)
 
@@ -463,6 +491,14 @@ class SimulatedSDG1032X(ScpiDevice):
         #: that got no reply, writes nobody handled, key presses, triggers.
         self.rejections: list[str] = []
         self.unanswered_queries: list[str] = []
+        #: Names of LAN uploads whose payload stopped short of the ``LENGTH``
+        #: the client claimed — a 0x0A byte inside the samples ended the
+        #: message early, as on the bench unit.
+        self.lan_truncated: list[str] = []
+        #: Every message received on the LAN socket, one entry per line
+        #: (uploads as ``<header><n bytes>``). Kept apart from
+        #: :py:attr:`command_log`, which stays the pty's alone.
+        self.lan_log: list[str] = []
         #: Bench quirk (firmware 1.01.01.33R1B6): a BSWV command carrying WVTP
         #: together with other fields makes the instrument swallow exactly one
         #: following message. Set by ``_set_bswv``, consumed by ``_dispatch``.
@@ -471,6 +507,25 @@ class SimulatedSDG1032X(ScpiDevice):
         self.ignored_commands: list[str] = []
         self.key_presses: list[str] = []
         self.triggers: list[str] = []
+        #: Where the reply of the command being dispatched goes: the pty by
+        #: default, a socket connection while a LAN line is being handled.
+        self._reply_to: Callable[[bytes], None] = self.send
+
+        # The LAN SCPI socket. Bound here so ``lan_port`` is known before
+        # ``start()``; the accept loop runs from ``start()`` to ``close()``.
+        self.lan_enabled = bool(lan)
+        self._lan_sock: Optional[socket.socket] = None
+        self._lan_thread: Optional[threading.Thread] = None
+        self._lan_stop = threading.Event()
+        self._lan_conns: set[socket.socket] = set()
+        self._lan_conns_lock = threading.Lock()
+        if self.lan_enabled:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(("127.0.0.1", int(lan_port)))
+            srv.listen(8)
+            srv.settimeout(0.1)  # so the accept loop notices ``close()``
+            self._lan_sock = srv
 
         self._queries: dict[str, Callable[[Optional[int], str], Optional[bytes]]] = {
             "*IDN": lambda ch, a: self._text(self.idn),
@@ -540,16 +595,20 @@ class SimulatedSDG1032X(ScpiDevice):
 
     # ------------------------------------------------------------ framing
 
-    def on_frame_bytes(self, data: bytes) -> None:
-        """Split the byte stream into commands.
+    USB_WVDT_DROPPED = "WVDT over USB-TMC is dropped by this firmware"
 
-        Line-oriented, except for a ``WVDT`` upload: the driver sends that
-        with ``write_raw`` and no terminator, and the int16 payload may
-        contain ``0x0A``. When the buffer holds ``WAVEDATA,`` the header
-        before it is parsed for ``LENGTH,<n>B`` and the frame is consumed
-        only once all ``n`` payload bytes have arrived. Without a ``LENGTH``
-        the frame cannot be delimited: the upload is recorded as a rejection
-        and whatever has arrived is dropped.
+    def on_frame_bytes(self, data: bytes) -> None:
+        """Split the pty byte stream into commands.
+
+        Line-oriented, except for a ``WVDT`` upload, whose int16 payload may
+        contain ``0x0A``: when the buffer holds ``WAVEDATA,`` the header
+        before it is parsed for ``LENGTH,<n>B`` and the frame is consumed only
+        once all ``n`` payload bytes have arrived, so the binary does not get
+        chopped into bogus commands. Either way the upload is then **dropped
+        without a trace**, which is what firmware 1.01.01.33R1B6 does with
+        every ``WVDT`` framing over USB-TMC; the drop is recorded in
+        :py:attr:`rejections`. Without a ``LENGTH`` the frame cannot be
+        delimited, so whatever has arrived is discarded too.
         """
         with self._lock:
             self._rx.extend(data)
@@ -566,26 +625,204 @@ class SimulatedSDG1032X(ScpiDevice):
                 if wd == -1:
                     break
                 head_end = wd + len(b"WAVEDATA,")
-                header = buf[:head_end].decode("ascii", errors="replace")
+                header = buf[:head_end].decode("ascii", errors="replace").strip()
+                name = self._wvdt_name(header)
                 m = re.search(r"LENGTH\s*,\s*(\d+)\s*(B|KB)?", header, re.I)
                 if not m:
-                    self.command_log.append(header.strip())
-                    self.rejections.append(f"WVDT {header.strip()[:60]}: no LENGTH field")
+                    self.command_log.append(header)
+                    self.rejections.append(
+                        f"WVDT {name}: {self.USB_WVDT_DROPPED} (no LENGTH field, buffer discarded)"
+                    )
                     self._rx = bytearray()
                     break
                 nbytes = int(m.group(1)) * (1024 if (m.group(2) or "B").upper() == "KB" else 1)
                 if len(buf) < head_end + nbytes:
                     break  # wait for the rest of the payload
-                payload = buf[head_end : head_end + nbytes]
                 self._rx = bytearray(buf[head_end + nbytes :])
-                self.command_log.append(f"{header.strip()}<{nbytes} bytes>")
-                self._upload_arb(header, payload)
+                self.command_log.append(f"{header}<{nbytes} bytes>")
+                self.rejections.append(f"WVDT {name}: {self.USB_WVDT_DROPPED}")
+                log.debug("sdg1032x sim: dropped USB WVDT upload of %r (%d bytes)", name, nbytes)
+
+    @staticmethod
+    def _wvdt_name(header: str) -> str:
+        m = re.search(r"WVNM\s*,\s*\"?([^,\"]*)", header, re.I)
+        return m.group(1).strip() if m else ""
 
     def _handle_line(self, line: str) -> None:
         self.command_log.append(line)
         self._dispatch(line)
 
-    def _dispatch(self, command: str) -> None:
+    # ------------------------------------------------------------ LAN socket
+
+    @property
+    def lan_port(self) -> Optional[int]:
+        """The loopback TCP port standing in for the instrument's port 5025;
+        ``None`` when the sim was built with ``lan=False``."""
+        if self._lan_sock is None:
+            return None
+        return int(self._lan_sock.getsockname()[1])
+
+    def start(self) -> SimulatedSDG1032X:
+        super().start()
+        if self._lan_sock is not None and self._lan_thread is None:
+            self._lan_stop.clear()
+            self._lan_thread = threading.Thread(
+                target=self._lan_accept_loop, name="SimulatedSDG1032X-lan", daemon=True
+            )
+            self._lan_thread.start()
+        return self
+
+    def close(self) -> None:
+        self._lan_stop.set()
+        with self._lan_conns_lock:
+            conns = list(self._lan_conns)
+        for c in conns:
+            with contextlib.suppress(OSError):
+                c.shutdown(socket.SHUT_RDWR)
+            c.close()
+        if self._lan_thread is not None:
+            self._lan_thread.join(timeout=2.0)
+            self._lan_thread = None
+        if self._lan_sock is not None:
+            self._lan_sock.close()
+            self._lan_sock = None
+        super().close()
+
+    def _lan_accept_loop(self) -> None:
+        srv = self._lan_sock
+        assert srv is not None
+        while not self._lan_stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with self._lan_conns_lock:
+                self._lan_conns.add(conn)
+            threading.Thread(
+                target=self._lan_serve, args=(conn,), name="SimulatedSDG1032X-lan-conn", daemon=True
+            ).start()
+
+    def _lan_serve(self, conn: socket.socket) -> None:
+        """One client connection: bytes in, messages split at ``\\n`` **only**.
+
+        A ``LENGTH`` field never extends a message past a newline — that is
+        the bench unit's behaviour and the whole reason the driver escapes
+        its payload."""
+        buf = bytearray()
+
+        def reply(data: bytes) -> None:
+            with contextlib.suppress(OSError):
+                conn.sendall(data)
+
+        try:
+            while not self._lan_stop.is_set():
+                try:
+                    data = conn.recv(65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                buf += data
+                while (nl := buf.find(b"\n")) != -1:
+                    message = bytes(buf[:nl])
+                    del buf[: nl + 1]
+                    self._lan_message(message, reply)
+        finally:
+            with self._lan_conns_lock:
+                self._lan_conns.discard(conn)
+            conn.close()
+
+    def _lan_message(self, message: bytes, reply: Callable[[bytes], None]) -> None:
+        wd = message.find(b"WAVEDATA,")
+        with self._lock:
+            if wd != -1:
+                head_end = wd + len(b"WAVEDATA,")
+                header = message[:head_end].decode("ascii", errors="replace").strip()
+                payload = message[head_end:]
+                self.lan_log.append(f"{header}<{len(payload)} bytes>")
+                self._lan_upload(header, payload)
+                return
+            text = message.decode("ascii", errors="replace").strip()
+            if not text:
+                return
+            self.lan_log.append(text)
+            m = re.match(r"^(?:C[12]:)?WVDT\?\s*(.*)$", text, re.I | re.S)
+            if m:
+                data = self._lan_wvdt_query(m.group(1))
+                if data is None:
+                    self.unanswered_queries.append(text)
+                    log.debug("sdg1032x sim: unanswered LAN query %r", text)
+                else:
+                    reply(data)
+                return
+            self._dispatch(text, send=reply)
+
+    def _lan_upload(self, header: str, payload: bytes) -> None:
+        """Store a LAN ``WVDT`` upload exactly as received. ``payload`` is
+        whatever followed ``WAVEDATA,`` up to the newline that ended the
+        message; if the header claimed a longer ``LENGTH`` the client's data
+        contained a 0x0A byte and was cut there, like on the bench."""
+        body = header.split(" ", 1)[1] if " " in header else header
+        fields = dict(_pairs(body.rsplit("WAVEDATA", 1)[0]))
+        name = fields.get("WVNM", "").strip().strip('"')
+        if not ARB_NAME_RE.match(name):
+            self._reject("WVDT", "WVNM", name, "bad waveform name")
+            return
+        if len(payload) > 2 * ARB_MAX_SAMPLES:
+            self._reject(
+                "WVDT", "WAVEDATA", str(len(payload)), f"more than {ARB_MAX_SAMPLES} samples"
+            )
+            return
+        nums: dict[str, float] = {}
+        for key, default in (("FREQ", 1000.0), ("AMPL", 1.0), ("OFST", 0.0), ("PHASE", 0.0)):
+            v = _parse_value(fields[key]) if key in fields else default
+            if v is None:
+                self._reject("WVDT", key, fields.get(key, ""), "malformed number")
+                return
+            nums[key] = v
+        m = re.match(r"^\s*(\d+)\s*(B|KB)?\s*$", fields.get("LENGTH", ""), re.I)
+        if m:
+            claimed = int(m.group(1)) * (1024 if (m.group(2) or "B").upper() == "KB" else 1)
+            if len(payload) < claimed:
+                self.lan_truncated.append(name)
+                log.debug(
+                    "sdg1032x sim: LAN upload %r cut at a newline byte: %d of %d bytes stored",
+                    name,
+                    len(payload),
+                    claimed,
+                )
+        self.user_arbs[name] = {
+            "freq": nums["FREQ"],
+            "ampl": nums["AMPL"],
+            "ofst": nums["OFST"],
+            "phase": nums["PHASE"],
+            "codes": bytes(payload),
+        }
+
+    def _lan_wvdt_query(self, args: str) -> Optional[bytes]:
+        """``WVDT? USER,<name>`` as the socket answers it (firmware
+        1.01.01.33R1B6): ``WVDT POS, /Local, WVNM, <name>, LENGTH, <n>B, TYPE,
+        6, WAVEDATA,`` — the fields comma-space separated — then immediately
+        the ``n`` stored bytes and a newline. Unknown name: no reply at all."""
+        parts = [p.strip() for p in args.split(",")]
+        if len(parts) < 2 or parts[0].upper() != "USER":
+            return None
+        name = parts[1].strip('"')
+        arb = self.user_arbs.get(name)
+        if arb is None:
+            return None
+        codes: bytes = arb["codes"]
+        head = f"WVDT POS, /Local, WVNM, {name}, LENGTH, {len(codes)}B, TYPE, 6, WAVEDATA,"
+        return head.encode("ascii") + codes + b"\n"
+
+    # ------------------------------------------------------------ dispatch
+
+    def _dispatch(self, command: str, send: Optional[Callable[[bytes], None]] = None) -> None:
+        """Run one command or query; its reply (if any) goes to ``send`` —
+        the pty when None, a socket connection for a LAN line."""
+        self._reply_to = send if send is not None else self.send
         m = _CMD_RE.match(command.strip())
         if not m:
             self.ignored_commands.append(command)
@@ -613,7 +850,7 @@ class SimulatedSDG1032X(ScpiDevice):
                 self.unanswered_queries.append(command)
                 log.debug("sdg1032x sim: unanswered query %r", command)
                 return
-            self.send(reply)
+            self._reply_to(reply)
             return
         setter = self._sets.get(head)
         if setter is None:
@@ -789,6 +1026,10 @@ class SimulatedSDG1032X(ScpiDevice):
 
     def _q_arwv(self, ch: Optional[int], args: str) -> bytes:
         st = self._ch(ch)
+        if st.arb_index == 0 and st.arb_name:
+            # Bench: a selected user waveform answers with no INDEX and the
+            # storage suffix appended.
+            return self._text(f"C{ch}:ARWV NAME,{st.arb_name}.bin")
         return self._text(f"C{ch}:ARWV INDEX,{st.arb_index},NAME,{st.arb_name}")
 
     def _q_stl(self, ch: Optional[int], args: str) -> bytes:
@@ -851,9 +1092,13 @@ class SimulatedSDG1032X(ScpiDevice):
                 fields.append(f"{key.upper()},{_g(c[key])}{unit}")
         return self._text("COUP " + ",".join(fields))
 
-    def _q_harm(self, ch: Optional[int], args: str) -> bytes:
+    def _q_harm(self, ch: Optional[int], args: str) -> Optional[bytes]:
         st = self._ch(ch)
         h = st.harmonics
+        if st.wave_type != "SINE":
+            # Bench: ``HARM?`` off a sine wave gets no reply at all — harmonics
+            # exist only for SINE and the firmware treats the query as unknown.
+            return None
         if not h["state"]:
             return self._text(f"C{ch}:HARM HARMSTATE,OFF")
         amp = st.amplitude * 10 ** (h["dbc"] / 20.0)
@@ -1295,6 +1540,8 @@ class SimulatedSDG1032X(ScpiDevice):
                     st.arb_name = self.builtin_arbs[int(v)]
             elif key == "NAME":
                 name = val.strip().strip('"')
+                if name not in self.user_arbs and name.lower().endswith(".bin"):
+                    name = name[:-4]  # the suffix ``ARWV?`` itself reports
                 if name not in self.user_arbs:
                     self._reject("ARWV", key, val, "no such user waveform")
                 else:
@@ -1527,38 +1774,7 @@ class SimulatedSDG1032X(ScpiDevice):
 
     def _s_scdp(self, ch: Optional[int], args: str) -> None:
         # A write-form command that answers with a binary blob, newline after.
-        self.send(_bmp(self.screen_px, self.screen_px) + self.terminator.encode("ascii"))
-
-    def _upload_arb(self, header: str, payload: bytes) -> None:
-        body = header.split(" ", 1)[1] if " " in header else header
-        fields = {k: v for k, v in _pairs(body.rsplit("WAVEDATA", 1)[0])}
-        name = fields.get("WVNM", "").strip().strip('"')
-        if not ARB_NAME_RE.match(name):
-            self._reject("WVDT", "WVNM", name, "bad waveform name")
-            return
-        n = len(payload) // 2
-        if n > ARB_MAX_SAMPLES:
-            self._reject(
-                "WVDT", "LENGTH", str(len(payload)), f"more than {ARB_MAX_SAMPLES} samples"
-            )
-            return
-        codes = payload[: 2 * n]
-        if self.arb_pad_to is not None and n < self.arb_pad_to and n > 0:
-            codes = codes + codes[-2:] * (self.arb_pad_to - n)
-        nums: dict[str, float] = {}
-        for key, default in (("FREQ", 1000.0), ("AMPL", 1.0), ("OFST", 0.0), ("PHASE", 0.0)):
-            v = _parse_value(fields.get(key, "")) if key in fields else default
-            if v is None:
-                self._reject("WVDT", key, fields.get(key, ""), "malformed number")
-                return
-            nums[key] = v
-        self.user_arbs[name] = {
-            "freq": nums["FREQ"],
-            "ampl": nums["AMPL"],
-            "ofst": nums["OFST"],
-            "phase": nums["PHASE"],
-            "codes": codes,
-        }
+        self._reply_to(_bmp(self.screen_px, self.screen_px) + self.terminator.encode("ascii"))
 
     # ------------------------------------------------------------ reset
 

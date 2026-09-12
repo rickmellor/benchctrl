@@ -62,7 +62,9 @@ import logging
 import math
 import numbers
 import re
+import socket
 import struct
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, fields
 from typing import Any, Optional, Union
@@ -140,6 +142,10 @@ VIRTUAL_KEYS: dict[str, int] = {
 OUTPUT_KEYS: frozenset[str] = frozenset({"KB_OUTPUT1", "KB_OUTPUT2"})
 
 DEFAULT_TIMEOUT_MS = 5000
+#: The instrument's raw SCPI socket. Arbitrary-waveform upload only works
+#: here on the bench firmware — USB-TMC drops it silently (§ F-25).
+LAN_PORT = 5025
+LAN_TIMEOUT_S = 10.0
 #: Around a waveform transfer or a screen dump (hundreds of KB over USB-TMC).
 TRANSFER_TIMEOUT_MS = 30000
 
@@ -365,7 +371,11 @@ class ArbSelection:
 
 @dataclass(frozen=True)
 class ArbData:
-    """A user waveform: metadata and the raw int16 little-endian codes."""
+    """A user waveform as the instrument stores it: the raw int16 little-endian
+    codes, plus the header fields it reports (the bench firmware reports only
+    the name and the length on read-back, so the rest are ``None`` then).
+    ``nudged`` is how many samples :py:func:`escape_codes` had to move to keep
+    a newline byte out of the upload — see :py:meth:`SiglentSDG1032X.write_arb`."""
 
     name: str
     frequency_hz: Optional[float]
@@ -373,6 +383,7 @@ class ArbData:
     offset_v: Optional[float]
     phase_deg: Optional[float]
     codes: bytes
+    nudged: int = 0
 
     @property
     def samples(self) -> tuple[int, ...]:
@@ -388,6 +399,7 @@ class ArbData:
             "phase_deg": self.phase_deg,
             "samples": len(self.codes) // 2,
             "bytes": len(self.codes),
+            "nudged": self.nudged,
         }
 
 
@@ -735,8 +747,13 @@ class SiglentSDG1032X:
         resource_manager=None,
         allowed_channels: Sequence[int] = CHANNELS,
         max_amplitude_vpp: Optional[float] = None,
+        lan_host: Optional[str] = None,
+        lan_port: int = LAN_PORT,
     ):
         self._inst = instrument
+        self._lan_host: Optional[str] = str(lan_host) if lan_host else None
+        self._lan_port = int(lan_port)
+        self._lan_discovered = False
         self._resource = resource_string
         self._owns_rm = owns_resource_manager  # API compatibility; gates nothing
         self._rm = resource_manager
@@ -768,11 +785,18 @@ class SiglentSDG1032X:
         *,
         allowed_channels: Sequence[int] = CHANNELS,
         max_amplitude_vpp: Optional[float] = None,
+        lan_host: Optional[str] = None,
+        lan_port: int = LAN_PORT,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         read_termination: str = "\n",
         write_termination: str = "\n",
     ) -> SiglentSDG1032X:
         """Open the generator. Energises nothing.
+
+        ``lan_host``/``lan_port`` name the instrument's raw SCPI socket, used
+        only for arbitrary-waveform upload and read-back (USB-TMC drops the
+        upload on the bench firmware). Unset, the driver asks the instrument
+        for its own IP address the first time it needs it.
 
         ``resource`` unset finds the one SDG1000X on the bus through
         :py:func:`benchctrl.discovery.visa_resource_for`. ``allowed_channels``
@@ -814,6 +838,8 @@ class SiglentSDG1032X:
             resource_manager=rm,
             allowed_channels=allowed_channels,
             max_amplitude_vpp=max_amplitude_vpp,
+            lan_host=lan_host,
+            lan_port=lan_port,
         )
         gen._base_timeout_ms = timeout_ms
         return gen
@@ -860,6 +886,12 @@ class SiglentSDG1032X:
     @property
     def max_amplitude_vpp(self) -> Optional[float]:
         return self._max_amp
+
+    @property
+    def lan_host(self) -> Optional[str]:
+        """The LAN address arb transfers use: as configured, or as the instrument
+        reported it once asked; ``None`` until then."""
+        return self._lan_host
 
     # ------------------------------------------------------------ transport
 
@@ -1186,11 +1218,14 @@ class SiglentSDG1032X:
         raw = self.query(f"C{ch}:ARWV?")
         _, body = split_header(raw, "ARWV")
         pairs, _ = parse_pairs(body)
-        if "INDEX" not in pairs:
+        if "INDEX" not in pairs and "NAME" not in pairs:
             raise SDG1032XProtocolError(f"unexpected ARWV response: {raw!r}")
-        return ArbSelection(
-            channel=ch, index=_int_or_none(pairs, "INDEX"), name=pairs.get("NAME", "")
-        )
+        # A user waveform reads back as ``C1:ARWV NAME,wave1.bin`` — no INDEX,
+        # and the storage suffix appended (bench, firmware 1.01.01.33R1B6).
+        name = pairs.get("NAME", "")
+        if name.lower().endswith(".bin"):
+            name = name[:-4]
+        return ArbSelection(channel=ch, index=_int_or_none(pairs, "INDEX"), name=name)
 
     def select_arb(
         self,
@@ -1217,8 +1252,23 @@ class SiglentSDG1032X:
             self._verify(verify, ch, "index", int(index), got.index, "")
             return got
         nm = self._arb_name(name)
-        self.write(f'C{ch}:ARWV NAME,"{nm}"')
-        got = self.get_arb(ch)
+        # The guide quotes the name; the bench firmware ignores a quoted one and
+        # takes it bare.
+        self.write(f"C{ch}:ARWV NAME,{nm}")
+        # Loading a user waveform into the channel takes the instrument a
+        # moment, and a query that arrives meanwhile goes unanswered (bench:
+        # the first ``ARWV?`` after selecting a 16k-point wave times out; the
+        # next one answers). Poll rather than assume.
+        got = None
+        for attempt in range(4):
+            try:
+                got = self.get_arb(ch)
+                break
+            except SDG1032XTimeoutError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.5)
+        assert got is not None
         self._verify(verify, ch, "name", nm, got.name, "")
         return got
 
@@ -1233,18 +1283,27 @@ class SiglentSDG1032X:
         phase_deg: float = 0.0,
         verify: bool = True,
     ) -> ArbData:
-        """Upload a user waveform (``WVDT``) and read it back.
+        """Upload a user waveform and read it back.
 
-        ``samples`` are either int16 codes (-32768..32767) or floats in
-        [-1, 1] scaled to full range; numpy arrays work (through ``numbers``),
-        numpy is never imported. 2..16384 samples. The frame is sent with
-        ``write_raw`` and **no terminator** — a ``\\n`` would become a stray
-        sample byte — and carries ``LENGTH`` so the message is self-delimiting.
-        Verified by reading the waveform back and comparing the codes.
+        ``samples`` are int16 codes (-32768..32767) or floats in [-1, 1]
+        scaled to full range; numpy arrays work (through ``numbers``), numpy
+        is never imported. 2..16384 samples.
+
+        Goes over the instrument's **LAN socket** (port 5025): on the bench
+        firmware USB-TMC silently drops every upload framing
+        (``KNOWN_LIMITATIONS.md`` § F-25). That socket is line-oriented — the
+        message ends at the first newline byte, payload included — so
+        :py:func:`escape_codes` first moves any sample whose bytes contain
+        0x0A: by one code when it is the low byte (below the 14-bit DAC's
+        resolution, so the output is unchanged) and to the nearest code
+        outside 2560..2815 when it is the high byte (up to 128 codes, 0.4 % of
+        full scale, on the ~0.4 % of samples that land there). The count is
+        returned as ``ArbData.nudged``. Verified by reading the stored codes
+        back and comparing them to what was sent.
         """
         nm = self._arb_name(name)
-        codes = _codes(samples)
-        n = len(codes) // 2
+        raw = _codes(samples)
+        n = len(raw) // 2
         if not ARB_MIN_SAMPLES <= n <= ARB_MAX_SAMPLES:
             raise SDG1032XValueError(
                 f"samples must number {ARB_MIN_SAMPLES}..{ARB_MAX_SAMPLES}, got {n}"
@@ -1257,83 +1316,126 @@ class SiglentSDG1032X:
             raise SDG1032XPolicyError(
                 f"amplitude {a:g} Vpp exceeds max_amplitude_vpp={self._max_amp:g}"
             )
+        codes, nudged = escape_codes(raw)
         header = (
             f"C1:WVDT WVNM,{nm},FREQ,{_fmt(f)},AMPL,{_fmt(a)},OFST,{_fmt(o)},"
-            f"PHASE,{_fmt(p)},LENGTH,{len(codes)}B,WAVEDATA,"
+            f"PHASE,{_fmt(p)},WAVEDATA,"
         ).encode("ascii")
-        if self._closed:
-            raise SDG1032XConnectionError("instrument is closed")
-        with self._transfer_timeout():
-            try:
-                self._inst.write_raw(header + codes)
-            except Exception as e:
-                raise SDG1032XConnectionError(f"write_arb({nm!r}) failed: {e}") from e
-        got = self.read_arb(nm)
-        if verify and got.codes[: len(codes)] != codes:
+        with self._lan() as sock:
+            _sock_send(sock, header + codes + b"\n")
+            got = self._read_arb_on(sock, nm)
+        if verify and got.codes != codes:
             raise SDG1032XVerifyError(
-                f"write_arb: {nm!r} read back {len(got.codes) // 2} samples that differ from the "
-                f"{n} sent (the instrument may have resampled or rejected the upload)",
+                f"write_arb: {nm!r} read back {len(got.codes) // 2} samples that differ from "
+                f"the {n} sent",
                 channel=None,
                 field="codes",
                 wanted=n,
                 got=len(got.codes) // 2,
             )
-        return got
+        return ArbData(
+            name=got.name,
+            frequency_hz=f,
+            amplitude_vpp=a,
+            offset_v=o,
+            phase_deg=p,
+            codes=got.codes,
+            nudged=nudged,
+        )
 
     def read_arb(self, name: str) -> ArbData:
-        """``WVDT? USER,<name>``: the text header up to ``WAVEDATA,`` then the
-        raw int16 little-endian codes."""
+        """The stored codes of a user waveform, over the LAN socket
+        (``WVDT? USER,<name>``: a text header up to ``WAVEDATA,`` then exactly
+        ``LENGTH`` bytes). The bench firmware reports only name and length in
+        that header, so the wave parameters read back ``None``; ask the channel
+        (``get_basic_wave``) for what is playing."""
         nm = self._arb_name(name)
-        if self._closed:
-            raise SDG1032XConnectionError("instrument is closed")
-        with self._transfer_timeout():
-            try:
-                self._inst.write(f"WVDT? USER,{nm}")
-                head = bytearray()
-                while not head.endswith(b"WAVEDATA,"):
-                    b = self._inst.read_bytes(1)
-                    if not b:
-                        break
-                    head += b
-                    if len(head) > 512:
-                        raise SDG1032XProtocolError(
-                            f"WVDT? header did not end: {bytes(head[:80])!r}"
-                        )
-            except SDG1032XError:
-                raise
-            except Exception as e:
-                text = str(e).lower()
-                if "timeout" in text or "pipe error" in text:
-                    raise SDG1032XTimeoutError(
-                        f"read_arb({nm!r}): no such waveform, or no reply"
-                    ) from e
-                raise SDG1032XConnectionError(f"read_arb({nm!r}) failed: {e}") from e
-            text = head.decode("ascii", errors="replace")
-            _, body = split_header(text, "WVDT")
-            pairs, _ = parse_pairs(body.rsplit("WAVEDATA", 1)[0])
-            length = pairs.get("LENGTH", "")
-            m = re.match(r"^(\d+)\s*(B|KB)?$", length.strip().upper())
-            if not m:
-                raise SDG1032XProtocolError(f"WVDT? without a LENGTH: {text!r}")
-            nbytes = int(m.group(1)) * (1024 if m.group(2) == "KB" else 1)
-            data = bytearray()
-            try:
-                while len(data) < nbytes:
-                    chunk = self._inst.read_bytes(min(nbytes - len(data), 65536))
-                    if not chunk:
-                        break
-                    data += chunk
-            except Exception as e:
-                raise SDG1032XConnectionError(f"read_arb({nm!r}): payload read failed: {e}") from e
-            self._drain_terminator()
+        with self._lan() as sock:
+            return self._read_arb_on(sock, nm)
+
+    def _read_arb_on(self, sock: socket.socket, name: str) -> ArbData:
+        _sock_send(sock, f"WVDT? USER,{name}\n".encode("ascii"))
+        head = bytearray()
+        while not head.endswith(b"WAVEDATA,"):
+            b = _sock_recv(sock, 1)
+            if not b:
+                raise SDG1032XTimeoutError(
+                    f"read_arb({name!r}): no reply — no such user waveform, or the LAN "
+                    "socket is not answering"
+                )
+            head += b
+            if len(head) > 512:
+                raise SDG1032XProtocolError(f"WVDT? header did not end: {bytes(head[:80])!r}")
+        text = head.decode("ascii", errors="replace")
+        _, body = split_header(text, "WVDT")
+        pairs, _ = parse_pairs(body.rsplit("WAVEDATA", 1)[0])
+        m = re.match(r"^(\d+)\s*(B|KB)?$", pairs.get("LENGTH", "").strip().upper())
+        if not m:
+            raise SDG1032XProtocolError(f"WVDT? without a LENGTH: {text!r}")
+        nbytes = int(m.group(1)) * (1024 if m.group(2) == "KB" else 1)
+        data = bytearray()
+        while len(data) < nbytes:
+            chunk = _sock_recv(sock, min(nbytes - len(data), 65536))
+            if not chunk:
+                raise SDG1032XProtocolError(
+                    f"read_arb({name!r}): short payload, {len(data)} of {nbytes} bytes"
+                )
+            data += chunk
+        # The line terminator after the payload; best effort.
+        try:
+            sock.settimeout(0.5)
+            _sock_recv(sock, 1)
+        except Exception:  # noqa: BLE001
+            pass
+        stored = pairs.get("WVNM", name)
+        if stored.lower().endswith(".bin"):
+            stored = stored[:-4]
         return ArbData(
-            name=pairs.get("WVNM", nm),
+            name=stored,
             frequency_hz=_num(pairs, "FREQ"),
             amplitude_vpp=_num(pairs, "AMPL"),
             offset_v=_num(pairs, "OFST"),
             phase_deg=_num(pairs, "PHASE"),
             codes=bytes(data),
         )
+
+    @contextlib.contextmanager
+    def _lan(self):
+        """A fresh connection to the instrument's SCPI socket for one transfer.
+
+        The address is ``lan_host`` from ``open()``/``agent.json``, else the one
+        the instrument reports for itself (``SYST:COMM:LAN:IPAD?``), asked once.
+        No LAN at all is a :py:class:`SDG1032XConnectionError` that says what to
+        plug in — the driver never falls back to USB for this, because USB
+        pretends to accept the upload and stores nothing.
+        """
+        if self._closed:
+            raise SDG1032XConnectionError("instrument is closed")
+        host = self._lan_host
+        if host is None and not self._lan_discovered:
+            self._lan_discovered = True
+            reported = self.get_lan_config().ip
+            if reported and reported not in ("0.0.0.0", "10.11.13.230"):
+                host = self._lan_host = reported
+        if host is None:
+            raise SDG1032XConnectionError(
+                "arbitrary-waveform transfer needs the instrument's LAN (SCPI socket, port "
+                f"{self._lan_port}): USB-TMC upload is silently dropped by this firmware. "
+                "Connect Ethernet and set a reachable address (set_lan_config), or pass "
+                "lan_host= to open()"
+            )
+        try:
+            sock = socket.create_connection((host, self._lan_port), timeout=LAN_TIMEOUT_S)
+        except OSError as e:
+            raise SDG1032XConnectionError(
+                f"cannot reach the instrument's SCPI socket at {host}:{self._lan_port}: {e} — "
+                "arb transfer needs its LAN (USB-TMC drops uploads on this firmware)"
+            ) from e
+        try:
+            yield sock
+        finally:
+            with contextlib.suppress(OSError):
+                sock.close()
 
     # ------------------------------------------------------------ modulation
 
@@ -1852,7 +1954,13 @@ class SiglentSDG1032X:
         return got
 
     def get_harmonics(self, channel: ChannelLike) -> Harmonic:
+        """Harmonic settings. Bench finding: ``HARM?`` goes **unanswered**
+        unless the channel's wave is SINE (harmonics exist only for sine), so
+        on any other wave this answers "disabled" without asking — a query
+        that never returns would cost the full timeout every time."""
         ch = self._coerce_channel(channel)
+        if self.get_basic_wave(ch).wave_type != "SINE":
+            return Harmonic(channel=ch, enabled=False)
         raw = self.query(f"C{ch}:HARM?")
         _, body = split_header(raw, "HARM")
         pairs, _ = parse_pairs(body)
@@ -1886,6 +1994,11 @@ class SiglentSDG1032X:
         ch = self._check_channel(channel)
         if amplitude_v is not None and amplitude_dbc is not None:
             raise SDG1032XValueError("give amplitude_v or amplitude_dbc, not both")
+        if self.get_basic_wave(ch).wave_type != "SINE":
+            raise SDG1032XValueError(
+                f"C{ch}: harmonics exist only for a SINE wave (set_wave_type first); the "
+                "instrument answers nothing to HARM on any other wave"
+            )
         parts: list[str] = []
         wanted: dict[str, tuple[Any, str]] = {}
         if enabled is not None:
@@ -2342,6 +2455,48 @@ class SiglentSDG1032X:
             pass
         finally:
             self._inst.timeout = old
+
+
+def escape_codes(codes: bytes) -> tuple[bytes, int]:
+    """Keep every newline byte out of an int16 little-endian payload.
+
+    The instrument's SCPI socket ends a message at the first 0x0A, payload
+    included, and ignores ``LENGTH``. A sample whose *low* byte is 0x0A moves
+    up by one code — below the 14-bit DAC's resolution, so the output is
+    identical. A sample whose *high* byte is 0x0A (2560..2815) moves to the
+    nearer of 2559 and 2816, up to 128 codes (0.4 % of full scale). Returns
+    the escaped bytes and how many samples moved.
+    """
+    n = len(codes) // 2
+    vals = list(struct.unpack(f"<{n}h", codes[: 2 * n]))
+    nudged = 0
+    for i, v in enumerate(vals):
+        u = v & 0xFFFF
+        if u & 0xFF == 0x0A:
+            v += 1
+            nudged += 1
+            u = v & 0xFFFF
+        if (u >> 8) & 0xFF == 0x0A:
+            v = 0x09FF if (v - 0x09FF) <= (0x0B00 - v) else 0x0B00
+            nudged += 1
+        vals[i] = v
+    return struct.pack(f"<{n}h", *vals), nudged
+
+
+def _sock_send(sock: socket.socket, data: bytes) -> None:
+    try:
+        sock.sendall(data)
+    except OSError as e:
+        raise SDG1032XConnectionError(f"LAN send failed: {e}") from e
+
+
+def _sock_recv(sock: socket.socket, n: int) -> bytes:
+    try:
+        return sock.recv(n)
+    except socket.timeout as e:
+        raise SDG1032XTimeoutError("LAN socket: no data within the timeout") from e
+    except OSError as e:
+        raise SDG1032XConnectionError(f"LAN receive failed: {e}") from e
 
 
 def _codes(samples: Sequence[Union[int, float]]) -> bytes:

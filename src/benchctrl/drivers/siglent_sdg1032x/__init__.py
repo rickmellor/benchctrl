@@ -18,6 +18,7 @@ through ``disable_outputs()``.
 from benchctrl.drivers.siglent_sdg1032x.driver import (
     ARB_MAX_SAMPLES,
     CHANNELS,
+    LAN_PORT,
     MOD_TYPES,
     VIRTUAL_KEYS,
     WAVE_TYPES,
@@ -47,11 +48,13 @@ from benchctrl.drivers.siglent_sdg1032x.driver import (
     Sweep,
     SyncConfig,
     discover,
+    escape_codes,
 )
 
 __all__ = [
     "ARB_MAX_SAMPLES",
     "CHANNELS",
+    "LAN_PORT",
     "MOD_TYPES",
     "VIRTUAL_KEYS",
     "WAVE_TYPES",
@@ -81,4 +84,5 @@ __all__ = [
     "Sweep",
     "SyncConfig",
     "discover",
+    "escape_codes",
 ]

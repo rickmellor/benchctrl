@@ -21,6 +21,8 @@ means for this driver:
 from __future__ import annotations
 
 import logging
+import re
+import socket
 import struct
 import time
 
@@ -462,6 +464,25 @@ def test_set_harmonics_parses_stray_comma_reply(gen):
     assert gen.query("C1:HARM?") == "C1:HARM HARMSTATE,OFF"
 
 
+def test_harm_query_is_unanswered_off_a_sine_wave():
+    """Bench: ``C1:HARM?`` gets no reply unless the channel's wave is SINE.
+    The driver reads BSWV first and never sends HARM? off a sine, so only a
+    raw query sees the timeout."""
+    drv = make_sdg1032x(timeout_ms=300)
+    try:
+        assert drv.query("C1:HARM?") == "C1:HARM HARMSTATE,OFF"
+        drv.set_wave_type(1, "SQUARE")
+        with pytest.raises(SDG1032XTimeoutError):
+            drv.query("C1:HARM?")
+        assert _sim(drv).unanswered_queries == ["C1:HARM?"]
+        before = len(_sim(drv).command_log)
+        assert drv.get_harmonics(1).enabled is False
+        assert "HARM?" not in " ".join(_sim(drv).command_log[before:])
+        assert drv.operation_complete() is True  # the next query still works
+    finally:
+        drv.close()
+
+
 def test_set_combine_refuses_square_silently(gen):
     assert gen.set_combine(1, True) is True
     with pytest.raises(SDG1032XVerifyError) as ei:
@@ -549,9 +570,11 @@ def test_language_and_power_on_config(gen):
 
 
 def test_lan_config(gen):
+    """The sim reports the loopback address so the driver's LAN auto-discovery
+    (``IPAD?`` when no ``lan_host`` was given) would land on its own socket."""
     lan = gen.get_lan_config()
-    assert lan.ip == "10.11.13.230" and lan.mask == "255.255.255.0"
-    assert gen.query("SYST:COMM:LAN:IPAD?") == '"10.11.13.230"'
+    assert lan.ip == "127.0.0.1" and lan.mask == "255.255.255.0"
+    assert gen.query("SYST:COMM:LAN:IPAD?") == '"127.0.0.1"'
     lan = gen.set_lan_config(ip="192.168.1.5", gateway="192.168.1.1")
     assert lan.ip == "192.168.1.5" and lan.gateway == "192.168.1.1"
 
@@ -570,51 +593,11 @@ def test_list_builtin_arbs_sorted_by_index(gen):
     assert gen.query("STL? BUILDIN").startswith("STL M10, ExpFal, M100, ECG14, ")
 
 
-def test_list_user_arbs_empty_then_populated(gen):
-    assert gen.list_arbs("user") == ()
-    assert gen.query("STL? USER") == "STL WVNM"
-    gen.write_arb("wave1", [0, 1, 2, 3])
-    assert gen.list_arbs("user") == (ArbInfo(index=None, name="wave1", builtin=False),)
-
-
 def test_select_builtin_by_index(gen):
     assert gen.get_arb(1).name == ""  # power-on: INDEX,0,NAME,
     sel = gen.select_arb(1, index=2)
     assert sel.index == 2 and sel.name == "StairUp"
     assert gen.query("C1:ARWV?") == "C1:ARWV INDEX,2,NAME,StairUp"
-
-
-def test_select_user_by_name_after_upload(gen):
-    with pytest.raises(SDG1032XVerifyError):
-        gen.select_arb(1, name="nothere")  # not stored: silently refused
-    gen.write_arb("wave1", [0, 100, -100, 0])
-    assert gen.select_arb(1, name="wave1").name == "wave1"
-
-
-def test_write_arb_int_codes_round_trip(gen):
-    data = gen.write_arb("ints", [0, 1000, -1000, 32767, -32768], frequency_hz=2500)
-    assert data.samples == (0, 1000, -1000, 32767, -32768)
-    assert data.frequency_hz == pytest.approx(2500.0)
-    assert gen.read_arb("ints").samples == data.samples
-
-
-def test_write_arb_floats_round_trip(gen):
-    data = gen.write_arb("floats", [0.0, 0.5, -0.5, 1.0, -1.0])
-    assert data.samples == (0, 16384, -16384, 32767, -32767)
-
-
-def test_write_arb_payload_with_newline_bytes_is_framed(gen):
-    samples = [10, 0x0A0A, -0x0A0B, 10]  # int16 codes whose bytes contain 0x0A
-    assert gen.write_arb("nl", samples).samples == tuple(samples)
-
-
-def test_write_arb_padded_readback_is_tolerated():
-    drv = make_sdg1032x(sim={"arb_pad_to": 8})
-    try:
-        data = drv.write_arb("short", [1, 2, 3])
-        assert data.samples == (1, 2, 3, 3, 3, 3, 3, 3)
-    finally:
-        drv.close()
 
 
 def test_write_arb_refuses_too_many_samples_and_bad_names(gen):
@@ -625,14 +608,216 @@ def test_write_arb_refuses_too_many_samples_and_bad_names(gen):
     with pytest.raises(SDG1032XValueError):
         gen.write_arb("x" * 25, [0, 1])
     assert _sim(gen).command_log == []  # refused before anything was sent
+    assert _sim(gen).lan_log == []
 
 
-def test_upload_without_length_is_silently_rejected(gen):
+# --------------------------------------------------------------------------
+# Arbitrary waveforms over the LAN SCPI socket
+#
+# On the bench (firmware 1.01.01.33R1B6) WVDT uploads only work over the
+# instrument's TCP port 5025, and that socket is line-oriented: a message ends
+# at the first 0x0A byte, payload included. These tests speak the socket
+# protocol directly to pin the simulator's model of it; the driver-level
+# ``write_arb``/``read_arb`` tests live with the driver.
+# --------------------------------------------------------------------------
+
+
+def _lan(gen: SiglentSDG1032X) -> socket.socket:
+    port = _sim(gen).lan_port
+    assert port is not None
+    return socket.create_connection(("127.0.0.1", port), timeout=2.0)
+
+
+def _recv_until_newline(sock: socket.socket) -> bytes:
+    """Bytes up to and including the first newline (the header of a
+    ``WVDT?`` answer, or a whole text reply)."""
+    out = bytearray()
+    while not out.endswith(b"\n"):
+        b = sock.recv(1)
+        if not b:
+            raise AssertionError(f"socket closed after {bytes(out)!r}")
+        out += b
+    return bytes(out)
+
+
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    out = bytearray()
+    while len(out) < n:
+        chunk = sock.recv(n - len(out))
+        if not chunk:
+            raise AssertionError(f"socket closed after {len(out)} of {n} bytes")
+        out += chunk
+    return bytes(out)
+
+
+def _upload_line(name: str, codes: bytes, *, length: bool = False) -> bytes:
+    """The driver's upload message: header, raw int16 codes, one newline."""
+    head = f"C1:WVDT WVNM,{name},FREQ,1000,AMPL,1,OFST,0,PHASE,0,"
+    if length:
+        head += f"LENGTH,{len(codes)}B,"
+    return head.encode("ascii") + b"WAVEDATA," + codes + b"\n"
+
+
+def _read_back(sock: socket.socket, name: str) -> tuple[bytes, bytes]:
+    """``WVDT? USER,<name>`` -> (header up to ``WAVEDATA,``, payload)."""
+    sock.sendall(f"WVDT? USER,{name}\n".encode("ascii"))
+    head = bytearray()
+    while not head.endswith(b"WAVEDATA,"):
+        head += sock.recv(1)
+        assert len(head) < 256, bytes(head)
+    m = re.search(rb"LENGTH, (\d+)B", bytes(head))
+    assert m is not None, bytes(head)
+    payload = _recv_exact(sock, int(m.group(1)))
+    assert _recv_exact(sock, 1) == b"\n"
+    return bytes(head), payload
+
+
+#: Sixteen int16 codes none of whose bytes is 0x0A — what the driver's
+#: escaping guarantees before it sends.
+_ESCAPED_16 = struct.pack("<16h", *range(0, 1600, 100))
+assert b"\n" not in _ESCAPED_16
+
+
+def test_lan_upload_lists_and_reads_back_byte_exact(gen):
     sim = _sim(gen)
-    gen._inst.write_raw(b"C1:WVDT WVNM,nolen,WAVEDATA," + b"\x00\x01\x02\x03")
+    assert gen.list_arbs("user") == ()
+    assert gen.query("STL? USER") == "STL WVNM"
+    with _lan(gen) as s:
+        s.sendall(_upload_line("wave1", _ESCAPED_16))
+        s.sendall(b"STL? USER\n")
+        assert _recv_until_newline(s) == b"STL WVNM,wave1\n"
+        head, payload = _read_back(s, "wave1")
+    assert head == b"WVDT POS, /Local, WVNM, wave1, LENGTH, 32B, TYPE, 6, WAVEDATA,"
+    assert payload == _ESCAPED_16
+    assert sim.user_arbs["wave1"]["codes"] == _ESCAPED_16
+    assert sim.lan_truncated == []
+    assert sim.lan_log == [
+        "C1:WVDT WVNM,wave1,FREQ,1000,AMPL,1,OFST,0,PHASE,0,WAVEDATA,<32 bytes>",
+        "STL? USER",
+        "WVDT? USER,wave1",
+    ]
+    # The pty sees the same store: the driver's catalogue lists the upload,
+    # and nothing about it went through the pty.
+    assert gen.list_arbs("user") == (ArbInfo(index=None, name="wave1", builtin=False),)
+    assert not any("WVDT" in c for c in sim.command_log)
+
+
+def test_lan_full_length_wave_is_a_single_32768_byte_message(gen):
+    """A 16384-point wave is one 32 KB line on the socket (the transfer that
+    wedges the USB stack), read back as ``LENGTH, 32768B``."""
+    codes = bytes(11 if (i * 7) % 256 == 10 else (i * 7) % 256 for i in range(32768))
+    assert b"\n" not in codes
+    with _lan(gen) as s:
+        s.sendall(_upload_line("full", codes, length=True))
+        head, payload = _read_back(s, "full")
+    assert head == b"WVDT POS, /Local, WVNM, full, LENGTH, 32768B, TYPE, 6, WAVEDATA,"
+    assert payload == codes
+    assert _sim(gen).lan_truncated == []
+
+
+def test_lan_upload_is_cut_at_the_first_newline_byte(gen):
+    """The socket ignores ``LENGTH`` and ends the message at 0x0A: a payload
+    containing that byte is stored short — the bench behaviour the driver's
+    escaping exists for."""
+    sim = _sim(gen)
+    codes = struct.pack("<4h", 10, 0x0A0A, -0x0A0B, 10)  # 0x0A at byte 0
+    assert codes[0] == 0x0A
+    with _lan(gen) as s:
+        s.sendall(_upload_line("nl", codes, length=True))
+        # The bytes after the 0x0A start the *next* message; end them here
+        # so the read-back below is a clean line, as the driver's fresh
+        # connection per call would be.
+        s.sendall(b"\n")
+    _wait_for(lambda: "nl" in sim.user_arbs)
+    assert sim.user_arbs["nl"]["codes"] == b""
+    assert sim.lan_truncated == ["nl"]
+    with _lan(gen) as s:
+        head, payload = _read_back(s, "nl")
+    assert head == b"WVDT POS, /Local, WVNM, nl, LENGTH, 0B, TYPE, 6, WAVEDATA,"
+    assert payload == b""
+    codes = b"\x01\x02\x03\x0a\x05\x06"
+    with _lan(gen) as s:
+        s.sendall(_upload_line("nl2", codes, length=True) + b"\n")
+    _wait_for(lambda: "nl2" in sim.user_arbs)
+    assert sim.user_arbs["nl2"]["codes"] == b"\x01\x02\x03"
+    assert sim.lan_truncated == ["nl", "nl2"]
+
+
+def test_lan_unknown_name_gets_no_reply(gen):
+    with _lan(gen) as s:
+        s.sendall(b"WVDT? USER,nothere\n")
+        s.settimeout(0.5)
+        with pytest.raises(socket.timeout):
+            s.recv(1)
+    assert _sim(gen).unanswered_queries == ["WVDT? USER,nothere"]
+
+
+def test_lan_text_queries_answer_like_the_pty(gen):
+    with _lan(gen) as s:
+        s.sendall(b"*IDN?\n")
+        assert _recv_until_newline(s) == (SimulatedSDG1032X.DEFAULT_IDN + "\n").encode()
+        s.sendall(b"C1:BSWV?\n")
+        assert _recv_until_newline(s) == (gen.query("C1:BSWV?") + "\n").encode()
+    assert _sim(gen).lan_log == ["*IDN?", "C1:BSWV?"]
+    assert _sim(gen).command_log == ["C1:BSWV?"]
+
+
+def test_lan_selected_user_wave_reads_back_with_bin_suffix(gen):
+    """``C1:ARWV NAME,<name>`` (bare name) selects a stored wave; ``ARWV?``
+    then answers ``NAME,<name>.bin`` with no INDEX — on either transport."""
+    sim = _sim(gen)
+    gen.write("C1:ARWV NAME,nothere")
+    gen.operation_complete()
+    assert sim.rejections == ["ARWV NAME,nothere: no such user waveform"]
+    with _lan(gen) as s:
+        s.sendall(_upload_line("wave1", _ESCAPED_16))
+        s.sendall(b"C1:ARWV NAME,wave1\n")
+        s.sendall(b"C1:ARWV?\n")
+        assert _recv_until_newline(s) == b"C1:ARWV NAME,wave1.bin\n"
+    assert gen.query("C1:ARWV?") == "C1:ARWV NAME,wave1.bin"
+    assert gen.get_arb(1).name == "wave1"  # the driver strips the suffix
+    assert gen.select_arb(1, index=2).name == "StairUp"
+    assert gen.query("C1:ARWV?") == "C1:ARWV INDEX,2,NAME,StairUp"
+
+
+def test_pty_wvdt_upload_is_silently_dropped(gen):
+    """USB-TMC on the bench: every WVDT framing is swallowed and nothing is
+    stored. The sim consumes the binary frame (so the pty stays in sync) and
+    records the drop."""
+    sim = _sim(gen)
+    gen._inst.write_raw(b"C1:WVDT WVNM,usb,LENGTH,4B,WAVEDATA," + b"\x00\x01\x02\x03")
     _wait_for(lambda: sim.rejections)
-    assert sim.rejections[0].endswith("no LENGTH field")
+    assert sim.rejections == [f"WVDT usb: {SimulatedSDG1032X.USB_WVDT_DROPPED}"]
     assert sim.user_arbs == {}
+    assert gen.query("STL? USER") == "STL WVNM"  # the pty still answers
+    gen._inst.write_raw(b"C1:WVDT WVNM,nolen,WAVEDATA," + b"\x00\x01\x02\x03")
+    _wait_for(lambda: len(sim.rejections) == 2)
+    assert sim.rejections[1].startswith(f"WVDT nolen: {SimulatedSDG1032X.USB_WVDT_DROPPED}")
+    assert sim.user_arbs == {}
+    assert gen.query("STL? USER") == "STL WVNM"
+
+
+def test_lan_can_be_disabled_for_the_no_ethernet_case():
+    drv = make_sdg1032x(sim={"lan": False})
+    try:
+        assert _sim(drv).lan_port is None
+        assert drv.info().model == "SDG1032X"
+    finally:
+        drv.close()
+
+
+def test_factory_passes_the_sim_port_unless_the_caller_named_one():
+    drv = make_sdg1032x()
+    try:
+        assert drv.lan_host == "127.0.0.1"
+        assert _sim(drv).lan_port is not None
+    finally:
+        drv.close()
+    drv = make_sdg1032x(lan_host="10.0.0.9")
+    try:
+        assert drv.lan_host == "10.0.0.9"
+    finally:
+        drv.close()
 
 
 # --------------------------------------------------------------------------
@@ -728,5 +913,75 @@ def test_the_simulator_swallows_one_message_after_a_combined_wave_command():
         with pytest.raises(SDG1032XTimeoutError):
             g.query("C1:BSWV?")
         assert g.get_basic_wave(1).frequency_hz == 1500.0, "the one after answers"
+    finally:
+        g.close()
+
+
+# --------------------------------------------------------------------------
+# write_arb / read_arb over the simulated LAN socket
+# --------------------------------------------------------------------------
+
+
+def test_write_arb_round_trips_over_the_lan_socket_with_escaping(gen):
+    """A payload with newline bytes lands whole: the driver escapes them, the
+    sim (like the bench) would otherwise have truncated at the first one."""
+    import struct
+
+    from benchctrl.drivers.siglent_sdg1032x import ArbData, escape_codes
+
+    sim = _sim(gen)
+    samples = list(range(16))  # sample 10 = 0x000A
+    got = gen.write_arb("esc16", samples, frequency_hz=2000.0, amplitude_vpp=0.5)
+    assert isinstance(got, ArbData) and got.nudged == 1
+    expected, _ = escape_codes(struct.pack("<16h", *samples))
+    assert got.codes == expected and len(got.codes) == 32
+    assert sim.lan_truncated == []
+    assert gen.read_arb("esc16").codes == expected
+    assert gen.list_arbs("user") == (ArbInfo(index=None, name="esc16", builtin=False),)
+    assert gen.select_arb(1, name="esc16").name == "esc16"
+    assert gen.lan_host == "127.0.0.1"
+
+
+def test_write_arb_full_length_floats_round_trip(gen):
+    import math
+
+    n = 16384
+    sine = [math.sin(2 * math.pi * i / n) for i in range(n)]
+    got = gen.write_arb("sine16k", sine)
+    assert len(got.codes) == 2 * n and got.nudged > 0
+    assert gen.read_arb("sine16k").codes == got.codes
+
+
+def test_an_unescaped_upload_is_truncated_and_the_verify_catches_it(gen):
+    """What the escaping protects against: sent raw through the socket, the
+    payload ends at the first 0x0A and the read-back disagrees."""
+    import socket
+    import struct
+
+    sim = _sim(gen)
+    codes = struct.pack("<16h", *range(16))
+    with socket.create_connection(("127.0.0.1", sim.lan_port), timeout=3) as s:
+        s.sendall(b"C1:WVDT WVNM,raw16,LENGTH,32B,WAVEDATA," + codes + b"\n")
+    import time
+
+    time.sleep(0.2)
+    assert "raw16" in sim.lan_truncated
+    assert len(gen.read_arb("raw16").codes) == 20
+
+
+def test_read_arb_of_an_unknown_name_is_a_timeout(gen):
+    with pytest.raises(SDG1032XTimeoutError):
+        gen.read_arb("never_uploaded")
+
+
+def test_without_a_lan_the_arb_path_says_so_instead_of_trying_usb():
+    from benchctrl.drivers.siglent_sdg1032x import SDG1032XConnectionError
+    from benchctrl.sim.factories import make_sdg1032x
+
+    g = make_sdg1032x(sim={"lan": False}, lan_host="127.0.0.1", lan_port=1)
+    try:
+        with pytest.raises(SDG1032XConnectionError, match="LAN"):
+            g.write_arb("nolan", [0, 1, 2, 3])
+        assert g.list_arbs("user") == (), "nothing was stored by the USB path"
     finally:
         g.close()
