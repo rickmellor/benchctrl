@@ -138,6 +138,10 @@ INSTRUMENTS: tuple[dict, ...] = (
     # rather than "GPIO" because that is what an operator glancing at the rail
     # needs to know is present -- the thing that can hold a DUT down.
     {"key": "silabs_cp2112", "label": "CP2112", "kind": "gpio", "role": "RESET LINE"},
+    # The camera is an instrument on this rail because the bench *reads* through
+    # it. Its scan presence is the camera's USB id; whether an NPU sits behind
+    # the sidecar is a property, not a slot.
+    {"key": "bench_vision", "label": "VISION", "kind": "camera", "role": "CAMERA/NPU"},
 )
 
 #: Presentation for a device this build has no entry for. Its slot is still

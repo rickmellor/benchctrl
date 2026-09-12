@@ -277,7 +277,27 @@ unknown, so that is a decision for a person.
 
 See `docs/runs.md` for the spec format.
 
-## Deploying to an Arduino Uno Q
+## Deploying the agent
+
+The agent runs on whatever Linux box holds the USB cables. Two platforms are
+supported at parity — the Arduino Uno Q the stack was built on, and a
+Raspberry Pi 5 — and the same `deploy/install-agent.sh` handles both; it
+tells the two layouts apart by what sits next to it. The one thing that does
+not carry across is PCIe: the Metis vision accelerator (`docs/vision.md`) is
+Pi/desktop only.
+
+| | Arduino Uno Q | Raspberry Pi 5 | desktop Linux |
+|---|---|---|---|
+| install | unzip wheels, `PYTHONPATH` (no pip) | git clone + venv | git clone + venv |
+| service user | `arduino` | the login user (`SUDO_USER`) | the login user |
+| QR10x (CH340) | userspace bridge + `60-benchctrl-ch341.rules` | kernel `ch341` → `/dev/ttyUSB*` | kernel `ch341` |
+| USB-TMC (DMM, Rigols) | pyvisa-py over libusb + `61-benchctrl-usbtmc.rules` | same wheels; kernel has `usbtmc` too (see below) | same |
+| CP2112 (`hidraw`) | `64-benchctrl-cp2112.rules` | same rule | same rule |
+| display | DP-altmode over USB-C hub → `install-display-hotplug.sh` | real HDMI, nothing to install | — |
+| blobs / runs | `/home/arduino/benchctrl/` (root fs < 2 GB) | `/home/<user>/benchctrl/` (SD card) | `/home/<user>/benchctrl/` |
+| Metis vision | **no** (no PCIe) | yes (M.2 HAT) | yes (M.2 slot) |
+
+### Deploying to an Arduino Uno Q
 
 App Lab apps run in Docker containers and **cannot reach `/dev/ttyUSB*` or
 `/dev/ttyACM*`** — device passthrough is brick-level and limited to
@@ -347,3 +367,67 @@ Other board notes:
 - Keep the USB cable attached during bring-up. `adb` is the only
   out-of-band console if wifi drops mid-run, and `adb forward tcp:9737
   tcp:9737` gives a working TCP path with no network at all.
+### Deploying to a Raspberry Pi 5
+
+Raspberry Pi OS (Bookworm or Trixie, 64-bit) has pip, a kernel with `ch341`
+and `usbtmc`, real HDMI and a normal login user, so almost everything above
+is unnecessary. Verified on a Pi 5 8 GB, Pi OS Lite trixie, Python 3.13.
+
+```bash
+git clone https://github.com/rickmellor/benchctrl ~/benchctrl
+cd ~/benchctrl
+python3 -m venv .venv && .venv/bin/pip install -e ".[bench,bench-visa-py,mcp]"
+.venv/bin/pytest -m "not hardware" -q          # optional, ~20 min on a Pi 5
+sudo install -m 0644 deploy/udev/64-benchctrl-cp2112.rules /etc/udev/rules.d/
+sudo install -m 0644 deploy/udev/61-benchctrl-usbtmc.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger --action=add
+sudo ./deploy/install-agent.sh                   # no knobs: sees the checkout + venv
+```
+
+`install-agent.sh` finds `src/` and `.venv/` beside itself, takes the service
+user from `SUDO_USER`, and writes `blob_dir`/`runs_dir` under that user's
+home. It prints the four values it resolved before touching systemd; set
+`SRC_DIR`, `PYTHON`, `RUN_USER` or `STATE_DIR` to override any of them.
+
+What is different from the Uno Q:
+
+- **No userspace CH341.** The kernel binds `ch341` and the QR10x appears as
+  `/dev/ttyUSB*`; `autoserial` picks the kernel tty first. Running
+  `verify-ch341-qr10x.sh` here prints "kernel ch341 driver present" and
+  installs nothing.
+- **USB-TMC has a kernel driver too.** `pyvisa-py` still drives the
+  instruments over libusb, so the udev rule is still needed for write access
+  to `/dev/bus/usb/…`, and **`pyusb` must be installed** — that is what lets
+  pyvisa-py claim the interface and detach the kernel `usbtmc` binding. The
+  `bench-visa-py` extra carries both; with `pyvisa` alone the instruments show
+  up as `/dev/usbtmc*` and are invisible to VISA (verified on benchpi: the DMM
+  and both Rigols opened over the kernel-bound interface once pyusb was present).
+- **`hidraw` nodes are `root:root 0600`** until the CP2112 rule is installed
+  — same as the Uno Q, same rule.
+- **Storage is the SD card.** Blobs stay in RAM below 4 MB; only recordings
+  spill. For long recordings point `blob_dir` at a USB SSD.
+- **The dashboard on the Pi's HDMI needs a display stack first.** Pi OS Lite
+  ships none; the Uno Q had Xorg, lightdm and Chromium preinstalled. Then the
+  same two installers apply:
+  ```bash
+  sudo apt install --no-install-recommends xserver-xorg xinit x11-xserver-utils \
+      lightdm lightdm-gtk-greeter chromium
+  sudo ./deploy/install-fui.sh        # the launcher; test over an ssh tunnel first
+  sudo ./deploy/install-kiosk.sh      # boot straight into it (autologin as $SUDO_USER)
+  ```
+  The launcher finds the package through `/etc/benchctrl/agent.env`, so no
+  per-board `BENCHCTRL_SRC_DIR` is needed. `install-kiosk.sh` also does the
+  four things a console-booting Pi needs that the Uno Q had already: an Xorg
+  snippet binding the display to the vc4 device (without it Xorg dies with
+  "Cannot run in framebuffer mode" and lightdm loops), membership of the
+  `autologin` group (Debian's PAM stack ignores the autologin drop-in
+  otherwise), `graphical.target` as the default (lightdm is never started
+  from `multi-user`), and `--no-sandbox` for the kiosk browser via
+  `/etc/benchctrl/kiosk.env` (Chromium's renderer sandbox fails on the Pi
+  kernel and paints a flat grey window; the page is the FUI on loopback and
+  nothing else). Verified on benchpi 2026-09-12: 1440x900 panel, dashboard up
+  within a second of the session starting.
+
+Keep the checkout current with `git pull` (the agent imports drivers lazily,
+so restart it after pulling — see `deploy/README.md`).
+

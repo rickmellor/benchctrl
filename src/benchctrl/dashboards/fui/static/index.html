@@ -136,9 +136,21 @@
             <div class="mode-pills" id="dmm-pills"></div>
           </div>
         </section>
-        <section class="panel">
-          <div class="title"><span>SUPPLY / LOAD</span><span class="val" id="psu-verdict">NO LINK</span></div>
-          <div class="body" id="trace-body"><canvas id="trace" class="trace"></canvas></div>
+        <!-- The camera, live. This quadrant was a supply/load scope that had no
+             waveform to draw (the status payload carries none), so it showed a
+             graticule saying NO SIGNAL forever. The bench now reads through a
+             camera, and the one thing an operator wants from it in peripheral
+             vision is the picture itself. The stream is relayed by the FUI
+             server from the sidecar's loopback (/vision/stream), so it works in
+             the kiosk and over an ssh tunnel alike. The verdict is the VISION
+             rail slot's word; NO FEED means the sidecar did not answer, which is
+             distinct from the agent not serving the device. -->
+        <section class="panel" id="vision-panel">
+          <div class="title"><span>VISION · LIVE</span><span class="val" id="vision-verdict">NO LINK</span></div>
+          <div class="body" id="vision-body">
+            <img id="vision-stream" class="hidden" alt="">
+            <div class="readout no-link" id="vision-note">NO FEED</div>
+          </div>
         </section>
       </div>
     </div>

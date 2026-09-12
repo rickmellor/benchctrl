@@ -85,53 +85,57 @@ and whether a trip latches until an explicit reset.
 
 ### Revalidate serial transport selection on a desktop Linux host
 
-**Status**: `benchctrl.transports.autoserial` prefers a kernel `ch341`
-driver over our userspace one, falling back only where the kernel bound
-nothing (`KNOWN_LIMITATIONS.md § N-6`). The **fallback** path is verified on
-silicon — QR101A-1M-R1 serial 00000248 on the Uno Q, open → close → reopen,
-the reopen proving the USB claim is released rather than leaked. The
-**kernel-first** path is not: it is covered by `tests/test_autoserial.py`
-(including a mutation check that inverting the precedence fails a test), but
-has never run against a host that actually has the module.
+**Status**: **resolved 2026-09-11** on the Raspberry Pi 5 bench agent
+(`benchpi`, Pi OS trixie, kernel 6.18 with `ch341`), QR101A-1M-R1 serial
+00000248 — the same unit the userspace path was verified with on the Uno Q,
+so the two transports were compared on one instrument:
 
-**Why deferred**: no host on this bench can exercise it. The Uno Q is built
-`# CONFIG_USB_SERIAL_CH341 is not set`, and WSL has no CH340 passed through
-to it. This needs a "big iron" Linux host with the QR10x plugged in
-directly — not a code change, just hardware we don't currently have on the
-bench.
+1. `resolve_ch341_port(port=None)` → `SerialTarget(port='/dev/ttyUSB1',
+   bridge=None, how='kernel')`; no pty created, no `_benchctrl_bridge` on
+   the driver.
+2. `info()` over the kernel tty: `QR101A-1M-R1`, serial `00000248`,
+   hw `5.1N`, fw `5.967KS` — identical to the userspace-path answers.
+   Setpoint 100.0 Ω reads back 100.038 Ω, the same figure the Uno Q reports.
+3. Open → close → reopen: clean.
+4. `discover()` reports `/dev/ttyUSB1 — CH340 USB-serial bridge` via
+   `scan_serial()`; `scan_driverless_bridges()` returns `[]`.
+5. The negative case did **not** fall back — `how="kernel"` both times, and
+   there is no code path from a failed kernel open to the bridge. But it did
+   not *raise* either, for a reason the original wording did not anticipate:
+   a Linux tty is not exclusive by default. pyserial's `exclusive=True` is an
+   advisory `flock`, and `QR10x.open` does not set even that, so a second
+   process opens the same `/dev/ttyUSB1` and both talk to the instrument.
+   On the Uno Q the libusb claim made the userspace path exclusive by
+   construction; the kernel path has no such property. Tracked as
+   **"Exclusive open on kernel ttys"** below.
+6. `test_bench_qr10x.py` with `BENCHCTRL_QR10X_PORT=auto`: 6 passed on the
+   Pi through the kernel tty (the fixture now goes through `autoserial`, so
+   `auto` means the same thing in the suite as in the agent; the `COM7`
+   default still passes straight through). `test_cross_validate_sdm4065a_qr10x.py`
+   skipped — no DMM on the Pi's hub yet.
 
-**Scope when picked up**, on a host where `/dev/ttyUSB*` appears for
-`1a86:7523`:
+Also settled: the same `agent.json` (no `open.eastwood_qr10x.port`) works
+unmodified on both boards; the agent journal shows
+`autoserial: kernel ch341 driver present, using /dev/ttyUSB1` on the Pi.
 
-1. `resolve_ch341_port(port=None)` returns `how="kernel"` and the tty path,
-   and **no pty is created** — the userspace driver must not be touched. Also
-   assert no `_benchctrl_bridge` attribute on the driver, since the kernel
-   path should carry no bridge machinery.
-2. A QR10x round-trip over the kernel tty: `info()` matches what the
-   userspace path reports for the same unit (device type, serial, firmware).
-   Same instrument, same answers, different transport.
-3. Open → close → reopen, as on the Uno Q. The failure this catches is a
-   half-released tty rather than a leaked USB claim.
-4. `discovery.discover()` reports the adapter via `scan_serial()` with a real
-   device path, and `scan_driverless_bridges()` returns `[]` — the
-   self-suppression that stops it being double-reported.
-5. The negative case, which is the one that matters most: hold the tty open
-   from another process, then open through `autoserial`. It must **raise**,
-   not fall back to the userspace driver and silently succeed on a different
-   transport.
-6. Then the hardware suites end to end — `test_bench_qr10x.py` and
-   `test_cross_validate_sdm4065a_qr10x.py` — with no port configured, to
-   confirm one config genuinely works unmodified on both hosts.
+**Still unresolved**: `serial_number=` selection — this CH340G reports
+`iSerialNumber=0`, so there is still nothing to match, and only one adapter
+has ever been attached. Needs a second adapter, not a second host.
 
-**Also unresolved, and cheap to settle on the same host**: whether
-`serial_number=` selection works at all. Our CH340G reports
-`iSerialNumber=0` — no serial-number descriptor — so `CH341Device.open(
-serial_number=...)` cannot match it and the `index=` path is the only way to
-pick among several. Adapters differ here; some CH340 variants do carry one.
-Worth confirming on a second adapter before relying on serial selection, and
-worth a clearer error than "no CH340 with serial None" if the descriptor is
-simply absent. Multi-adapter selection is untested on real hardware either
-way — only one CH340 has ever been attached to this bench at a time.
+### Exclusive open on kernel ttys
+
+**Status**: found while closing the item above. `QR10x.open` (and the other
+pyserial drivers) open a kernel tty without `exclusive=True`, so nothing stops
+two benchctrl processes — or benchctrl and a stray `screen` — from sharing an
+instrument's port. The agent's single-writer claim (`KNOWN_LIMITATIONS.md`
+§ N-4) only governs clients of *one* agent.
+
+**Why deferred**: `exclusive=True` is an advisory `flock`, which protects
+against another pyserial/flock-aware opener but not against an arbitrary
+`open(2)`; `TIOCEXCL` is the enforced form but is per-fd and cleared on close.
+Either is a driver-wide behaviour change across seven drivers and the pty-backed
+simulators, so it belongs in its own change with its own tests, not in the Pi
+deployment work.
 
 ### Transport-layer encryption for remote mode
 
@@ -144,6 +148,39 @@ tunnel, which works and is what we use.
 someone re-flashes regularly, and the SSH tunnel is a complete answer
 for the deployments we have. Worth revisiting if benchctrl ends up on
 a network where a tunnel isn't practical.
+
+## Vision
+
+### LED / indicator classifier on the Metis — **shipped 2026-09-12**
+The capture-and-label loop (`benchctrl.vision.labelloop`) and the classifier
+path (`classify()` / `vision_classify`, `classify=` on a capture, a
+`Classification` with a logit margin, region-bound models served by name from
+the sidecar) are in. First model: the Pi's own `ACT` LED, 200 frames, 100 %
+on a held-out round, trained and compiled on scrub with the Axelera devkit
+(`metis` repo `experiments/vision/bench_led/`). Lessons from the metis
+board-reader experiment held: real frames beat synthetic, exposure first,
+gate on margin, keep the classical-CV sanity read. Left for a later pass:
+colour / blink-code classes (a multi-class dataset and a temporal read),
+`require N consistent reads` as a driver helper rather than a caller rule,
+and a FUI overlay of the current read.
+
+### Hardware trigger for the camera
+**Status**: capture is software-triggered from the sidecar, tagged with `seq`.
+The Basler's opto-isolated trigger input and the cable are on the bench; wiring
+it to a CP2112 line (or a Pi GPIO) would let a *bench event* — a reset pulse,
+a PDU switch — fire the exposure with microsecond alignment. Lands on the same
+`TriggerSource` seam in `benchctrl.vision.camera` (`Line1` instead of
+`Software`); the driver and the wire need nothing. Open question: how `seq`
+is assigned to a frame the sidecar did not fire — probably by the agent
+stamping the event that pulsed the line.
+
+### A tool that lets a model *look* at the bench
+**Status**: `vision_frame`/`vision_trigger_capture` return metadata and write
+the JPEG to `save_to`; no tool returns an image. FastMCP can return an `Image`
+content block, which would let an agent see the frame directly. Deferred
+because there is no image-return precedent in this server and the transcript
+cost of a 300 KB frame per call wants a deliberate design (downscale, crop to
+ROI, rate-limit), not a one-line addition.
 
 ## Foundation hardening
 

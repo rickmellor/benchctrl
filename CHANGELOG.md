@@ -9,6 +9,142 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### Bench vision — a camera and a Metis NPU as a device (`bench_vision`)
+
+The bench can now be *read* through a camera. A Basler a2A1920-160uc USB3
+Vision camera and an Axelera Metis M.2 NPU (YOLOv8n, ~510 FPS on-device in
+the `metis` R&D repo) are fronted by a loopback HTTP sidecar that owns the
+heavy SDKs, and benchctrl's driver is a **stdlib** HTTP client to it. That
+split is the whole design: the same driver, the same twelve `vision_*`
+tools and the same config work in local, remote and sim mode, whether the
+camera and NPU sit in a Raspberry Pi 5, a desktop, or the host itself. The
+Metis needs PCIe, so on an Arduino Uno Q the device is camera-only and
+detection raises `VisionCapabilityError` — a type that survives the wire
+so a caller falls back rather than retries.
+
+`trigger_capture(seq=N)` returns *the* frame tagged `N` or raises; a frame
+from an earlier trigger is never passed off as this one. That guarantee is
+what a labelled dataset and an LED-state assertion rest on. Frames cross the
+agent link as bytes and ride the existing blob store above 64 KB with no
+vision-specific code in `net/`.
+
+The simulator serves the *same* HTTP router the production sidecar runs
+(`benchctrl.vision.service`), with a synthetic camera and canned boxes, so
+CI exercises the driver's real socket path and the simulator cannot drift
+from the API. Registered everywhere a device key must be: config, agent
+opener, sim factory, codec, wire errors, MCP, the FUI rail, and discovery
+(a new read-only `scan_usb()` for instruments that are only a USB
+descriptor). No MCP tool returns image bytes — `save_to` writes the JPEG
+host-side.
+
+The sidecar ships too: `benchctrl-vision` (`benchctrl.vision.camera`,
+`.detector`, `.server` — pypylon, OpenCV, onnxruntime and the Axelera
+runtime, imported by nothing else) and `deploy/vision/` — a Dockerfile
+that builds the same on arm64 and amd64, a privileged loopback-only
+container run script, `benchctrl-vision.service`, an idempotent installer,
+a Debian-native `metis-dkms` installer that pins the package checksum and
+finds the card by vendor id, and a model fetcher that records SHA-256s.
+Brought up on `benchpi` 2026-09-11: driver built by DKMS against the Pi
+kernel, card bound as `axl`. `pyproject` gains a `vision` extra (the
+sidecar's wheels) and a `bench-visa-py` extra (`pyvisa-py` + `pyusb`),
+because on a Pi the kernel binds `usbtmc` and only pyusb lets pyvisa-py
+claim the interface — without it the DMM and both Rigols are invisible to
+VISA. See `docs/vision.md` and `deploy/vision/README.md`.
+
+**The Metis works on the Pi 5.** Three host-side faults stacked, none
+visible through the others: the card resets its BARs a few seconds after
+the Pi's early enumeration (a boot-time `benchctrl-metis-rescan.service`
+re-enumerates it), the card's DMA is 32-bit while the Pi maps RAM to PCIe
+above 4 GB (`dtoverlay=pcie-32bit-dma-pi5`), and the root port's 512-byte
+Max Payload Size against the card's 128 made every completion malformed
+(the rescan service aligns both to 128 every boot). Plus one vendor
+module option, `single_msi=1`, because with 32 vectors the card's firmware
+signals DMA completion with bare vector indices a Broadcom host does not
+decode. Diagnosed from the driver's debugfs and the PCIe error bits;
+written up in `KNOWN_LIMITATIONS.md` § V-8. Remote capture-and-detect
+through the agent runs at ~100 ms per frame on the Pi.
+
+The Pi's HDMI panel runs the dashboard too. `deploy/benchctrl-fui` finds the
+package through `/etc/benchctrl/agent.env`, and `deploy/install-kiosk.sh`
+derives its autologin user like the other installers and handles what a
+console-booting Raspberry Pi needs that the Uno Q had: an Xorg snippet
+binding the display to the vc4 device (`deploy/xorg/`), the `autologin`
+group, and `graphical.target`.
+
+The dashboard's former supply/load scope quadrant, which had no waveform to
+draw, is now **VISION · LIVE**: the camera's stream, relayed by the FUI
+server from the sidecar's loopback so it works on the kiosk and over a
+tunnel alike. The sidecar gained a read-only **view listener** (`VIEW_PORT`,
+8096 on the LAN) serving only `/stream`, `/frame.jpg` and `/health`; the
+control port stays on loopback.
+
+**The bench can read an LED.** `benchctrl.vision.labelloop` builds a
+labelled dataset from states benchctrl *commands* (a PDU outlet, a CP2112
+line, or a host LED through sysfs) and the frames it captures with `seq`
+correlation — wrong-`seq` frames are discarded, never labelled; actuators
+are restored as found; the manifest records the camera settings read back.
+The first dataset was the Pi's own `ACT` LED: 200 frames in 15 s. From it,
+a two-class classifier trained and compiled on scrub with the Axelera devkit
+scores 100 % on a capture round it never saw, with a logit margin above 10,
+and runs in well under a millisecond on the Metis. The sidecar serves such
+models by name (`--classifier DIR`, `CLASSIFIERS=` in `vision.env`,
+`deploy/vision/fetch-classifier.sh`); the driver reads them with
+`classify()` or `classify=` on `trigger_capture` (the seq-correlated way),
+returning a `Classification` — label, per-class logits, margin, `confident`
+— that crosses the agent wire typed. A model is bound to the sensor region
+it was trained on: the sidecar translates that region into the camera's
+current crop and refuses one that does not contain it, so a classifier keeps
+working after the crop is cleared for the live stream and never reads the
+wrong patch. Thirteen `vision_*` tools now (`vision_classify`), plus the
+cross-driver `vision_label_capture`; the simulator gained a
+`CannedClassifier`.
+
+### Capture-and-label: a training set from states benchctrl commanded
+
+`benchctrl.vision.labelloop` (stdlib) commands a state — a PDU outlet, a
+CP2112 line, or the bench box's own status LED via sysfs — settles, fires
+N `seq`-tagged captures and labels each frame with the state that was
+commanded when it was taken. A wrong-`seq` frame is a recorded discard,
+never a label; states are interleaved across rounds so drift cannot
+become a class; every actuator is restored as found, also on failure, and
+the far side of the link is checked in the tests. Output is
+`frames/<label>/<seq>.jpg` with a manifest (spec digest, camera settings
+read back, per-frame checksum and actuator state, optional sanity read)
+and `labels.csv`. CLI `python -m benchctrl.vision.labelloop`, MCP tool
+`vision_label_capture`. First real dataset on benchpi: the Pi's ACT LED,
+200 frames in 15 s, zero discards. `deploy/vision/` gains a udev rule for
+the host LEDs.
+
+### Raspberry Pi 5 as a second agent platform
+
+The bench agent now deploys to a Raspberry Pi 5 with the same
+`deploy/install-agent.sh` that serves the Arduino Uno Q. Nothing in the
+wire protocol or the agent was Uno-Q-specific; what was specific were the
+installer's *defaults* — user `arduino`, an unzipped tree at a fixed path,
+the system python — and those are now derived from what sits next to the
+script (a git checkout with `src/` and `.venv/`) and from `SUDO_USER`,
+falling back to the Uno Q values when neither applies. The resolved values
+are printed before systemd is touched. `RUN_USER` never resolves to
+`root`.
+
+A fresh `agent.json` gets `blob_dir`/`runs_dir` under the service user's
+home rather than the example's `/home/arduino`, because the code-level
+fallbacks know only the Uno Q and a systemd service's cwd is a read-only
+`/`. `verify-ch341-qr10x.sh` now stops, with exit 0, on a host whose
+kernel already has `ch341`: there the userspace bridge is never selected,
+so proving it would prove the wrong thing.
+
+`docs/remote.md` gains a Pi section and a platform capability table. The
+one capability that does not carry across is PCIe — the Metis vision
+accelerator is Pi/desktop only.
+
+Bringing the Pi up closed a ROADMAP item that had waited for exactly this
+host: the kernel-first CH341 path in `transports.autoserial` is now
+observed, not just asserted, on the same QR10x the userspace path was
+verified with. It also found that a kernel tty is not exclusive — two
+processes can open `/dev/ttyUSB1` — which the libusb claim had ruled out
+on the Uno Q; that is a new ROADMAP item, not a change here.
+
 ### Silicon Labs CP2112 — open-drain control lines for hardware reset
 
 The bench can now assert and release a DUT's reset line with a ~$15 USB

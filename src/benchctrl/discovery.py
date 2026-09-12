@@ -119,6 +119,21 @@ SIGNATURES: tuple[DriverSignature, ...] = (
         # never be loosened to match on vendor alone.
         note="not to be confused with 10c4:ea60, the CP210x UART bridge",
     ),
+    DriverSignature(
+        device_key="bench_vision",
+        label="Basler ace 2 USB3 Vision camera",
+        vid=0x2676,
+        pid=0xBA05,
+        transport="usb",
+        confidence=EXACT,
+        product_hints=("a2a", "basler"),
+        # A USB3 Vision (GenICam) camera: no tty, no /dev/video*, no hidraw.
+        # Presence of the *camera* is what the bus can decide; whether the
+        # vision sidecar is running, and whether an NPU sits behind it, are
+        # facts the driver reports once opened. The agent opens the sidecar,
+        # never this USB device.
+        note="presence of the camera, not of the vision sidecar or the NPU",
+    ),
 )
 
 #: Labels for keys only a probe can return. Kept beside :py:data:`SIGNATURES`
@@ -493,6 +508,66 @@ def _hidraw_attr(hidraw_name: str, attr: str) -> Optional[str]:
     return None
 
 
+def scan_usb(sysfs_root: str = "/sys/bus/usb/devices") -> list[DiscoveredDevice]:
+    """Enumerate USB devices by sysfs descriptor and identify only those whose
+    signature says ``transport="usb"``.
+
+    For instruments that are neither a tty, a USB-TMC node nor a hidraw node —
+    today the USB3 Vision camera — the bus descriptor is the only thing there
+    is to see. Read-only like every other scanner: sysfs attributes, nothing
+    opened.
+
+    Filters rather than reports, for the same reason :py:func:`scan_hidraw`
+    does: every tty and hidraw device on the bench is *also* a USB device, and
+    reporting them here would list the Arc and the CP2112 twice. So only
+    signatures whose transport is ``"usb"`` are matched, and everything else on
+    the bus is skipped rather than reported as unknown.
+    """
+    found: list[DiscoveredDevice] = []
+    try:
+        entries = sorted(os.listdir(sysfs_root))
+    except OSError:
+        return found
+    for name in entries:
+        base = os.path.join(sysfs_root, name)
+        vid = _sysfs_attr(base, "idVendor")
+        pid = _sysfs_attr(base, "idProduct")
+        if vid is None or pid is None:
+            continue
+        try:
+            vid_i, pid_i = int(vid, 16), int(pid, 16)
+        except ValueError:
+            continue
+        sig = _match_signature(vid_i, pid_i, "usb")
+        if sig is None or sig.transport != "usb":
+            continue
+        found.append(
+            DiscoveredDevice(
+                path=base,
+                transport="usb",
+                device_key=sig.device_key,
+                label=sig.label,
+                vid=vid_i,
+                pid=pid_i,
+                serial_number=_sysfs_attr(base, "serial"),
+                description=_sysfs_attr(base, "product") or "",
+                manufacturer=_sysfs_attr(base, "manufacturer"),
+                product=_sysfs_attr(base, "product"),
+                confidence=sig.confidence,
+                note=sig.note,
+            )
+        )
+    return found
+
+
+def _sysfs_attr(base: str, attr: str) -> Optional[str]:
+    try:
+        with open(os.path.join(base, attr)) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
 def scan_visa(resource_manager=None) -> list[DiscoveredDevice]:
     """Enumerate VISA resources, if a VISA backend is installed.
 
@@ -562,6 +637,7 @@ def discover(
     usbtmc: bool = True,
     visa: bool = True,
     hidraw: bool = True,
+    usb: bool = True,
     probe: bool = False,
     resource_manager=None,
 ) -> list[DiscoveredDevice]:
@@ -610,6 +686,10 @@ def discover(
         # Additive: no other scanner reports hidraw nodes, so there is nothing
         # to de-duplicate against.
         found.extend(scan_hidraw())
+    if usb:
+        # Additive too: scan_usb reports only signatures no other scanner can
+        # see (transport "usb"), so it never duplicates a tty or hidraw entry.
+        found.extend(scan_usb())
     if probe:
         found = probe_unidentified(found)
     return sorted(found, key=lambda d: (d.transport, d.path))

@@ -12,7 +12,14 @@
 
 set -eu
 
-RUN_USER=${RUN_USER:-arduino}
+# The autologin user: whoever invoked sudo (the Pi's login user), else the Uno
+# Q's `arduino`. Never root — see install-agent.sh for the same rule.
+if [ -z "${RUN_USER:-}" ]; then
+    case "${SUDO_USER:-}" in
+        ""|root) RUN_USER=arduino ;;
+        *)       RUN_USER=$SUDO_USER ;;
+    esac
+fi
 DROPIN=/etc/lightdm/lightdm.conf.d/90-benchctrl-kiosk.conf
 SESSION=/usr/share/xsessions/benchctrl-kiosk.desktop
 
@@ -66,6 +73,49 @@ esac
 # --- install --------------------------------------------------------------
 install -m 0755 "$here/benchctrl-kiosk" /usr/local/bin/
 install -m 0644 "$here/xsessions/benchctrl-kiosk.desktop" "$SESSION"
+
+# A Raspberry Pi's Xorg needs to be told which of its two DRM devices has the
+# HDMI ports, or it never starts (see deploy/xorg/20-benchctrl-vc4.conf). Only
+# where the vc4 driver is present: the Uno Q's msm display is unaffected.
+if [ -d /sys/module/vc4 ] || [ -d /sys/bus/platform/drivers/vc4-drm ]; then
+    install -d -m 0755 /etc/X11/xorg.conf.d
+    install -m 0644 "$here/xorg/20-benchctrl-vc4.conf" /etc/X11/xorg.conf.d/
+    echo "installed /etc/X11/xorg.conf.d/20-benchctrl-vc4.conf (vc4 display)"
+fi
+
+# On a Raspberry Pi, Chromium's renderer sandbox fails under this kernel and
+# the kiosk paints a flat grey window with no error anywhere (the same page
+# renders headless and unsandboxed). The panel shows the FUI on loopback and
+# nothing else, so run it unsandboxed there — written to a file the launcher
+# reads, so the decision is visible on the board and reversible by deleting it.
+if [ -d /sys/module/vc4 ] || [ -d /sys/bus/platform/drivers/vc4-drm ]; then
+    install -d -m 0755 /etc/benchctrl
+    if [ ! -f /etc/benchctrl/kiosk.env ]; then
+        cat > /etc/benchctrl/kiosk.env <<'EOF'
+# Written by deploy/install-kiosk.sh (Raspberry Pi): the renderer sandbox fails
+# on this kernel and the kiosk paints nothing. The page is the FUI on loopback.
+BENCHCTRL_KIOSK_EXTRA_FLAGS=--no-sandbox
+EOF
+        echo "wrote /etc/benchctrl/kiosk.env (--no-sandbox for the kiosk browser)"
+    fi
+fi
+
+# Debian's lightdm-autologin PAM stack admits only members of `autologin`.
+# Without this the drop-in below is silently ignored and the greeter appears.
+if ! getent group autologin >/dev/null; then
+    groupadd autologin
+fi
+if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx autologin; then
+    usermod -aG autologin "$RUN_USER"
+    echo "added $RUN_USER to the autologin group"
+fi
+
+# A board that boots to the console never starts a display manager, however
+# enabled it is: lightdm is pulled in by graphical.target only.
+if [ "$(systemctl get-default)" != "graphical.target" ]; then
+    systemctl set-default graphical.target
+    echo "default target -> graphical.target (was multi-user)"
+fi
 
 install -d -m 0755 /etc/lightdm/lightdm.conf.d
 sed "s/^autologin-user=.*/autologin-user=$RUN_USER/" \

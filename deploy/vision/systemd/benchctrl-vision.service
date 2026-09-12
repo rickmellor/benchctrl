@@ -1,0 +1,28 @@
+[Unit]
+Description=benchctrl vision sidecar (Basler camera + Axelera Metis, in a container)
+Documentation=https://github.com/rickmellor/benchctrl/blob/master/docs/vision.md
+Requires=docker.service
+After=docker.service network.target benchctrl-metis-rescan.service
+Wants=benchctrl-metis-rescan.service
+# The agent opens the driver lazily, so ordering against benchctrl-agent is not
+# required; but starting first means a fresh boot serves frames by the time a
+# client asks.
+Before=benchctrl-agent.service
+
+# Six failures in a minute means the image, the card or the camera is wrong.
+StartLimitBurst=6
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+# Root, because it drives docker; the container is privileged regardless.
+ExecStartPre=-/usr/bin/docker rm -f benchctrl-vision
+ExecStart=/usr/local/bin/benchctrl-vision-run --foreground
+ExecStop=/usr/bin/docker stop -t 10 benchctrl-vision
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+SyslogIdentifier=benchctrl-vision
+
+[Install]
+WantedBy=multi-user.target

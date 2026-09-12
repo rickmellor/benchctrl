@@ -164,6 +164,26 @@ def _registry() -> dict[str, type]:
             ("CP2112Error", "CP2112ConnectionError", "CP2112ProtocolError",
              "CP2112ValueError", "CP2112PolicyError", "CP2112VerifyError"),
         ),
+        (
+            "benchctrl.drivers.bench_vision.driver",
+            # Two beyond the usual, and each only means something if its type
+            # survives the wire:
+            #
+            # - CapabilityError: no AIPU / no model on the bench host. The
+            #   remedy is to fall back (classical CV, a human), never to
+            #   retry; degraded to RuntimeError it looks like a fault in a
+            #   sidecar that is in fact healthy.
+            # - CaptureError: the frame that came back is not the one that
+            #   was triggered (wrong seq), or the camera would not fire. A
+            #   label loop must discard on this and must be able to tell it
+            #   from a timeout, which is retryable.
+            #
+            # TimeoutError is real here: urllib has a socket timeout and a
+            # long-poll has a deadline.
+            ("VisionError", "VisionConnectionError", "VisionProtocolError",
+             "VisionTimeoutError", "VisionValueError", "VisionCapabilityError",
+             "VisionCaptureError"),
+        ),
     ):
         try:
             module = __import__(module_path, fromlist=["*"])

@@ -10,13 +10,52 @@
 
 set -eu
 
-PYTHON=${PYTHON:-/usr/bin/python3}
-SRC_DIR=${SRC_DIR:-/home/arduino/benchctrl-1.2.0/src}
-RUN_USER=${RUN_USER:-arduino}
 CONF_DIR=/etc/benchctrl
 UNIT=benchctrl-agent.service
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# Two supported layouts, told apart by what sits next to this script:
+#
+#   git checkout (Raspberry Pi 5, any pip-capable Linux)
+#       <checkout>/src/benchctrl/   +   <checkout>/.venv/bin/python
+#   unzipped tree (Arduino Uno Q, no pip)
+#       /home/arduino/benchctrl-1.2.0/src/{benchctrl,serial}/  +  /usr/bin/python3
+#
+# The knobs still win when set. Defaults only *look*; the import probe below is
+# what decides, so a wrong guess fails here rather than in a restart loop.
+if [ -z "${SRC_DIR:-}" ]; then
+    if [ -d "$here/../src/benchctrl" ]; then
+        SRC_DIR=$(CDPATH= cd -- "$here/../src" && pwd)
+    else
+        SRC_DIR=/home/arduino/benchctrl-1.2.0/src
+    fi
+fi
+if [ -z "${PYTHON:-}" ]; then
+    if [ -x "$here/../.venv/bin/python" ]; then
+        PYTHON=$(CDPATH= cd -- "$here/../.venv/bin" && pwd)/python
+    else
+        PYTHON=/usr/bin/python3
+    fi
+fi
+# The service user: whoever invoked sudo, which on the Uno Q is `arduino` and
+# on a Pi is the login user. Root itself is never a sensible answer (the unit
+# drops privileges on purpose), so a bare `sudo` from a root shell falls back
+# to the Uno Q default rather than installing a root-owned service.
+if [ -z "${RUN_USER:-}" ]; then
+    case "${SUDO_USER:-}" in
+        ""|root) RUN_USER=arduino ;;
+        *)       RUN_USER=$SUDO_USER ;;
+    esac
+fi
+# The agent's on-disk state (blob spill, run artifacts) lives in the service
+# user's home, never under / — on the Uno Q the root partition is under 2 GB.
+STATE_DIR=${STATE_DIR:-/home/$RUN_USER/benchctrl}
+
+echo "install-agent: RUN_USER=$RUN_USER"
+echo "install-agent: SRC_DIR=$SRC_DIR"
+echo "install-agent: PYTHON=$PYTHON"
+echo "install-agent: STATE_DIR=$STATE_DIR"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "must run as root (try: sudo $0)" >&2
@@ -56,6 +95,11 @@ else
     # substitution is safe; the generated token is URL-safe base64 and can
     # contain '/', hence the '|' delimiter.
     sed -i "s|REPLACE-ME[^\"]*|$token|" "$CONF_DIR/agent.json"
+    # The example carries the Uno Q's paths; point them at this user's home.
+    # Only on first install — an existing agent.json is the operator's.
+    sed -i -e "s|\"blob_dir\": *\"[^\"]*\"|\"blob_dir\": \"$STATE_DIR/blobs\"|" \
+           -e "s|\"runs_dir\": *\"[^\"]*\"|\"runs_dir\": \"$STATE_DIR/runs\"|" \
+           "$CONF_DIR/agent.json"
     echo "wrote $CONF_DIR/agent.json with a fresh token (mode 0640)"
     echo "  client-side token: $token"
 fi

@@ -1201,25 +1201,149 @@ Verified end to end on real hardware: QR101A-1M-R1, serial 00000248 — opened,
 closed and reopened through the auto-selected userspace transport, the reopen
 proving the USB claim is released rather than leaked.
 
-**Two validation gaps, both needing a host this bench doesn't have.** Neither
-is a known defect; they are untested paths, which is a different and lesser
-claim than "works". Tracked in [`ROADMAP.md`](ROADMAP.md) § *Revalidate serial
-transport selection on a desktop Linux host*, to be closed when we move back
-to big-iron Linux hosts.
+**Validated on a second host, 2026-09-11.** The kernel-first branch has now
+run on a host that has the module — the Raspberry Pi 5 bench agent — against
+the same QR101A-1M-R1 (serial 00000248): `how="kernel"`, no pty, identical
+`info()` and setpoint read-back to the userspace path, clean reopen,
+`scan_driverless_bridges()` empty. Results in `ROADMAP.md` § *Revalidate
+serial transport selection*. Two things remain:
 
-- **The kernel-first branch has never run on a host that has the module.** It
-  is covered by `tests/test_autoserial.py`, including a mutation check that
-  inverting the precedence fails a test, but the Uno Q is built without
-  `ch341` and WSL has no CH340 passed through. So "the kernel driver is
-  preferred where it exists" is asserted, not observed. The negative case
-  matters most: a kernel tty that fails to open must raise rather than
-  silently falling back to the userspace driver.
+- **A kernel tty is not exclusive.** The negative case ("hold the tty from
+  another process, then open through autoserial") did not fall back — there is
+  no path from a failed kernel open to the bridge — but it did not fail
+  either: Linux allows a second `open(2)` of a tty, pyserial's `exclusive=True`
+  is only an advisory `flock`, and `QR10x.open` sets neither. Two processes
+  can share the instrument's port on a kernel-tty host, which the libusb claim
+  ruled out on the Uno Q. Tracked in `ROADMAP.md` § *Exclusive open on kernel
+  ttys*.
 - **`serial_number=` selection cannot work on our adapter.** This CH340G
   reports `iSerialNumber=0` — no serial-number descriptor at all — so
   `CH341Device.open(serial_number=...)` has nothing to match and `index=` is
   the only way to choose. Other CH340 variants do carry one. Multi-adapter
   selection is untested on hardware regardless: only one CH340 has ever been
   attached here at a time.
+
+## Vision (camera + Metis NPU)
+
+### V-1. The Metis needs PCIe, so the Arduino Uno Q is camera-only at best
+The Axelera Metis M.2 is a PCIe device. A Raspberry Pi 5 (M.2 HAT) or a desktop
+has a slot; an Uno Q does not, and no USB path exists. On such a host the
+`bench_vision` sidecar can still serve the camera, but every detection call —
+`detect()`, `trigger_capture(infer=True)` — raises `VisionCapabilityError`,
+and that type survives the agent wire on purpose: the remedy is to fall back
+(classical CV, a human), never to retry. `aipu_present` says which kind of host
+you are on before you ask.
+
+### V-2. The sidecar container runs privileged
+The Axelera runtime maps the card's PCIe BARs from user space, which needs
+`CAP_SYS_RAWIO`, and enumerates the device through `/sys/class/metis`. The
+invocation that works — `--privileged -v /dev:/dev -v /sys:/sys` — is the one
+verified on scrub and reused unchanged in `deploy/vision/run-vision.sh`. A
+narrower grant (`--cap-add SYS_RAWIO,SYS_ADMIN --device /dev/metis-… --device
+/dev/dma_heap/system`, `/sys/class/metis` and `/sys/bus/pci` read-only,
+`/dev/bus/usb` for the camera) is written out in that script for the day it is
+worth the experiment; it has not been proven. Until then the container sees
+the whole of `/dev`, which is one more reason the sidecar stays on loopback
+(§ V-3) and the box it runs on is a bench appliance, not a workstation.
+
+### V-3. The sidecar is unauthenticated and must stay on loopback
+`benchctrl-vision` binds `127.0.0.1` by default and has no auth of its own. The
+agent is the network face, exactly as for every other instrument: a remote
+client reaches the camera only through the agent's HMAC handshake and claim
+gate. Binding the sidecar's control port to `0.0.0.0` would expose a
+trigger-and-capture surface to the LAN with no credential. Don't; if a second
+host needs to *drive* the camera, give it an agent.
+
+Two read-only ways to *watch* exist, and both are deliberately unable to fire
+or configure anything: the sidecar's optional **view listener** (`VIEW_PORT`,
+default 8096 on the LAN) serves `/stream`, `/frame.jpg` and `/health` and
+answers everything else 403; and the FUI relays exactly those two paths from
+the sidecar's loopback under its own origin (`/vision/stream`,
+`/vision/frame.jpg`) for the kiosk's VISION · LIVE quadrant. Neither carries
+`/status`, so a watcher cannot read the bench's structured state either.
+
+### V-4. `seq` correlation is only as good as the trigger path
+`trigger_capture(seq=N)` returns the frame tagged `N` or raises — but the tag is
+stamped by the *software* trigger in the sidecar. A free-run camera, or a
+hardware trigger wired before the cable lands on the same `TriggerSource` seam,
+produces untagged frames (`seq=-1`) which `/capture` refuses and `read_frame`
+returns as what they are. A frame's `seq` says "the sidecar fired this on
+request N"; it does not yet say when in the exposure the LED changed.
+
+### V-5. On a Raspberry Pi the blob spill is the SD card
+Frames are small enough to stay in the agent's RAM blob store (a 1920x1200
+q80 JPEG is ~150-300 KB; the spill threshold is 4 MB), so vision alone never
+touches the card. Recordings do spill, and on `benchpi` `blob_dir` is on the
+microSD. For long recordings point `blob_dir` at a USB SSD (`STATE_DIR=` on
+`install-agent.sh`, or edit `agent.json`).
+
+### V-6. The Metis link depends on the HAT
+A Pi 5 has one PCIe lane. The official M.2 HAT+ is 2230/2242 and the Metis is
+2280, so it overhangs and needs securing (kapton tape on benchpi), but it is
+switchless and gives Gen3 x1 (8 GT/s). A dual-slot HAT with an ASM1182e switch
+caps the link at Gen2 x1 (4 Gb/s). Either is ample for YOLOv8n-class work
+(~0.6 Gb/s at 60 fps). `install-metis-driver.sh` prints the negotiated link.
+
+### V-7. `aipu_temp_c` is whatever `axcmd` says, or `None`
+The Axelera Python runtime exposes no thermal call we know of, so the sidecar
+shells out to `axcmd --board-temp` inside its container and parses the first
+temperature it prints, cached for a few seconds. Any failure — no `axcmd`, a
+changed output format, a card mid-reset — reads as `None`. It is never
+estimated from anything else. Firmware ≥ 1.4 has its own thermal management
+(HW throttle at 105 °C; 1.8.0 is what the bench runs); on 1.3.0 the card
+hard-hung under load and no software reading would have warned you.
+
+### V-8. The Metis on a Raspberry Pi 5 needs three host-side fixes, all shipped
+Found 2026-09-12 after every hardware variable had been ruled out (the card
+was fine in an x86 desktop). Each fails in its own way and they stack, which
+is why no single change looked like it helped:
+
+1. **The card resets its BARs after the kernel enumerates it.** The Pi
+   enumerates PCIe ~7 s after power-on; the card's firmware finishes booting
+   a few seconds later and resets its PCIe configuration, so the BARs no
+   longer hold what the kernel wrote. Every host read of the card returns
+   0xFF, the driver logs `vmsi not available`, every command ends in
+   `IRQ MSI timeout`. An x86 BIOS enumerates tens of seconds later and never
+   sees this. `benchctrl-metis-rescan.service` removes and rescans the device
+   once per boot when the driver reports it unhealthy.
+2. **The card's DMA is 32-bit; the Pi maps RAM to PCIe above 4 GB.** Needs
+   `dtoverlay=pcie-32bit-dma-pi5` (bounce-buffered 2 GB inbound window), which
+   also moves the MSI doorbell below 4 GB. Without it the runtime's firmware
+   load times out (`USR_DMA_XFER failed`).
+3. **Max Payload Size mismatch.** The root port defaults to 512 bytes, the
+   card to 128, `pci=pcie_bus_safe` notwithstanding; every completion the
+   root port returns is malformed to the card (`UESta MalfTLP+ CmpltTO+`) and
+   the same DMA times out. The rescan service sets both ends to 128 on every
+   boot, after a rescan too, because re-enumeration re-derives them.
+
+Also pinned: `options metis single_msi=1`. With 32 MSI vectors the card's
+firmware programs its DMA-completion interrupts with bare vector indices,
+which a Broadcom brcmstb host encodes as `0x6540|index`; one vector is the
+virtual-MSI path the card uses on x86 anyway. `install-metis-driver.sh`
+writes it. Diagnosed with the driver's debugfs (`/sys/kernel/debug/metis/…`:
+`dma-statistics`, `dma-regs`, `vmsi`) and `lspci -vv` error bits on both ends
+of the link, which is the order to look in if it ever regresses.
+
+### V-9. An indicator classifier is bound to the sensor region and lighting it was trained under
+A classifier (`classify()`, `vision_classify`) is a small CNN trained on the
+label loop's frames of **one** sensor region at **one** exposure/gain. The
+region travels with the model (`classes.json` `crop`) and the sidecar
+translates it into the camera's current crop — a full frame for the
+dashboard, or any crop that contains it — and **refuses** one that does not
+(`VisionValueError`, "does not contain"), so a read is never taken from the
+wrong patch. Exposure and gain do not travel: the dataset manifest records
+what they were, and a read under different lighting is what the logit
+`margin` is for. Treat `confident=False` as "capture again", never as a
+weak yes. The first model (Pi 5 `ACT` LED, 2026-09-12) measures margins of
+11–23 on the bench at its training exposure (40 ms); the default gate is 3.
+Moving the camera, the DUT or the lights means a new dataset — the loop
+takes seconds, the training a minute on scrub.
+
+The classifier and the YOLO detector each hold their own runtime context;
+on the Pi the detector on 4 cores and a classifier on 1 load side by side
+(the runtime time-slices), ~1.3 ms per read on the AIPU, ~46 ms round trip
+through the agent with the trigger. Not measured: several classifiers plus
+detection under sustained load.
 
 ## What's not in this list
 

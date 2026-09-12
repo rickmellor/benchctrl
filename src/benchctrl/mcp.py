@@ -57,6 +57,7 @@ from benchctrl.battery import (
     estimate_life_constant_current,
     estimate_life_from_profile,
 )
+from benchctrl.drivers.bench_vision import mcp_tools as _vision_tools
 from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as _pdu41002_tools
 from benchctrl.drivers.silabs_cp2112 import mcp_tools as _cp2112_tools
 from benchctrl.drivers.eastwood_qr10x import mcp_tools as _qr10x_tools
@@ -82,6 +83,7 @@ _dp2031_tools.register_mcp_tools(mcp)
 _sdm4065a_tools.register_mcp_tools(mcp)
 _pdu41002_tools.register_mcp_tools(mcp)
 _cp2112_tools.register_mcp_tools(mcp)
+_vision_tools.register_mcp_tools(mcp)
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +405,23 @@ from benchctrl.drivers.silabs_cp2112.mcp_tools import (
     cp2112_set_line_mode,
     cp2112_trigger_reset_pulse,
 )
+
+# Vision tools
+from benchctrl.drivers.bench_vision.mcp_tools import (
+    vision_classify,
+    vision_clear_crop,
+    vision_close,
+    vision_detect,
+    vision_frame,
+    vision_info,
+    vision_open,
+    vision_set_crop,
+    vision_set_exposure_us,
+    vision_set_fps,
+    vision_set_gain_db,
+    vision_status,
+    vision_trigger_capture,
+)
 from benchctrl.drivers.cyberpower_pdu41002.mcp_tools import (
     pdu41002_allowed_outlets,
     pdu41002_clear_outlet_command,
@@ -420,6 +439,63 @@ from benchctrl.drivers.cyberpower_pdu41002.mcp_tools import (
     pdu41002_status,
     pdu41002_transport,
 )
+
+
+# ---------------------------------------------------------------------------
+# Vision: capture-and-label (cross-device — it commands the PDU or CP2112 and
+# captures with the camera). See docs/vision.md § Label loop.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def vision_label_capture(spec: dict, out_dir: str, sanity: bool = False) -> dict:
+    """Build a labelled frame set from states benchctrl commands itself.
+
+    ``spec`` is the label-loop spec (``docs/vision.md`` § Label loop): a name, a
+    list of states — each an actuator to command (a PDU outlet, a CP2112 line,
+    or the bench box's own ``sysfs_led``) and the label frames taken in that
+    state receive — plus frames per state, rounds, settle time, and optional
+    camera setup (crop, exposure, gain). The loop commands each state, waits,
+    fires N ``seq``-tagged captures, writes ``frames/<label>/<seq>.jpg`` under
+    ``out_dir`` with ``manifest.json`` and ``labels.csv``, and **restores every
+    actuator to how it was found** — also when something fails half way.
+
+    Uses the devices already opened by ``vision_open`` and, as the spec needs
+    them, ``pdu41002_open`` / ``cp2112_open``; their allow-lists apply
+    unchanged (an outlet or line outside them is refused by the driver). The
+    ``sysfs_led`` actuator drives a host LED and is only meaningful when this
+    server runs on the bench box itself.
+
+    A frame that comes back with the wrong ``seq`` is discarded, never
+    labelled. ``sanity=True`` stores a mean-brightness read of
+    ``spec.sanity_roi`` beside each frame (needs Pillow on this host) so a
+    frame whose pixels disagree with its label can be flagged.
+
+    Returns the manifest summary: frame counts per label, discards, whether
+    the restore succeeded, and the spec digest to cite from a training run.
+    """
+    from benchctrl.vision.labelloop import (
+        LabelSpec,
+        build_actuators,
+        mean_brightness,
+        run_label_capture,
+    )
+
+    parsed = LabelSpec.from_dict(spec)
+    kinds = {s.actuator["device"] for s in parsed.states}
+    devices: dict = {}
+    if "cyberpower_pdu41002" in kinds:
+        devices["cyberpower_pdu41002"] = _pdu41002_tools._get_pdu()
+    if "silabs_cp2112" in kinds:
+        devices["silabs_cp2112"] = _cp2112_tools._get_dev()
+    manifest = run_label_capture(
+        _vision_tools._get_vision(),
+        build_actuators(devices),
+        parsed,
+        out_dir,
+        sanity=mean_brightness if sanity else None,
+    )
+    return manifest.summary()
 
 
 # ---------------------------------------------------------------------------
@@ -744,9 +820,7 @@ def battery_profiler_estimate_duration(
     cycle_time_s = high_time_s + low_time_s
     if cycle_time_s <= 0:
         return {"error": "high_time_s + low_time_s must be > 0"}
-    cycle_charge_mAh = (
-        (high_current_A * high_time_s) + (low_current_A * low_time_s)
-    ) / 3.6
+    cycle_charge_mAh = ((high_current_A * high_time_s) + (low_current_A * low_time_s)) / 3.6
     if cycle_charge_mAh <= 0:
         return {"error": "no net charge drawn per cycle"}
     cycles = capacity_mAh / cycle_charge_mAh
