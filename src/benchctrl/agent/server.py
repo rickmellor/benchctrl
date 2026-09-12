@@ -24,6 +24,7 @@ import string
 import threading
 import time
 import traceback
+from collections.abc import Iterable
 from typing import Any, Optional
 
 from benchctrl.agent import dispatch
@@ -74,6 +75,17 @@ OBSERVER_METHODS = frozenset(
         "run.list",
         "run.status",
         "run.events",
+        # The one device verb an observer has: a *read* of a device that is
+        # already open. Gated in :py:meth:`AgentServer._device_read` — never a
+        # mutator, never a lazy open, never a claim. Added for the dashboard's
+        # generator-screen pane, which needs a 400 KB bitmap every couple of
+        # seconds that pushing to every observer would waste.
+        "device.read",
+        # A ``device.read`` answer above the inline limit (the generator's
+        # 400 KB screen) arrives as a blob reference; fetching it is part of
+        # the same read. Blob ids are unguessable and only ever handed out in
+        # a response the session already received.
+        "blob.fetch",
     }
 )
 
@@ -188,11 +200,12 @@ PRESENCE_INTERVAL_HEARTBEATS = 6.0
 #:
 #: Pushed by the bench for the same reason presence is, and for one more that is
 #: specific to this device. A dashboard is an **observer** session
-#: (:py:data:`OBSERVER_METHODS`), so it cannot call ``device.call`` and cannot
-#: read a PDU for itself — a panel that displayed mains state by polling would
-#: need write-grade access to the one device on the bench that switches mains, to
-#: show a number. Pushing it keeps the display strictly read-only and leaves the
-#: PDU's single CLI session where it belongs: with the bench.
+#: (:py:data:`OBSERVER_METHODS`), so it cannot call ``device.call``; its only
+#: device verb, ``device.read``, came later and only for open devices. Polling
+#: the PDU would still put a display on the one device on the bench that
+#: switches mains, on its single CLI session. Pushing mains state keeps the
+#: display strictly a consumer and leaves that session where it belongs: with
+#: the bench.
 MAINS_KIND = "mains"
 
 #: Severity for a mains sweep that found no change. Read-grade like presence:
@@ -345,6 +358,7 @@ def _looks_secret(text: str) -> bool:
         and any(c.isdigit() for c in head)
     )
 
+
 #: Wire verbs that arm, disarm, open, or close something.
 _ARM_GRADE_METHODS = frozenset(
     {
@@ -395,9 +409,7 @@ def action_severity(method: str, device_method: str = "", *, ok: bool = True) ->
         # A property read and a getter both come through here; only a mutator
         # changed anything.
         return (
-            ACTION_SEVERITY_COMMAND
-            if dispatch.is_mutator(device_method)
-            else ACTION_SEVERITY_READ
+            ACTION_SEVERITY_COMMAND if dispatch.is_mutator(device_method) else ACTION_SEVERITY_READ
         )
     if method.startswith(("device.", "blob.", "rec.stats", "run.", "agent.", "iter.")):
         return ACTION_SEVERITY_READ if _is_read_verb(method) else ACTION_SEVERITY_COMMAND
@@ -774,9 +786,7 @@ class ActionCoalescer:
                 self._suppressed[signature] = self._suppressed.get(signature, 0) + 1
                 self._folded += 1
                 return None
-            if signature not in self._last_emit and (
-                len(self._last_emit) >= self._max_signatures
-            ):
+            if signature not in self._last_emit and (len(self._last_emit) >= self._max_signatures):
                 # Forget the table rather than grow it. The cumulative counters
                 # survive, so the honesty of `folded` does not depend on the size
                 # of this dict.
@@ -811,7 +821,9 @@ class Session:
        deadman could never trip. A status display must not be able to keep an
        armed bench alive.
     2. **They may only call** :py:data:`OBSERVER_METHODS`. No opening, no
-       claiming, no device calls.
+       claiming, no ``device.call``. The one device verb they have is
+       ``device.read`` — a non-mutating method on a device somebody else has
+       already opened (the dashboard's generator-screen pane).
     """
 
     _ids = itertools.count(1)
@@ -877,9 +889,12 @@ class BenchAgent:
         blob_store: Optional[BlobStore] = None,
         runs_dir=None,
         llm_base_url: str = "",
+        safe_stop_exempt: Iterable[str] = (),
     ) -> None:
         self.registry = registry
         self.token = token
+        #: Bench infrastructure the governor leaves alone (see SafetyGovernor.exempt).
+        self.safe_stop_exempt = frozenset(safe_stop_exempt)
         self.deadman_s = deadman_s
         self.heartbeat_s = heartbeat_s
         self.max_blocking_s = max_blocking_s
@@ -896,7 +911,7 @@ class BenchAgent:
         # producer, before the bus ever sees them. See ActionCoalescer.
         self.actions = ActionCoalescer()
         self.governor = SafetyGovernor(
-            deadman_s=deadman_s, on_event=self._broadcast_event
+            deadman_s=deadman_s, on_event=self._broadcast_event, exempt=self.safe_stop_exempt
         )
         self._sessions: dict[str, Session] = {}
         self._claims: dict[str, str] = {}  # device -> session id
@@ -1054,10 +1069,7 @@ class BenchAgent:
         if interval <= 0:
             return  # presence sweeps disabled by configuration
         now = time.monotonic()
-        if (
-            self._last_presence_mono is not None
-            and now - self._last_presence_mono < interval
-        ):
+        if self._last_presence_mono is not None and now - self._last_presence_mono < interval:
             return
         if self.observer_count() <= 0:
             self._last_presence_mono = now
@@ -1070,9 +1082,7 @@ class BenchAgent:
                 return
             self._presence_running = True
         self._last_presence_mono = now
-        threading.Thread(
-            target=self._presence_sweep, name="presence-sweep", daemon=True
-        ).start()
+        threading.Thread(target=self._presence_sweep, name="presence-sweep", daemon=True).start()
 
     def _presence_sweep(self) -> None:
         """Scan the bus and publish which configured devices are on it.
@@ -1101,26 +1111,20 @@ class BenchAgent:
         try:
             from benchctrl import discovery
 
-            found = discovery.inventory(
-                probe=False, resource_manager=self.resource_manager()
-            )
+            found = discovery.inventory(probe=False, resource_manager=self.resource_manager())
             by_key = found.get("by_device_key") or {}
             served = list(self.registry.keys)
             # Only the keys this agent serves: a sweep is a statement about the
             # configured bench, and reporting every stray tty as "present" would
             # bury the four lines anybody cares about.
             present = sorted(k for k in served if k in by_key)
-            changed = self._last_presence_keys is not None and (
-                self._last_presence_keys != present
-            )
+            changed = self._last_presence_keys is not None and (self._last_presence_keys != present)
             first = self._last_presence_keys is None
             self._last_presence_keys = present
             self.events.publish(
                 {
                     "kind": PRESENCE_KIND,
-                    "severity": (
-                        PRESENCE_CHANGE_SEVERITY if changed else PRESENCE_SEVERITY
-                    ),
+                    "severity": (PRESENCE_CHANGE_SEVERITY if changed else PRESENCE_SEVERITY),
                     "present": present,
                     "served": served,
                     # So a consumer can tell a real change from its first frame,
@@ -1256,17 +1260,13 @@ class BenchAgent:
             # the first round trip. Normalising at the source means the change
             # detection below and the consumer's own agree.
             outlets = {str(i): bool(v) for i, v in sorted(states.items())}
-            changed = self._last_mains_states is not None and (
-                self._last_mains_states != outlets
-            )
+            changed = self._last_mains_states is not None and (self._last_mains_states != outlets)
             first = self._last_mains_states is None
             self._last_mains_states = outlets
             self.events.publish(
                 {
                     "kind": MAINS_KIND,
-                    "severity": (
-                        MAINS_CHANGE_SEVERITY if changed else MAINS_SEVERITY
-                    ),
+                    "severity": (MAINS_CHANGE_SEVERITY if changed else MAINS_SEVERITY),
                     "device": key,
                     "outlets": outlets,
                     # Metering, flattened rather than nested, because a consumer
@@ -1285,9 +1285,7 @@ class BenchAgent:
                 }
             )
             if changed:
-                log.warning(
-                    "agent: mains outlet states changed — now %s", outlets
-                )
+                log.warning("agent: mains outlet states changed — now %s", outlets)
         except Exception:  # noqa: BLE001 - a background courtesy must not raise
             # ``info``, not ``warning``: the expected cause is a worker timeout
             # because a run has the PDU busy, which is this sweep correctly
@@ -1350,8 +1348,7 @@ class BenchAgent:
                 # the process — on the bench board that showed up as the supply,
                 # load and DMM all reading NOT FOUND until a service restart.
                 log.warning(
-                    "agent: the shared VISA manager was closed by something "
-                    "else; rebuilding it"
+                    "agent: the shared VISA manager was closed by something else; rebuilding it"
                 )
                 self._rm = None
             self._rm_tried = True
@@ -1566,12 +1563,12 @@ class BenchAgent:
     def encoder(self, session: Session) -> Encoder:
         return Encoder(
             store_blob=lambda data: self.blobs.put(data).blob_id,
-            register_iterator=lambda gen: self.iterators.register(
-                "unknown", gen, session_id=session.session_id
-            ).iter_id,
-            register_recording=lambda rec: self.recordings.start(
-                "unknown", rec, session_id=session.session_id
-            ).rec_id,
+            register_iterator=lambda gen: (
+                self.iterators.register("unknown", gen, session_id=session.session_id).iter_id
+            ),
+            register_recording=lambda rec: (
+                self.recordings.start("unknown", rec, session_id=session.session_id).rec_id
+            ),
         )
 
     @staticmethod
@@ -1786,9 +1783,9 @@ class _Handler(socketserver.BaseRequestHandler):
             exc,
             device=device,
             method=method,
-            traceback_text="".join(
-                traceback.format_exception(type(exc), exc, exc.__traceback__)
-            )[-4000:],
+            traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[
+                -4000:
+            ],
         )
         try:
             session.writer.send(FrameType.ERR, _json({"id": req_id, "e": payload}))
@@ -1807,6 +1804,8 @@ class _Handler(socketserver.BaseRequestHandler):
                 f"{', '.join(sorted(OBSERVER_METHODS))}"
             )
 
+        if method == "device.read":
+            return self._device_read(session, p)
         if method == "agent.hello":
             return {"agent": AGENT_NAME, "devices": agent.registry.describe()}, None
         if method == "agent.devices":
@@ -1818,9 +1817,7 @@ class _Handler(socketserver.BaseRequestHandler):
             # closed its own would close this singleton and invalidate every
             # instrument session on the bench. See
             # :py:meth:`BenchAgent.resource_manager` for the sweep it killed.
-            return discovery.inventory(
-                resource_manager=agent.resource_manager()
-            ), None
+            return discovery.inventory(resource_manager=agent.resource_manager()), None
         if method == "agent.status":
             return {
                 "safety": agent.governor.status(),
@@ -1888,8 +1885,9 @@ class _Handler(socketserver.BaseRequestHandler):
             return agent.runs.list(), None
         if method == "run.events":
             store = agent.runs.store_for(p["run_id"])
-            return store.events_since(int(p.get("since_seq", 0)),
-                                      limit=int(p.get("limit", 500))), None
+            return store.events_since(
+                int(p.get("since_seq", 0)), limit=int(p.get("limit", 500))
+            ), None
         if method == "run.abort":
             engine = agent.runs.get(p["run_id"])
             engine.abort(p.get("reason", "operator"))
@@ -1915,6 +1913,37 @@ class _Handler(socketserver.BaseRequestHandler):
         raise PolicyError(f"unknown method {method!r}")
 
     # --- device calls ---------------------------------------------------
+
+    def _device_read(self, session: Session, p: dict):
+        """``device.read``: a non-mutating call on an **already open** device.
+
+        The read-only sibling of ``device.call`` that observer sessions may use.
+        Three refusals keep it read-only by construction: the device must be
+        open (an observer never triggers a lazy ``open()`` — that powers a
+        session up), the method must be a property or a non-mutator (checked
+        against the surface *and* the name-prefix rule, so a mutator can never
+        slip through as a "read"), and no property snapshot is piggybacked (an
+        observer pays for what it asked, not for fifteen properties). Normal
+        sessions may use it too.
+        """
+        agent = self.agent
+        key = p.get("device", "")
+        name = p.get("method", "")
+        entry = agent.registry.entry(key)
+        if not entry.is_open:
+            raise PolicyError(
+                f"{key} is not open; device.read never opens a device — "
+                "a session with the writer role must open it first"
+            )
+        surface = agent.registry.surface_of(key)
+        if name not in surface.properties and (
+            name not in surface.methods or name in surface.mutators or dispatch.is_mutator(name)
+        ):
+            raise PolicyError(
+                f"{key}.{name} is not a read; device.read serves properties and "
+                "non-mutating methods only"
+            )
+        return self._device_call(session, {**p, "want_props": False})
 
     def _device_call(self, session: Session, p: dict):
         agent = self.agent
@@ -1949,9 +1978,7 @@ class _Handler(socketserver.BaseRequestHandler):
             timeout=agent.max_blocking_s * 4,
             label=f"{key}.{name}",
         )
-        agent.governor.observe_call(
-            key, name, tuple(args), kwargs, session_id=session.session_id
-        )
+        agent.governor.observe_call(key, name, tuple(args), kwargs, session_id=session.session_id)
 
         encoder = agent.encoder(session)
         encoded = encoder.encode(result)
@@ -2062,9 +2089,7 @@ class _Handler(socketserver.BaseRequestHandler):
             timeout=duration + agent.max_blocking_s * 2,
             label=f"{key}.read_window",
         )
-        return {
-            _code_of(channel): list(values) for channel, values in (result or {}).items()
-        }
+        return {_code_of(channel): list(values) for channel, values in (result or {}).items()}
 
     # --- recordings -----------------------------------------------------
 
@@ -2072,9 +2097,7 @@ class _Handler(socketserver.BaseRequestHandler):
         agent = self.agent
         key = p["device"]
         if not session.holds(key):
-            raise PolicyError(
-                f"recording {key} mutates device state — call agent.claim first"
-            )
+            raise PolicyError(f"recording {key} mutates device state — call agent.claim first")
         agent.recordings.check_duration(p.get("expected_s"))
         obj = agent.registry.get(key)
         channels = tuple(p.get("channels") or ())
@@ -2084,9 +2107,7 @@ class _Handler(socketserver.BaseRequestHandler):
             lambda: obj.start_recording(name=name, channels=channels or None),
             label=f"{key}.start_recording",
         )
-        handle = agent.recordings.start(
-            key, rec, name=name, session_id=session.session_id
-        )
+        handle = agent.recordings.start(key, rec, name=name, session_id=session.session_id)
         agent.governor.set_recording(key, True)
         return handle.to_dict()
 

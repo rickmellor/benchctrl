@@ -142,6 +142,9 @@ INSTRUMENTS: tuple[dict, ...] = (
     # it. Its scan presence is the camera's USB id; whether an NPU sits behind
     # the sidecar is a property, not a slot.
     {"key": "bench_vision", "label": "VISION", "kind": "camera", "role": "CAMERA/NPU"},
+    # The generator reads back every setting it is given, so its slot can be
+    # trusted; the pane below the rail shows the instrument's own screen.
+    {"key": "siglent_sdg1032x", "label": "AWG", "kind": "awg", "role": "FUNC GEN"},
 )
 
 #: Presentation for a device this build has no entry for. Its slot is still
@@ -912,7 +915,7 @@ def _outlet_rows(outlets: object) -> list[dict]:
     """
     if not isinstance(outlets, dict):
         return []
-    rows = []
+    rows: list[dict] = []
     for key, value in outlets.items():
         try:
             index = int(key)
@@ -1016,6 +1019,20 @@ def _headline_run(runs: dict) -> Optional[str]:
         if runs[key] in ("running", "starting", "pending"):
             return key
     return keys[0]
+
+
+def _screen_state(raw: object) -> dict:
+    """Normalise the feed's ``screen_snapshot`` for the view: always the three
+    keys, and never ``present`` without a size behind it."""
+    if not isinstance(raw, dict) or not raw.get("present"):
+        return {"present": False, "age_s": None, "bytes": None}
+    size = raw.get("bytes")
+    age = raw.get("age_s")
+    return {
+        "present": isinstance(size, int) and size > 0,
+        "age_s": float(age) if isinstance(age, (int, float)) else None,
+        "bytes": size if isinstance(size, int) else None,
+    }
 
 
 def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
@@ -1154,8 +1171,14 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
         # Instruments on the bus that no driver claims. A fixed five-slot rail
         # structurally cannot show these, and "something is plugged in that
         # benchctrl cannot drive" is a real bench fact — on the development board
-        # it is an SDG1032X and a DS1000Z scope with no drivers yet.
+        # it is a DS1000Z scope with no driver yet (the SDG1032X used to sit here
+        # too, until it got one and moved up onto the rail).
         "unclaimed": list(snap.get("unclaimed") or ()),
+        # The function generator's own screen, as the feed last grabbed it. The
+        # DMM pane shows it while the AWG is linked; the renderer fetches the
+        # bytes from /sdg/screen and this only says whether there is a current
+        # one and how old it is. Same defensive .get as every newer field.
+        "sdg_screen": _screen_state(snap.get("sdg_screen")),
         # Core harness, and its own top-level block rather than a sixth entry in
         # ``instruments``. A PDU is not something a test reads: it has no arm
         # state, no run enrolls it as a source, and the rail's whole vocabulary

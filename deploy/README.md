@@ -11,7 +11,7 @@ none of it; see [`docs/remote.md`](../docs/remote.md) for the client config.
 | [`verify-ch341-qr10x.sh`](verify-ch341-qr10x.sh) | required for a QR10x on a kernel without `ch341`: installs the udev rule, then proves the instrument end to end |
 | [`install-fui.sh`](install-fui.sh) | optional: the read-only HDMI status display (`benchctrl-fui`) |
 | [`install-kiosk.sh`](install-kiosk.sh) | optional: boots the board straight into that display, **no login prompt** — run `install-fui.sh` first |
-| [`udev/61-benchctrl-usbtmc.rules`](udev/61-benchctrl-usbtmc.rules) | required for USB-TMC instruments (SDM4065A, both Rigols) on a kernel without `usbtmc` |
+| [`udev/61-benchctrl-usbtmc.rules`](udev/61-benchctrl-usbtmc.rules) | required for USB-TMC instruments (SDM4065A, SDG1032X, both Rigols) on a kernel without `usbtmc` |
 | [`sync-board.sh`](sync-board.sh) | during development: push this checkout to a board and **prove** it landed — runs from your workstation, not the board |
 | [`board_sync_manifest.py`](board_sync_manifest.py) | what `sync-board.sh` compares with; also useful on its own to answer "is the board current?" |
 | [`board_apply_sync.sh`](board_apply_sync.sh) | the board-side half of that: extract, then delete what the tarball did not carry |
@@ -193,9 +193,12 @@ Verified end to end on a real QR101A-1M-R1 (serial 00000248, fw 5.967KS): a
 | `udev/61-benchctrl-usbtmc.rules` | `/etc/udev/rules.d/` (0644) |
 
 Same mechanism as the CH341 rule above, different missing driver. The Uno Q
-builds without `CONFIG_USB_TMC`, so there is no `/dev/usbtmc0` for the SDM4065A
-or either Rigol; pyvisa-py drives them over libusb instead, which again needs
-write access to `/dev/bus/usb/BBB/DDD`.
+builds without `CONFIG_USB_TMC`, so there is no `/dev/usbtmc0` for the SDM4065A,
+the SDG1032X or either Rigol; pyvisa-py drives them over libusb instead, which
+again needs write access to `/dev/bus/usb/BBB/DDD`. The SDG1032X rule (`f4ec:1103`)
+matters on the Raspberry Pi as well: there the kernel *does* have `usbtmc`, binds
+the generator and leaves `/dev/usbtmc0` root-only, and the rule is what lets
+pyusb detach that driver and claim the interface as the bench user.
 
 **The failure mode is worse than a permission error.** Without the rule the
 instrument is *invisible*, not merely unopenable:

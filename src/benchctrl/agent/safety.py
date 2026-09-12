@@ -100,6 +100,7 @@ _ARMING_CALLS: dict[str, str] = {
     "set_output": "output",
     "enable_output": "output",
     "disable_output": "output_off",
+    "disable_outputs": "output_off",  # the all-channels disarm (DP2031, SDG1032X)
     "set_input": "output",  # electronic loads sink, which is equally live
 }
 
@@ -125,6 +126,14 @@ class SafetyGovernor:
     deadman_s: float = 15.0
     safe_state_timeout_s: float = SAFE_STATE_TIMEOUT_S
     on_event: Optional[Callable[[dict], None]] = None
+    #: Device keys the governor never treats as armed and never drives to a
+    #: safe state — **bench infrastructure**, declared per bench in
+    #: ``agent.json`` ``safe_stop_exempt``. The motivating case is a bench
+    #: supply that powers the NPU's fan and the NPU itself: "safe" for a DUT
+    #: source is "off", and off is exactly what that bench must not do on a
+    #: service restart or a lost session. Same reasoning as the PDU's
+    #: ``set_outlet_state`` being absent from :py:data:`_ARMING_CALLS`.
+    exempt: frozenset[str] = frozenset()
 
     _states: dict[str, ArmState] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
@@ -153,6 +162,11 @@ class SafetyGovernor:
         """Update arm state from a call that just succeeded."""
         kind = _ARMING_CALLS.get(method)
         if kind is None:
+            return
+        if device_key in self.exempt:
+            log.debug(
+                "safety: %s is safe_stop_exempt — %s not tracked as arming", device_key, method
+            )
             return
         enabled = _first_bool(args, kwargs)
         if kind == "output_off":
@@ -239,9 +253,7 @@ class SafetyGovernor:
         # after the armed devices deliberately: turn off what is driving
         # current before cutting the mains feeding it.
         panic_targets = [
-            key
-            for key, obj in devices.items()
-            if key not in targets and panic_outlets_of(obj)
+            key for key, obj in devices.items() if key not in targets and panic_outlets_of(obj)
         ]
 
         if not targets:
@@ -337,9 +349,7 @@ class SafetyGovernor:
                 "kind": "safety_failed",
                 "severity": "critical",
                 "device": device_key,
-                "guidance": (
-                    "Output may still be live — physically disconnect the DUT."
-                ),
+                "guidance": ("Output may still be live — physically disconnect the DUT."),
             }
         )
         return TripOutcome.FAILED
@@ -427,8 +437,15 @@ def default_safe_state(obj: Any) -> None:
     by adding outlet calls here.
     """
     errors = []
+    # ``disable_outputs()`` comes first and takes no arguments: a multi-channel
+    # instrument's ``set_output(channel, on)`` cannot be reached by the
+    # single-argument ``set_output(False)`` below (the DP2031 rejects a bool
+    # channel), which left the PSU armed across a service stop until the
+    # no-argument disarm was added. Every output-bearing driver with channels
+    # provides it.
     for method, args in (
         ("stop_recording", ()),
+        ("disable_outputs", ()),
         ("set_output", (False,)),
         ("set_input", (False,)),
         ("set_current_limit_enabled", (True,)),

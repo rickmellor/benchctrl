@@ -1029,6 +1029,76 @@ Code reference:
 `src/benchctrl/drivers/silabs_cp2112/hidraw.py` -- `HidrawLink.open`;
 `src/benchctrl/discovery.py` -- `scan_hidraw`.
 
+### F-21. The SDG1032X has no error queue — read-back is the only rejection signal
+The generator implements no ``SYST:ERR?`` and no status byte worth reading. A
+value it cannot represent, or one outside the range of the current waveform or
+load, is **silently refused or clamped**: bench-measured, ``C1:BSWV AMP,0.001``
+reads back ``AMP,0.002V`` (the 2 mVpp floor) and ``DUTY,99`` at 20 MHz square
+reads back ``DUTY,59``. So every setter in the driver reads the state back,
+returns it, and raises ``SDG1032XVerifyError`` (a distinct wire type) when a
+requested field differs beyond the instrument's own resolution. ``verify=False``
+returns the read-back without raising. A raw ``write()`` verifies nothing.
+
+### F-22. `CHDR` is not supported on the SDG1000X; headers are fixed
+The guide's ``CHDR OFF`` (drop the response header) is marked unsupported for
+the SDG1000X, so every answer carries its short header (``C1:BSWV …``) and the
+parser strips it. Three answers carry **no** header and one carries a stray
+comma, all bench-measured: ``VOLTPRT?`` → ``ON``; the three LAN queries → a
+quoted dotted quad; ``C1:HARM?`` when on → ``C1:HARM ,HARMSTATE,ON,…``. The
+parser accepts all four and the simulator renders them the same way.
+
+### F-23. Firmware 1.01.01.33R1B6 deviates from the programming guide in six places
+Measured on the bench unit; the driver follows the instrument, not the guide:
+``MODE?`` answers ``PHASE-LOCKED`` and the *set* form must be ``MODE
+PHASE-LOCKED`` (the guide's ``PHASELOCKED`` is silently ignored — the driver
+translates); ``C1:MDWV?`` when on is ``STATE,ON,<TYPE>,<params>,CARR,…`` (the
+guide puts the type first — both are parsed); ``C1:SYNC?`` never echoes
+``TYPE``; ``ROSC?`` never echoes ``10MOUT``; ``CURRPRT?`` and ``VOLTSTAT?`` are
+not implemented — the query goes unanswered (a USB pipe error, surfaced as
+``SDG1032XTimeoutError``). Unlike the SDM4065A (§ F-8), an unanswered query
+does **not** wedge this instrument: the next query works. And a ``BSWV``
+command that carries ``WVTP`` **together with** other fields makes the
+instrument swallow exactly one following message (the read-back query times
+out; the one after answers) — no delay helps, ``WVTP`` alone or fields
+without it answer at once — so ``set_basic_wave`` sends the wave type in its
+own command first. The simulator models the swallow.
+
+### F-24. `MAX_OUTPUT_AMP` is accepted, never echoed, and not enforced
+The guide's instrument-side amplitude cap does nothing on this firmware: after
+``C1:BSWV MAX_OUTPUT_AMP,2`` a request for 3 Vpp reads back 3 Vpp. The driver
+therefore does not rely on it: ``max_amplitude_vpp`` (``open()``,
+``agent.json``) is enforced by the driver on every amplitude it sends, and
+``set_max_amplitude`` can only *lower* that cap at run time. A raw ``write``
+bypasses it — which is why ``allowed_channels`` and the cap are the driver's
+policy, and the agent's writer claim is the bench's.
+
+### F-25. Arbitrary-waveform upload (`WVDT`) does not land over USB-TMC on this firmware
+Three framings were tried on the bench (the guide's, with and without a
+``LENGTH`` field, with and without a terminator, as pyvisa-py's 512-byte
+USB-TMC pieces and as one 32 KB transfer). None stored a user waveform; the
+small ones left the next query with a USB pipe error and the 32 KB one stalled
+the instrument's USB stack until a front-panel power cycle. The driver's
+``write_arb``/``read_arb`` implement the guide's protocol and are verified
+against the simulator only; ``list_arbs``, ``select_arb`` (built-ins by index)
+and ``get_arb`` work on the bench. Next step is in ``ROADMAP.md``: the upload
+over the instrument's LAN socket (port 5025), where the framing is not USB-TMC.
+
+### F-26. `STL? BUILDIN` names differ from the `ARWV INDEX` table
+The built-in list the instrument returns (``M4, StairUD``, ``M12, LogFall``…)
+spells several names differently from the guide's index table (``Stairud``,
+``Logfall``) and lists them in string order of ``M<n>`` (M10, M100, M101, …,
+M11). ``list_arbs("builtin")`` re-sorts by index; select built-ins **by
+index** and user waveforms **by name** — the instrument refuses the other way
+round.
+
+### F-27. `SCDP` (screen dump) is undocumented in the programming guide
+Siglent's operating tip confirms it for the SDG1000X; the guide does not list
+it. Bench-measured: a 480×272 24-bit BMP of 391734 bytes followed by a stray
+newline, delivered by pyvisa-py in 20 KB chunks in about 450 ms (a 1 MB
+``chunk_size`` is four times slower). ``read_screen()`` reads the size from
+the BMP header, loops until complete and drains the newline. The FUI shows it
+in the former DMM pane (``docs/dashboard.md``).
+
 ## Harness
 
 ### A-1. Emulator + `SMU.record()` deadlock
@@ -1344,6 +1414,14 @@ on the Pi the detector on 4 cores and a classifier on 1 load side by side
 (the runtime time-slices), ~1.3 ms per read on the AIPU, ~46 ms round trip
 through the agent with the trigger. Not measured: several classifiers plus
 detection under sustained load.
+
+### V-10. The `led` classifier is stale on this bench since the camera moved
+The ACT-LED model (§ V-9) is bound to sensor region (1040, 620, 160×160). On
+2026-09-12 the camera was re-aimed at the SDG1032X's front panel, so that
+region now shows a patch of the generator and ``classify(name="led")``
+returns a plausible-looking label for the wrong thing. It stays loaded
+(harmless) but must not be trusted until the camera returns to the Pi or the
+model is retrained; the generator's Output-key classifiers are the live ones.
 
 ## What's not in this list
 

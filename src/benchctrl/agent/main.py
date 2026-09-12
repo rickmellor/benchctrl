@@ -142,12 +142,19 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901
         print(f"unknown device key(s): {unknown}; valid: {list(DEVICE_KEYS)}", file=sys.stderr)
         return 2
 
-    registry = build_default_registry(
-        keys, simulate=simulate, open_kwargs=cfg.get("open") or {}
-    )
+    registry = build_default_registry(keys, simulate=simulate, open_kwargs=cfg.get("open") or {})
+
+    # Bench infrastructure the safe-stop and the governor leave alone. A
+    # bench supply that powers the NPU and its fan is "armed" for the whole
+    # life of the bench, and disarming it is the outage, not the remedy.
+    exempt = tuple(cfg.get("safe_stop_exempt") or [])
+    bad = [k for k in exempt if k not in DEVICE_KEYS]
+    if bad:
+        print(f"safe_stop_exempt names unknown device key(s): {bad}", file=sys.stderr)
+        return 2
 
     if args.safe_stop:
-        return _safe_stop(registry)
+        return _safe_stop(registry, exempt=exempt)
 
     if not token:
         log.warning(
@@ -167,7 +174,12 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901
         # happened to start. The config key has to reach the RunManager.
         runs_dir=Path(cfg["runs_dir"]) if cfg.get("runs_dir") else None,
         llm_base_url=cfg.get("llm_base_url", ""),
+        safe_stop_exempt=exempt,
     )
+    if exempt:
+        log.warning(
+            "safe_stop_exempt: %s will NOT be disarmed by safe-stop or a trip", ", ".join(exempt)
+        )
     server = AgentServer(agent, host=host, port=port).start()
 
     beacon = None
@@ -207,16 +219,20 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901
     return 0
 
 
-def _safe_stop(registry) -> int:
+def _safe_stop(registry, *, exempt: tuple[str, ...] = ()) -> int:
     """Drive every device to its safe state and exit.
 
     Wired to ``ExecStopPost=`` so a service restart disarms the bench rather
-    than leaving an output live across the gap.
+    than leaving an output live across the gap. ``exempt`` keys (``agent.json``
+    ``safe_stop_exempt``) are bench infrastructure and are left as found.
     """
     from benchctrl.agent.safety import default_safe_state
 
     failures = 0
     for key in registry.keys:
+        if key in exempt:
+            log.info("safe-stop: %s exempt (safe_stop_exempt) — left as found", key)
+            continue
         try:
             obj = registry.get(key)
         except Exception as exc:  # noqa: BLE001

@@ -26,6 +26,14 @@ from the bench box's loopback (``BENCHCTRL_VISION_URL``, default
 kiosk and through an ssh tunnel alike — without the sidecar's unauthenticated
 control port ever being published. Only those two paths are relayed; they can
 fire nothing and configure nothing.
+
+The other picture is the function generator's own screen. ``/sdg/screen``
+serves the last ``SCDP`` bitmap the feed grabbed from the SDG1032X (a 480x272
+BMP) with its age in ``X-Screen-Age``, or 404 when there is no current one. Each
+hit also arms the feed's screen poll (:py:meth:`AgentFeed.want_screen`), so the
+instrument is only read while a page is showing it: the first fetch answers 404
+and the picture is there by the next. Nothing here reaches the instrument
+directly — the handler reads a snapshot the feed thread already holds.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ import logging
 import mimetypes
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -55,6 +64,10 @@ VISION_RELAY: dict[str, str] = {
     "/vision/stream": "/stream",
     "/vision/frame.jpg": "/frame.jpg",
 }
+
+#: The generator's screen grab, served from the feed's memory — no relay, no
+#: upstream, and a hit is also what keeps the feed grabbing it.
+SCREEN_PATH = "/sdg/screen"
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -78,6 +91,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_view()
         elif path in VISION_RELAY:
             self._relay_vision(VISION_RELAY[path])
+        elif path == SCREEN_PATH:
+            self._send_screen()
         elif path in ("/", "/index.html"):
             self._send_static("index.html")
         else:
@@ -101,6 +116,33 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_screen(self) -> None:
+        """The generator's last screen grab, or 404 while there is none.
+
+        ``want_screen`` first, unconditionally: a 404 is how the page learns it
+        has to ask again, and the ask is what starts the grabs.
+        """
+        feed: AgentFeed = self.server.feed  # type: ignore[attr-defined]
+        feed.want_screen()
+        latest = feed.latest_screen
+        if latest is None:
+            body = json.dumps({"error": "no screen"}).encode("utf-8")
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        data, taken = latest
+        self.send_response(200)
+        self.send_header("Content-Type", "image/bmp")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Screen-Age", f"{max(time.monotonic() - taken, 0.0):.2f}")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _relay_vision(self, sidecar_path: str) -> None:
         """Copy one sidecar response through, chunk by chunk, until an end.

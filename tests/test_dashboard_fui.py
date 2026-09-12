@@ -414,23 +414,24 @@ def test_a_reconnect_does_not_carry_the_old_agents_device_table():
 
 
 def test_unclaimed_hardware_is_reported_because_the_rail_cannot_show_it(live):
-    """A fixed five-slot rail structurally cannot say "something is plugged in
-    that benchctrl cannot drive". On the development board that is a real pair of
-    instruments — an SDG1032X and a DS1000Z scope with no drivers yet.
+    """The rail only has rows for devices benchctrl has drivers for, so it
+    structurally cannot say "something is plugged in that benchctrl cannot
+    drive". On the development board that is a real instrument — a Rigol DS1000Z
+    scope with no driver yet. (The SDG1032X used to be the other example here;
+    it now has a driver and a rail slot, which is exactly how an instrument is
+    supposed to leave this list.)
     """
     live.apply_inventory(
         {
             "devices": [
-                {"device_key": None, "usb_id": "f4ec:1103", "label": "",
-                 "product": "SDG1032X", "path": "USB0::..."},
-                {"device_key": None, "usb_id": "1ab1:04ce",
-                 "label": "Rigol DS1xx4Z", "path": "USB0::..."},
+                {"device_key": None, "usb_id": "1ab1:04ce", "label": "",
+                 "product": "DS1104Z", "path": "USB0::..."},
             ]
         }
     )
     unclaimed = view_of(live)["unclaimed"]
-    assert {u["usb_id"] for u in unclaimed} == {"f4ec:1103", "1ab1:04ce"}
-    assert any("SDG1032X" in u["label"] for u in unclaimed)
+    assert [u["usb_id"] for u in unclaimed] == ["1ab1:04ce"]
+    assert "DS1104Z" in unclaimed[0]["label"]
 
 
 def test_unidentified_devices_without_a_usb_id_are_not_listed_as_hardware(live):

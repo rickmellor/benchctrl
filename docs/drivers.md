@@ -19,6 +19,7 @@ Each driver is independent and optional. Import only what you need.
 | Siglent SDM4065A 6½-digit bench DMM | `benchctrl.drivers.siglent_sdm4065a.SiglentSDM4065A` | USB-TMC + SCPI via pyvisa | **shipped (unreleased)** |
 | CyberPower PDU41002 8-outlet switched PDU | `benchctrl.drivers.cyberpower_pdu41002.CyberPowerPDU41002` | vendor CLI over USB-Serial (FTDI) **or** SSH | **shipped (unreleased)** — switches mains |
 | Silicon Labs CP2112 GPIO control lines | `benchctrl.drivers.silabs_cp2112.CP2112` | USB HID feature reports over `hidraw` | **shipped (unreleased)** — open-drain reset lines |
+| Siglent SDG1032X — 2-ch 30 MHz function/arbitrary waveform generator | `benchctrl.drivers.siglent_sdg1032x.SiglentSDG1032X` | USB-TMC via pyvisa-py | **shipped (unreleased)** |
 | Bench vision — Basler a2A1920-160uc camera + Axelera Metis NPU | `benchctrl.drivers.bench_vision.BenchVision` | HTTP/JSON to the `benchctrl-vision` sidecar on loopback | **shipped (unreleased)** — driver + simulator; sidecar lands with `deploy/vision/` |
 
 ## QR10x — programmable resistance
@@ -1506,4 +1507,99 @@ MCP tools: `vision_*` (13) — `open`, `close`, `info`, `status`, `frame`,
 writes the JPEG host-side. `classify` reads an indicator (the Pi's `ACT` LED
 is the first) with a model the label loop's dataset trained — `vision.md`
 § Classifiers.
+
+## Siglent SDG1032X — function / arbitrary waveform generator
+
+`siglent_sdg1032x` drives the two-channel 30 MHz SDG1032X over USB-TMC
+(pyvisa-py, `f4ec:1103`). Siglent's own SCPI dialect: `C1:BSWV FRQ,1000,AMP,2`
+sets, `C1:BSWV?` answers the whole state with units suffixed. Sixty-seven MCP
+tools, `sdg1032x_*`.
+
+```python
+from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X
+
+with SiglentSDG1032X.open(max_amplitude_vpp=5.0) as gen:   # nothing is energised
+    w = gen.set_basic_wave(1, wave_type="SINE", frequency_hz=1000, amplitude_vpp=1.0)
+    print(w.frequency_hz, w.amplitude_vrms)                 # what the instrument READ BACK
+    gen.set_output(1, True)                                 # arms the BNC; the governor sees it
+    gen.disable_outputs()                                   # what safe-stop calls; __exit__ too
+```
+
+### The read-back rule
+
+The SDG has **no error queue**. A value it cannot represent is silently
+refused or clamped (`AMP,0.001` reads back `0.002V`; `DUTY,99` at 20 MHz reads
+back `59`). So every setter sends only the fields it was given, reads the
+header back, **returns the typed read-back**, and raises
+`SDG1032XVerifyError(channel, field, wanted, got)` when a requested field
+differs beyond the instrument's resolution (relative 1e-5 with absolute
+floors of half a display digit). `verify=False` returns the read-back without
+raising. A raw `write()` verifies nothing, which is why it is the last resort.
+The bench validates the same settings a second way: the instrument's own
+screen (`read_screen()`, shown in the FUI) and the camera on the front panel
+(`docs/vision.md` § Classifiers).
+
+### Safety
+
+- `open()` changes nothing on the instrument. `allowed_channels` (default both)
+  gates every channel mutator; reads are never gated. `max_amplitude_vpp` caps
+  every amplitude the driver sends — the instrument's own `MAX_OUTPUT_AMP` is
+  accepted but neither echoed nor enforced by the bench firmware
+  (`KNOWN_LIMITATIONS.md` § F-24), so the cap is the driver's, and
+  `set_max_amplitude` can only lower it.
+- `set_output(channel, on)` is what the governor counts as arming;
+  `disable_outputs()` takes no arguments so `default_safe_state` reaches it, and
+  `__exit__` calls it. `trigger_key` refuses `KB_OUTPUT1`/`KB_OUTPUT2`.
+- Default load is HiZ (the factory state, and the safe one into an open BNC);
+  set the load before the amplitude — limits halve into 50 Ω.
+
+### Surface
+
+| Group | Methods |
+|---|---|
+| lifecycle | `open`, `close`, `info`, `reset`, `operation_complete`, `write`, `query` |
+| output | `get_output`, `set_output`, `set_output_load`, `set_output_polarity`, `disable_outputs` |
+| basic wave | `get_basic_wave`, `set_basic_wave(**fields)`, `set_wave_type`, `set_frequency`, `set_amplitude`, `set_offset`, `set_phase`, `set_max_amplitude` |
+| arb | `list_arbs`, `get_arb`, `select_arb(index\|name)`, `write_arb`, `read_arb` |
+| modulation / sweep / burst | `get_/set_modulation`, `get_/set_sweep`, `trigger_sweep`, `get_/set_burst`, `trigger_burst` |
+| sync / clock / phase | `get_/set_sync`, `get_/set_clock`, `get_/set_phase_mode`, `apply_equal_phase`, `get_/set_invert`, `apply_channel_copy` |
+| coupling / harmonics / combine | `get_/set_coupling`, `get_/set_harmonics`, `get_/set_combine` |
+| counter / protection | `read_counter`, `set_counter`, `get_/set_protection` |
+| system | `read_screen`, `get_/set_buzzer`, `get_/set_screen_saver`, `get_/set_number_format`, `get_/set_language`, `get_/set_power_on_config`, `get_/set_lan_config`, `trigger_key` |
+
+Every read returns a frozen dataclass (`OutputState`, `BasicWave`, `Modulation`,
+`Sweep`, `Burst`, `ArbInfo`, `ArbSelection`, `ArbData`, `SyncConfig`,
+`ClockConfig`, `CounterReading`, `Coupling`, `Harmonic`, `ProtectionState`,
+`LanConfig`, `NumberFormat`), all of which cross the agent wire typed; a field
+the instrument did not report is `None` (NOISE has no frequency, an OFF
+modulation reports only `enabled`). `read_screen()` is a 480×272 BMP as
+`bytes` (a blob over the wire).
+
+### Arbitrary waveforms
+
+Built-ins are selected **by index** (2–198, `list_arbs("builtin")`), user
+waveforms **by name**. `write_arb(name, samples)` takes int16 codes or floats in
+[-1, 1] (numpy arrays accepted, numpy never imported), 2–16384 samples, and
+reads the waveform back to verify. **Upload does not land on the bench unit's
+firmware over USB-TMC** — three framings were tried; the instrument stalls
+(`KNOWN_LIMITATIONS.md` § F-25). It is verified against the simulator and
+waits for the LAN path (`ROADMAP.md`).
+
+### Quirks (all bench-measured, all in the parser and the simulator)
+
+`CHDR` unsupported, headers fixed (§ F-22); `MODE` must be sent as
+`PHASE-LOCKED`, `MDWV?` puts the type after the state pair, `SYNC?` and
+`ROSC?` omit `TYPE`/`10MOUT`, `CURRPRT?`/`VOLTSTAT?` are unimplemented and go
+unanswered — without wedging the instrument (§ F-23); `HARM?` carries a stray
+comma when on, `VOLTPRT?` and the LAN queries carry no header (§ F-22);
+`STL? BUILDIN` names differ from the index table (§ F-26); `SCDP` is
+undocumented (§ F-27).
+
+### Simulator
+
+`benchctrl.sim.sdg1032x.SimulatedSDG1032X` (`make_sdg1032x`) renders every
+answer byte-exact as the bench unit does, models the silent clamping and the
+no-reply on unknown queries, couples AMP/OFST with HLEV/LLEV and FRQ with
+PERI, makes modulation/sweep/burst mutually exclusive, and answers `SCDP`
+with a real BMP (`sim={"screen_px": 200}` for a blob-sized one).
 

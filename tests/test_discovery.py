@@ -140,6 +140,33 @@ def test_the_siglent_signature_records_the_family_ambiguity():
     assert "IDN" in sig.note
 
 
+def test_the_sdg_signature_is_exact_and_records_the_family_ambiguity():
+    """The generator is the SDM's sibling in every way that matters here: same
+    vendor, USB-TMC, and one VID/PID shared across the family (SDG1032X and
+    SDG1062X). The match names the family; ``*IDN?`` names the model."""
+    sigs = [s for s in discovery.SIGNATURES if s.device_key == "siglent_sdg1032x"]
+    assert len(sigs) == 1
+    sig = sigs[0]
+    assert (sig.vid, sig.pid) == (0xF4EC, 0x1103)
+    assert sig.transport == "usbtmc"
+    assert sig.confidence == EXACT
+    assert "sdg10" in sig.product_hints
+    assert "SDG1062X" in sig.note and "*IDN?" in sig.note
+
+
+def test_visa_scan_identifies_the_siglent_generator(monkeypatch):
+    class FakeRM:
+        def list_resources(self):
+            return ("USB0::0xF4EC::0x1103::SDG1XCBX5R1972::INSTR",)
+
+        def close(self):
+            pass
+
+    found = discovery.scan_visa(FakeRM())
+    assert [d.device_key for d in found] == ["siglent_sdg1032x"]
+    assert found[0].confidence == EXACT
+
+
 def test_visa_scan_is_silent_without_a_backend(monkeypatch):
     """A bench with only serial instruments is a valid bench."""
     import builtins
@@ -870,11 +897,13 @@ def test_every_probe_label_is_a_real_device_key():
 # --------------------------------------------------------------------------
 
 #: The bench board's real resource strings, as pyvisa-py renders them. 6833 is
-#: 0x1AB1, 42152 is 0xA4A8, 3601 is 0x0E11, 62700 is 0xF4EC, 4640 is 0x1220.
+#: 0x1AB1, 42152 is 0xA4A8, 3601 is 0x0E11, 62700 is 0xF4EC, 4640 is 0x1220,
+#: 4355 is 0x1103.
 BOARD_RESOURCES = (
     "ASRL/dev/ttyACM0::INSTR",
     "ASRL/dev/ttyS0::INSTR",
     "USB0::62700::4640::SDM46A0CA00021::0::INSTR",
+    "USB0::62700::4355::SDG1XCBX5R1972::0::INSTR",
     "USB0::6833::3601::DL3D232300106::0::INSTR",
     "USB0::6833::42152::DP2A243500269::0::INSTR",
 )
@@ -907,6 +936,7 @@ def _patch_visa(monkeypatch, resources):
         ("rigol_dp2031", "USB0::6833::42152::DP2A243500269::0::INSTR"),
         ("rigol_dl3031a", "USB0::6833::3601::DL3D232300106::0::INSTR"),
         ("siglent_sdm4065a", "USB0::62700::4640::SDM46A0CA00021::0::INSTR"),
+        ("siglent_sdg1032x", "USB0::62700::4355::SDG1XCBX5R1972::0::INSTR"),
     ],
 )
 def test_a_decimal_resource_resolves_for_every_visa_instrument(
@@ -930,11 +960,13 @@ def test_a_hex_resource_still_resolves(monkeypatch):
     _patch_visa(
         monkeypatch,
         ("USB0::0x1AB1::0xA4A8::DP2A243500269::INSTR",
-         "USB0::0x1ab1::0x0E11::DL3D232300106::INSTR"),
+         "USB0::0x1ab1::0x0E11::DL3D232300106::INSTR",
+         "USB0::0xF4EC::0x1103::SDG1XCBX5R1972::INSTR"),
     )
 
     assert discovery.visa_resource_for("rigol_dp2031").endswith("DP2A243500269::INSTR")
     assert discovery.visa_resource_for("rigol_dl3031a").endswith("DL3D232300106::INSTR")
+    assert discovery.visa_resource_for("siglent_sdg1032x").endswith("SDG1XCBX5R1972::INSTR")
 
 
 def test_two_rigols_are_told_apart_on_pid_alone(monkeypatch):
@@ -1052,6 +1084,50 @@ def test_each_driver_actually_uses_the_shared_lookup(monkeypatch, module, expect
             pass
 
     assert drv._autodiscover(FakeRM()) == expected
+
+
+def test_the_sdg1032x_opens_through_the_shared_lookup(monkeypatch):
+    """The generator has no ``_autodiscover`` to call: ``open(resource=None)``
+    goes to :py:func:`visa_resource_for` directly, handing over the manager it
+    is about to use. So the wiring is checked through ``open()`` itself, with
+    pyvisa's ResourceManager replaced by one that lists the board's resources
+    and records whether anyone closed it.
+    """
+    import pyvisa
+
+    from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X
+
+    closed = []
+
+    class FakeInstrument:
+        timeout = 0
+        read_termination = ""
+        write_termination = ""
+
+        def close(self):
+            pass
+
+    class FakeRM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def list_resources(self):
+            return BOARD_RESOURCES
+
+        def open_resource(self, resource):
+            self.opened = resource
+            return FakeInstrument()
+
+        def close(self):
+            closed.append(True)
+
+    _patch_ports(monkeypatch, [])
+    _patch_visa(monkeypatch, BOARD_RESOURCES)
+    monkeypatch.setattr(pyvisa, "ResourceManager", FakeRM)
+
+    gen = SiglentSDG1032X.open()
+    assert gen.resource == "USB0::62700::4355::SDG1XCBX5R1972::0::INSTR"
+    assert not closed, "the driver closed the ResourceManager it was about to use"
 
 
 def test_a_kernel_usbtmc_node_is_not_returned_as_a_visa_resource(monkeypatch):

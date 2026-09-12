@@ -182,6 +182,41 @@ because there is no image-return precedent in this server and the transcript
 cost of a 300 KB frame per call wants a deliberate design (downscale, crop to
 ROI, rate-limit), not a one-line addition.
 
+## Signal sources and the scope loop
+
+### SDG1032X arbitrary-waveform upload over LAN
+**Status**: the driver implements the guide's `WVDT` upload and it works
+against the simulator, but on the bench unit (firmware 1.01.01.33R1B6) no
+USB-TMC framing tried landed a user waveform, and a 32 KB single transfer
+stalled the instrument's USB stack (`KNOWN_LIMITATIONS.md` § F-25).
+
+**Scope when picked up**: a LAN transport for the SDG (raw socket, port 5025 —
+the instrument has an Ethernet port and `SYST:COMM:LAN:*` is already in the
+driver), then `write_arb` over it, then a hardware test that uploads, selects
+and reads back a waveform. Same driver, second transport — the resource string
+already decides which pyvisa backend speaks.
+
+### Rigol DS1000Z oscilloscope driver, then generator→scope sweeps
+**Status**: the scope (`1ab1:04ce`) is on the bench and shows as unclaimed.
+
+**Scope when picked up**: a `rigol_ds1000z` driver (waveform capture, trigger,
+measurements) built the way the SDG was: read-back everywhere, sim first,
+hardware-marked tests; then the cross-instrument loop the bench exists for —
+the SDG sweeps (`set_sweep`) or bursts into the DUT, the scope captures, the
+counter/DMM cross-check. The FUI's scope quadrant gets the capture.
+
+### Reading the SDG's screen text with the label loop
+**Status**: the FUI shows the generator's own screen (`SCDP`) and the camera
+sees the same panel. A frequency/amplitude read from the *camera* would be a
+third, optical check of every setting.
+
+**Scope when picked up**: the label loop already labels for free — command a
+frequency through the driver, capture, the commanded value is the label — so
+per-character models over a fixed screen layout are the same recipe as the
+Output-key classifiers, and the `SCDP` bitmap is a pixel-perfect reference
+for the layout. Needs a multi-region classify call (`docs/vision.md` § V-9
+binds a model to one region today).
+
 ## Foundation hardening
 
 ### Strict mypy

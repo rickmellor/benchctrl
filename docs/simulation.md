@@ -58,6 +58,7 @@ free-running thread.
 | `SimulatedRigolDL3031A` | Rigol DL3031A | SCPI over ASRL, incl. the `:SOUR:FUNC` set-as-`CURRent`/read-as-`CC` quirk |
 | `SimulatedRigolDP2031` | Rigol DP2031 | SCPI over ASRL, three channels, register model |
 | `SimulatedSDM4065A` | Siglent SDM4065A | SCPI over ASRL, per-function range/NPLC/null state, autoranging, the `9.9E37` overload sentinel, `CONFigure`'s reset side effects, and Siglent's colon-less headers |
+| `SimulatedSDG1032X` | Siglent SDG1032X | Siglent's `Cn:HEADER KEY,VAL` dialect over ASRL with byte-exact firmware 1.01.01.33R1B6 read-backs (`PHASE-LOCKED`, headerless `VOLTPRT?`, the `HARM?` stray comma, lexicographic `STL?`), **silent rejection with no error queue** (out-of-range values clamped or dropped and logged in `rejections`, unimplemented queries left unanswered), coupled FRQ/PERI and AMP/OFST/HLEV/LLEV, mutually exclusive modulation/sweep/burst, length-delimited binary `WVDT` uploads, `SCDP` BMP screen dumps, and `VKEY` Output-key toggles |
 
 The SCPI simulators use a generic register model that covers the bulk
 of the ~254 distinct SCPI strings across the two Rigols; measurement,

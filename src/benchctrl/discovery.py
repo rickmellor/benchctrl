@@ -26,11 +26,13 @@ reserved for the signature table.
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import logging
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
-from typing import Iterable, Optional
+from typing import Optional
 
 from benchctrl.exceptions import BenchConnectionError
 
@@ -105,6 +107,19 @@ SIGNATURES: tuple[DriverSignature, ...] = (
         # 4065A has a 1 MΩ top resistance range where the 4055A has 2 MΩ), so
         # a caller that must be sure of the model has to read ``*IDN?``.
         note="SDM4045A/4055A/4065A share this ID; check *IDN? for the model",
+    ),
+    DriverSignature(
+        device_key="siglent_sdg1032x",
+        label="Siglent SDG1000X-series function/arbitrary waveform generator",
+        vid=0xF4EC,
+        pid=0x1103,
+        transport="usbtmc",
+        confidence=EXACT,
+        product_hints=("sdg10",),
+        # Same vendor, same family-level ambiguity as the SDM above: the
+        # SDG1032X and SDG1062X present one VID/PID, so the match names the
+        # family and ``*IDN?`` names the model (30 vs 60 MHz).
+        note="SDG1032X/SDG1062X share this ID; check *IDN? for the model",
     ),
     DriverSignature(
         device_key="silabs_cp2112",
@@ -608,10 +623,8 @@ def scan_visa(resource_manager=None) -> list[DiscoveredDevice]:
         return []
     finally:
         if close_after:
-            try:
+            with contextlib.suppress(Exception):
                 rm.close()
-            except Exception:
-                pass
 
     found: list[DiscoveredDevice] = []
     for res in resources:

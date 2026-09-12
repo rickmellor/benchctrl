@@ -947,6 +947,18 @@ function render(v) {
   renderUnclaimed(v.unclaimed);
   renderFlow(v.stages, v.stage_unknown);
 
+  // The DMM pane is the generator's screen while the AWG is linked: during a
+  // test the one thing worth watching in that quadrant is what the instrument
+  // itself is doing, and the DMM has no measurement channel to lose yet.
+  const awg = v.instruments.find((i) => i.kind === 'awg');
+  if (awg && awg.linked) {
+    showSdgScreen(v);
+    renderVision(v);
+    $('dut-verdict').textContent = dutLabel(v);
+    return;
+  }
+  hideSdgScreen();
+
   // The DMM readout. There is no measurement in the observer status payload, so
   // this is NO LINK until one exists — deliberately not a plausible number.
   // When agent.status grows per-channel readings, they land here.
@@ -976,6 +988,68 @@ function render(v) {
 
   renderVision(v);
   $('dut-verdict').textContent = dutLabel(v);
+}
+
+/* The generator's screen in the DMM pane.
+ *
+ * Unlike the camera this is a still, re-fetched on a fixed 2 s clock: the feed
+ * grabs the SDG1032X's SCDP bitmap only while /sdg/screen keeps being asked
+ * for, so the fetch loop here is what keeps the instrument being read — and
+ * stopping it (the AWG unlinked, the DMM back) is what stops the reads. The
+ * first fetch after arming is a 404 by design (the feed has not grabbed yet);
+ * that shows NO SCREEN for one tick and the picture lands on the next.
+ *
+ * The verdict beside the title stays the rail's word for the AWG (OPEN, IN RUN,
+ * …), the same split as the camera: the agent's fact about the device, and
+ * NO SCREEN for the picture being absent, are never the same thing.
+ */
+const SDG = { timer: null, showing: false, pollMs: 2000 };
+
+function showSdgScreen(v) {
+  const img = $('sdg-screen');
+  const note = $('dmm-note');
+  const awg = v.instruments.find((i) => i.kind === 'awg');
+  $('dmm-title').textContent = 'SDG1032X · SCREEN';
+  $('dmm-verdict').textContent = awg ? awg.status : 'NO LINK';
+  $('dmm-readout').classList.add('hidden');
+  $('dmm-pills').classList.add('hidden');
+  $('dmm-body').classList.add('screen');
+  if (SDG.showing) return;
+  SDG.showing = true;
+  note.textContent = 'NO SCREEN';
+  note.className = 'readout-note';
+  img.onload = () => {
+    img.classList.remove('hidden');
+    note.classList.add('hidden');
+  };
+  img.onerror = () => {
+    img.classList.add('hidden');
+    note.textContent = 'NO SCREEN';
+    note.className = 'readout-note';
+  };
+  const tick = () => {
+    if (!SDG.showing) return;
+    img.src = '/sdg/screen?t=' + Date.now();
+    SDG.timer = setTimeout(tick, SDG.pollMs);
+  };
+  tick();
+}
+
+function hideSdgScreen() {
+  if (!SDG.showing) return;
+  SDG.showing = false;
+  clearTimeout(SDG.timer);
+  SDG.timer = null;
+  const img = $('sdg-screen');
+  img.onload = null;
+  img.onerror = null;
+  img.removeAttribute('src');
+  img.classList.add('hidden');
+  $('dmm-title').textContent = 'DIGITAL MULTIMETER';
+  $('dmm-readout').classList.remove('hidden');
+  $('dmm-pills').classList.remove('hidden');
+  $('dmm-body').classList.remove('screen');
+  // The DMM block that follows repaints the readout, note and verdict.
 }
 
 /* The VISION · LIVE quadrant: the camera's MJPEG stream, relayed by the FUI

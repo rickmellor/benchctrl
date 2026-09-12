@@ -56,10 +56,24 @@ rather than another field on the status poll: measured on the bench board it cos
 ~1.65 s against ~5 ms for ``agent.status``, since identifying a USB-TMC instrument
 means reading its string descriptors over libusb. Both calls are in
 ``OBSERVER_METHODS`` already, so none of this widens what a display may do.
+
+The generator's screen
+----------------------
+
+The one read this feed makes of an *instrument* rather than of the agent: while
+the FUI page is showing the function generator's own screen (``/sdg/screen``),
+the session loop grabs :py:data:`SCREEN_DEVICE`'s ``SCDP`` bitmap every
+:py:data:`SCREEN_POLL_S`. It is opt-in and self-cancelling — each page fetch arms
+it for :py:data:`SCREEN_WATCH_S`, so a closed browser stops the grabs — and it
+is a claim-free ``device.read`` of a non-mutating method, never an
+``agent.claim``. The agent's observer allowlist governs whether the call is
+permitted at all; if it is refused the pane reads NO SCREEN and nothing else on
+the panel is affected.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -88,6 +102,22 @@ DEFAULT_INVENTORY_S = 30.0
 RECONNECT_MIN_S = 1.0
 RECONNECT_MAX_S = 30.0
 
+#: The one device whose own screen the FUI shows: the function generator's
+#: ``SCDP`` bitmap fills the DMM pane while the generator is served, so a test
+#: can be watched from across the bench. See :py:meth:`AgentFeed.want_screen`.
+SCREEN_DEVICE = "siglent_sdg1032x"
+
+#: How often to re-grab the screen while someone is watching it. ~0.5 s per
+#: grab on the bench (a 392 KB BMP over USB-TMC), so 2 s keeps the generator's
+#: worker mostly free for the run that is actually driving it.
+SCREEN_POLL_S = 2.0
+
+#: How long one ``/sdg/screen`` hit keeps the poll armed. The page re-fetches
+#: every :py:data:`SCREEN_POLL_S` while the pane is up, so this only has to
+#: outlast a couple of missed fetches; a closed browser stops the grabs within
+#: this window rather than polling the instrument forever for nobody.
+SCREEN_WATCH_S = 10.0
+
 
 class AgentFeed:
     """A self-healing read-only feed from one agent into one ``BenchStatus``.
@@ -103,6 +133,7 @@ class AgentFeed:
         poll_s: float = DEFAULT_POLL_S,
         inventory_s: float = DEFAULT_INVENTORY_S,
         connect: Optional[Callable[[], object]] = None,
+        screen_reader: Optional[Callable[[object], bytes]] = None,
     ) -> None:
         self.endpoint = endpoint
         self.poll_s = poll_s
@@ -111,11 +142,20 @@ class AgentFeed:
         # Injectable so tests can drive the whole loop against a fake client;
         # the default builds a real observer session.
         self._connect = connect or self._default_connect
+        # How one screen grab reaches the generator, given the session's client.
+        # Injectable for the same reason as ``connect``; the default is the
+        # claim-free ``device.read`` in :py:meth:`_default_screen_reader`.
+        self._screen_reader = screen_reader or self._default_screen_reader
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._client: object = None
         self._reconnects = 0
+        #: The last screen grab, as ``(bmp_bytes, monotonic_ts)``; None when
+        #: there is no *current* picture — never a stale one dressed as live.
+        self.latest_screen: Optional[tuple[bytes, float]] = None
+        self._screen_wanted_until = 0.0
+        self._screen_grabbed_at = 0.0
 
     def _default_connect(self):
         from benchctrl.net.client import RemoteClient
@@ -139,10 +179,9 @@ class AgentFeed:
         self._stop.set()
         client = self._client
         if client is not None:
-            try:
+            # Shutting down anyway: a close that fails has nothing left to tell us.
+            with contextlib.suppress(Exception):
                 client.close()  # type: ignore[attr-defined]
-            except Exception:  # noqa: BLE001 - shutting down anyway
-                pass
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=timeout)
@@ -182,10 +221,8 @@ class AgentFeed:
                     self.status.apply_disconnected(f"session ended: {exc}")
             finally:
                 self._client = None
-                try:
-                    client.close()  # type: ignore[attr-defined]
-                except Exception:  # noqa: BLE001
-                    pass
+                with contextlib.suppress(Exception):
+                    client.close()  # type: ignore[union-attr]
                 self._reconnects += 1
             if self._stop.wait(RECONNECT_MIN_S):
                 return
@@ -205,14 +242,20 @@ class AgentFeed:
         # fact. Monotonic deadline rather than a countdown, so a slow status poll
         # does not push the inventory back indefinitely.
         next_inventory = 0.0
+        # The status poll gets the same treatment once the screen poll exists:
+        # the loop now wakes on whichever clock is due next, and a 2 s screen
+        # cadence must not drag the 5 s status poll along with it.
+        next_status = 0.0
         while not self._stop.is_set():
             if not getattr(client, "is_connected", False):
                 with self._lock:
                     self.status.apply_disconnected("the agent closed the connection")
                 return
-            snapshot = client.status()
-            with self._lock:
-                self.status.apply_status(snapshot)
+            if time.monotonic() >= next_status:
+                snapshot = client.status()
+                with self._lock:
+                    self.status.apply_status(snapshot)
+                next_status = time.monotonic() + self.poll_s
 
             now = time.monotonic()
             if now >= next_inventory:
@@ -223,7 +266,13 @@ class AgentFeed:
                 # in-flight calls both hit the same session's writer.
                 self._take_inventory(client)
                 next_inventory = time.monotonic() + self.inventory_s
-            if self._stop.wait(self.poll_s):
+            # Same reasoning: inline, after the reads that matter more.
+            screen_due = self._poll_screen(client)
+
+            delay = next_status - time.monotonic()
+            if screen_due is not None:
+                delay = min(delay, screen_due)
+            if self._stop.wait(max(delay, 0.0)):
                 return
 
     def _take_inventory(self, client) -> None:
@@ -244,6 +293,98 @@ class AgentFeed:
             return
         with self._lock:
             self.status.apply_inventory(inventory)
+
+    # --- the generator's screen -----------------------------------------
+
+    def want_screen(self) -> None:
+        """Arm the screen poll for :py:data:`SCREEN_WATCH_S` from now.
+
+        Called by the HTTP handler on every ``/sdg/screen`` hit, so the
+        instrument is only ever read while a page is actually showing it. The
+        first hit arms the poll and gets a 404; the picture is there by the
+        page's next fetch.
+        """
+        with self._lock:
+            self._screen_wanted_until = time.monotonic() + SCREEN_WATCH_S
+
+    def screen_snapshot(self) -> dict:
+        """``{"present", "age_s", "bytes"}`` for the view, under the lock."""
+        with self._lock:
+            latest = self.latest_screen
+        if latest is None:
+            return {"present": False, "age_s": None, "bytes": None}
+        data, taken = latest
+        return {
+            "present": True,
+            "age_s": round(max(time.monotonic() - taken, 0.0), 2),
+            "bytes": len(data),
+        }
+
+    def _screen_served(self) -> bool:
+        """Whether the agent's registry lists the generator at all. Learned from
+        WELCOME's device table, so it is known before any inventory lands."""
+        with self._lock:
+            slot = self.status.slots.get(SCREEN_DEVICE)
+            return slot is not None and bool(slot.served)
+
+    def _poll_screen(self, client) -> Optional[float]:
+        """One step of the screen poll. Returns how long until the next grab is
+        due, or None when nothing is due (nobody watching, or not served).
+
+        Never fatal, and never stale: a grab that raises clears
+        :py:attr:`latest_screen` so the pane drops to NO SCREEN rather than
+        keeping the last bitmap up as if it were live. Logged at debug because on
+        a bench without the generator this is the ordinary idle case, not news.
+        """
+        now = time.monotonic()
+        with self._lock:
+            wanted = now < self._screen_wanted_until
+        if not wanted or not self._screen_served():
+            with self._lock:
+                self.latest_screen = None
+            return None
+        remaining = SCREEN_POLL_S - (now - self._screen_grabbed_at)
+        if remaining > 0:
+            return remaining
+        # Stamp before the read, not after: a slow or failing grab must not
+        # shorten the gap to the next one.
+        self._screen_grabbed_at = now
+        try:
+            data = self._screen_reader(client)
+        except Exception as exc:  # noqa: BLE001 - a picture, not the feed
+            log.debug("dashboard: screen grab of %s failed (%s)", SCREEN_DEVICE, exc)
+            with self._lock:
+                self.latest_screen = None
+            return SCREEN_POLL_S
+        with self._lock:
+            self.latest_screen = (bytes(data), time.monotonic())
+        return SCREEN_POLL_S
+
+    @staticmethod
+    def _default_screen_reader(client) -> bytes:
+        """Read the generator's screen through the feed's own session.
+
+        Deliberately *not* ``client.attach()``: that helper takes the writer claim
+        as a side effect, and a dashboard must never hold one — while a run is
+        driving the generator the claim is the run's. ``read_screen`` is not a
+        mutator, so it goes through ``device.read`` — the one device verb an
+        observer session has: refused unless the device is already open (a
+        display never powers a session up) and never a mutator, by the
+        agent's own check as well as the name-prefix rule.
+        """
+        data = client.call(
+            "device.read",
+            {
+                "device": SCREEN_DEVICE,
+                "method": "read_screen",
+                "args": [],
+                "kwargs": {},
+                "want_props": False,
+            },
+        )
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError(f"read_screen returned {type(data).__name__}, not bytes")
+        return bytes(data)
 
     def _on_event(self, event: dict) -> None:
         try:
@@ -268,6 +409,7 @@ class AgentFeed:
             self.status.check_silence()
             data = self.status.to_dict()
             data["reconnects"] = self._reconnects
+            data["sdg_screen"] = self.screen_snapshot()
             return data
 
     @property

@@ -424,6 +424,28 @@ dl.set_input(True)
 | Sub-ms / sub-100 ms transients | DL3031A LIST or transient mode |
 | Built-in battery discharge characterization | DL3031A |
 
+### Siglent SDG1032X (function / arbitrary waveform generator)
+
+`siglent_sdg1032x`, tools `sdg1032x_*`. **No error queue**: every setter
+returns the instrument's read-back and fails with `SDG1032XVerifyError` when
+it differs from the request — that is the signal a value was refused or
+clamped; do not retry blindly, pick a representable value. `open()` energises
+nothing; `set_output(ch, True)` arms the BNC (know what is attached); the
+driver's `max_amplitude_vpp` is the amplitude cap (the instrument's own is
+not honoured); `disable_outputs()` is the disarm. Built-in arbs select by
+index, user arbs by name; upload over USB does not work on the bench unit
+yet. `sdg1032x_read_screen(save_to=…)` grabs the instrument's screen; the FUI
+shows it live. Full contract: `docs/drivers.md` § Siglent SDG1032X.
+
+```python
+from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X
+
+with SiglentSDG1032X.open(max_amplitude_vpp=5.0) as gen:
+    w = gen.set_basic_wave(1, wave_type="SINE", frequency_hz=1e3, amplitude_vpp=1.0)
+    gen.set_output(1, True)      # verified read-back; the camera classifier "sdg-out1" sees the key light
+    gen.disable_outputs()
+```
+
 ### Bench vision (camera + Metis NPU)
 
 `bench_vision` reads the bench through a Basler camera and, on a host with

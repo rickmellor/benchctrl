@@ -39,7 +39,7 @@ to LLM agents through MCP. The Arc wire protocol is documented in
 - **`benchctrl.battery`** — battery characterisation + emulation:
   profile I/O, life calculator, hardware profiler, 100 Hz host-side
   emulator
-- **`benchctrl.mcp`** — MCP server, **319 tools**, orchestrator that
+- **`benchctrl.mcp`** — MCP server, **387 tools**, orchestrator that
   calls each driver's `register_mcp_tools(mcp)`
 - **`benchctrl.session`** — the local/remote/sim seam. `resolve()`
   decides *per device key* what a driver singleton actually gets

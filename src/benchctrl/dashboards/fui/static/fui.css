@@ -532,6 +532,17 @@ header {
 #vision-note { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
 #vision-note.hidden { display: none; }
 
+/* The DMM pane while it is showing the generator's screen: the same treatment
+   as the camera (fills the body, letterboxed on black), with the DMM's own
+   readout and pills hidden rather than removed so the switch back is a class
+   toggle and not a rebuild. The note doubles as the NO SCREEN card. */
+#dmm-body.screen { padding: 0; position: relative; background: #000; }
+#sdg-screen { width: 100%; height: 100%; object-fit: contain; display: block; }
+#sdg-screen.hidden { display: none; }
+#dmm-body.screen #dmm-note { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+#dmm-body.screen #dmm-note.hidden { display: none; }
+#dmm-readout.hidden, #dmm-pills.hidden { display: none; }
+
 .mode-pills { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 4px; }
 .pill {
   font-size: 9px;

@@ -311,7 +311,8 @@ class VisionService:
         for key in allowed:
             if key in body:
                 kw[key] = _number(body[key], key)
-                if kw[key] <= 0:
+                # 0 dB is a valid (and the default) gain; exposure and fps are not.
+                if kw[key] < 0 or (kw[key] == 0 and key != "gain_db"):
                     raise ServiceValueError(f"{key} must be > 0, got {kw[key]}")
         with self._lock:
             if kw:
