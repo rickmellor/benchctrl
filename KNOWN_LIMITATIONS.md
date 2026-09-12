@@ -1094,7 +1094,10 @@ instrument reports for itself. Read-back is `WVDT POS, /Local, WVNM, <name>,
 LENGTH, <n>B, TYPE, 6, WAVEDATA, ` + n bytes; it carries no wave parameters.
 A user waveform selects **by name** and reads back as `NAME,<name>.bin`. There
 is no delete command in the SDG1000X set: stale user waveforms are removed
-from the front panel (Store/Recall).
+from the front panel (Store/Recall) — which has its own bugs: an entry whose
+upload was cut off mid-message could not be deleted or read back until it
+was overwritten with a valid one, and after one deletion the next fails
+until the menu is left and re-entered (delete from the top of the list).
 
 ### F-26. `STL? BUILDIN` names differ from the `ARWV INDEX` table
 The built-in list the instrument returns (``M4, StairUD``, ``M12, LogFall``…)
