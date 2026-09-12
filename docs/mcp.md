@@ -5,20 +5,21 @@ exposes your whole bench as tools any MCP-aware client (Claude Code,
 Claude Desktop, Cursor, custom agents) can call. Built on the official
 `mcp` Python SDK.
 
-**319 tools**, registered per driver:
+**387 tools**, registered per driver:
 
 | Source | Tools |
 |---|---|
 | Otii Arc / Arc Pro | 23 |
 | Eastwood QR10x | 11 |
 | Rigol DL3031A | 45 |
-| Rigol DP2031 | 134 |
+| Rigol DP2031 | 135 |
 | Siglent SDM4065A | 54 |
+| Siglent SDG1032X | 67 |
 | CyberPower PDU41002 | 15 |
 | Silicon Labs CP2112 | 10 |
 | Bench vision (camera + Metis) | 13 |
 | Cross-driver (battery, recording I/O, connection, vision label loop) | 14 |
-| **Total** | **319** |
+| **Total** | **387** |
 
 Each driver registers its own surface via `register_mcp_tools(mcp)`;
 `benchctrl.mcp` is the orchestrator that wires them together. A driver
@@ -152,8 +153,9 @@ their SDK methods, which are documented in [`drivers.md`](drivers.md):
 |---|---|---|
 | `qr10x_*` | Eastwood QR10x | 11 |
 | `dl3031a_*` | Rigol DL3031A | 45 |
-| `dp2031_*` | Rigol DP2031 | 134 |
+| `dp2031_*` | Rigol DP2031 | 135 |
 | `sdm4065a_*` | Siglent SDM4065A | 54 |
+| `sdg1032x_*` | Siglent SDG1032X | 67 |
 | `pdu41002_*` | CyberPower PDU41002 | 15 |
 | `cp2112_*` | Silicon Labs CP2112 | 10 |
 | `vision_*` | Bench vision (camera + Metis NPU) | 13 |
@@ -170,6 +172,20 @@ number instead, so the tools that affect accuracy — `sdm4065a_set_range`,
 docstrings. In particular `sdm4065a_measure_*` reconfigures before it
 triggers and therefore discards a null; `sdm4065a_read` and
 `sdm4065a_read_nulled` are the ones to use after nulling.
+
+The `sdg1032x_*` set is the first signal source. The SDG1032X has no
+error queue — a value it cannot represent is silently ignored or
+quantised — so every `sdg1032x_set_*` tool returns the instrument's
+*read-back* rather than an acknowledgement, and fails with a verify
+error when that differs from what was asked (`verify=false` logs and
+returns whatever the instrument chose). `sdg1032x_write` and
+`sdg1032x_query` are the raw escape hatches: nothing is verified on a
+write, and a query of a header the firmware does not implement goes
+unanswered. `sdg1032x_read_screen` takes `save_to` and returns the
+path, size and SHA-256 of the BMP — the same no-bytes-in-the-transcript
+rule as `vision_*`; `sdg1032x_read_arb` does the same for waveform codes.
+`sdg1032x_set_output` and `sdg1032x_write_arb` carry SAFETY notes, and
+`sdg1032x_disable_outputs` is the ungated safe-stop.
 
 The `vision_*` set never returns image bytes — a JPEG in a tool result
 lands in the transcript — so `vision_frame` and `vision_trigger_capture`

@@ -200,12 +200,24 @@ picture follows the lens, turn the ring until label text reads, then put
 model needs (LED lit/dark, colour, later blink codes) from ground truth
 benchctrl already has: it commands a state, settles, fires N `seq`-tagged
 captures and labels each frame with the state that was commanded when it was
-taken. Actuators: a PDU outlet, a CP2112 line, or the bench box's own status
-LED (`sysfs_led`, e.g. a Raspberry Pi's `ACT`). Rules, each earned by the metis
-board-reader experiment: label from the command and verify from the frame (a
-wrong-`seq` frame is a recorded discard, never a label; an optional sanity read
-of a region is stored beside every frame); interleave states across rounds so
-drift cannot become a class; restore every actuator as found, also on failure.
+taken. Actuators: a PDU outlet (`cyberpower_pdu41002`), a CP2112 line
+(`silabs_cp2112`), an SDG1032X generator output (`siglent_sdg1032x`), or the
+bench box's own status LED (`sysfs_led`, e.g. a Raspberry Pi's `ACT`). Rules,
+each earned by the metis board-reader experiment: label from the command and
+verify from the frame (a wrong-`seq` frame is a recorded discard, never a
+label; an optional sanity read of a region is stored beside every frame);
+interleave states across rounds so drift cannot become a class; restore every
+actuator as found, also on failure.
+
+The generator actuator switches one channel's output on or off:
+
+```json
+{"label": "driven", "actuator": {"device": "siglent_sdg1032x", "channel": 1, "output": true}}
+```
+
+Its `set_output` verifies, and the manifest's per-frame `actuator_state` is the
+generator's *read-back* of the output, not the command the loop sent; the
+channel is restored to the output state it was found in.
 
 ```json
 {

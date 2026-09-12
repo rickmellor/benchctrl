@@ -9,6 +9,38 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### Siglent SDG1032X — a function / arbitrary waveform generator (`siglent_sdg1032x`)
+
+The bench's first signal source. Sixty-seven `sdg1032x_*` tools over the
+whole instrument: basic waves, output (load, polarity), arbitrary waveforms,
+modulation (AM/DSBAM/FM/PM/PWM/ASK/FSK/PSK), sweep, burst, sync, clock,
+phase mode, channel copy, coupling, harmonics, combine, the frequency
+counter, over-voltage protection, screen dump, virtual keys and the system
+settings. The instrument has **no error queue**, so the driver's contract is
+the read-back: every setter returns what the instrument reads back and
+raises `SDG1032XVerifyError` when that differs from what was asked — the
+only way to learn that a value was silently refused or clamped. Bench
+bring-up on `benchpi` found five places where the firmware differs from the
+programming guide and one where it ignores a documented command
+(`KNOWN_LIMITATIONS.md` § F-21–F-27); the parser and the simulator follow
+the instrument. Arbitrary-waveform upload over USB-TMC does not land on
+this firmware and is documented rather than shipped.
+
+**The bench watches the generator two ways.** The FUI's former DMM pane
+shows the SDG's own screen (`read_screen`, a 480×272 bitmap every two
+seconds while somebody is looking), relayed from the dashboard's observer
+session through a new `device.read` verb — the one device call an observer
+has: a non-mutating method on a device somebody else already opened, never
+an open, a claim or a mutator. And the camera, re-aimed at the front panel,
+reads the two Output keys' backlights with classifiers trained by the label
+loop's new `siglent_sdg1032x` actuator, so `set_output` is validated
+optically as well as by read-back.
+
+**Safe-stop reaches multi-channel instruments.** `default_safe_state` now
+also calls a no-argument `disable_outputs()`; the DP2031 gained one. Its
+per-channel `set_output(channel, on)` had been rejecting the safe state's
+single-argument call, which left the supply armed across a service stop.
+
 ### Bench vision — a camera and a Metis NPU as a device (`bench_vision`)
 
 The bench can now be *read* through a camera. A Basler a2A1920-160uc USB3

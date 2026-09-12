@@ -6,8 +6,9 @@ The NPU ships with YOLOv8n, which knows 80 everyday classes and nothing about
 this bench. What the bench needs answered is "is this LED lit, what colour, is
 it blinking", and training that needs a few hundred labelled frames. Labelling
 by hand is slow and wrong often enough to matter; but benchctrl already *knows*
-the truth whenever it commands a PDU outlet, a CP2112 line, or the bench box's
-own status LED. So: command a state, settle, capture N frames tagged with a
+the truth whenever it commands a PDU outlet, a CP2112 line, an SDG1032X
+generator output, or the bench box's own status LED. So: command a state,
+settle, capture N frames tagged with a
 ``seq`` this loop chose, and label each frame with the state that was commanded
 when it was taken.
 
@@ -50,7 +51,7 @@ from benchctrl._version import __version__
 log = logging.getLogger("benchctrl.vision.labelloop")
 
 #: Actuator kinds a state may name. Everything else is refused at spec time.
-ACTUATOR_KINDS = ("cyberpower_pdu41002", "silabs_cp2112", "sysfs_led")
+ACTUATOR_KINDS = ("cyberpower_pdu41002", "silabs_cp2112", "sysfs_led", "siglent_sdg1032x")
 
 #: Where a host's LEDs live. Raspberry Pi 5: ``ACT`` (green status) and ``PWR``.
 SYSFS_LEDS = "/sys/class/leds"
@@ -92,6 +93,16 @@ class LabelState:
             ):
                 raise LabelSpecError(
                     f"state {self.label!r}: CP2112 actuator needs int line + bool asserted"
+                )
+        elif kind == "siglent_sdg1032x":
+            ch = self.actuator.get("channel")
+            if (
+                isinstance(ch, bool)
+                or ch not in (1, 2)
+                or not isinstance(self.actuator.get("output"), bool)
+            ):
+                raise LabelSpecError(
+                    f"state {self.label!r}: SDG1032X actuator needs channel 1 or 2 + bool output"
                 )
         elif kind == "sysfs_led":
             led = self.actuator.get("led")
@@ -222,6 +233,31 @@ class Cp2112Actuator:
             self.gpio.set_line_mode(line, output=False)
 
 
+class SdgOutputActuator:
+    """One SDG1032X output channel (on / off). Snapshot is the output as found.
+
+    ``set_output`` verifies: it returns what the instrument read back and
+    raises ``SDG1032XVerifyError`` when that differs from what was asked. The
+    *read-back* is what ``apply`` returns, so the label's provenance is the
+    generator's own report of its output, not the command the loop sent.
+    """
+
+    def __init__(self, gen: Any) -> None:
+        self.gen = gen
+
+    def snapshot(self, actuator: dict) -> dict:
+        ch = actuator["channel"]
+        return {"channel": ch, "output": bool(self.gen.get_output(ch).enabled)}
+
+    def apply(self, actuator: dict) -> dict:
+        ch = actuator["channel"]
+        st = self.gen.set_output(ch, actuator["output"])
+        return {"channel": ch, "output": bool(st.enabled)}
+
+    def restore(self, found: dict) -> None:
+        self.gen.set_output(found["channel"], found["output"])
+
+
 class SysfsLedActuator:
     """A host LED under ``/sys/class/leds`` — the bench box's own status light.
 
@@ -266,16 +302,18 @@ class SysfsLedActuator:
 def build_actuators(devices: dict[str, Any], *, sysfs_root: str = SYSFS_LEDS) -> dict[str, Any]:
     """Adapters keyed by actuator kind, from open driver objects.
 
-    ``devices`` maps ``"cyberpower_pdu41002"`` / ``"silabs_cp2112"`` to open
-    drivers (local, remote or simulated — the loop cannot tell). The host LED
-    needs no driver and is always available; whether the LED exists is checked
-    when a state names it.
+    ``devices`` maps ``"cyberpower_pdu41002"`` / ``"silabs_cp2112"`` /
+    ``"siglent_sdg1032x"`` to open drivers (local, remote or simulated — the
+    loop cannot tell). The host LED needs no driver and is always available;
+    whether the LED exists is checked when a state names it.
     """
     out: dict[str, Any] = {"sysfs_led": SysfsLedActuator(sysfs_root)}
     if "cyberpower_pdu41002" in devices:
         out["cyberpower_pdu41002"] = PduActuator(devices["cyberpower_pdu41002"])
     if "silabs_cp2112" in devices:
         out["silabs_cp2112"] = Cp2112Actuator(devices["silabs_cp2112"])
+    if "siglent_sdg1032x" in devices:
+        out["siglent_sdg1032x"] = SdgOutputActuator(devices["siglent_sdg1032x"])
     return out
 
 
@@ -489,6 +527,8 @@ def _target_key(actuator: dict) -> str:
         return f"{kind}:{actuator['outlet']}"
     if kind == "silabs_cp2112":
         return f"{kind}:{actuator['line']}"
+    if kind == "siglent_sdg1032x":
+        return f"{kind}:{actuator['channel']}"
     return f"{kind}:{actuator['led']}"
 
 
@@ -570,6 +610,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         from benchctrl.drivers.silabs_cp2112 import CP2112
 
         devices["silabs_cp2112"] = session.resolve("silabs_cp2112", opener=CP2112.open)
+    if "siglent_sdg1032x" in kinds:
+        from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X
+
+        devices["siglent_sdg1032x"] = session.resolve(
+            "siglent_sdg1032x", opener=SiglentSDG1032X.open
+        )
     vision = session.resolve("bench_vision", opener=BenchVision.open)
     try:
         manifest = run_label_capture(

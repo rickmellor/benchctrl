@@ -25,9 +25,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Optional
 
 from benchctrl.exceptions import BenchValueError
 
@@ -44,6 +45,7 @@ DEVICE_KEYS: tuple[str, ...] = (
     "cyberpower_pdu41002",
     "silabs_cp2112",
     "bench_vision",
+    "siglent_sdg1032x",
 )
 
 MODES: tuple[str, ...] = ("local", "remote", "sim")

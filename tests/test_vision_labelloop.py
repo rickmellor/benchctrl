@@ -22,12 +22,45 @@ import json
 import pytest
 
 from benchctrl.vision.labelloop import (
+    ACTUATOR_KINDS,
     LabelSpec,
     LabelSpecError,
     SysfsLedActuator,
+    _target_key,
     build_actuators,
     run_label_capture,
 )
+
+
+class _FakeOutputState:
+    def __init__(self, channel: int, enabled: bool) -> None:
+        self.channel = channel
+        self.enabled = enabled
+
+
+class FakeGenerator:
+    """The two calls the label loop makes on an SDG1032X, and nothing else.
+
+    ``set_output`` answers with the *read-back*, like the driver. ``lie``
+    makes the read-back disagree with the request on the named channel, the
+    way a generator whose output is interlocked would report.
+    """
+
+    def __init__(self, enabled: dict[int, bool] | None = None) -> None:
+        self.enabled = dict(enabled or {1: True, 2: False})
+        self.calls: list[tuple[str, int, bool | None]] = []
+        self.lie: set[int] = set()
+
+    def get_output(self, channel: int) -> _FakeOutputState:
+        self.calls.append(("get", channel, None))
+        return _FakeOutputState(channel, self.enabled[channel])
+
+    def set_output(self, channel: int, on: bool, *, verify: bool = True) -> _FakeOutputState:
+        assert isinstance(on, bool)
+        self.calls.append(("set", channel, on))
+        if channel not in self.lie:
+            self.enabled[channel] = on
+        return _FakeOutputState(channel, self.enabled[channel])
 
 
 @pytest.fixture
@@ -88,6 +121,14 @@ GPIO_RST = {
 GPIO_RUN = {
     "label": "running",
     "actuator": {"device": "silabs_cp2112", "line": 2, "asserted": False},
+}
+SDG_ON = {
+    "label": "driven",
+    "actuator": {"device": "siglent_sdg1032x", "channel": 1, "output": True},
+}
+SDG_OFF = {
+    "label": "idle",
+    "actuator": {"device": "siglent_sdg1032x", "channel": 1, "output": False},
 }
 
 
@@ -313,3 +354,98 @@ def test_sysfs_led_actuator_reads_the_active_trigger_from_the_bracketed_word(led
     a = SysfsLedActuator(str(leds))
     assert a.snapshot({"led": "ACT"}) == {"led": "ACT", "trigger": "mmc0", "brightness": 0}
     assert a.snapshot({"led": "PWR"})["trigger"] == "none"
+
+
+# ---------------------------------------------------------------- SDG1032X output
+
+
+def test_an_sdg_state_needs_channel_1_or_2_and_a_bool_output():
+    assert "siglent_sdg1032x" in ACTUATOR_KINDS
+    ok = spec_for(SDG_ON, SDG_OFF)
+    assert [s.label for s in ok.states] == ["driven", "idle"]
+    for bad in (
+        {"channel": True, "output": True},  # a bool is not a channel number
+        {"channel": 3, "output": True},  # the SDG1032X has two
+        {"channel": "1", "output": True},
+        {"channel": 1, "output": 1},  # not a bool
+        {"channel": 1, "output": "ON"},
+        {"channel": 1},
+    ):
+        with pytest.raises(LabelSpecError, match="SDG1032X"):
+            spec_for({"label": "x", "actuator": {"device": "siglent_sdg1032x", **bad}})
+
+
+def test_sdg_target_key_is_per_channel():
+    assert _target_key(SDG_ON["actuator"]) == "siglent_sdg1032x:1"
+    assert _target_key({"device": "siglent_sdg1032x", "channel": 2, "output": False}) == (
+        "siglent_sdg1032x:2"
+    )
+    assert _target_key(SDG_ON["actuator"]) == _target_key(SDG_OFF["actuator"]), (
+        "on and off of one channel are the same target: one snapshot, one restore"
+    )
+
+
+def test_the_sdg_actuator_is_built_only_when_the_generator_is_open(bench, leds, tmp_path):
+    vision, _, _ = bench
+    assert "siglent_sdg1032x" not in build_actuators({}, sysfs_root=str(leds))
+    gen = FakeGenerator()
+    built = build_actuators({"siglent_sdg1032x": gen}, sysfs_root=str(leds))
+    assert built["siglent_sdg1032x"].gen is gen
+    with pytest.raises(LabelSpecError, match="siglent_sdg1032x"):
+        run_label_capture(
+            vision, build_actuators({}, sysfs_root=str(leds)), spec_for(SDG_ON), tmp_path / "ds"
+        )
+    assert vision._benchctrl_sim.camera.frame_id == 0 and gen.calls == []
+
+
+def test_sdg_output_states_are_commanded_labelled_from_the_read_back_and_restored(
+    bench, leds, tmp_path
+):
+    vision, _, _ = bench
+    gen = FakeGenerator({1: True, 2: False})  # channel 1 found ON
+    seen: list[tuple[str, bool]] = []
+
+    def watch(kind, data):
+        if kind == "captured":
+            seen.append((data["label"], gen.enabled[1]))
+
+    out = tmp_path / "ds"
+    m = run_label_capture(
+        vision,
+        build_actuators({"siglent_sdg1032x": gen}, sysfs_root=str(leds)),
+        spec_for(SDG_ON, SDG_OFF),
+        out,
+        on_event=watch,
+    )
+    assert m.counts == {"driven": 6, "idle": 6} and not m.discards and m.error is None
+    assert ("driven", True) in seen and ("idle", False) in seen, "output never actually moved"
+    for rec in m.frames:
+        assert rec.actuator_state == {"channel": 1, "output": rec.label == "driven"}
+    assert m.as_found == {"siglent_sdg1032x:1": {"channel": 1, "output": True}}
+    assert m.restored is True and gen.enabled[1] is True, "as-found ON not restored ON"
+    assert gen.calls[0] == ("get", 1, None), "snapshot before the first command"
+    assert gen.calls[-1] == ("set", 1, True), "the last thing the loop does is restore"
+    assert gen.enabled[2] is False and not any(c[1] == 2 for c in gen.calls), "channel 2 untouched"
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert {f["actuator_state"]["output"] for f in manifest["frames"]} == {True, False}
+
+
+def test_an_sdg_read_back_that_disagrees_with_the_request_is_what_gets_recorded(
+    bench, leds, tmp_path
+):
+    """The loop trusts the generator's read-back, not its own command: a
+    channel that reports OFF after being told ON is recorded as OFF."""
+    vision, _, _ = bench
+    gen = FakeGenerator({1: False, 2: False})
+    gen.lie.add(1)  # channel 1 stays OFF whatever it is told
+    m = run_label_capture(
+        vision,
+        build_actuators({"siglent_sdg1032x": gen}, sysfs_root=str(leds)),
+        spec_for(SDG_ON, rounds=1),
+        tmp_path / "ds",
+    )
+    assert m.counts == {"driven": 3}
+    assert all(f.actuator_state == {"channel": 1, "output": False} for f in m.frames), (
+        "the manifest must carry what the generator reported, not what was asked"
+    )
+    assert ("set", 1, True) in gen.calls

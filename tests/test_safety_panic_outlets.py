@@ -135,6 +135,57 @@ def test_the_default_safe_state_still_disarms_a_normal_instrument():
     assert smu.output is False
 
 
+def test_the_default_safe_state_reaches_a_multi_channel_instrument():
+    """A driver whose ``set_output`` takes ``(channel, on)`` cannot be disarmed
+    by ``set_output(False)`` — the DP2031 rejects a bool channel — so the
+    safe state also calls the no-argument ``disable_outputs()``. Both forms
+    are tried; the per-channel one failing must not prevent the other."""
+
+    class FakePSU:
+        def __init__(self):
+            self.outputs = {1: True, 2: True, 3: True}
+            self.disarmed = False
+
+        def set_output(self, channel, on):
+            if isinstance(channel, bool):
+                raise ValueError("channel must be 1, 2 or 3, got bool")
+            self.outputs[channel] = on
+
+        def disable_outputs(self):
+            self.outputs = dict.fromkeys(self.outputs, False)
+            self.disarmed = True
+
+    psu = FakePSU()
+    default_safe_state(psu)
+    assert psu.disarmed and not any(psu.outputs.values())
+
+
+def test_the_dp2031_is_disarmed_by_the_default_safe_state():
+    """The real driver against its simulator: the gap this closes was a PSU
+    left armed across a service stop."""
+    from benchctrl.sim.factories import make_dp2031
+
+    psu = make_dp2031()
+    try:
+        sim = psu._benchctrl_sim
+        psu.set_output(1, True)
+        before = len(sim.command_log)
+        default_safe_state(psu)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and len(sim.command_log) <= before:
+            time.sleep(0.02)  # the simulator reads its pty on its own thread
+        sent = sim.command_log[before:]
+        assert any(c.upper().startswith(":OUTPUT:STATE ALL,OFF") for c in sent), sent
+    finally:
+        psu.close()
+
+
+def test_disable_outputs_is_graded_as_a_disarm():
+    from benchctrl.agent.safety import _ARMING_CALLS
+
+    assert _ARMING_CALLS["disable_outputs"] == "output_off"
+
+
 # ---------------------------------------------------------------------------
 # The cut
 # ---------------------------------------------------------------------------
@@ -272,6 +323,7 @@ def test_a_trip_with_something_armed_cuts_the_panic_outlets(pdu, worker):
 
     smu_worker = DeviceWorker("smu").start()
     try:
+
         class FakeSMU:
             def __init__(self):
                 self.output = True
@@ -310,6 +362,7 @@ def test_the_armed_instrument_is_disarmed_before_the_mains_is_cut(pdu, worker):
 
     smu_worker = DeviceWorker("smu").start()
     try:
+
         class FakeSMU:
             def set_output(self, on):
                 order.append("smu_off")
@@ -344,6 +397,7 @@ def test_a_failed_cut_is_reported_as_failed_not_safe(pdu, worker):
 
     smu_worker = DeviceWorker("smu").start()
     try:
+
         class FakeSMU:
             def set_output(self, on):
                 pass
@@ -393,6 +447,7 @@ def test_a_trip_does_not_reset_the_pdu_transport(pdu, worker):
 
     smu_worker = DeviceWorker("smu").start()
     try:
+
         class FakeSMU:
             def set_output(self, on):
                 pass
@@ -422,6 +477,7 @@ def test_the_trip_event_names_the_panic_outlet_device(pdu, worker):
 
     smu_worker = DeviceWorker("smu").start()
     try:
+
         class FakeSMU:
             def set_output(self, on):
                 pass
@@ -451,3 +507,36 @@ def test_panic_outlets_cannot_exceed_allowed_outlets():
 
     with pytest.raises(PDU41002ValueError, match="panic_outlets"):
         make_pdu41002(allowed_outlets=(2,), panic_outlets=(2, 3))
+
+
+def test_an_exempt_device_is_never_armed_or_made_safe():
+    """Bench infrastructure: a supply that powers the NPU and its fan must not
+    be disarmed by a trip, so the governor does not even count it as armed."""
+    from benchctrl.agent.safety import SafetyGovernor
+
+    gov = SafetyGovernor(deadman_s=1.0, exempt=frozenset({"rigol_dp2031"}))
+    gov.observe_call("rigol_dp2031", "set_output", (1, True), {}, session_id="s1")
+    gov.observe_call("otii_arc", "set_output", (True,), {}, session_id="s1")
+    assert gov.armed_devices == ["otii_arc"]
+
+
+def test_safe_stop_skips_exempt_devices():
+    from benchctrl.agent.main import _safe_stop
+    from benchctrl.agent.registry import DeviceRegistry
+
+    class Fake:
+        def __init__(self):
+            self.disarmed = False
+
+        def disable_outputs(self):
+            self.disarmed = True
+
+        def close(self):
+            pass
+
+    exempt, normal = Fake(), Fake()
+    reg = DeviceRegistry()
+    reg.register_open("rigol_dp2031", exempt)
+    reg.register_open("siglent_sdg1032x", normal)
+    assert _safe_stop(reg, exempt=("rigol_dp2031",)) == 0
+    assert normal.disarmed and not exempt.disarmed

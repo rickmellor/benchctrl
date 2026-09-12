@@ -99,6 +99,31 @@ def _wire_types() -> dict[str, type]:
         "VisionInfo",
         "VisionStatus",
     )
+    add(
+        "benchctrl.drivers.siglent_sdg1032x.driver",
+        # Every read returns a typed dataclass. BasicWave is also the nested
+        # carrier inside Modulation/Sweep/Burst, so it must be listed for those
+        # three to decode at all. ArbData.codes is bytes: inline below 64 KB,
+        # a blob reference above, and read_screen()'s BMP (~390 KB) is plain
+        # bytes that always rides as a blob -- nothing generator-specific here.
+        "SDG1032XInfo",
+        "OutputState",
+        "BasicWave",
+        "Modulation",
+        "Sweep",
+        "Burst",
+        "ArbInfo",
+        "ArbSelection",
+        "ArbData",
+        "SyncConfig",
+        "ClockConfig",
+        "CounterReading",
+        "Coupling",
+        "Harmonic",
+        "ProtectionState",
+        "LanConfig",
+        "NumberFormat",
+    )
     add("benchctrl.battery.profile", "BatteryProfile", "DischargeStep")
     add("benchctrl.battery.emulator", "EmulatorState")
 

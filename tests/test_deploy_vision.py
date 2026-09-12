@@ -224,3 +224,10 @@ def test_the_host_led_rule_is_installed_only_where_the_host_has_one():
     assert "/sys/class/leds/ACT" in code.split("70-benchctrl-host-leds.rules")[0]
     rule = (VISION / "udev" / "70-benchctrl-host-leds.rules").read_text(encoding="utf-8")
     assert 'SUBSYSTEM=="leds"' in rule and "ACT|PWR" in rule and "chmod g+w" in rule
+
+
+def test_the_env_example_says_how_to_list_several_classifiers():
+    """A space-separated CLASSIFIERS value must be quoted or `sh` runs the second
+    name as a command (bench-found: the unit crash-looped on `sdg-out1: not found`)."""
+    example = (VISION / "vision.env.example").read_text(encoding="utf-8")
+    assert 'CLASSIFIERS="led sdg-out1"' in example

@@ -126,9 +126,16 @@
       </section>
 
       <div id="detail">
-        <section class="panel">
-          <div class="title"><span>DIGITAL MULTIMETER</span><span class="val" id="dmm-verdict">NO LINK</span></div>
-          <div class="body">
+        <!-- Dual-purpose. While the function generator is linked this pane shows
+             the SDG1032X's own screen (its SCDP bitmap, grabbed by the feed and
+             served at /sdg/screen every ~2 s) so a test can be watched from
+             across the bench; otherwise it is the DMM readout. The image starts
+             hidden, like the camera's, so a stalled script never leaves a
+             broken-image glyph where digits should be. -->
+        <section class="panel" id="dmm-panel">
+          <div class="title"><span id="dmm-title">DIGITAL MULTIMETER</span><span class="val" id="dmm-verdict">NO LINK</span></div>
+          <div class="body" id="dmm-body">
+            <img id="sdg-screen" class="hidden" alt="">
             <div class="readout no-link" id="dmm-readout">NO LINK</div>
             <!-- Says why the digits are absent rather than leaving a bare word
                  that could be mistaken for a measurement mode. -->

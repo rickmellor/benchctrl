@@ -65,6 +65,7 @@ from benchctrl.drivers.otii_arc import mcp_tools as _arc_tools
 from benchctrl.drivers.rigol_dl3031a import mcp_tools as _dl3031a_tools
 from benchctrl.drivers.rigol_dp2031 import mcp_tools as _dp2031_tools
 from benchctrl.drivers.siglent_sdm4065a import mcp_tools as _sdm4065a_tools
+from benchctrl.drivers.siglent_sdg1032x import mcp_tools as _sdg1032x_tools
 from benchctrl.recording import Recording
 
 log = logging.getLogger("benchctrl.mcp")
@@ -81,6 +82,7 @@ _qr10x_tools.register_mcp_tools(mcp)
 _dl3031a_tools.register_mcp_tools(mcp)
 _dp2031_tools.register_mcp_tools(mcp)
 _sdm4065a_tools.register_mcp_tools(mcp)
+_sdg1032x_tools.register_mcp_tools(mcp)
 _pdu41002_tools.register_mcp_tools(mcp)
 _cp2112_tools.register_mcp_tools(mcp)
 _vision_tools.register_mcp_tools(mcp)
@@ -218,6 +220,7 @@ from benchctrl.drivers.rigol_dp2031.mcp_tools import (
     dp2031_set_ocp_level,
     dp2031_set_output,
     dp2031_set_output_all,
+    dp2031_disable_outputs,
     dp2031_set_ovp_enabled,
     dp2031_set_ovp_level,
     dp2031_set_voltage,
@@ -390,6 +393,77 @@ from benchctrl.drivers.siglent_sdm4065a.mcp_tools import (
     sdm4065a_set_temperature_unit,
     sdm4065a_standard_event_status,
     sdm4065a_write,
+)
+
+# SDG1032X tools — setters return the instrument's read-back; no error queue.
+from benchctrl.drivers.siglent_sdg1032x.mcp_tools import (
+    sdg1032x_apply_channel_copy,
+    sdg1032x_apply_equal_phase,
+    sdg1032x_close,
+    sdg1032x_disable_outputs,
+    sdg1032x_get_arb,
+    sdg1032x_get_basic_wave,
+    sdg1032x_get_burst,
+    sdg1032x_get_buzzer,
+    sdg1032x_get_clock,
+    sdg1032x_get_combine,
+    sdg1032x_get_coupling,
+    sdg1032x_get_harmonics,
+    sdg1032x_get_invert,
+    sdg1032x_get_lan_config,
+    sdg1032x_get_language,
+    sdg1032x_get_modulation,
+    sdg1032x_get_number_format,
+    sdg1032x_get_output,
+    sdg1032x_get_phase_mode,
+    sdg1032x_get_power_on_config,
+    sdg1032x_get_protection,
+    sdg1032x_get_screen_saver,
+    sdg1032x_get_sweep,
+    sdg1032x_get_sync,
+    sdg1032x_info,
+    sdg1032x_list_arbs,
+    sdg1032x_open,
+    sdg1032x_operation_complete,
+    sdg1032x_query,
+    sdg1032x_read_arb,
+    sdg1032x_read_counter,
+    sdg1032x_read_screen,
+    sdg1032x_reset,
+    sdg1032x_select_arb,
+    sdg1032x_set_amplitude,
+    sdg1032x_set_basic_wave,
+    sdg1032x_set_burst,
+    sdg1032x_set_buzzer,
+    sdg1032x_set_clock,
+    sdg1032x_set_combine,
+    sdg1032x_set_counter,
+    sdg1032x_set_coupling,
+    sdg1032x_set_frequency,
+    sdg1032x_set_harmonics,
+    sdg1032x_set_invert,
+    sdg1032x_set_lan_config,
+    sdg1032x_set_language,
+    sdg1032x_set_max_amplitude,
+    sdg1032x_set_modulation,
+    sdg1032x_set_number_format,
+    sdg1032x_set_offset,
+    sdg1032x_set_output,
+    sdg1032x_set_output_load,
+    sdg1032x_set_output_polarity,
+    sdg1032x_set_phase,
+    sdg1032x_set_phase_mode,
+    sdg1032x_set_power_on_config,
+    sdg1032x_set_protection,
+    sdg1032x_set_screen_saver,
+    sdg1032x_set_sweep,
+    sdg1032x_set_sync,
+    sdg1032x_set_wave_type,
+    sdg1032x_trigger_burst,
+    sdg1032x_trigger_key,
+    sdg1032x_trigger_sweep,
+    sdg1032x_write,
+    sdg1032x_write_arb,
 )
 
 # PDU41002 tools — read-only in this build: nothing here switches mains.

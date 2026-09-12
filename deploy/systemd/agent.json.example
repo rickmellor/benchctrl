@@ -5,6 +5,8 @@
   "token": "REPLACE-ME — generate with: benchctrl-agent --generate-token",
 
   "devices": ["otii_arc"],
+  "_safe_stop_exempt": "Bench INFRASTRUCTURE the safe-stop and the governor must leave alone: a supply that powers the NPU/fan is armed for the life of the bench and disarming it is the outage. Keys here are never tracked as armed and never driven to a safe state. Rename to safe_stop_exempt to enable.",
+  "_safe_stop_exempt_example": ["rigol_dp2031"],
 
   "deadman_s": 15,
   "heartbeat_s": 5,

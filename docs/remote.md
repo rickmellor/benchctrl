@@ -204,7 +204,12 @@ so the bench cannot cut power to itself or to the path that would recover it.
 See [drivers.md](drivers.md#deployment-assumptions).
 
 Deploy with `ExecStopPost=... --safe-stop` so a service restart disarms the
-bench rather than leaving an output live across the gap. That is what the unit
+bench rather than leaving an output live across the gap. **Except bench
+infrastructure**: `agent.json` `"safe_stop_exempt": ["rigol_dp2031"]` names
+devices the safe-stop and the governor's trip leave as found and never count
+as armed — on `benchpi` the DP2031 powers the Metis and its fan, so "off" is
+the outage there, not the safe state (learned the hard way on 2026-09-12 when
+the first safe-stop that could actually reach the supply cut the fan). That is what the unit
 in [`deploy/`](../deploy/README.md) does — it invokes `python3 -m
 benchctrl.agent.main` rather than the console script, because the board has no
 pip and reaches the package through `PYTHONPATH`.
@@ -240,7 +245,9 @@ Behavioural differences worth knowing:
 - **`read_window()` cannot preserve caller-object identity** in its result
   keys — object identity does not cross a wire. Keys are equal by code and
   by `==`.
-- **One writer per device.** Extra sessions are read-only observers.
+- **One writer per device.** Extra sessions are read-only observers. An observer's only
+  device verb is `device.read`: a non-mutating method on a device somebody else has already
+  opened (what the dashboard's generator-screen pane uses); it never opens, claims or arms.
 - **A-1 still applies.** The emulator and a recording cannot run
   concurrently on one Arc; the run engine refuses the combination rather
   than deadlocking.

@@ -125,6 +125,30 @@ def make_sdm4065a(**kwargs) -> Any:
     return _bind_lifetime(driver, sim)
 
 
+def make_sdg1032x(**kwargs) -> Any:
+    """A real ``SiglentSDG1032X`` over pyvisa-py's serial backend.
+
+    ``allowed_channels``, ``max_amplitude_vpp`` and ``timeout_ms`` pass
+    through to ``open()`` untouched: both channels and no cap is the driver's
+    own default, and against a simulator there is no DUT to protect, so the
+    factory adds no policy of its own — a test narrows the grant to exercise
+    the policy errors.
+    """
+    from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X
+    from benchctrl.sim.sdg1032x import SimulatedSDG1032X
+
+    sim_kwargs = kwargs.pop("sim", {})
+    kwargs.pop("resource", None)
+    sim = SimulatedSDG1032X(**sim_kwargs)
+    sim.start()
+    try:
+        driver = SiglentSDG1032X.open(_asrl(sim.port), **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
 def make_pdu41002(**kwargs) -> Any:
     """A real ``CyberPowerPDU41002`` driving a :py:class:`SimulatedPDU41002`.
 
@@ -231,6 +255,7 @@ FACTORIES: dict[str, Callable[..., Any]] = {
     "cyberpower_pdu41002": make_pdu41002,
     "silabs_cp2112": make_cp2112,
     "bench_vision": make_bench_vision,
+    "siglent_sdg1032x": make_sdg1032x,
 }
 
 
@@ -239,6 +264,5 @@ def factory_for(device_key: str) -> Callable[..., Any]:
         return FACTORIES[device_key]
     except KeyError:
         raise BenchValueError(
-            f"no simulator for device key {device_key!r}; "
-            f"available: {sorted(FACTORIES)}"
+            f"no simulator for device key {device_key!r}; available: {sorted(FACTORIES)}"
         ) from None

@@ -132,6 +132,39 @@ def test_the_ch341_verifier_stops_where_the_kernel_has_the_driver():
     assert "exit 0" in tail
 
 
+def _udev_rules(name: str) -> list[str]:
+    """Each rule of ``deploy/udev/<name>`` as one line: comments dropped and
+    backslash continuations folded, so an assertion sees a whole rule."""
+    text = (DEPLOY / "udev" / name).read_text(encoding="utf-8")
+    folded = re.sub(r"\\\n\s*", " ", text)
+    return [
+        ln.strip()
+        for ln in folded.splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+
+
+def test_the_usbtmc_rule_grants_the_sdg1032x_and_nothing_broader():
+    """The generator (``f4ec:1103``) needs the same write grant as the DMM,
+    and on a Raspberry Pi it is what lets pyusb detach the kernel's own
+    ``usbtmc`` binding. The rule must be scoped to that one product: a rule
+    without an ``idProduct`` would hand the bench user every device of that
+    vendor -- or, without ``idVendor``, every USB device on the board."""
+    rules = _udev_rules("61-benchctrl-usbtmc.rules")
+    assert rules, "no rules found"
+
+    sdg = [r for r in rules if 'ATTR{idProduct}=="1103"' in r]
+    assert len(sdg) == 1, sdg
+    assert 'ATTR{idVendor}=="f4ec"' in sdg[0]
+    assert 'MODE="0660"' in sdg[0]
+    assert 'GROUP="dialout"' in sdg[0]
+
+    for rule in rules:
+        assert rule.startswith('SUBSYSTEM=="usb"'), rule
+        assert "ATTR{idVendor}==" in rule, f"rule without a vendor: {rule}"
+        assert "ATTR{idProduct}==" in rule, f"rule broader than one product: {rule}"
+
+
 def test_the_fui_launcher_finds_the_package_through_the_agents_env_file():
     """The kiosk session cannot set BENCHCTRL_SRC_DIR; /etc/benchctrl/agent.env
     already holds the right PYTHONPATH on every platform, so the launcher reads

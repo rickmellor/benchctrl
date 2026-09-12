@@ -244,8 +244,9 @@ link died.
 Hardware the scan finds that no driver claims gets its own list below the rail,
 because the rail only has rows for devices benchctrl has drivers for, and
 "something is plugged in that benchctrl cannot drive" is a real bench fact. On the
-development board that list is a CH340 bridge plus an SDG1032X and a DS1000Z
-scope — both attached, both identified, neither having a driver yet.
+development board that list is a CH340 bridge plus a DS1000Z scope — attached,
+identified, no driver yet. (The SDG1032X sat in this list until it got a driver;
+it now has a rail slot, which is exactly how an instrument leaves the list.)
 
 ### The rail adapts to the bench, but never to cable state
 
@@ -452,6 +453,27 @@ did not answer — the picture is absent even if the agent lists the device. The
 `<img>` is armed once and left alone (an MJPEG connection repaints itself); on
 error the note returns and a retry backs off to 30 s so a bench with no camera
 does not hammer a dead port.
+
+## SDG1032X · SCREEN — the generator's own screen in the DMM pane
+
+While the function generator is linked, the DIGITAL MULTIMETER pane switches to
+the SDG1032X's own display — its `SCDP` screen bitmap (480x272 BMP) — so a test
+that drives the generator can be watched from across the bench without walking
+over to it. The title changes to `SDG1032X · SCREEN`, the verdict stays the
+AWG rail slot's word, and NO SCREEN means no current picture (the first tick
+after the pane opens, or a grab that failed); when the AWG is unlinked the pane
+is the DMM readout again.
+
+It is observer-side and polled only while watched. The feed grabs the screen
+inside its own session loop (a claim-free `device.call` of `read_screen`, which
+is not a mutator — the dashboard never takes a writer claim), every 2 s, and
+only while a page has fetched `/sdg/screen` within the last 10 s. The page
+re-fetches on that same 2 s clock, so closing the browser stops the reads. The
+handler serves the feed's last grab (`image/bmp`, `X-Screen-Age`) or 404 when
+there is none, and each hit is what arms the poll — which is why the first
+fetch is a 404 by design. `/api/view` carries `sdg_screen.present/age_s/bytes`.
+A failed grab clears the picture rather than leaving a stale one up as live
+(`tests/test_fui_sdg_screen.py`).
 
 ## Display takeover
 

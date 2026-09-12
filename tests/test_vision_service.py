@@ -481,3 +481,12 @@ def test_classifier_region_is_pure_and_precise():
         classifier_region((10, 20, 30, 40), (5, 5, 30, 40), 30, 40)  # one pixel short
     with pytest.raises(ServiceValueError):
         classifier_region((10, 20, 30, 40), (20, 20, 100, 100), 100, 100)  # starts past it
+
+
+def test_zero_gain_is_a_valid_config_value(service):
+    """0 dB is the camera's default gain and what a label-loop spec pins; the
+    positive-only check is for exposure and fps."""
+    status, doc = call(service, "PUT", "/config", {"gain_db": 0})
+    assert status == 200 and doc["gain_db"] == 0
+    status, _ = call(service, "PUT", "/config", {"exposure_us": 0})
+    assert status == ERROR_STATUS["value"]
