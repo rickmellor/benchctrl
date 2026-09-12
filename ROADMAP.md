@@ -151,21 +151,18 @@ a network where a tunnel isn't practical.
 
 ## Vision
 
-### LED / indicator classifier on the Metis
-**Status**: the vision device ships with COCO-80 object detection (YOLOv8n),
-which is a proof that the pipeline works, not the model the bench needs. The
-bench needs "is this LED on, what colour, what blink code", and no such model
-exists yet.
-
-**Scope when picked up**: the capture-and-label loop **shipped** (2026-09-12,
-`benchctrl.vision.labelloop`; first dataset: the Pi's own ACT LED, 200 frames,
-100 per class). Remaining: train a small classifier on scrub with the Axelera
-devkit, compile to `.axm`, serve it from the same sidecar with a
-`read_indicators()`-shaped call. Lessons from the metis repo's
-board-reader experiment apply verbatim: synthetic-only collapsed to 48 %,
-200 real frames gave 100 %; tune exposure before anything else; keep a
-classical-CV sanity channel and parity-check against the commanded state;
-require `N` consistent frames before acting on a transition.
+### LED / indicator classifier on the Metis — **shipped 2026-09-12**
+The capture-and-label loop (`benchctrl.vision.labelloop`) and the classifier
+path (`classify()` / `vision_classify`, `classify=` on a capture, a
+`Classification` with a logit margin, region-bound models served by name from
+the sidecar) are in. First model: the Pi's own `ACT` LED, 200 frames, 100 %
+on a held-out round, trained and compiled on scrub with the Axelera devkit
+(`metis` repo `experiments/vision/bench_led/`). Lessons from the metis
+board-reader experiment held: real frames beat synthetic, exposure first,
+gate on margin, keep the classical-CV sanity read. Left for a later pass:
+colour / blink-code classes (a multi-class dataset and a temporal read),
+`require N consistent reads` as a driver helper rather than a caller rule,
+and a FUI overlay of the current read.
 
 ### Hardware trigger for the camera
 **Status**: capture is software-triggered from the sidecar, tagged with `seq`.

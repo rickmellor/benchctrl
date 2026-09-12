@@ -72,7 +72,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, fields
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 log = logging.getLogger("benchctrl.drivers.bench_vision")
 
@@ -93,6 +93,10 @@ STATUS_TTL_S = 0.2
 #: worker times a device call out at 20 s; this leaves room for the HTTP round
 #: trip on top of the wait.
 MAX_WAIT_S = 10.0
+
+#: Default logit-margin gate for :py:meth:`BenchVision.classify` — mirrors the
+#: sidecar's ``DEFAULT_MIN_MARGIN``; the LED model's held-out frames clear 10.
+DEFAULT_MIN_MARGIN = 3.0
 
 
 # ---------------------------------------------------------------- exceptions
@@ -220,8 +224,39 @@ class Detections:
 
 
 @dataclass(frozen=True)
+class Classification:
+    """One indicator read: the winning label, and how clearly it won.
+
+    ``scores`` are the model's raw logits per class (dequantized), ``margin``
+    the gap between the top two, ``confident`` whether that gap cleared the
+    ``min_margin`` the caller asked for. ``region`` is where in *this frame*
+    the model looked (frame pixels), so a saved frame can be checked by eye.
+    """
+
+    frame_id: int
+    seq: int
+    model_name: str
+    label: str
+    margin: Optional[float]
+    confident: bool
+    scores: dict[str, float]
+    infer_ms: float
+    region: Optional[Crop] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "scores", {str(k): float(v) for k, v in self.scores.items()})
+
+    def to_dict(self) -> dict:
+        out = {f.name: getattr(self, f.name) for f in fields(self)}
+        out["scores"] = dict(self.scores)
+        out["region"] = self.region.to_dict() if self.region else None
+        return out
+
+
+@dataclass(frozen=True)
 class Frame:
-    """One captured frame: the JPEG, where it came from, and any detections."""
+    """One captured frame: the JPEG, where it came from, and any detections
+    or classification made on it."""
 
     frame_id: int
     seq: int
@@ -231,6 +266,7 @@ class Frame:
     jpeg: bytes = field(repr=False)
     crop: Optional[Crop] = None
     detections: Optional[Detections] = None
+    classification: Optional[Classification] = None
 
     @property
     def size(self) -> int:
@@ -247,6 +283,7 @@ class Frame:
             "bytes": len(self.jpeg),
             "crop": self.crop.to_dict() if self.crop else None,
             "detections": self.detections.to_dict() if self.detections else None,
+            "classification": self.classification.to_dict() if self.classification else None,
         }
 
 
@@ -263,9 +300,15 @@ class VisionInfo:
     aipu_present: bool
     aipu_firmware: Optional[str]
     model_name: Optional[str]
+    classifiers: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "classifiers", tuple(str(c) for c in self.classifiers))
 
     def to_dict(self) -> dict:
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        out = {f.name: getattr(self, f.name) for f in fields(self)}
+        out["classifiers"] = list(self.classifiers)
+        return out
 
 
 @dataclass(frozen=True)
@@ -292,10 +335,16 @@ class VisionStatus:
     infer_ms_last: Optional[float]
     sidecar_version: Optional[str]
     uptime_s: Optional[float]
+    #: Names of the classifiers the sidecar serves (``/status`` ``classifiers[].name``).
+    classifiers: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "classifiers", tuple(str(c) for c in self.classifiers))
 
     def to_dict(self) -> dict:
         out = {f.name: getattr(self, f.name) for f in fields(self)}
         out["crop"] = self.crop.to_dict() if self.crop else None
+        out["classifiers"] = list(self.classifiers)
         return out
 
     @classmethod
@@ -324,6 +373,11 @@ class VisionStatus:
             infer_ms_last=aipu.get("infer_ms_last"),
             sidecar_version=side.get("version"),
             uptime_s=side.get("uptime_s"),
+            classifiers=tuple(
+                str(c.get("name"))
+                for c in (doc.get("classifiers") or [])
+                if isinstance(c, dict) and c.get("name")
+            ),
         )
 
 
@@ -408,6 +462,7 @@ class BenchVision:
             aipu_present=st.aipu_present,
             aipu_firmware=st.aipu_firmware,
             model_name=st.model_name,
+            classifiers=st.classifiers,
         )
 
     def read_status(self) -> VisionStatus:
@@ -438,6 +493,27 @@ class BenchVision:
         doc = self._request("POST", "/detect", body={"min_conf": self._check_conf(min_conf)})
         return self._detections_from(doc)
 
+    def classify(
+        self, *, name: Optional[str] = None, min_margin: float = DEFAULT_MIN_MARGIN
+    ) -> Classification:
+        """Read an indicator from the latest frame. No trigger, no new frame.
+
+        ``name`` picks one of the classifiers the sidecar serves (property
+        ``classifiers``); unset, the one classifier loaded is used and several
+        is a :py:class:`VisionValueError`. ``min_margin`` is the logit gap the
+        top class must have over the runner-up for ``confident`` to be true —
+        the result is returned either way, so the caller decides what to do
+        with a hesitant read (typically: capture again).
+
+        Raises :py:class:`VisionCapabilityError` where nothing is loaded and
+        :py:class:`VisionValueError` when the camera's current crop does not
+        contain the region the model was trained on.
+        """
+        body: dict[str, Any] = {"min_margin": self._check_margin(min_margin)}
+        body["name"] = self._check_name(name) if name is not None else True
+        doc = self._request("POST", "/classify", body=body)
+        return self._classification_from(doc)
+
     # --- mutators (writer claim) --------------------------------------------
 
     def trigger_capture(
@@ -447,6 +523,8 @@ class BenchVision:
         infer: bool = False,
         min_conf: float = 0.4,
         wait_s: float = 2.0,
+        classify: Union[bool, str, None] = None,
+        min_margin: float = DEFAULT_MIN_MARGIN,
     ) -> Frame:
         """Fire a software trigger tagged ``seq`` and return *that* frame.
 
@@ -459,6 +537,11 @@ class BenchVision:
         second frame) and raises :py:class:`VisionCapabilityError` on a host
         without an AIPU **before** triggering, so the camera is not fired for a
         result that cannot be produced.
+
+        ``classify=True`` (or a classifier's name) reads the indicator off the
+        same frame, under :py:attr:`Frame.classification` — the seq-correlated
+        way to read an LED against a state benchctrl just commanded. Same
+        before-the-trigger check as ``infer``.
         """
         wait_s = self._check_wait(wait_s)
         if seq is None:
@@ -473,6 +556,8 @@ class BenchVision:
                 "infer": bool(infer),
                 "min_conf": self._check_conf(min_conf),
                 "wait_s": wait_s,
+                "classify": self._check_classify(classify),
+                "min_margin": self._check_margin(min_margin),
             },
             timeout=wait_s + self._timeout_s,
         )
@@ -581,6 +666,15 @@ class BenchVision:
     def model_name(self) -> Optional[str]:
         return self._prop("model_name")
 
+    @property
+    def classifiers(self) -> list[str]:
+        """Names of the indicator classifiers the sidecar serves; empty without any.
+
+        A list rather than a tuple so it reads the same locally and through
+        the agent's property snapshot (which carries plain JSON sequences).
+        """
+        return [str(c) for c in (self._prop("classifiers") or ())]
+
     # --- internals -----------------------------------------------------------
 
     _last_status_doc: Optional[dict] = None
@@ -620,6 +714,7 @@ class BenchVision:
         try:
             jpeg = base64.b64decode(doc["jpeg_b64"])
             dets = doc.get("detections")
+            cls = doc.get("classification")
             return Frame(
                 frame_id=int(doc["frame_id"]),
                 seq=int(doc["seq"]),
@@ -629,6 +724,7 @@ class BenchVision:
                 jpeg=jpeg,
                 crop=Crop.from_wire(doc.get("crop")),
                 detections=self._detections_from(dets) if dets else None,
+                classification=self._classification_from(cls) if cls else None,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise VisionProtocolError(f"malformed frame document: {exc!r}") from exc
@@ -657,6 +753,45 @@ class BenchVision:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise VisionProtocolError(f"malformed detections document: {exc!r}") from exc
+
+    @staticmethod
+    def _classification_from(doc: dict) -> Classification:
+        try:
+            margin = doc.get("margin")
+            return Classification(
+                frame_id=int(doc["frame_id"]),
+                seq=int(doc["seq"]),
+                model_name=str(doc["model_name"]),
+                label=str(doc["label"]),
+                margin=float(margin) if margin is not None else None,
+                confident=bool(doc["confident"]),
+                scores={str(k): float(v) for k, v in dict(doc["scores"]).items()},
+                infer_ms=float(doc.get("infer_ms", 0.0)),
+                region=Crop.from_wire(doc.get("region")),
+            )
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise VisionProtocolError(f"malformed classification document: {exc!r}") from exc
+
+    @staticmethod
+    def _check_margin(min_margin: float) -> float:
+        if isinstance(min_margin, bool) or not isinstance(min_margin, (int, float)):
+            raise VisionValueError(f"min_margin must be a number, got {min_margin!r}")
+        if min_margin < 0:
+            raise VisionValueError(f"min_margin must be >= 0, got {min_margin!r}")
+        return float(min_margin)
+
+    @staticmethod
+    def _check_name(name: str) -> str:
+        if not isinstance(name, str) or not name:
+            raise VisionValueError(f"classifier name must be a non-empty string, got {name!r}")
+        return name
+
+    def _check_classify(self, classify: Union[bool, str, None]) -> Union[bool, str]:
+        if classify is None or classify is False:
+            return False
+        if classify is True:
+            return True
+        return self._check_name(classify)
 
     @staticmethod
     def _check_wait(wait_s: float) -> float:

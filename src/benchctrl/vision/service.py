@@ -8,8 +8,9 @@ implementation of that API, the two could agree with each other and both be
 wrong about the real sidecar — the failure ``AGENTS.md`` warns about, where sim
 and driver share an author's assumptions. So there is one router, this one,
 and it is what both the production sidecar and :py:mod:`benchctrl.sim.vision`
-serve. Only the *collaborators* differ: a pylon camera and a Metis detector in
-production, a synthetic camera and a canned detector in the simulator.
+serve. Only the *collaborators* differ: a pylon camera, a Metis detector and
+Metis classifiers in production; a synthetic camera, a canned detector and a
+canned classifier in the simulator.
 
 The collaborators are duck-typed rather than Protocols, per ``CONTRIBUTING.md``
 convention 3 (a Protocol arrives with the second concrete instance — there is
@@ -32,6 +33,18 @@ return a frame whose ``seq`` is not the one requested: a frame from an earlier
 trigger, or a free-run frame, is a capture error rather than a plausible-looking
 success. That refusal is the property everything downstream (labelled datasets,
 LED-state reads against a commanded state) rests on.
+
+Classifiers
+-----------
+A *classifier* reads one indicator (an LED, a lamp, a segment) from a fixed
+region of the sensor and answers with one label out of a small closed set —
+the model the label loop's dataset trains. It is bound to the sensor region
+it was trained on: ``/classify`` slices that region out of whatever the
+camera currently delivers (a full frame, or a crop that contains it) and
+refuses, with a ``value`` error, a camera crop that does not cover it. A host
+may serve several, by name; each is loaded from a compiled model directory
+and reports ``classes`` and ``crop`` in ``/status`` so a caller can check what
+it is asking before it asks.
 """
 
 from __future__ import annotations
@@ -56,6 +69,12 @@ API_VERSION = "1"
 #: remote ``read_frame`` from tripping the worker timeout instead of returning
 #: a clean timeout error.
 MAX_WAIT_S = 10.0
+
+#: Default logit-margin gate for ``/classify``: the top score must beat the
+#: runner-up by this much for ``confident`` to be true. The LED model's
+#: held-out round measures a minimum margin above 10; transition frames (an
+#: LED mid-fade) score low. Same idea as the metis board reader's gate.
+DEFAULT_MIN_MARGIN = 3.0
 
 #: Error type -> HTTP status. The driver reads the type, not the status; the
 #: status is for humans with curl.
@@ -161,17 +180,33 @@ class VisionService:
     A detector that is absent (``None``) or ``present=False`` makes ``/detect``
     and ``infer=true`` answer with a *capability* error — the documented gap on
     hosts without PCIe.
+
+    Each classifier (``classifiers`` maps name -> object) must provide::
+
+        present: bool
+        name: str
+        classes: tuple[str, ...]
+        crop: tuple[int, int, int, int] | None
+                                  the sensor region (x, y, w, h) it was trained
+                                  on; None = the whole frame, whatever it is
+        classify(record: FrameRecord, region: tuple | None)
+                                  -> (dict[label, float] scores, float ms)
+                                  ``region`` is (x, y, w, h) in *frame* pixels,
+                                  already checked to lie inside the frame
+        status() -> dict          optional extras (input size, digest, ...)
     """
 
     def __init__(
         self,
         camera: Any,
         detector: Any = None,
+        classifiers: Optional[dict[str, Any]] = None,
         *,
         version: str = "0",
     ) -> None:
         self.camera = camera
         self.detector = detector
+        self.classifiers: dict[str, Any] = dict(classifiers or {})
         self.version = version
         self._started = time.monotonic()
         self._lock = threading.RLock()
@@ -207,6 +242,8 @@ class VisionService:
                 return self._frame_jpg(query)
             if method == "POST" and path == "/detect":
                 return _json(200, self._detect(_body_json(body)))
+            if method == "POST" and path == "/classify":
+                return _json(200, self._classify(_body_json(body)))
             if method == "GET" and path == "/crop":
                 return _json(200, self._crop(query))
             if method == "GET" and path == "/stream":
@@ -229,7 +266,8 @@ class VisionService:
         return {
             "ok": True,
             "camera": self.camera is not None,
-            "aipu": bool(self.detector is not None and self.detector.present),
+            "aipu": self._aipu_present(),
+            "classifiers": self._classifier_names(),
             "version": self.version,
             "api": API_VERSION,
         }
@@ -246,9 +284,11 @@ class VisionService:
                 aipu.update(det.status())
             except Exception as exc:  # noqa: BLE001 - status is best effort
                 log.debug("detector status failed: %r", exc)
+        aipu["present"] = self._aipu_present()
         return {
             "camera": cam,
             "aipu": aipu,
+            "classifiers": [self._classifier_doc(c) for c in self._present_classifiers()],
             "sidecar": {
                 "version": self.version,
                 "api": API_VERSION,
@@ -297,6 +337,8 @@ class VisionService:
         min_conf = _conf(body.get("min_conf", 0.4))
         if infer:
             self._require_detector()
+        clf = self._classifier_for(body.get("classify"))  # capability/value errors first
+        min_margin = _margin(body.get("min_margin", DEFAULT_MIN_MARGIN))
         with self._lock:
             before = self.camera.latest()
             after_id = before.frame_id if before is not None else -1
@@ -310,14 +352,23 @@ class VisionService:
             raise ServiceCaptureError(
                 f"frame {rec.frame_id} carries seq={rec.seq}, not the requested {seq}"
             )
-        return self._frame_dict(rec, infer=infer, min_conf=min_conf)
+        return self._frame_dict(
+            rec, infer=infer, min_conf=min_conf, classifier=clf, min_margin=min_margin
+        )
 
     def _frame_json(self, query: dict) -> dict:
         rec = self._wait_query(query)
         infer = query.get("infer", "0") in ("1", "true", "yes")
         if infer:
             self._require_detector()
-        return self._frame_dict(rec, infer=infer, min_conf=_conf(query.get("min_conf", 0.4)))
+        clf = self._classifier_for(query.get("classify"))
+        return self._frame_dict(
+            rec,
+            infer=infer,
+            min_conf=_conf(query.get("min_conf", 0.4)),
+            classifier=clf,
+            min_margin=_margin(query.get("min_margin", DEFAULT_MIN_MARGIN)),
+        )
 
     def _frame_jpg(self, query: dict) -> tuple[int, str, bytes]:
         rec = self._wait_query(query)
@@ -351,6 +402,14 @@ class VisionService:
             "items": list(items),
         }
 
+    def _classify(self, body: dict) -> dict:
+        clf = self._classifier_for(body.get("name", True))
+        min_margin = _margin(body.get("min_margin", DEFAULT_MIN_MARGIN))
+        rec = self.camera.latest()
+        if rec is None:
+            raise ServiceCaptureError("no frame to classify")
+        return self._classification(clf, rec, min_margin)
+
     def _crop(self, query: dict) -> dict:
         with self._lock:
             if "off" in query:
@@ -368,7 +427,89 @@ class VisionService:
                 "(the Metis needs PCIe: Raspberry Pi 5 or desktop, not an Uno Q)"
             )
 
-    def _frame_dict(self, rec: FrameRecord, *, infer: bool, min_conf: float) -> dict:
+    def _aipu_present(self) -> bool:
+        det = self.detector
+        return bool(det is not None and det.present) or bool(self._present_classifiers())
+
+    def _present_classifiers(self) -> list[Any]:
+        return [c for c in self.classifiers.values() if getattr(c, "present", True)]
+
+    def _classifier_names(self) -> list[str]:
+        return [str(c.name) for c in self._present_classifiers()]
+
+    def _classifier_for(self, want: Any) -> Any:
+        """Resolve the ``classify``/``name`` parameter to a classifier, or None.
+
+        ``None``/``False``/``""`` mean "no classification"; ``True`` means "the
+        one classifier here" (a *value* error when there are several to choose
+        from); a string names one. Nothing loaded is a *capability* error, like
+        detection without an AIPU, so a caller can fall back rather than retry.
+        """
+        if want is None or want is False or want == "":
+            return None
+        present = self._present_classifiers()
+        if not present:
+            raise ServiceCapabilityError(
+                "no classifier loaded on this host — start the sidecar with "
+                "--classifier <compiled model dir> (docs/vision.md § Classifiers)"
+            )
+        if want is True or want == "true" or want == "1":
+            if len(present) == 1:
+                return present[0]
+            names = ", ".join(sorted(self._classifier_names()))
+            raise ServiceValueError(f"several classifiers loaded ({names}) — name one")
+        if not isinstance(want, str):
+            raise ServiceValueError(f"classify must be a name or true, got {want!r}")
+        for clf in present:
+            if str(clf.name) == want:
+                return clf
+        names = ", ".join(sorted(self._classifier_names()))
+        raise ServiceValueError(f"no classifier named {want!r} here (loaded: {names})")
+
+    def _classifier_doc(self, clf: Any) -> dict:
+        doc: dict[str, Any] = {
+            "name": str(clf.name),
+            "classes": list(clf.classes),
+            "crop": list(clf.crop) if clf.crop else None,
+        }
+        status = getattr(clf, "status", None)
+        if callable(status):
+            try:
+                doc.update(status())
+            except Exception as exc:  # noqa: BLE001 - status is best effort
+                log.debug("classifier %s status failed: %r", clf.name, exc)
+        return doc
+
+    def _classification(self, clf: Any, rec: FrameRecord, min_margin: float) -> dict:
+        region = classifier_region(clf.crop, rec.crop, rec.width, rec.height)
+        scores, infer_ms = clf.classify(rec, region)
+        scores = {str(k): float(v) for k, v in scores.items()}
+        if not scores:
+            raise ServiceError(f"classifier {clf.name} returned no scores", type="internal")
+        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        label = ranked[0][0]
+        margin = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else float("inf")
+        return {
+            "frame_id": rec.frame_id,
+            "seq": rec.seq,
+            "model_name": str(clf.name),
+            "label": label,
+            "margin": round(margin, 4) if margin != float("inf") else None,
+            "confident": margin >= min_margin,
+            "scores": scores,
+            "infer_ms": infer_ms,
+            "region": list(region) if region else None,
+        }
+
+    def _frame_dict(
+        self,
+        rec: FrameRecord,
+        *,
+        infer: bool,
+        min_conf: float,
+        classifier: Any = None,
+        min_margin: float = DEFAULT_MIN_MARGIN,
+    ) -> dict:
         out: dict[str, Any] = {
             "frame_id": rec.frame_id,
             "seq": rec.seq,
@@ -378,7 +519,10 @@ class VisionService:
             "crop": list(rec.crop) if rec.crop else None,
             "jpeg_b64": base64.b64encode(rec.jpeg).decode("ascii"),
             "detections": None,
+            "classification": None,
         }
+        if classifier is not None:
+            out["classification"] = self._classification(classifier, rec, min_margin)
         if infer:
             items, infer_ms = self.detector.infer(rec, min_conf)
             out["detections"] = {
@@ -391,7 +535,7 @@ class VisionService:
         return out
 
     def close(self) -> None:
-        for obj in (self.camera, self.detector):
+        for obj in (self.camera, self.detector, *self.classifiers.values()):
             close = getattr(obj, "close", None)
             if callable(close):
                 try:
@@ -555,6 +699,44 @@ def _conf(value: Any) -> float:
     if not 0.0 <= conf <= 1.0:
         raise ServiceValueError(f"min_conf must be in [0, 1], got {conf:g}")
     return conf
+
+
+def _margin(value: Any) -> float:
+    margin = _number(value, "min_margin")
+    if margin < 0:
+        raise ServiceValueError(f"min_margin must be >= 0, got {margin:g}")
+    return margin
+
+
+def classifier_region(
+    model_crop: Optional[tuple[int, int, int, int]],
+    frame_crop: Optional[tuple[int, int, int, int]],
+    frame_w: int,
+    frame_h: int,
+) -> Optional[tuple[int, int, int, int]]:
+    """Where the classifier's sensor region lies in *this* frame, in frame pixels.
+
+    ``model_crop`` is the sensor region (x, y, w, h) the model was trained on;
+    ``frame_crop`` is the camera crop the frame was taken with (``None`` = the
+    full sensor). Returns ``None`` when the model takes the whole frame
+    (``model_crop`` is None), the frame's own region when the two are the same
+    crop, otherwise the model region translated into frame coordinates. Raises
+    ``ServiceValueError`` when the frame does not contain the region: a reading
+    from the wrong patch of the bench would be a confident wrong answer.
+    """
+    if model_crop is None:
+        return None
+    mx, my, mw, mh = (int(v) for v in model_crop)
+    fx, fy = (int(frame_crop[0]), int(frame_crop[1])) if frame_crop else (0, 0)
+    x, y = mx - fx, my - fy
+    if x < 0 or y < 0 or x + mw > int(frame_w) or y + mh > int(frame_h):
+        have = f"crop {list(frame_crop)}" if frame_crop else "the full frame"
+        raise ServiceValueError(
+            f"the camera delivers {have} ({frame_w}x{frame_h}), which does not contain "
+            f"the classifier's region {[mx, my, mw, mh]} — clear the crop, or set it "
+            "to that region"
+        )
+    return (x, y, mw, mh)
 
 
 def _crop_tuple(value: Any) -> tuple[int, int, int, int]:

@@ -24,6 +24,9 @@ wrong*, because those are what the tests need to be able to see:
   what it *sent* rather than what came back would be caught.
 * ``fail_next_trigger`` makes one trigger raise, so the label loop's "discard,
   never label" path can be exercised.
+* :py:class:`CannedClassifier` answers with fixed logits for a fixed sensor
+  region, so the driver's ``classify`` path — region check against the current
+  crop, margin gate, typed result over the wire — runs without a model.
 
 The JPEG is real. :py:data:`TINY_JPEG` is a 16x16 baseline JPEG minted once
 with Pillow, and :py:func:`padded_jpeg` grows it to any requested size by
@@ -305,6 +308,51 @@ class CannedDetector:
         }
 
 
+class CannedClassifier:
+    """An indicator classifier that answers with fixed logits.
+
+    Defaults model the bench's first real one: the Pi's ACT LED, two classes,
+    trained on the 160x160 sensor region at (1040, 620). ``scores`` are the
+    logits it returns for every frame; ``region_seen`` records what region the
+    router asked it to look at, which is how the crop-translation tests see it.
+    """
+
+    def __init__(
+        self,
+        scores: Optional[dict[str, float]] = None,
+        *,
+        name: str = "act-led-sim",
+        classes: tuple[str, ...] = ("dark", "lit"),
+        crop: Optional[tuple[int, int, int, int]] = (1040, 620, 160, 160),
+        present: bool = True,
+        infer_ms: float = 0.4,
+        input_size: int = 96,
+    ) -> None:
+        self.name = name
+        self.classes = tuple(classes)
+        self.crop = (int(crop[0]), int(crop[1]), int(crop[2]), int(crop[3])) if crop else None
+        self.present = present
+        self.infer_ms = infer_ms
+        self.input_size = input_size
+        self.scores: dict[str, float] = (
+            dict(scores) if scores is not None else {"dark": -5.4, "lit": 5.9}
+        )
+        self.calls = 0
+        self.region_seen: Optional[tuple[int, int, int, int]] = None
+
+    def classify(
+        self, record: FrameRecord, region: Optional[tuple[int, int, int, int]]
+    ) -> tuple[dict[str, float], float]:
+        self.calls += 1
+        self.region_seen = (
+            (int(region[0]), int(region[1]), int(region[2]), int(region[3])) if region else None
+        )
+        return dict(self.scores), self.infer_ms
+
+    def status(self) -> dict:
+        return {"input": [3, self.input_size, self.input_size], "calls": self.calls}
+
+
 class SimulatedVisionSidecar:
     """The service on a loopback socket, with a request log for tests.
 
@@ -316,6 +364,7 @@ class SimulatedVisionSidecar:
         self,
         camera: Optional[SyntheticCamera] = None,
         detector: Optional[Any] = None,
+        classifiers: Optional[dict[str, Any]] = None,
         *,
         aipu: bool = True,
         **camera_kwargs: Any,
@@ -324,8 +373,12 @@ class SimulatedVisionSidecar:
         if detector is None and aipu:
             detector = CannedDetector()
         self.detector = detector
+        if classifiers is None:
+            clf = CannedClassifier()
+            classifiers = {clf.name: clf} if aipu else {}
+        self.classifiers = dict(classifiers)
         self.request_log: list[tuple[str, str]] = []
-        self.service = VisionService(self.camera, self.detector, version="sim")
+        self.service = VisionService(self.camera, self.detector, self.classifiers, version="sim")
         self._server = serve(self.service, bind="127.0.0.1", port=0, on_request=self._log)
         self._thread = threading.Thread(
             target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True

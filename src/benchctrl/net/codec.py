@@ -94,6 +94,7 @@ def _wire_types() -> dict[str, type]:
         "Crop",
         "Detection",
         "Detections",
+        "Classification",
         "Frame",
         "VisionInfo",
         "VisionStatus",
@@ -155,8 +156,7 @@ class Encoder:
                 return {TAG: "b64", "v": base64.b64encode(raw).decode("ascii")}
             if self._store_blob is None:
                 raise BenchProtocolError(
-                    f"{len(raw)} bytes exceeds the inline limit and no blob "
-                    f"store is available"
+                    f"{len(raw)} bytes exceeds the inline limit and no blob store is available"
                 )
             return {
                 TAG: "blob",
@@ -205,15 +205,12 @@ class Encoder:
         if is_dataclass(value) and not isinstance(value, type):
             name = type(value).__name__
             if name not in _wire_types():
-                raise BenchProtocolError(
-                    f"dataclass {name!r} is not in the wire-type allowlist"
-                )
+                raise BenchProtocolError(f"dataclass {name!r} is not in the wire-type allowlist")
             return {
                 TAG: "dc",
                 "c": name,
                 "f": {
-                    f.name: self.encode(getattr(value, f.name), _depth + 1)
-                    for f in fields(value)
+                    f.name: self.encode(getattr(value, f.name), _depth + 1) for f in fields(value)
                 },
             }
 
@@ -284,9 +281,7 @@ class Decoder:
             try:
                 return cls[value["v"]]
             except KeyError:
-                raise BenchProtocolError(
-                    f"{value['c']} has no member {value['v']!r}"
-                ) from None
+                raise BenchProtocolError(f"{value['c']} has no member {value['v']!r}") from None
 
         if tag == "dc":
             cls = self._lookup(value["c"])
@@ -330,8 +325,7 @@ class Decoder:
         cls = _wire_types().get(name)
         if cls is None:
             raise BenchProtocolError(
-                f"type {name!r} is not in the wire-type allowlist — refusing "
-                f"to construct it"
+                f"type {name!r} is not in the wire-type allowlist — refusing to construct it"
             )
         return cls
 

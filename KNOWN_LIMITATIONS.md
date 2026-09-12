@@ -1324,6 +1324,27 @@ writes it. Diagnosed with the driver's debugfs (`/sys/kernel/debug/metis/…`:
 `dma-statistics`, `dma-regs`, `vmsi`) and `lspci -vv` error bits on both ends
 of the link, which is the order to look in if it ever regresses.
 
+### V-9. An indicator classifier is bound to the sensor region and lighting it was trained under
+A classifier (`classify()`, `vision_classify`) is a small CNN trained on the
+label loop's frames of **one** sensor region at **one** exposure/gain. The
+region travels with the model (`classes.json` `crop`) and the sidecar
+translates it into the camera's current crop — a full frame for the
+dashboard, or any crop that contains it — and **refuses** one that does not
+(`VisionValueError`, "does not contain"), so a read is never taken from the
+wrong patch. Exposure and gain do not travel: the dataset manifest records
+what they were, and a read under different lighting is what the logit
+`margin` is for. Treat `confident=False` as "capture again", never as a
+weak yes. The first model (Pi 5 `ACT` LED, 2026-09-12) measures margins of
+11–23 on the bench at its training exposure (40 ms); the default gate is 3.
+Moving the camera, the DUT or the lights means a new dataset — the loop
+takes seconds, the training a minute on scrub.
+
+The classifier and the YOLO detector each hold their own runtime context;
+on the Pi the detector on 4 cores and a classifier on 1 load side by side
+(the runtime time-slices), ~1.3 ms per read on the AIPU, ~46 ms round trip
+through the agent with the trigger. Not measured: several classifiers plus
+detection under sustained load.
+
 ## What's not in this list
 
 Things we **don't** consider limits — they're just facts:

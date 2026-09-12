@@ -11,17 +11,19 @@ contract are in [`docs/vision.md`](../../docs/vision.md).
 | [`install-metis-driver.sh`](install-metis-driver.sh) | the Axelera `metis-dkms` kernel driver, `axelera` group, udev, load at boot |
 | [`Dockerfile`](Dockerfile) + [`build.sh`](build.sh) | the sidecar image: Axelera runtime + pylon + OpenCV on Ubuntu 24.04 (arm64 or amd64) |
 | [`fetch-model.sh`](fetch-model.sh) | put a compiled `.axm` where the sidecar mounts it, checksum recorded |
+| [`fetch-classifier.sh`](fetch-classifier.sh) | put a compiled indicator classifier directory (`model.json` + `classes.json`) beside it, checksums recorded |
 | [`install-vision.sh`](install-vision.sh) | `benchctrl-vision.service` + `/etc/benchctrl/vision.env` |
 | [`run-vision.sh`](run-vision.sh) | what the unit runs: the privileged container, port on loopback |
 | [`udev/72-axelera.rules`](udev/72-axelera.rules) | reference copy of the rule the driver package installs |
 
-`vision.env` knobs: `IMAGE`, `SRC_DIR`, `MODEL_DIR`, `MODEL`, `PORT` (control,
-loopback only), `VIEW_PORT` (read-only stream + still on the LAN; 0 = off),
-`EXPOSURE_US`, `GAIN_DB`, `FPS`, `TRIGGER_MODE`, `JPEG_QUALITY`, `AIPU_CORES`,
-`NO_AIPU`.
+`vision.env` knobs: `IMAGE`, `SRC_DIR`, `MODEL_DIR`, `MODEL`, `CLASSIFIERS`
+(space-separated directory names under `MODEL_DIR`, e.g. `led`), `PORT`
+(control, loopback only), `VIEW_PORT` (read-only stream + still on the LAN;
+0 = off), `EXPOSURE_US`, `GAIN_DB`, `FPS`, `TRIGGER_MODE`, `JPEG_QUALITY`,
+`AIPU_CORES`, `NO_AIPU`.
 
 All scripts are POSIX `sh`. The two `install-*` and the driver installer are
-root-only and idempotent; `build.sh` and `fetch-model.sh` run as the user.
+root-only and idempotent; `build.sh` and the two `fetch-*` run as the user.
 
 ## Why a container, and why privileged
 
@@ -121,6 +123,7 @@ hard-hung under load at ~100 s. `vision_status()` reports `aipu_temp_c` (via
 |---|---|
 | benchctrl (any Python) | `git pull && sudo systemctl restart benchctrl-vision` |
 | a model | `fetch-model.sh` then restart |
+| a classifier | `NAME=led fetch-classifier.sh`, add it to `CLASSIFIERS=` in `vision.env` if new, restart |
 | `AX_VERSION` / wheels | `build.sh`, then edit `IMAGE=` in `/etc/benchctrl/vision.env`, restart |
 | the kernel | DKMS rebuilds `metis` on boot (`AUTOINSTALL=yes`); check `dkms status` |
 

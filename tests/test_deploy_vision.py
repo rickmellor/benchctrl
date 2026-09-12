@@ -26,6 +26,7 @@ SCRIPTS = (
     "install-vision.sh",
     "install-metis-driver.sh",
     "fetch-model.sh",
+    "fetch-classifier.sh",
 )
 
 #: sha256 of Axelera's own 72-axelera.rules as shipped in metis-dkms_1.6.2_all.deb.
@@ -95,6 +96,25 @@ def test_the_run_script_falls_back_to_camera_only_without_a_model():
     code = _code("run-vision.sh")
     assert "--no-aipu" in code
     assert 'if [ "$NO_AIPU" = "1" ]' in code
+
+
+def test_the_run_script_serves_only_the_classifiers_that_are_there():
+    """CLASSIFIERS names directories under MODEL_DIR; a missing one is skipped
+    with a pointer, never passed through, and none are passed without an AIPU."""
+    code = _code("run-vision.sh")
+    assert "for c in $CLASSIFIERS; do" in code
+    assert 'if [ -f "$MODEL_DIR/$c/model.json" ]' in code
+    assert "--classifier /models/$c" in code
+    assert "fetch-classifier.sh" in code
+    assert code.index('if [ "$NO_AIPU" != "1" ]') < code.index("for c in $CLASSIFIERS")
+    assert "$model_args $classifier_args" in code
+
+
+def test_the_classifier_fetch_refuses_a_directory_that_is_not_a_model():
+    code = _code("fetch-classifier.sh")
+    for f in ("model.json", "classes.json"):
+        assert f in code
+    assert "SHA256SUMS" in code and "MANIFEST" in code
 
 
 def test_the_unit_clears_a_stale_container_and_requires_docker():

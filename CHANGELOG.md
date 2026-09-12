@@ -78,6 +78,27 @@ tunnel alike. The sidecar gained a read-only **view listener** (`VIEW_PORT`,
 8096 on the LAN) serving only `/stream`, `/frame.jpg` and `/health`; the
 control port stays on loopback.
 
+**The bench can read an LED.** `benchctrl.vision.labelloop` builds a
+labelled dataset from states benchctrl *commands* (a PDU outlet, a CP2112
+line, or a host LED through sysfs) and the frames it captures with `seq`
+correlation — wrong-`seq` frames are discarded, never labelled; actuators
+are restored as found; the manifest records the camera settings read back.
+The first dataset was the Pi's own `ACT` LED: 200 frames in 15 s. From it,
+a two-class classifier trained and compiled on scrub with the Axelera devkit
+scores 100 % on a capture round it never saw, with a logit margin above 10,
+and runs in well under a millisecond on the Metis. The sidecar serves such
+models by name (`--classifier DIR`, `CLASSIFIERS=` in `vision.env`,
+`deploy/vision/fetch-classifier.sh`); the driver reads them with
+`classify()` or `classify=` on `trigger_capture` (the seq-correlated way),
+returning a `Classification` — label, per-class logits, margin, `confident`
+— that crosses the agent wire typed. A model is bound to the sensor region
+it was trained on: the sidecar translates that region into the camera's
+current crop and refuses one that does not contain it, so a classifier keeps
+working after the crop is cleared for the live stream and never reads the
+wrong patch. Thirteen `vision_*` tools now (`vision_classify`), plus the
+cross-driver `vision_label_capture`; the simulator gained a
+`CannedClassifier`.
+
 ### Capture-and-label: a training set from states benchctrl commanded
 
 `benchctrl.vision.labelloop` (stdlib) commands a state — a PDU outlet, a

@@ -408,6 +408,7 @@ from benchctrl.drivers.silabs_cp2112.mcp_tools import (
 
 # Vision tools
 from benchctrl.drivers.bench_vision.mcp_tools import (
+    vision_classify,
     vision_clear_crop,
     vision_close,
     vision_detect,
@@ -819,9 +820,7 @@ def battery_profiler_estimate_duration(
     cycle_time_s = high_time_s + low_time_s
     if cycle_time_s <= 0:
         return {"error": "high_time_s + low_time_s must be > 0"}
-    cycle_charge_mAh = (
-        (high_current_A * high_time_s) + (low_current_A * low_time_s)
-    ) / 3.6
+    cycle_charge_mAh = ((high_current_A * high_time_s) + (low_current_A * low_time_s)) / 3.6
     if cycle_charge_mAh <= 0:
         return {"error": "no net charge drawn per cycle"}
     cycles = capacity_mAh / cycle_charge_mAh

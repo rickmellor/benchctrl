@@ -64,6 +64,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", default=None, help="path to a compiled .axm (YOLOv8n-COCO)")
     p.add_argument("--aipu-cores", type=int, default=4)
     p.add_argument("--no-aipu", action="store_true", help="serve the camera only")
+    p.add_argument(
+        "--classifier",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="a compiled indicator classifier directory (model.json + classes.json); "
+        "repeatable, named by its directory (or classes.json 'name')",
+    )
+    p.add_argument("--classifier-cores", type=int, default=1, help="AIPU cores per classifier")
     p.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
     return p
 
@@ -90,7 +99,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         from benchctrl.vision.detector import load_detector
 
         detector = load_detector(args.model, aipu_cores=args.aipu_cores)
-    service = VisionService(camera, detector, version=__version__)
+    classifiers: dict = {}
+    if args.classifier and not args.no_aipu:
+        from benchctrl.vision.classifier import load_classifiers
+
+        classifiers = load_classifiers(args.classifier, aipu_cores=args.classifier_cores)
+    service = VisionService(camera, detector, classifiers, version=__version__)
     server = serve(service, bind=args.bind, port=args.port)
     view = None
     if args.view_port:
@@ -115,13 +129,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             "view listener (stream + still only) on http://%s:%d", args.view_bind, args.view_port
         )
     log.info(
-        "benchctrl-vision %s serving %s (%s) on http://%s:%d — aipu=%s",
+        "benchctrl-vision %s serving %s (%s) on http://%s:%d — aipu=%s, classifiers=%s",
         __version__,
         camera.model,
         camera.serial,
         args.bind,
         args.port,
         "yes" if detector is not None else "no",
+        ",".join(sorted(classifiers)) or "none",
     )
     if args.bind not in ("127.0.0.1", "localhost", "::1"):
         log.warning(

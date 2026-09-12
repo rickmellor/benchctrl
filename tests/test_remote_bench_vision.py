@@ -419,3 +419,36 @@ def test_a_crop_really_moved_at_the_simulated_camera(remote):
     assert remote.proxy.trigger_capture(seq=1).width == 300
     remote.proxy.clear_crop()
     assert remote.sim.camera.crop is None
+
+
+def test_classify_is_a_read_and_its_result_survives_the_wire(remote):
+    from benchctrl.drivers.bench_vision import Classification, Crop
+
+    remote.proxy.trigger_capture(seq=21)
+    remote.client.call("agent.release", {"device": "bench_vision"})
+    try:
+        read = remote.proxy.classify(min_margin=1.0)
+    finally:
+        remote.client.call("agent.claim", {"device": "bench_vision"})
+    assert isinstance(read, Classification)
+    assert read.seq == 21 and read.label == "lit" and read.confident is True
+    assert read.scores == {"dark": -5.4, "lit": 5.9}, "a dict field must cross the codec intact"
+    assert isinstance(read.region, Crop) and read.region.w == 160
+    assert remote.proxy.classifiers == ["act-led-sim"]
+
+
+def test_a_capture_with_classification_crosses_the_wire_typed(remote):
+    from benchctrl.drivers.bench_vision import Classification
+
+    frame = remote.proxy.trigger_capture(seq=22, classify=True)
+    assert frame.seq == 22
+    assert isinstance(frame.classification, Classification)
+    assert frame.classification.seq == 22
+
+
+def test_classify_errors_keep_their_types_over_the_wire(remote):
+    from benchctrl.drivers.bench_vision import VisionValueError
+
+    remote.proxy.trigger_capture(seq=23)
+    with pytest.raises(VisionValueError):
+        remote.proxy.classify(name="nope")

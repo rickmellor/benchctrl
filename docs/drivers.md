@@ -1500,8 +1500,10 @@ with BenchVision.open() as cam:
     print(frame.detections.items)
 ```
 
-MCP tools: `vision_*` (12) — `open`, `close`, `info`, `status`, `frame`,
-`trigger_capture`, `detect`, `set_exposure_us`, `set_gain_db`, `set_fps`,
-`set_crop`, `clear_crop`. No tool returns image bytes; `save_to` writes the
-JPEG host-side.
+MCP tools: `vision_*` (13) — `open`, `close`, `info`, `status`, `frame`,
+`trigger_capture`, `detect`, `classify`, `set_exposure_us`, `set_gain_db`,
+`set_fps`, `set_crop`, `clear_crop`. No tool returns image bytes; `save_to`
+writes the JPEG host-side. `classify` reads an indicator (the Pi's `ACT` LED
+is the first) with a model the label loop's dataset trained — `vision.md`
+§ Classifiers.
 

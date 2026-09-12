@@ -439,3 +439,100 @@ def _walk(value):
             yield from _walk(v)
     else:
         yield value
+
+
+# ------------------------------------------------------------- classifiers
+
+
+def test_classify_returns_a_typed_read_with_the_margin(sim, vision):
+    from benchctrl.drivers.bench_vision import Classification
+
+    vision.trigger_capture(seq=4)
+    read = vision.classify()
+    assert isinstance(read, Classification)
+    assert read.seq == 4 and read.model_name == "act-led-sim"
+    assert read.label == "lit" and read.confident is True
+    assert read.margin == pytest.approx(11.3)
+    assert read.scores == {"dark": -5.4, "lit": 5.9}
+    assert read.region == Crop(1040, 620, 160, 160)
+    assert sim.camera.frame_id == 1, "classify must not fire the camera"
+    assert read.to_dict()["region"] == {"x": 1040, "y": 620, "w": 160, "h": 160}
+
+
+def test_classify_margin_gate_and_argument_checks(sim, vision):
+    vision.trigger_capture(seq=1)
+    assert vision.classify(min_margin=20).confident is False
+    assert vision.classify(name="act-led-sim").label == "lit"
+    with pytest.raises(VisionValueError):
+        vision.classify(name="nope")
+    with pytest.raises(VisionValueError):
+        vision.classify(name="")
+    with pytest.raises(VisionValueError):
+        vision.classify(min_margin=-0.1)
+    with pytest.raises(VisionValueError):
+        vision.classify(min_margin=True)  # type: ignore[arg-type]
+
+
+def test_classify_without_a_classifier_is_a_capability_error():
+    with SimulatedVisionSidecar(aipu=False) as s:
+        v = BenchVision.open(s.url)
+        try:
+            v.trigger_capture(seq=1)
+            assert v.classifiers == []
+            with pytest.raises(VisionCapabilityError):
+                v.classify()
+        finally:
+            v.close()
+
+
+def test_classify_refuses_a_crop_that_misses_the_region(sim, vision):
+    vision.set_crop(0, 0, 640, 480)
+    vision.trigger_capture(seq=1)
+    with pytest.raises(VisionValueError, match="does not contain"):
+        vision.classify()
+
+
+def test_trigger_capture_can_classify_the_frame_it_returns(sim, vision):
+    from benchctrl.drivers.bench_vision import Classification
+
+    frame = vision.trigger_capture(seq=12, classify=True)
+    assert isinstance(frame.classification, Classification)
+    assert frame.classification.seq == 12 and frame.classification.label == "lit"
+    assert frame.to_dict()["classification"]["label"] == "lit"
+    frame = vision.trigger_capture(seq=13, classify="act-led-sim", min_margin=50)
+    assert frame.classification.confident is False
+    assert vision.trigger_capture(seq=14).classification is None
+    before = sim.camera.frame_id
+    with pytest.raises(VisionValueError):
+        vision.trigger_capture(seq=15, classify="nope")
+    assert sim.camera.frame_id == before, "the camera fired for a result it cannot give"
+
+
+def test_classifiers_property_comes_from_the_cached_status(sim, vision):
+    assert vision.classifiers == ["act-led-sim"]
+    assert vision.read_identity().classifiers == ("act-led-sim",)
+    assert vision.read_status().classifiers == ("act-led-sim",)
+    n = sim.requests_to("/status")
+    _ = (vision.classifiers, vision.model_name, vision.aipu_present)
+    assert sim.requests_to("/status") - n <= 1
+
+
+def test_vision_classify_tool_returns_json_only(tmp_path):
+    from benchctrl import session
+    from benchctrl.config import Config, DeviceConfig
+    from benchctrl.drivers.bench_vision import mcp_tools as tools
+
+    session.configure(Config(devices={"bench_vision": DeviceConfig(mode="sim")}))
+    try:
+        tools._vision = None
+        tools.vision_open()
+        cap = tools.vision_trigger_capture(seq=3, classify="*", save_to=str(tmp_path / "f.jpg"))
+        assert cap["classification"]["label"] == "lit"
+        read = tools.vision_classify(min_margin=1.0)
+        assert read["label"] == "lit" and read["confident"] is True
+        for v in _walk(read):
+            assert not isinstance(v, (bytes, bytearray))
+    finally:
+        tools.vision_close()
+        tools._vision = None
+        session.configure(None)

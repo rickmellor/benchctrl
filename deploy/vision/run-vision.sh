@@ -24,6 +24,7 @@ IMAGE=${IMAGE:-benchctrl-vision:1.8.0}
 SRC_DIR=${SRC_DIR:-/home/rick/benchctrl/src}
 MODEL_DIR=${MODEL_DIR:-/home/rick/benchctrl/models}
 MODEL=${MODEL:-yolov8n-coco.axm}
+CLASSIFIERS=${CLASSIFIERS:-}
 PORT=${PORT:-8095}
 EXPOSURE_US=${EXPOSURE_US:-8000}
 GAIN_DB=${GAIN_DB:-0}
@@ -61,6 +62,19 @@ else
     model_args="--no-aipu"
 fi
 
+# Indicator classifiers: CLASSIFIERS names directories under MODEL_DIR, each
+# holding a compiled model.json + classes.json (deploy/vision/fetch-classifier.sh).
+classifier_args=""
+if [ "$NO_AIPU" != "1" ]; then
+    for c in $CLASSIFIERS; do
+        if [ -f "$MODEL_DIR/$c/model.json" ]; then
+            classifier_args="$classifier_args --classifier /models/$c"
+        else
+            echo "no classifier at $MODEL_DIR/$c/model.json — skipping it (deploy/vision/fetch-classifier.sh)" >&2
+        fi
+    done
+fi
+
 # A stale container from a previous run must not block this one.
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
@@ -86,7 +100,7 @@ exec docker run --rm $detach --name "$NAME" \
     "$IMAGE" \
     --bind 0.0.0.0 --port "$PORT" $view_args \
     $mode_flag --exposure-us "$EXPOSURE_US" --gain-db "$GAIN_DB" --fps "$FPS" \
-    --jpeg-quality "$JPEG_QUALITY" $model_args
+    --jpeg-quality "$JPEG_QUALITY" $model_args $classifier_args
 
 # Narrow-grant variant, for when --privileged is worth revisiting. Replace the
 # three lines --privileged / -v /dev:/dev / -v /sys:/sys with:

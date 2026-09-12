@@ -347,3 +347,137 @@ def test_the_control_listener_is_unrestricted_by_default():
         conn.request("GET", "/status")
         assert conn.getresponse().status == 200
         conn.close()
+
+
+# ------------------------------------------------------------- classifiers
+
+
+@pytest.fixture
+def clf_service():
+    from benchctrl.sim.vision import CannedClassifier
+
+    cam = SyntheticCamera()
+    clf = CannedClassifier()
+    svc = VisionService(cam, CannedDetector(), {clf.name: clf}, version="test")
+    svc.clf = clf
+    yield svc
+    svc.close()
+
+
+def test_status_and_health_list_the_classifiers(clf_service):
+    _, health = call(clf_service, "GET", "/health")
+    assert health["classifiers"] == ["act-led-sim"]
+    _, status = call(clf_service, "GET", "/status")
+    (doc,) = status["classifiers"]
+    assert doc["name"] == "act-led-sim"
+    assert doc["classes"] == ["dark", "lit"]
+    assert doc["crop"] == [1040, 620, 160, 160]
+    assert doc["input"] == [3, 96, 96], "status() extras are merged in"
+
+
+def test_classify_reads_the_latest_frame_and_reports_the_margin(clf_service):
+    call(clf_service, "GET", "/trigger?seq=7")
+    status, doc = call(clf_service, "POST", "/classify", {})
+    assert status == 200
+    assert doc["seq"] == 7 and doc["model_name"] == "act-led-sim"
+    assert doc["label"] == "lit"
+    assert doc["scores"] == {"dark": -5.4, "lit": 5.9}
+    assert doc["margin"] == pytest.approx(11.3)
+    assert doc["confident"] is True
+    # The camera is uncropped: the model's sensor region is used as-is.
+    assert doc["region"] == [1040, 620, 160, 160]
+    assert clf_service.clf.region_seen == (1040, 620, 160, 160)
+
+
+def test_classify_is_hesitant_below_the_margin_but_still_answers(clf_service):
+    call(clf_service, "GET", "/trigger?seq=1")
+    _, doc = call(clf_service, "POST", "/classify", {"min_margin": 20})
+    assert doc["label"] == "lit" and doc["confident"] is False
+    status, doc = call(clf_service, "POST", "/classify", {"min_margin": -1})
+    assert status == ERROR_STATUS["value"]
+
+
+def test_classify_translates_the_region_into_a_cropped_frame(clf_service):
+    """A camera crop that contains the model's region shifts it; the frame's own
+    crop is the region when they coincide."""
+    call(clf_service, "GET", "/crop?x=1000&y=600&w=300&h=300")
+    call(clf_service, "GET", "/trigger?seq=1")
+    _, doc = call(clf_service, "POST", "/classify", {})
+    assert doc["region"] == [40, 20, 160, 160]
+    call(clf_service, "GET", "/crop?x=1040&y=620&w=160&h=160")
+    call(clf_service, "GET", "/trigger?seq=2")
+    _, doc = call(clf_service, "POST", "/classify", {})
+    assert doc["region"] == [0, 0, 160, 160]
+
+
+def test_classify_refuses_a_frame_that_does_not_contain_the_region(clf_service):
+    call(clf_service, "GET", "/crop?x=0&y=0&w=640&h=480")
+    call(clf_service, "GET", "/trigger?seq=1")
+    status, doc = call(clf_service, "POST", "/classify", {})
+    assert status == ERROR_STATUS["value"]
+    assert doc["error"]["type"] == "value"
+    assert "does not contain" in doc["error"]["message"]
+    assert clf_service.clf.calls == 0, "the model must not be asked about the wrong patch"
+
+
+def test_classify_without_a_classifier_is_a_capability_error(service):
+    call(service, "GET", "/trigger?seq=1")
+    status, doc = call(service, "POST", "/classify", {})
+    assert status == ERROR_STATUS["capability"]
+    assert doc["error"]["type"] == "capability"
+    _, health = call(service, "GET", "/health")
+    assert health["classifiers"] == []
+
+
+def test_classify_by_name_and_the_ambiguity_of_several():
+    from benchctrl.sim.vision import CannedClassifier
+
+    a = CannedClassifier(name="a", crop=None)
+    b = CannedClassifier({"dark": 2.0, "lit": -2.0}, name="b", crop=None)
+    svc = VisionService(SyntheticCamera(), None, {"a": a, "b": b}, version="test")
+    try:
+        call(svc, "GET", "/trigger?seq=1")
+        status, doc = call(svc, "POST", "/classify", {})
+        assert status == ERROR_STATUS["value"] and "name one" in doc["error"]["message"]
+        _, doc = call(svc, "POST", "/classify", {"name": "b"})
+        assert doc["label"] == "dark" and doc["region"] is None
+        status, doc = call(svc, "POST", "/classify", {"name": "zz"})
+        assert status == ERROR_STATUS["value"] and "zz" in doc["error"]["message"]
+        _, health = call(svc, "GET", "/health")
+        assert health["aipu"] is True, "classifiers alone are an AIPU present"
+    finally:
+        svc.close()
+
+
+def test_capture_can_classify_the_frame_it_returns(clf_service):
+    status, doc = call(
+        clf_service, "POST", "/capture", {"seq": 9, "classify": True, "min_margin": 1.0}
+    )
+    assert status == 200 and doc["seq"] == 9
+    assert doc["classification"]["seq"] == 9
+    assert doc["classification"]["label"] == "lit"
+    assert doc["detections"] is None
+    _, doc = call(clf_service, "POST", "/capture", {"seq": 10})
+    assert doc["classification"] is None
+    _, doc = call(clf_service, "GET", "/frame.json?classify=act-led-sim")
+    assert doc["classification"]["seq"] == 10
+
+
+def test_capture_with_an_unknown_classifier_fails_before_the_trigger(clf_service):
+    before = clf_service.camera.frame_id
+    status, doc = call(clf_service, "POST", "/capture", {"seq": 1, "classify": "nope"})
+    assert status == ERROR_STATUS["value"]
+    assert clf_service.camera.frame_id == before, "the camera fired for a result it cannot give"
+
+
+def test_classifier_region_is_pure_and_precise():
+    from benchctrl.vision.service import ServiceValueError, classifier_region
+
+    assert classifier_region(None, None, 1920, 1200) is None
+    assert classifier_region((10, 20, 30, 40), None, 1920, 1200) == (10, 20, 30, 40)
+    assert classifier_region((10, 20, 30, 40), (10, 20, 30, 40), 30, 40) == (0, 0, 30, 40)
+    assert classifier_region((10, 20, 30, 40), (5, 5, 100, 100), 100, 100) == (5, 15, 30, 40)
+    with pytest.raises(ServiceValueError):
+        classifier_region((10, 20, 30, 40), (5, 5, 30, 40), 30, 40)  # one pixel short
+    with pytest.raises(ServiceValueError):
+        classifier_region((10, 20, 30, 40), (20, 20, 100, 100), 100, 100)  # starts past it

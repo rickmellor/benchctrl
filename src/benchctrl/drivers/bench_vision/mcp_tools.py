@@ -24,7 +24,7 @@ import hashlib
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 log = logging.getLogger("benchctrl.drivers.bench_vision.mcp_tools")
 
@@ -129,6 +129,8 @@ def vision_trigger_capture(
     min_conf: float = 0.4,
     wait_s: float = 2.0,
     save_to: Optional[str] = None,
+    classify: Optional[str] = None,
+    min_margin: float = 3.0,
 ) -> dict:
     """Fire a software trigger tagged ``seq`` and return that exact frame.
 
@@ -141,11 +143,25 @@ def vision_trigger_capture(
     label, score and coordinates in the result under ``detections``). On a
     host with no AIPU that fails *before* the trigger fires.
 
+    ``classify`` names an indicator classifier the sidecar serves (or ``"*"``
+    for the only one loaded) and reads it off this same frame — the result's
+    ``classification`` carries label, logit margin and ``confident`` (margin
+    >= ``min_margin``). This is the seq-correlated way to read an LED against
+    a state benchctrl just commanded.
+
     Needs the writer claim in remote mode: a trigger changes camera state.
     Pass ``save_to`` to write the JPEG host-side; the result never carries
     image bytes.
     """
-    frame = _get_vision().trigger_capture(seq=seq, infer=infer, min_conf=min_conf, wait_s=wait_s)
+    want: Union[bool, str, None] = True if classify == "*" else classify
+    frame = _get_vision().trigger_capture(
+        seq=seq,
+        infer=infer,
+        min_conf=min_conf,
+        wait_s=wait_s,
+        classify=want,
+        min_margin=min_margin,
+    )
     return _frame_result(frame, save_to)
 
 
@@ -156,6 +172,22 @@ def vision_detect(min_conf: float = 0.4) -> dict:
     capability error on a host without an AIPU.
     """
     return _get_vision().detect(min_conf=min_conf).to_dict()
+
+
+def vision_classify(name: Optional[str] = None, min_margin: float = 3.0) -> dict:
+    """Read an indicator (an LED, a lamp) off the latest frame with a trained
+    classifier, without triggering a new frame.
+
+    ``name`` picks one of the classifiers listed by ``vision_status`` under
+    ``classifiers``; unset, the only one loaded is used. The result carries the
+    winning ``label``, the raw per-class ``scores`` (logits), the ``margin``
+    between the top two and ``confident`` (margin >= ``min_margin``) — a
+    hesitant read is returned, not hidden, so the caller can capture again.
+    Fails with a capability error where no classifier is loaded and a value
+    error when the camera's crop does not contain the region the model was
+    trained on (``vision_status`` shows that region as ``crop`` per classifier).
+    """
+    return _get_vision().classify(name=name, min_margin=min_margin).to_dict()
 
 
 def vision_set_exposure_us(exposure_us: float) -> dict:
@@ -197,6 +229,7 @@ _TOOLS = (
     vision_frame,
     vision_trigger_capture,
     vision_detect,
+    vision_classify,
     vision_set_exposure_us,
     vision_set_gain_db,
     vision_set_fps,

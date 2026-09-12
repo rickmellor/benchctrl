@@ -440,6 +440,8 @@ with BenchVision.open() as cam:            # $BENCHCTRL_VISION_URL or loopback :
     f = cam.trigger_capture(seq=42, infer=True)
     assert f.seq == 42                      # guaranteed, or it raised VisionCaptureError
     print([(d.label, d.score) for d in f.detections.items])
+    r = cam.trigger_capture(seq=43, classify=True).classification   # a trained indicator model
+    print(r.label, r.margin, r.confident)   # 'lit' 11.8 True — act only on confident reads
 ```
 
 Rules: **choose `seq` yourself** when correlating a capture with a commanded
@@ -452,6 +454,10 @@ states (PDU outlet / CP2112 line / host `sysfs_led`) with labels, then
 `python -m benchctrl.vision.labelloop spec.json out/ --sanity` on the bench
 box, or `vision_label_capture(spec, out_dir)` over MCP. Labels come from the
 commanded state; a wrong-`seq` frame is discarded; actuators are restored.
+Train + compile on scrub (`docs/vision.md` § Classifiers), ship with
+`deploy/vision/fetch-classifier.sh`, then `vision_classify()` /
+`vision_trigger_capture(classify="*")` read it; `vision_status()` lists
+`classifiers` with the sensor region each expects.
 
 ## Anti-patterns — don't do these
 

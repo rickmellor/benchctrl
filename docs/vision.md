@@ -110,14 +110,15 @@ benchctrl-agent --simulate --devices bench_vision       # or an agent serving a 
 | `read_status()` | read | `VisionStatus` — the `/status` document, typed |
 | `read_frame(*, wait_for=None, wait_s=5.0)` | read | `Frame`: latest, or the next after frame id `wait_for` |
 | `detect(*, min_conf=0.4)` | read | `Detections` on the latest frame; no trigger |
-| `trigger_capture(*, seq=None, infer=False, min_conf=0.4, wait_s=2.0)` | **write** | `Frame` carrying `seq` |
+| `classify(*, name=None, min_margin=3.0)` | read | `Classification` of the latest frame by a trained indicator model; no trigger |
+| `trigger_capture(*, seq=None, infer=False, min_conf=0.4, wait_s=2.0, classify=None, min_margin=3.0)` | **write** | `Frame` carrying `seq` (and its `classification` when `classify` is `True` or a name) |
 | `set_exposure_us(us)` / `set_gain_db(db)` / `set_fps(fps)` | **write** | the value the camera **read back** (clamped) |
 | `set_crop(x, y, w, h)` / `clear_crop()` | **write** | `Crop` / `None` |
 | `close()` | — | forgets the sidecar; changes nothing on the camera |
 
 Properties — `camera_model`, `camera_serial`, `frame_id`, `trigger_seq`, `crop`,
 `exposure_us`, `gain_db`, `fps`, `triggered`, `aipu_present`, `aipu_temp_c`,
-`model_name`, `stream_url`, `url`, `is_open` — all read from **one** cached
+`model_name`, `classifiers`, `stream_url`, `url`, `is_open` — all read from **one** cached
 `/status` (`STATUS_TTL_S = 0.2 s`). The agent piggybacks every property onto
 every response, so this is what keeps a remote call at one request rather than
 fifteen. A property never raises; it logs and reads `None`.
@@ -134,6 +135,10 @@ fifteen. A property never raises; it logs and reads `None`.
 - `Detections(frame_id, seq, model_name, infer_ms, items: tuple[Detection, ...])`,
   `Detection(class_id, label, score, x1, y1, x2, y2)` — coordinates are in
   frame pixels, i.e. after any crop.
+- `Classification(frame_id, seq, model_name, label, margin, confident, scores, infer_ms, region)`
+  — one indicator read: the winning `label`, the raw per-class logits in
+  `scores`, the `margin` between the top two, `confident` (margin ≥ the
+  `min_margin` asked for) and the `region` of *this frame* the model looked at.
 - `Crop(x, y, w, h)`, `VisionInfo`, `VisionStatus`.
 
 ### Exceptions
@@ -157,11 +162,12 @@ JSON everywhere except the two browser endpoints. Errors are
 | Route | Purpose |
 |---|---|
 | `GET /health` | `{ok, camera, aipu, version, api}` |
-| `GET /status` | `camera{model, serial, width, height, exposure_us, gain_db, fps, triggered, crop, frame_id, trigger_seq, dropped}`, `aipu{present, model_name, firmware, temp_c, cores, infer_ms_last}`, `sidecar{version, api, uptime_s}` |
+| `GET /status` | `camera{model, serial, width, height, exposure_us, gain_db, fps, triggered, crop, frame_id, trigger_seq, dropped}`, `aipu{present, model_name, firmware, temp_c, cores, infer_ms_last}`, `classifiers[{name, classes, crop, input, …}]`, `sidecar{version, api, uptime_s}` |
 | `GET /config`, `PUT /config` | `exposure_us`, `gain_db`, `fps`, `crop` — PUT returns values **read back** from the camera |
-| `POST /capture {seq, infer, min_conf, wait_s}` | trigger + wait + optional infer, one call; wrong-`seq` frame → `capture` error |
+| `POST /capture {seq, infer, min_conf, wait_s, classify, min_margin}` | trigger + wait + optional infer / classify, one call; wrong-`seq` frame → `capture` error |
 | `GET /frame.json?wait=<fid>&wait_s=` | latest frame (long-poll with `wait`); observer-safe |
 | `POST /detect {min_conf}` | infer on the latest frame; `capability` error without an AIPU |
+| `POST /classify {name, min_margin}` | read an indicator off the latest frame with a trained classifier (§ Classifiers); `capability` error with none loaded, `value` error when the camera crop misses the model's region |
 | `GET /trigger?seq=N` | fire a trigger (kept for the browser workflow) |
 | `GET /frame.jpg`, `GET /stream`, `GET /crop?x=&y=&w=&h=` / `?off` | for a human focusing the camera: raw JPEG, MJPEG, live ROI |
 
@@ -170,7 +176,8 @@ Error types → status: `value` 400, `not_found` 404, `capability` 409,
 
 `benchctrl-vision` flags: `--bind 127.0.0.1 --port 8095 --exposure-us --gain-db
 --fps --triggered|--free-run --model /models/yolov8n-coco.axm --aipu-cores 4
---no-aipu --jpeg-quality 80`.
+--classifier /models/led` (repeatable) `--classifier-cores 1 --no-aipu
+--jpeg-quality 80`.
 
 ## Watching the camera
 
@@ -229,6 +236,59 @@ the raw value per state and labels it; the truth is the label. First real
 dataset, 2026-09-12: 200 frames in 15 s, 100 per class, zero discards, sanity
 read separating the classes cleanly.
 
+## Classifiers — reading an indicator the label loop taught
+
+A *classifier* is the model the label loop's dataset trains: a small CNN that
+reads **one indicator from one fixed sensor region** and answers with a label
+from a closed set. The first one is the Pi's own `ACT` LED (`lit` / `dark`),
+trained 2026-09-12 on the 200-frame dataset above: 100 % on a held-out capture
+round the model never saw, with a logit margin above 10 on every frame, before
+and after INT8 quantization; ~0.3 ms on the Metis.
+
+```python
+with BenchVision.open() as cam:
+    print(cam.classifiers)                       # ['led']
+    f = cam.trigger_capture(seq=7, classify=True)  # the seq=7 frame, read on the way out
+    r = f.classification
+    print(r.label, r.margin, r.confident)        # lit 11.8 True
+    if not r.confident:                          # a hesitant read is returned, not hidden
+        ...                                      # capture again; never act on it
+    cam.classify(name="led", min_margin=5.0)     # the latest frame, no trigger (observer-safe)
+```
+
+What makes it portable: the model records the sensor **region** it was trained
+on (the label loop's `crop`), and the sidecar translates that region into
+whatever the camera currently delivers — a full frame for the dashboard, or a
+crop that contains it — and **refuses** (`VisionValueError`, "does not
+contain") a crop that misses it. So a classifier trained under one camera
+setup keeps working after someone clears the crop for the live stream, and
+never silently reads the wrong patch of the bench. Exposure and gain are the
+caller's to keep as they were at training time (the dataset manifest records
+them); a read under different lighting is what `margin` is for.
+
+`min_margin` is the gate from the metis board reader: the top logit must beat
+the runner-up by that much for `confident` to be true. Transition frames (an
+LED mid-fade, a blink caught halfway) score low. The default of 3 sits far
+below what settled frames measure; raise it for anything a run acts on, and
+require `N` consistent confident reads before trusting a transition.
+
+**Training one** (on scrub, in the `metis-devkit` container, never on the Pi —
+`~/repos/metis/experiments/vision/bench_led/`):
+
+```bash
+docker run --rm -v $PWD:/work -w /work/experiments/vision/bench_led metis-devkit:1.8.0 bash -lc '
+  python3 prep.py /work/datasets/<dataset> data.npz --size 96 &&   # frames -> npz, last round held out
+  python3 train.py data.npz --epochs 30 --out led &&               # -> led.onnx, led_calib.npy, led_classes.json
+  python3 compile.py --name led'                                   # PTQ + int8 holdout check -> compiled_led/
+```
+
+`compiled_led/` holds `model.json` (+ blobs) for the runtime and `classes.json`
+— classes in output order, `input` `[3, 96, 96]`, the `crop`, the dataset name
+and spec digest, holdout accuracy. Ship it with
+`deploy/vision/fetch-classifier.sh`, name it in `CLASSIFIERS=` in
+`/etc/benchctrl/vision.env`, restart the sidecar; `vision_status` then lists
+it under `classifiers`. Several can be served at once, by name.
+
 ## Tuning notes (from the metis R&D write-up)
 
 - **Exposure first.** Signal-to-noise beats frame rate for LED and indicator
@@ -250,8 +310,11 @@ about the things a driver could get wrong: no frame without a trigger in
 triggered mode, `seq` landing on the *next* frame only, `dropped` counting an
 early re-trigger, crops changing the reported dimensions, exposure/gain reading
 back clamped. `frame_bytes=200_000` pushes frames over the blob threshold;
-`aipu=False` models a camera-only host; `fail_next_trigger=True` makes one
-trigger fail. The JPEG is real (a 16×16 baseline JPEG padded with `COM`
+`aipu=False` models a camera-only host (no detector, no classifier);
+`fail_next_trigger=True` makes one trigger fail. A `CannedClassifier`
+(`act-led-sim`, `dark`/`lit`, region `(1040, 620, 160, 160)`) answers with
+fixed logits, so the region translation, the margin gate and the typed result
+run without a model. The JPEG is real (a 16×16 baseline JPEG padded with `COM`
 segments to any size — any decoder accepts it), and the `-SIM` suffix on the
 model name says what it is.
 

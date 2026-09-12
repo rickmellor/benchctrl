@@ -15,7 +15,7 @@ any concrete driver.
 ```
                            ┌──────────────────────────────────────────┐
                            │   MCP server  (benchctrl.mcp)            │
-                           │   317 tools — orchestrator that calls    │
+                           │   319 tools — orchestrator that calls    │
                            │   each driver's register_mcp_tools(mcp)  │
                            └──────────────────────────────────────────┘
                                           │
@@ -353,7 +353,7 @@ is `local` and behaviour is unchanged.
    host laptop                                    bench (e.g. Uno Q)
    ┌────────────────────────┐                     ┌──────────────────────────┐
    │ benchctrl.mcp          │                     │ benchctrl-agent          │
-   │   317 tools, unchanged │                     │   registry / dispatch    │
+   │   319 tools, unchanged │                     │   registry / dispatch    │
    │        │               │                     │   DeviceWorker per device│
    │        ▼               │                     │   SafetyGovernor         │
    │ session.resolve()      │   length-prefixed   │   RunManager             │

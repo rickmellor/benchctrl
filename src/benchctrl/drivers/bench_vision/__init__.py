@@ -22,11 +22,13 @@ and ``detect`` raises :py:class:`VisionCapabilityError`. See
 """
 
 from benchctrl.drivers.bench_vision.driver import (
+    DEFAULT_MIN_MARGIN,
     DEFAULT_URL,
     MAX_WAIT_S,
     STATUS_TTL_S,
     URL_ENV,
     BenchVision,
+    Classification,
     Crop,
     Detection,
     Detections,
@@ -43,11 +45,13 @@ from benchctrl.drivers.bench_vision.driver import (
 )
 
 __all__ = [
+    "DEFAULT_MIN_MARGIN",
     "DEFAULT_URL",
     "MAX_WAIT_S",
     "STATUS_TTL_S",
     "URL_ENV",
     "BenchVision",
+    "Classification",
     "Crop",
     "Detection",
     "Detections",

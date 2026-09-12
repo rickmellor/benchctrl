@@ -5,7 +5,7 @@ exposes your whole bench as tools any MCP-aware client (Claude Code,
 Claude Desktop, Cursor, custom agents) can call. Built on the official
 `mcp` Python SDK.
 
-**317 tools**, registered per driver:
+**319 tools**, registered per driver:
 
 | Source | Tools |
 |---|---|
@@ -16,9 +16,9 @@ Claude Desktop, Cursor, custom agents) can call. Built on the official
 | Siglent SDM4065A | 54 |
 | CyberPower PDU41002 | 15 |
 | Silicon Labs CP2112 | 10 |
-| Bench vision (camera + Metis) | 12 |
-| Cross-driver (battery, recording I/O, connection) | 13 |
-| **Total** | **317** |
+| Bench vision (camera + Metis) | 13 |
+| Cross-driver (battery, recording I/O, connection, vision label loop) | 14 |
+| **Total** | **319** |
 
 Each driver registers its own surface via `register_mcp_tools(mcp)`;
 `benchctrl.mcp` is the orchestrator that wires them together. A driver
@@ -156,7 +156,7 @@ their SDK methods, which are documented in [`drivers.md`](drivers.md):
 | `sdm4065a_*` | Siglent SDM4065A | 54 |
 | `pdu41002_*` | CyberPower PDU41002 | 15 |
 | `cp2112_*` | Silicon Labs CP2112 | 10 |
-| `vision_*` | Bench vision (camera + Metis NPU) | 12 |
+| `vision_*` | Bench vision (camera + Metis NPU) | 13 |
 
 The DP2031 set is the large one, covering source/measure, protection,
 IEEE 488.2 status, channel pairing and tracking, the Arb timer
@@ -175,6 +175,8 @@ The `vision_*` set never returns image bytes — a JPEG in a tool result
 lands in the transcript — so `vision_frame` and `vision_trigger_capture`
 take `save_to` and return the path, size and SHA-256 with the metadata.
 `vision_trigger_capture(seq=N)` returns *the* frame tagged `N` or fails;
+`vision_classify` (and `classify=` on the capture) reads an indicator with a
+trained model and reports its logit margin rather than hiding a hesitant read;
 see [`vision.md`](vision.md).
 
 The `pdu41002_*` set is the one to read the docstrings of before
