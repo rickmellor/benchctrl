@@ -14,8 +14,11 @@ duck type the router expects (``present``, ``model_name``, ``infer(record,
 min_conf)``, ``status()``) and a best-effort board temperature.
 
 The AIPU temperature is read by shelling out to ``axcmd --board-temp`` (the
-runtime's Python API exposes no thermal call we know of), cached for a few
-seconds, and reported as ``None`` on any failure — never estimated. Firmware
+runtime's Python API exposes no thermal call we know of) on a background
+thread every few seconds, because the call takes seconds on a Pi and a status
+request — which the agent piggybacks onto every response — must never wait on
+it. Reported as ``None`` until the first read lands or on any failure; never
+estimated. Firmware
 1.8.0 restored the chip's own thermal management (HW throttle at 105 °C);
 on the 1.3.0 firmware the card hard-hung under load, so ``firmware`` in
 ``status()`` is worth a glance before trusting a soak.
@@ -46,8 +49,9 @@ log = logging.getLogger("benchctrl.vision.detector")
 #: Model input edge, pixels. yolov8n-coco is compiled for 640x640.
 SIZE = 640
 
-#: How long one ``axcmd --board-temp`` answer is reused.
-TEMP_TTL_S = 5.0
+#: How often the background thread re-reads ``axcmd --board-temp``. The read
+#: takes seconds (it attaches to the runtime), so it never runs on a request.
+TEMP_REFRESH_S = 10.0
 
 
 class YoloMetisDetector:
@@ -77,7 +81,10 @@ class YoloMetisDetector:
         self.present = True
         self.infer_ms_last: Optional[float] = None
         self.firmware = _firmware_version()
-        self._temp: tuple[float, Optional[float]] = (0.0, None)
+        self._temp_c: Optional[float] = None
+        self._stop = threading.Event()
+        self._temp_thread = threading.Thread(target=self._temp_loop, name="metis-temp", daemon=True)
+        self._temp_thread.start()
         log.info(
             "detector: %s on %d AIPU cores (firmware %s)",
             self.model_name,
@@ -122,15 +129,17 @@ class YoloMetisDetector:
 
     @property
     def temp_c(self) -> Optional[float]:
-        at, value = self._temp
-        if time.monotonic() - at < TEMP_TTL_S:
-            return value
-        value = _board_temp_c()
-        self._temp = (time.monotonic(), value)
-        return value
+        """The last temperature the background thread read; None until it has."""
+        return self._temp_c
+
+    def _temp_loop(self) -> None:
+        while not self._stop.is_set():
+            self._temp_c = _board_temp_c()
+            self._stop.wait(TEMP_REFRESH_S)
 
     def close(self) -> None:
         self.present = False
+        self._stop.set()
         for obj in (self.inst, self.conn, self.model, self.ctx):
             with contextlib.suppress(Exception):
                 obj.release()
@@ -193,7 +202,7 @@ class YoloMetisDetector:
 # ---------------------------------------------------------------- helpers
 
 
-def _run(args: list[str], timeout: float = 5.0) -> Optional[str]:
+def _run(args: list[str], timeout: float = 20.0) -> Optional[str]:
     try:
         out = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
