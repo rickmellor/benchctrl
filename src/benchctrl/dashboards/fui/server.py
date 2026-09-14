@@ -47,12 +47,13 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlsplit
 
 from benchctrl.config import EndpointConfig
 from benchctrl.dashboards.feed import AgentFeed
 from benchctrl.dashboards.fui.view import build_view
+from benchctrl.dashboards.hostnet import LanProbe
 
 log = logging.getLogger("benchctrl.dashboards.fui")
 
@@ -100,8 +101,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_view(self) -> None:
         feed: AgentFeed = self.server.feed  # type: ignore[attr-defined]
+        lan = self.server.lan  # type: ignore[attr-defined]
         try:
-            view = build_view(feed.snapshot(), feed.bench)
+            view = build_view(feed.snapshot(), feed.bench, lan=lan)
         except Exception:  # noqa: BLE001
             # A renderer that gets no answer shows its own stale banner, which
             # is the honest outcome; inventing a view here would not be.
@@ -221,13 +223,19 @@ class FuiServer:
         port: int = 8600,
         feed: Optional[AgentFeed] = None,
         vision_url: Optional[str] = None,
+        lan: Optional[Callable[[], dict]] = None,
     ) -> None:
         self.feed = feed or AgentFeed(endpoint)
         self.vision_url = vision_url or os.environ.get("BENCHCTRL_VISION_URL") or DEFAULT_VISION_URL
+        # Cached, because a view is built per request and the board's address
+        # changes about never. Injectable so a test can drive the panel's four
+        # LAN states without a network.
+        self.lan = lan or LanProbe()
         self._httpd = ThreadingHTTPServer((host, port), _Handler)
         self._httpd.daemon_threads = True
         self._httpd.feed = self.feed  # type: ignore[attr-defined]
         self._httpd.vision_url = self.vision_url  # type: ignore[attr-defined]
+        self._httpd.lan = self.lan  # type: ignore[attr-defined]
         self._thread: Optional[threading.Thread] = None
 
     @property

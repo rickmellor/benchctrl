@@ -904,6 +904,8 @@ function render(v) {
   $('agent-state').textContent = v.connected ? 'LINKED' : 'NO LINK';
   $('agent-state').className = v.connected ? 'ok' : 'bad';
 
+  renderLan(v.lan);
+
   $('sys-verdict').textContent = v.connected ? (v.trustworthy ? 'OK' : 'DEGRADED') : 'NO LINK';
   $('sys-link').textContent = v.connected ? 'LINKED' : 'NO LINK';
   $('sys-link').className = 'v' + (v.connected ? '' : ' bad');
@@ -1121,6 +1123,39 @@ function dutLabel(v) {
   if (!v.connected) return 'NO LINK';
   if (!v.dut_known) return 'NO RUN';
   return v.dut || 'UNSPECIFIED';
+}
+
+/* The host's own LAN identity. The only rows on the panel that are not bench
+ * data: they describe the machine serving this page.
+ *
+ * Note what is deliberately absent — there is no branch that falls back to a
+ * remembered address. The address shown is the one in this frame's payload or
+ * the row says why there isn't one, because a stale IP on a bench display is
+ * actively misleading in a way a blank one is not: it sends an operator to ssh
+ * at a host that has stopped being the bench.
+ *
+ * The interface name rides along with the state rather than getting its own row.
+ * It is what you need once something is already wrong ("eth0 or wlan0?") and a
+ * fourth row of chrome in the pane that carries the arm state is not worth it. */
+function renderLan(lan) {
+  const l = lan || { state: 'UNKNOWN', ip: '', iface: '', hostname: '' };
+  const ok = l.state === 'LAN' && !!l.ip;
+
+  const state = $('sys-lan');
+  state.textContent = l.iface ? `${l.state} · ${l.iface}` : l.state;
+  /* UNKNOWN is amber, not red. A probe that could not answer is a different
+   * thing from a cable that is out, and colouring them alike would train an
+   * operator to read the pane's only red row as "the display is being odd". */
+  state.className = 'v' + (ok ? '' : (l.state === 'UNKNOWN' ? ' warn' : ' bad'));
+
+  const ip = $('sys-ip');
+  ip.textContent = ok ? l.ip : l.state;
+  ip.className = 'v' + (ok ? ' addr' : ' bad');
+
+  /* The hostname is the durable half of the identity: it survives the DHCP lease
+   * the address does not, so it is what belongs in an ssh config. Shown plainly
+   * with no state styling, because unlike the address it cannot go stale. */
+  $('sys-host').textContent = l.hostname || '–';
 }
 
 /* The curtain. When the page cannot reach its own server, the numbers on screen

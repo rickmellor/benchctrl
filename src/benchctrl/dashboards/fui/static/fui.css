@@ -264,6 +264,12 @@ header {
 .kv .v { color: var(--teal); }
 .kv .v.bad { color: var(--red); text-shadow: var(--glow-red); }
 .kv .v.warn { color: var(--amber); }
+/* The board's address is read from across the bench, by someone about to type it
+   into a terminal — so it gets tabular figures (an IP is compared digit by digit,
+   and proportional digits make 1 and 7 argue) and slightly more weight than the
+   rows around it. Not a full readout treatment: it must not outrank the arm
+   state two panels down. */
+.kv .v.addr { font-variant-numeric: tabular-nums; letter-spacing: 0.04em; color: var(--ink); }
 
 /* Newest event at the top: on a wall panel nobody scrolls, so the most recent
    thing has to be where the eye lands, not at the bottom of a tall pane. */

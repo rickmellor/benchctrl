@@ -61,8 +61,9 @@ global banner is not enough when the numbers themselves are what gets believed.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
+from benchctrl.dashboards.hostnet import LAN_UNKNOWN
 from benchctrl.dashboards.state import BenchStatus
 
 #: What a readout says when there is no measurement behind it. A single literal,
@@ -1035,13 +1036,58 @@ def _screen_state(raw: object) -> dict:
     }
 
 
-def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
+#: The LAN block when there is no probe, or the probe did not answer. A shape
+#: rather than an absent key, so the renderer has one path and not two.
+LAN_NO_READING = {"state": LAN_UNKNOWN, "ip": "", "iface": "", "hostname": ""}
+
+
+def _lan_block(lan: Optional[Callable[[], dict]]) -> dict:
+    """The host-network block, or an honest unknown.
+
+    Wrapped in a catch-all because this is the one field sourced from the OS
+    rather than the snapshot: a board mid-reconfiguration can have
+    ``/sys/class/net`` entries vanish between two reads. That is a missing
+    address, not a reason for the panel to lose the arm state — so the failure is
+    contained to this block, which then says it does not know.
+    """
+    if lan is None:
+        return dict(LAN_NO_READING)
+    try:
+        block = lan()
+    except Exception:  # noqa: BLE001 - see docstring: never take the view down
+        return dict(LAN_NO_READING)
+    if not isinstance(block, dict) or "state" not in block:
+        return dict(LAN_NO_READING)
+    # Normalised here rather than trusted, for the same reason every map off the
+    # wire is: the renderer prints these directly onto a bench display.
+    return {
+        "state": str(block.get("state") or LAN_UNKNOWN),
+        "ip": str(block.get("ip") or ""),
+        "iface": str(block.get("iface") or ""),
+        "hostname": str(block.get("hostname") or ""),
+    }
+
+
+def build_view(
+    snap: dict,
+    status: Optional[BenchStatus] = None,
+    *,
+    lan: Optional[Callable[[], dict]] = None,
+) -> dict:
     """Turn a :py:meth:`AgentFeed.snapshot` dict into the FUI's view model.
 
     Takes the flat snapshot rather than the live model so it inherits the
     snapshot's atomicity — the renderer must never see a frame stitched from
     two different instants. ``status`` is optional and used only for the event
     log, which the flat snapshot does not carry.
+
+    ``lan`` is the one input that is not bench data: a callable returning this
+    *host's* network identity (see :py:mod:`benchctrl.dashboards.hostnet`).
+    Injected rather than called directly because it touches a socket and this
+    module's contract is that it does not — so every caller in a test gets a
+    view built from data alone. Omitted, the LAN block reports
+    :py:data:`~benchctrl.dashboards.hostnet.LAN_UNKNOWN`, which is the truth
+    about a view nobody gave a probe to.
     """
     trustworthy = bool(snap["trustworthy"])
     devices = snap["devices"]
@@ -1146,6 +1192,14 @@ def build_view(snap: dict, status: Optional[BenchStatus] = None) -> dict:
     return {
         "headline": snap["headline"],
         "severity": snap["severity"],
+        # This host's own LAN identity, not the bench's. The board is headless on
+        # DHCP, so when its address moves every remote route to it breaks at once
+        # and this screen is the only place the new one exists.
+        #
+        # A probe that raises costs the panel its address and nothing else: the
+        # LAN readout is the least safety-relevant thing here, and taking the
+        # whole view down with it would blank the arm state — which is the most.
+        "lan": _lan_block(lan),
         "connected": bool(snap["connected"]),
         "starting": bool(snap.get("starting")),
         "trustworthy": trustworthy,
