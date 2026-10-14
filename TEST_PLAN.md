@@ -12,8 +12,8 @@ tiers:
   when the device isn't present.
 
 ```bash
-pytest -m "not hardware"     # 1333 collected, ~10 min, no hardware
-pytest -m hardware           # 173, needs the bench
+pytest -m "not hardware"     # 2316 collected, ~22 min, no hardware
+pytest -m hardware           # 201, needs the bench
 pytest                       # both
 ```
 
@@ -93,6 +93,11 @@ than "a number arrived".
 | `test_bench_siglent_sdm4065a.py` | the SDM4065A's measurement surface *and its traps*: that `MEASure?` discards a null, that the naive value-then-state null ordering genuinely fails, that a 4-wire read resolves a 38 mΩ offset a 2-wire read cannot, and that the 2 MΩ range is rejected because it belongs to the SDM4055A |
 | `test_remote_sdm4065a.py` | the same driver through the full remote stack — proxy, wire protocol, agent dispatch, production driver, pyvisa, pty, simulator. Only the silicon is fake. Catches the registry entries and codec/exception round-trips that local tests cannot see |
 | `test_cross_validate_sdm4065a_qr10x.py` | 8 of its 15 tests need no hardware at all: they **pin the tolerance budgets** derived from the two datasheets — that the range term dominates at low resistance, that only the meter (not the two-instrument comparison) resolves the 38 mΩ offset, that a null buys back the 2-wire lead term, and that the budget is a linear sum rather than a quadrature sum. A tolerance cannot be quietly loosened to make a bench run pass |
+| `test_bench_cyberpower_pdu41002.py` | 149 tests over the CLI engine both links share: the three error shapes, reading to the prompt rather than to a blank line, the conditional command echo that differs between serial and SSH, `menumode` unreachable, and that a password appears in neither `repr()` nor `to_dict()` |
+| `test_remote_cyberpower_pdu41002.py` | the PDU through the full remote stack, one test per registration site |
+| `test_usbfs_adu218.py` | 61 tests on the USB layer alone, with no device: that the ioctl numbers are **computed** from `sizeof(struct usbdevfs_bulktransfer)` rather than hardcoded (a literal that works on a 64-bit laptop is wrong on the 32-bit board), that the eight-byte report framing is exact, and that a desync is detected rather than returned |
+| `test_bench_adu218.py` | 96 tests against the simulator, whose link **is** the production link. The load-bearing ones are about *silence*: that a write-only command is not waited on, that a command outside the whitelist never reaches the wire, and that the argument check and the whitelist are distinguishable even though both raise `ADU218ValueError`. Plus the watchdog ladder against a synthetic clock, and that `reset_relays()` verifies it actually reached the safe state |
+| `test_remote_ontrak_adu218.py` | the ADU218 through the remote stack, including that every relay-switching method lands in `surface.mutators` — the guard on the naming decision, since `agent/dispatch.py` derives mutators from name prefixes alone and a miss would make mains-adjacent switching callable without a writer claim |
 
 ### The local / remote / sim seam
 
@@ -145,6 +150,8 @@ connected to the output terminals unless the test says otherwise.
 | `test_bench_rigol_dp2031.py` | DP2031 | OVP trip + clear on CH3, multi-channel setpoint round-trip, tracking and pair state, `program_timer` + readback via the IEEE 488.2 block parser, screenshot BMP capture |
 | `test_bench_siglent_sdm4065a.py` | SDM4065A | the manual's quirks proven on silicon rather than against my own simulator: `CONFigure` resetting NPLC to 10 *and* re-enabling autorange, `NULL:STATe` arming `NULL:VALue:AUTO`, that writing a value does **not** disarm AUTO as §7.4.3 claims, that the two `DEF` forms disagree about autoranging, and that autozero answers to `ZERO:AUTO` rather than the manual's `AZ`. Plus all six 4065A NPLC values and every resistance range read back to catch silent coercion, the 2 MΩ range rejected as the sibling model's, the overload sentinel raising, and a 100 NPLC × 10-sample read finishing inside `reading_timeout_ms` |
 | `test_cross_validate_sdm4065a_qr10x.py` | SDM4065A **+** QR10x | the meter and the programmable resistance measuring the same physical ohms. Catches errors no single-instrument test can see — units, range scaling, swapped 2-/4-wire, a null with the wrong sign. Tolerances are derived from both datasheets in-file and pinned by hardware-free tests, and the file is explicit that this resolves *gross* errors only: the QR10x's ±0.05% dominates, so the agreement budget (~0.07 Ω at 100 Ω) is wider than the 38 mΩ offset the meter alone can see. The lead-resistance test escapes that limit by differencing 2-wire against 4-wire on the *same* meter, which cancels the QR10x term — that is how it can report 78.9 mΩ meaningfully |
+| `test_hardware_cyberpower_pdu41002.py` | PDU41002 | the CLI over both transports against the real device, including the cross-check that only real hardware can do: switch an outlet over SSH, read it back over serial |
+| `test_hardware_ontrak_adu218.py` | ADU218 **+** SDM4065A | the only set that uses a second instrument as a **witness**. The ADU218's writes are unacknowledged, so `set_relay_state()` confirms by re-reading the same device — self-consistent by construction, and blind to a driver whose read-back is secretly its own commanded value. The DMM across relay K0 is not the ADU218 talking about itself: a closed contact reads a number, an open one raises the `9.9E37` overload sentinel, and no amount of probe-contact drift can confuse those two. No resistance *threshold* is asserted (the same closed relay measured 6.14–10.69 Ω across sessions, all of it probe seating) — only that shape. Proved able to fail: patching `set_relay_state` to return its own argument without touching the device fails 3 of the 6 |
 | `test_mcp_hw.py` | bench | MCP tools against real devices |
 
 ### SDM4065A — last hardware run

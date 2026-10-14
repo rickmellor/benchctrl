@@ -1,0 +1,41 @@
+ADU218 relay K0 switching transcript, with an independent witness
+================================================================
+Device: Ontrak ADU218, USB 0a07:00da, node /dev/bus/usb/001/015
+Witness: SDM4065A s/n SDM46A0CA00021 fw 0.0.0.20
+Wiring: K0 load side -> DMM input leads. Nothing else attached.
+Settle: 0.5 s after each command, covering SSR turn-on plus DMM
+        integration time.
+
+Three independent readings per transition: the relay's own bit
+(RPK0), the whole port (PK), and the DMM. The DMM is the only one
+of the three that is not the device reporting on itself.
+
+initial: PK=000 RPK0=0 WD=0 DB=1
+
+===== CYCLE 1 =====
+-- commanding K0 CLOSED (SK0) --
+   ADU218 reports  RPK0=1  PK=001
+   DMM measures    6.1398 ohm
+-- commanding K0 OPEN (RK0) --
+   ADU218 reports  RPK0=0  PK=000
+   DMM measures    OPEN (9.9E37 overload sentinel)
+
+===== CYCLE 2 =====
+-- commanding K0 CLOSED (SK0) --
+   ADU218 reports  RPK0=1  PK=001
+   DMM measures    6.1395 ohm
+-- commanding K0 OPEN (RK0) --
+   ADU218 reports  RPK0=0  PK=000
+   DMM measures    OPEN (9.9E37 overload sentinel)
+
+===== SUMMARY =====
+  cycle1 commanded=closed RPK0=1 PK=001 DMM=6.1398 ohm               adu_self_consistent=True
+  cycle1 commanded=open   RPK0=0 PK=000 DMM=OPEN(inf)                adu_self_consistent=True
+  cycle2 commanded=closed RPK0=1 PK=001 DMM=6.1395 ohm               adu_self_consistent=True
+  cycle2 commanded=open   RPK0=0 PK=000 DMM=OPEN(inf)                adu_self_consistent=True
+
+The open state raises an overload rather than returning a number,
+so open-vs-closed discrimination needs no threshold at all: the
+margin between ~6 ohm and the overload sentinel is effectively
+infinite. A driver should treat the DMM's overload as 'open', not
+compare against a resistance limit.

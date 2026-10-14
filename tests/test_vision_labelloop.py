@@ -449,3 +449,30 @@ def test_an_sdg_read_back_that_disagrees_with_the_request_is_what_gets_recorded(
         "the manifest must carry what the generator reported, not what was asked"
     )
     assert ("set", 1, True) in gen.calls
+
+
+def test_the_mcp_tool_hands_an_open_generator_to_the_loop(bench, monkeypatch, tmp_path):
+    """``vision_label_capture`` wired the PDU and CP2112 but not the SDG1032X, so
+    a spec naming the generator was refused as "not open" even after
+    ``sdg1032x_open``. Drives the tool, not ``run_label_capture``: the loop
+    itself was always right, which is why its tests could not see this."""
+    from benchctrl.drivers.bench_vision import mcp_tools as vision_tools
+    from benchctrl.drivers.siglent_sdg1032x import mcp_tools as sdg_tools
+
+    vision, _, _ = bench
+    gen = FakeGenerator({1: False, 2: False})
+    monkeypatch.setattr(vision_tools, "_vision", vision)
+    monkeypatch.setattr(sdg_tools, "_sdg1032x", gen)
+
+    raw = {
+        "name": "t",
+        "states": [SDG_ON, SDG_OFF],
+        "frames_per_state": 2,
+        "rounds": 1,
+        "settle_s": 0,
+    }
+    summary = vision_tools.vision_label_capture(raw, str(tmp_path / "ds"))
+
+    assert summary["counts"] == {"driven": 2, "idle": 2}, summary
+    assert ("set", 1, True) in gen.calls, "the generator was never commanded"
+    assert gen.enabled[1] is False, "as-found OFF not restored"

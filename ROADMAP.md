@@ -214,6 +214,161 @@ binds a model to one region today).
 
 ## Foundation hardening
 
+### Apply the disconnect grace, or stop promising it
+
+**Status**: `KNOWN_LIMITATIONS.md § N-9`, with the measurement.
+`SafetyGovernor.grace_for_disconnect()` returns 3 s when armed, has one call
+site repo-wide, and that site is a `log.warning` argument. Nothing consumes the
+value, nothing on the disconnect path touches `_last_contact`, and
+`TripReason.CLIENT_DISCONNECT` is raised nowhere — so the real delay is the
+full remaining deadman window. Measured at **6.45 s with `deadman_s=6` and
+12.46 s with `deadman_s=12`**, against a logged promise of "≤ 3s" in both
+cases. At the shipped default of 15 s the message understates it fivefold.
+
+**Why it matters more than the number**: an operator reads that line at the
+moment a client holding a live output died, and decides from it whether to walk
+to the bench.
+
+**Scope when picked up**, one of two, and the choice is the work:
+1. **Apply it** — back-date `_last_contact` on disconnect so the grace really
+   is the window, and trip with `TripReason.CLIENT_DISCONNECT`, which is what
+   that enum member exists for. Shortens a safety delay, so it needs a timing
+   assertion: every "did it reach safe state" assertion passes on both the old
+   and new behaviour, which is exactly how this shipped.
+2. **Delete it** — drop `grace_for_disconnect()` and log
+   `max(0, deadman_s - seconds_since_contact)`, the honest figure.
+
+Option 1 is better behaviour and option 2 is a smaller change; either is
+strictly better than a promise wired to nothing.
+
+**Why deferred**: found while documenting the CLI, and it is agent-side safety
+behaviour. Changing when the bench goes safe does not belong in a CLI commit.
+
+### Close the writer-claim escapes in `agent/dispatch.py`
+
+**Status**: found while building the CLI's authorisation table, and it is an
+*agent*-side gap rather than a CLI one. `dispatch.py` derives
+`DeviceSurface.mutators` from a bare list of name prefixes with no
+driver-declared override, so a method that changes the instrument but happens
+not to start with `set_`/`reset`/`clear_`/`trigger` is **remotely callable
+without holding the writer claim**. Measured against the CLI's explicit
+classification, which is the independent second opinion this needs:
+
+| device | escapes | of which tier 1 |
+|---|---|---|
+| `rigol_dp2031` | 17 | `delete_file`, `install_license`, `load_file`, `recall_state` |
+| `siglent_sdm4065a` | 8 | `write`, `query` |
+| `rigol_dl3031a` | 3 | `transient_enable` |
+
+28 in total; the Arc, QR10x, PDU, CP2112 and ADU218 have none, because their
+naming was chosen with this constraint already in view (see the note in
+`cyberpower_pdu41002/driver.py` on why there is no `outlet_on`).
+
+**The worst two are `write` and `query`** on all three SCPI drivers
+(`siglent_sdm4065a/driver.py:479,488`, `rigol_dl3031a/driver.py:265,277`,
+`rigol_dp2031/driver.py:296,310`). They are arbitrary-command escape hatches —
+anything the instrument accepts, including `*RST` and an output enable — and
+`is_mutator("write")` is `False`, so a read-only observer can send them. Only
+the SDM4065A exposes them as MCP tools today, which is why the other two do not
+appear in the table above; the driver methods are equally reachable over the
+wire.
+
+**Why the CLI did not just reuse the predicate**: it is wrong in both
+directions. `take_snapshot` matches the prefix list and only samples, while
+`step_voltage_up` moves a live output and matches nothing. `cli_tiers.py`
+classifies all 406 tools explicitly instead, and a test asserts `is_mutator`
+still disagrees — so this entry has a tripwire, not just a note.
+
+**Scope when picked up**:
+1. Give drivers a declarative way to mark a method as a mutator — a decorator
+   or a class-level tuple — so the answer comes from the driver rather than from
+   its spelling. Adding prefixes to `_MUTATOR_PREFIXES` is not the fix: adding
+   `outlet_` would capture `outlet_state()` and make *reads* require a claim.
+2. Cross-check the result against `cli_tiers.py` in a test, so the two
+   classifications cannot drift. This is the cheap part and the valuable part.
+3. Mutation-test the change: reverting any single method to non-mutator must
+   fail a test.
+4. Exact-equality mutator tests on the three oldest drivers, which is where
+   the naming predates the constraint.
+
+**Why deferred**: it needs its own commit and its own mutation evidence, and it
+touches the wire-level authorisation of three instruments — not something to
+fold into a CLI change. Nothing is newly exposed by the CLI, which gates all 28
+locally regardless of what the agent thinks.
+
+### Make the CI matrix meaningful again
+
+**Status**: every GitHub Actions run on `master` has failed for at least the
+last eight commits, from four unrelated pre-existing causes. Recorded in
+[`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) § N-7 with the module table. They
+are independent, which is the reason none has been fixed: clearing any one
+leaves the matrix red, so no single piece of work is visibly worth doing.
+
+**Why it matters more than it looks.** The cost is not the red mark — it is that
+a red matrix carries no information, so a *genuine* regression would be
+invisible among failures everyone has learned to skip. Right now comparing a
+branch against `master` requires diffing collection errors module by module.
+
+**Scope when picked up**, four separable pieces — and they must be done together
+to produce any signal at all:
+
+- **Windows collection.** Five modules import POSIX-only stdlib at module
+  scope — `sim/loopback.py`, `transports/ptybridge.py`,
+  `drivers/cyberpower_pdu41002/links.py`, `drivers/silabs_cp2112/hidraw.py`,
+  `drivers/ontrak_adu218/usbfs.py`. The imports are load-bearing (real ptys,
+  real USBDEVFS/hidraw ioctls), so the fix is **not** to make them optional —
+  it is to decide what Windows CI is *for*. Cheapest honest answer: drop
+  `windows-latest` from the matrix, since every device on this bench hangs off a
+  Linux host and no Windows target exists. If Windows must stay, the modules
+  need platform guards *and* their tests need `skipif`, which is more surface to
+  maintain than the coverage is worth.
+- **The ruff baseline.** 1198 findings on `master` at CI's scope under ruff
+  0.16.3, far newer than the config was written for. It is concentrated enough to
+  be tractable: 538 are `UP045` (`Optional[X]` → `X | None`) and 315 are `F401`,
+  so ~71% is two mechanical rules, and `--fix` handles a large share. `UP045` is
+  safe to apply *despite* `target-version = "py39"` — it fires because 83 of the
+  100 modules in `src/` carry `from __future__ import annotations`, which is what
+  makes `X | None` legal in an annotation on 3.9, and ruff will not offer the fix
+  where it is not. So this piece is genuinely independent of the 3.9 decision
+  below. The alternative is to pin ruff to the version the config assumes and
+  defer the sweep. Until it is
+  cleared, lint claims must compare rule *codes* against a `master` worktree at
+  the same scope, never counts: the same tree gives 1105 / 1197 / 1198 / 1262
+  depending on which directories are passed.
+- **The 3.9 `Install` step**, which fails before ruff or pytest is reached, so that
+  row tests nothing at all. The cause is a **packaging** contradiction rather than
+  a code defect: `pyproject.toml` declares `requires-python = ">=3.9"`, but the
+  `[mcp]` extra pins `mcp>=1.0,<2` and `mcp` itself requires `>=3.10`, so pip
+  reports `Could not find a version that satisfies the requirement mcp<2,>=1.0
+  (extra == "mcp")` and stops. The 3.9 promise has therefore never been
+  installable with extras. Two honest resolutions, and it is a maintainer call
+  which: raise `requires-python` to `>=3.10` and drop 3.9 from the matrix, or make
+  `mcp` conditional (`mcp>=1.0,<2; python_version >= "3.10"`) and accept that on
+  3.9 the MCP server is simply absent. Whichever is chosen, the *claim* in
+  `pyproject.toml` and the matrix row should agree — today they do not. Note the
+  tooling has already half-decided: `[tool.ruff] target-version = "py39"` but
+  `[tool.mypy] python_version = "3.10"`, so the two linters are checking against
+  different language levels. Settle all three in one edit.
+- **The Ubuntu rows need a VISA backend, and a comment in the workflow says they
+  don't.** `1 failed, 2114 passed, 6 skipped, 111 errors` on `master`, every
+  error one cause: `Could not locate a VISA implementation. Install either the
+  IVI binary or pyvisa-py.` The install step already fetches `[bench-visa]` and
+  then explains why it stops there — *"Hardware-free tests use mock objects; we
+  install `[bench-visa]` for the pyvisa Python module but don't install a VISA
+  backend, which the mocks don't need."* That assumption is **false**, and the
+  errors say where: they land on `tests/test_sim_loopback.py`, i.e. the
+  simulator tests, which construct a real driver and so reach `ResourceManager()`
+  before any mock intervenes. So this is a stale comment rather than a forgotten
+  line, and `pyvisa-py` is declared in **no** extra in `pyproject.toml` — § N-5
+  documents it as something the operator installs by hand. Two ways out: add
+  `pyvisa-py` to the CI install, or give the sim tests a backend-free path so the
+  comment becomes true. Cheapest of the four by a wide margin and the only one
+  that turns a currently-red row *green*, so it is the sensible place to start.
+
+Deliberately **not** bundled into a driver PR: it touches four drivers, the lint
+config, the packaging metadata and the workflow, and would dwarf the diff of
+whichever driver happened to notice it.
+
 ### Strict mypy
 
 **Status**: `mypy src` runs with `check_untyped_defs = true` but not
@@ -246,6 +401,35 @@ it was: it is validation, not design.
    answer may be that cross-machine sync needs a hardware trigger line
 4. Acquire a second Arc / Arc Pro and validate
 5. End-to-end demo: synchronized capture on 2+ devices
+
+### Retire the ten legacy Arc CLI commands
+
+**Status**: `benchctrl discover|info|set-voltage|set-output|set-range|
+set-current-limit|set-exp-voltage|set-gpo|capture|stream` predate the generated
+subcommands and are hand-written and Arc-only. They open the Arc directly, so
+`--sim` and `--remote` do **not** apply to them and neither does the `--yes`
+authorisation model — `benchctrl set-voltage 3.3` needs no flag while
+`benchctrl arc set-voltage 3.3` runs through the tier table. Two commands, same
+instrument, different rules.
+
+**Why deferred**: they are documented in `docs/getting_started.md` as the CLI
+since v0.1, and removing them is a breaking change for anyone's shell scripts
+with no deprecation cycle behind it. Not urgent, because the overlap is
+confusing rather than dangerous — the legacy path is Arc-only, and the Arc is
+not a switching device.
+
+**Scope when picked up**:
+1. Emit a deprecation notice on stderr naming the `benchctrl arc …` equivalent
+2. Keep them working for one release after that
+3. Remove, and fold `--port` handling into the generated open path
+4. `capture` maps cleanly onto `arc record`, which is synchronous and takes a
+   `--save-path` with the same extension detection. `stream` does **not** map
+   onto anything: it prints samples continuously for the life of the process,
+   and the generated surface offers only `live` (next sample) and
+   `take-snapshot` (a brief drained window). Either `stream` stays, or a
+   streaming tool is added — but a tool that never returns is a poor fit for
+   the MCP surface the subcommands are generated from, which is the real
+   reason it has no equivalent
 
 ### Project save/load
 

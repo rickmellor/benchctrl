@@ -135,13 +135,19 @@ def test_the_opener_does_not_route_through_autoserial():
     them switches mains. The PDU is opened by explicit path only.
     """
     import inspect
+    import re
 
     from benchctrl.agent import registry as registry_module
 
     source = inspect.getsource(registry_module.build_default_registry)
-    pdu_opener = source[source.index("def _pdu("):]
-    pdu_opener = pdu_opener[: pdu_opener.index("openers = {")]
-    assert "autoserial" not in pdu_opener.replace("# ", "").split("return")[1]
+    # Bound the slice at the *next* opener, not at ``openers = {``. Slicing to
+    # the table swallowed every closure defined after this one, so adding the
+    # ADU218 opener — which mentions autoserial in a comment explaining why it
+    # does not use it — failed this test about the PDU.
+    body = source[source.index("def _pdu(") :]
+    following = re.search(r"\n    def \w+\(", body)
+    body = body[: following.start()] if following else body[: body.index("openers = {")]
+    assert "autoserial" not in body.replace("# ", "").split("return")[1]
 
 
 def test_the_opener_injects_no_password():
@@ -150,11 +156,16 @@ def test_the_opener_injects_no_password():
     LAN in clear, so resolution happens inside ``open()`` from the *agent's own*
     environment instead."""
     import inspect
+    import re
 
     from benchctrl.agent import registry as registry_module
 
     source = inspect.getsource(registry_module.build_default_registry)
-    body = source[source.index("def _pdu("): source.index("openers = {")]
+    # Bounded at the next opener rather than at the table, so a closure added
+    # after this one is not read as part of it. See the autoserial test above.
+    body = source[source.index("def _pdu(") :]
+    following = re.search(r"\n    def \w+\(", body)
+    body = body[: following.start()] if following else body[: body.index("openers = {")]
     code = "\n".join(
         line for line in body.splitlines() if not line.strip().startswith("#")
     )

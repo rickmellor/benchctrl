@@ -58,6 +58,9 @@ free-running thread.
 | `SimulatedRigolDL3031A` | Rigol DL3031A | SCPI over ASRL, incl. the `:SOUR:FUNC` set-as-`CURRent`/read-as-`CC` quirk |
 | `SimulatedRigolDP2031` | Rigol DP2031 | SCPI over ASRL, three channels, register model |
 | `SimulatedSDM4065A` | Siglent SDM4065A | SCPI over ASRL, per-function range/NPLC/null state, autoranging, the `9.9E37` overload sentinel, `CONFigure`'s reset side effects, and Siglent's colon-less headers |
+| `SimulatedPDU41002` | CyberPower PDU41002 | The line-oriented CLI over a pty: the login handshake, the `CyberPower > ` prompt, per-outlet state / names / delays, the three distinct error shapes, and `menumode` as the one-way trap it is |
+| `SimulatedCP2112` | Silicon Labs CP2112 | The HID feature-report pair at the *link* seam, **not** a pty: whole-port config and latch registers, and three chip behaviours a naive fake gets wrong — a write to a pin still configured as an input is silently ignored, open-drain cannot force a line high against a modelled pull-down, and an undriven pin latches 1 |
+| `SimulatedADU218` | Ontrak ADU218 | The USB HID report pair, **not** a pty: relays, the two four-bit input ports, event counters, de-bounce, the watchdog ladder against an injectable clock, and — most importantly — the device's *silence*, since an unknown command and a write-only one are byte-identical |
 | `SimulatedSDG1032X` | Siglent SDG1032X | Siglent's `Cn:HEADER KEY,VAL` dialect over ASRL with byte-exact firmware 1.01.01.33R1B6 read-backs (`PHASE-LOCKED`, headerless `VOLTPRT?`, the `HARM?` stray comma, lexicographic `STL?`), **silent rejection with no error queue** (out-of-range values clamped or dropped and logged in `rejections`, unimplemented queries left unanswered), coupled FRQ/PERI and AMP/OFST/HLEV/LLEV, mutually exclusive modulation/sweep/burst, `SCDP` BMP screen dumps, `VKEY` Output-key toggles, and **both of the bench unit's transports for arbitrary waveforms**: a `WVDT` upload over the pty (USB-TMC on the bench) is consumed and silently dropped, exactly as firmware 1.01.01.33R1B6 does, while a `threading` TCP server on loopback (`lan_port`; `lan=False` disables it) models the instrument's line-terminated LAN SCPI socket — messages end at the first `\n` even inside the binary payload (so an unescaped upload is truncated and logged in `lan_truncated`), `WVDT? USER,<name>` answers the firmware's `WVDT POS, /Local, WVNM, <name>, LENGTH, <n>B, TYPE, 6, WAVEDATA,` header plus the stored bytes, `STL? USER` lists the uploads, and a selected user wave reads back as `C1:ARWV NAME,<name>.bin`; the factory passes the sim's port to the driver as `lan_host`/`lan_port` |
 
 The SCPI simulators use a generic register model that covers the bulk
@@ -74,11 +77,32 @@ modelled only the happy path would have agreed with a driver that got
 the null ordering backwards. This one does not — a test pins that the
 naive ordering genuinely fails against it.
 
+The two USB-HID simulators are the structural exceptions here: every
+other simulator is a `SimDevice` behind a pty, because every other driver
+talks to a character device. These two talk HID through ioctls — the
+ADU218 through `USBDEVFS`, the CP2112 through `HIDIOCSFEATURE` on a
+`/dev/hidraw` node — and there is no pty that answers an ioctl. So
+`SimulatedAdu218Link` **subclasses the production link** and overrides
+`_transfer()` — the one method that would have called `fcntl.ioctl` —
+plus the three lifecycle members that would otherwise open a real device
+node. Everything else (the eight-byte report framing, the
+command whitelist, the width table, the desync check) is shipping code
+running under test rather than a second implementation that has to be
+kept in step with the first.
+
+That matters most for the thing the device does not do: **it never
+reports an error.** An absent command, a valid command with a bad
+argument and a write-only command all produce the same nothing. A
+simulator that answered "unknown command" would have made a whole class
+of driver bug invisible, so this one stays silent in exactly the cases
+the hardware does — which is why the driver has an explicit
+`responsive` flag per command instead of guessing from the mnemonic.
+
 ## Sim mode — no code changes
 
 `benchctrl.session` resolves each device to `local`, `remote` or `sim`
 independently, so you can simulate part of a bench and leave the rest
-real. Nothing above the seam changes — all 280 MCP tools are unaware.
+real. Nothing above the seam changes — all 406 MCP tools are unaware.
 
 ```bash
 # whole bench simulated
@@ -90,7 +114,8 @@ BENCHCTRL_SIM_DEVICES=otii_arc,siglent_sdm4065a benchctrl-mcp
 
 Device keys are the canonical ones from `benchctrl.config.DEVICE_KEYS`:
 `otii_arc`, `eastwood_qr10x`, `rigol_dl3031a`, `rigol_dp2031`,
-`siglent_sdm4065a`.
+`siglent_sdm4065a`, `cyberpower_pdu41002`, `silabs_cp2112`,
+`ontrak_adu218`.
 
 Or in a config file:
 
@@ -166,6 +191,16 @@ driver rather than the device:
 - **A-4** — `Transport.read_chunk` blocks until the buffer fills or
   the 0.5 s timeout expires, so a running recording reports no samples
   for up to half a second.
+
+And one gap that is a property of simulation itself rather than of any
+one device, written up as **A-5**: **no simulator here reaches its
+instrument's real transport.** The SCPI sims answer over pyvisa-py's ASRL
+backend while the hardware is USB-TMC; the ADU218 and CP2112 sims replace
+the `fcntl.ioctl` call. So a green hardware-free run says nothing about
+whether the USB-TMC endpoint pair can wedge, or whether an ioctl request
+number is right for the running word size — the failures that separate a
+64-bit laptop from a 32-bit board. That boundary is the reason the
+hardware tier is not optional, and A-5 states where exactly it falls.
 
 ## Cost
 

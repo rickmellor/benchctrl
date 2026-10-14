@@ -1,0 +1,191 @@
+ADU218 K0 closed-contact resistance characterisation
+====================================================
+Witness: SDM4065A s/n SDM46A0CA00021 fw 0.0.0.20
+Question: the datasheet gives 700 mohm typical / 1.1 ohm maximum
+on-state resistance for the ADU218's Panasonic AQZ207 PhotoMOS
+relays. The bench measures roughly nine times that. Is the extra
+resistance in the relay, in the leads, or in the measurement?
+
+K0 closed (RPK0=1)
+
+--- 2-wire, eight repeats (establishes the noise floor) ---
+  0: 6.13937 ohm
+  1: 6.13964 ohm
+  2: 6.13984 ohm
+  3: 6.14020 ohm
+  4: 6.13987 ohm
+  5: 6.14014 ohm
+  6: 6.13996 ohm
+  7: 6.14035 ohm
+  mean=6.13992 ohm  spread=0.983 mohm
+  -> the spread is milliohms, so the offset is systematic, not noise
+
+--- 4-wire (would remove lead resistance IF sense leads present) ---
+  4-wire: -146172.31500 ohm
+  delta 2w-4w = 146178.45492 ohm
+  NOTE: with no sense leads attached this function returns a
+  plausible-looking negative number rather than raising. Do not
+  use 4-wire as a witness on this setup (KNOWN_LIMITATIONS H-5).
+
+--- continuity function ---
+  continuity: 6.00636 ohm
+
+--- open state: is 'OPEN' truly out of range? ---
+K0 open (RPK0=0)
+  SDM4065AOverloadError: 9.9E37 overload sentinel (over-range)
+
+--- DC voltage across the open contact ---
+  DCV: 0.000595 V
+
+CONCLUSION: unexplained. The milliohm spread rules out noise.
+(This paragraph originally cited KNOWN_LIMITATIONS H-5's ~79 mohm
+as an upper bound on the series error, which was a mistake of the
+same kind as the datasheet comparison below: H-5's figure was
+measured on a QR10x 100 ohm setpoint with a different lead set and
+different connections, so it bounds THAT path, not this one. It
+also turned out to be wrong by 57x for this path -- see the
+RESOLVED section at the end of this file. H-5's own datasheet
+bound is 0.2 ohm, still far below the excess.) Candidates not yet
+separated: the specific relay's actual
+on-resistance, contact/clip resistance at the terminal block, or
+a range-dependent offset in the 2-wire function. Recorded as open
+rather than rationalised. The driver must NOT use the datasheet
+on-resistance as a validation threshold.
+
+FOLLOW-UP: the part datasheet was read, and the comparison this
+file makes is not valid
+------------------------------------------------------------------
+The "700 mohm typical / 1.1 ohm maximum" in the question above is
+quoted from Ontrak's ADU218 manual, which reprints it with NO test
+conditions. Panasonic's own catalogue for the part (ASCTB467E,
+PhotoMOS Power SIL 1 Form A; the AQZ207 has no standalone
+datasheet) states them explicitly in a Condition column:
+
+    IF = 10 mA        LED forward current
+    IL = Max.         load current AT MAXIMUM = 1.0 A for AQZ207
+    Within 1 s        take the reading within 1 s (thermal bound)
+
+So 1.1 ohm is a short-pulse figure at ONE AMP. Every reading in
+this file was taken with the DMM's ohmmeter sourcing on the order
+of 1 mA -- about three orders of magnitude below the specified
+condition, and with indefinite dwell rather than a 1 s pulse.
+
+Therefore: 6.14 ohm neither violates nor satisfies the datasheet
+maximum. There is no applicable limit at this test current. This
+unit must NOT be recorded as out of spec on the strength of this
+file.
+
+It is also still not explained. The natural story -- PhotoMOS R_on
+rising steeply as load current falls -- is NOT supported by the
+datasheet: it contains no R_on-vs-load-current curve at all (R_on
+is plotted only against ambient temperature), and its single
+lower-current data point runs the other way. Graph 3-4 is taken at
+0.4 A and reads about 0.65 ohm at 25 C, slightly BELOW the 0.7 ohm
+typical quoted at 1.0 A. The output I-V curve (graph 9-2) is a
+straight line through the origin with no knee, but at +/-4 A full
+scale it cannot resolve 1 mA either way. Temperature is the only
+R_on modifier the datasheet quantifies and it bounds that at about
+1.5x from 25 C to 85 C. 5.44 ohm remains unaccounted for.
+
+One candidate is now closed: the AC/DC variants really are two
+MOSFETs in anti-series (Panasonic's schematic, and visible in the
+~2x R_on ratio against each DC-only sibling: AQZ107 0.34 ohm ->
+AQZ207 0.7 ohm). But that doubling is ALREADY inside the published
+0.7 ohm. It must not be applied a second time.
+
+CORRECTION to this file's own method, while here: the eight
+repeats above are 2-WIRE. The 4-wire attempt is the line that
+returned -146172 ohm because no sense leads were attached. Any
+later summary of this measurement should say 2-wire. And 2-wire
+does include lead and terminal-block contact resistance, which a
+4-wire reading would have excluded -- which, per the RESOLVED
+section below, is where the excess turned out to live. (This
+paragraph also leaned on the ~79 mohm bound to argue the
+distinction did not matter. It did matter, and the bound did not
+apply; see the note in the CONCLUSION above.)
+
+The discriminating experiment is a measurement at the datasheet's
+own condition: 1.0 A, expecting <= 1.1 ohm, or 0.4 A for direct
+comparison against graph 3-4's ~0.65 ohm. That energises a
+120 V-rated relay into a real load, so it is an operator decision
+and is deliberately not scripted here.
+
+RESOLVED: the excess is not in the relay
+-----------------------------------------
+This file's CONCLUSION above lists three candidates and declines to
+choose. A later session chose for it, by accident. See
+on_resistance_drift.txt for the data; the short version:
+
+The same closed contact read 10.694 ohm, with nothing in software
+changed -- a +4.55 ohm step from the 6.13992 ohm mean here. The value
+is milliohm-stable on BOTH sides of that step: 3.93 mohm across ten
+re-actuations (vs 0.12-2.35 mohm within a single close), and 1.67 mohm
+of drift over a 28 s hold. So each side of the step is a good
+measurement of something; they are measurements of different things.
+
+Against the three candidates listed at lines 43-45:
+
+  "the specific relay's actual on-resistance"  ELIMINATED. A
+    semiconductor's R_on does not step 74% between sessions and then
+    hold to 4 mohm over ten actuations. The datasheet quantifies only
+    temperature as an R_on modifier, bounded ~1.5x over 25-85 C.
+
+  "a range-dependent offset in the 2-wire function"  ELIMINATED
+    independently, in latency_after_command.txt section B: pinned
+    200 ohm vs autoranged differ by 1.353 mohm against a 4550 mohm
+    step. That measurement also supplies what this file failed to
+    record -- the DMM's range and autorange state, which cannot be
+    recovered from a transcript after the fact.
+
+  "contact/clip resistance at the terminal block"  the only candidate
+    that predicts a step-then-hold. Confirmed by elimination.
+
+So the ~5 ohm this file recorded as unexplained is attributed, and the
+answer is that it was never the relay. Which specific connection moved
+is not identifiable from the host: the DMM leads, the K0 screw
+terminals and the clip joints are in series and all outside the part.
+This is not an accusation that anyone disturbed anything -- it is
+evidence a series connection differs between sessions, and the cause
+is outside what a script can see. Ask the operator.
+
+CONFIRMED BY THE OPERATOR (asked, not assumed): the probes were
+re-seated between the two sessions, deliberately, to improve
+connection stability -- and left untouched for the two hours spanning
+the drift and re-actuation captures. That is the right element, the
+right interval, and the right quiet window, so the elimination above
+is a confirmed cause rather than a surviving candidate.
+
+Note the direction: re-seating the probes made the reading HIGHER,
+6.14 -> 10.69 ohm. And note what the probes actually are -- clamped
+into a screw terminal, so the contact point quality is not guaranteed
+by construction. The operator's stated improvement is MECHANICAL (the
+probe moves less than it did), which is a different quantity from
+electrical contact resistance and does not bound it.
+
+A claim made here in an earlier pass -- that the new joint is "both
+more stable and more resistive" -- was withdrawn: it compared this
+session's ACROSS-close spread (3.93 mohm) with the earlier session's
+WITHIN-close spread (0.983 mohm), which are different quantities. The
+only like-for-like pair is within-close, 0.983 mohm before against
+0.12-2.35 mohm after: comparable, arguably slightly worse, and no
+across-close data exists from the earlier session at all. The
+comparison cannot be made in either direction.
+
+What stands is that the reading is stable IN ABSOLUTE TERMS over the
+measured window, which is all the elimination argument needed, and that
+it went up by 4.55 ohm. So repeat precision is no evidence a figure
+describes the relay: this one is milliohm-repeatable and measures a
+screw clamp.
+
+Which also means the 6.14 ohm mean at the top of this file was never a
+relay measurement either. Both numbers are probe-path resistance. This
+file's original question -- "is the extra resistance in the relay, in
+the leads, or in the measurement?" -- is answered: the leads, in every
+session, including the one that produced the eight repeats above.
+
+The driver consequence at line 46-47 stands and is now permanent rather
+than provisional. It used to rest on "the number is unexplained," which
+a later explanation could have dissolved. It now rests on something that
+does not expire: this measurement is dominated by series connections the
+driver cannot see or know about, so any figure it reported would be a
+property of the bench wiring wearing a relay's name.

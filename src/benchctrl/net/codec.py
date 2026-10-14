@@ -85,6 +85,7 @@ def _wire_types() -> dict[str, type]:
         "CP2112LineState",
         "CP2112GpioConfig",
     )
+    add("benchctrl.drivers.ontrak_adu218.driver", "ADU218Info")
     add(
         "benchctrl.drivers.bench_vision.driver",
         # Frame carries the JPEG as bytes: inline below 64 KB, a blob reference

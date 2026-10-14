@@ -5,7 +5,7 @@ exposes your whole bench as tools any MCP-aware client (Claude Code,
 Claude Desktop, Cursor, custom agents) can call. Built on the official
 `mcp` Python SDK.
 
-**387 tools**, registered per driver:
+**406 tools**, registered per driver:
 
 | Source | Tools |
 |---|---|
@@ -17,9 +17,10 @@ Claude Desktop, Cursor, custom agents) can call. Built on the official
 | Siglent SDG1032X | 67 |
 | CyberPower PDU41002 | 15 |
 | Silicon Labs CP2112 | 10 |
-| Bench vision (camera + Metis) | 13 |
-| Cross-driver (battery, recording I/O, connection, vision label loop) | 14 |
-| **Total** | **387** |
+| Ontrak ADU218 | 19 |
+| Bench vision (camera + Metis, label loop) | 14 |
+| Cross-driver (battery, recording I/O, connection) | 13 |
+| **Total** | **406** |
 
 Each driver registers its own surface via `register_mcp_tools(mcp)`;
 `benchctrl.mcp` is the orchestrator that wires them together. A driver
@@ -72,7 +73,7 @@ BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_TOKEN=... benchctrl-mcp
 BENCHCTRL_REMOTE=bench.local:9737 BENCHCTRL_LOCAL_DEVICES=otii_arc benchctrl-mcp
 
 # no hardware at all
-BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a,cyberpower_pdu41002 benchctrl-mcp
+BENCHCTRL_SIM_DEVICES=otii_arc,eastwood_qr10x,rigol_dl3031a,rigol_dp2031,siglent_sdm4065a,cyberpower_pdu41002,silabs_cp2112,ontrak_adu218 benchctrl-mcp
 ```
 
 With nothing configured everything is local. See
@@ -158,7 +159,8 @@ their SDK methods, which are documented in [`drivers.md`](drivers.md):
 | `sdg1032x_*` | Siglent SDG1032X | 67 |
 | `pdu41002_*` | CyberPower PDU41002 | 15 |
 | `cp2112_*` | Silicon Labs CP2112 | 10 |
-| `vision_*` | Bench vision (camera + Metis NPU) | 13 |
+| `adu218_*` | Ontrak ADU218 | 19 |
+| `vision_*` | Bench vision (camera + Metis NPU) | 14 |
 
 The DP2031 set is the large one, covering source/measure, protection,
 IEEE 488.2 status, channel pairing and tracking, the Arb timer
@@ -213,6 +215,35 @@ that way *after* the password is accepted; and `pdu41002_close` must be
 called, because closing the connection without it leaves the PDU
 unreachable from the other transport. See
 [`drivers.md`](drivers.md#cyberpower-pdu41002--8-outlet-switched-pdu).
+
+The `adu218_*` set switches relays, and unlike the PDU set it is **not**
+read-only — `adu218_set_relay_state` really does close a contact. Three
+things about it are unusual enough to be worth reading first:
+
+- **`adu218_open`'s `allowed_relays` is optional, and omitting it allows
+  every relay** — the opposite of `pdu41002_open`, where the allowlist is
+  mandatory. The difference is the device: a mains typo de-powers the
+  bench, whereas these are 1 A signal SSRs on instrument leads that the
+  bench wants to toggle freely. Pass it when the relays are wired to
+  something that must not switch. Listed or not, *de-energising is always
+  permitted*: an unlisted relay is refused by
+  `adu218_set_relay_state(..., on=True)` and accepted by the same call
+  with `on=False`, because an allowlist must never make the safe state
+  unreachable.
+- **The device never reports an error.** An unknown command, a valid
+  command with a bad argument, and a write-only command are
+  byte-identical on the wire — all silence. So every write is confirmed
+  by reading the state back, and `adu218_set_relay_state` returns the
+  *read-back* value rather than the value it was asked for. If a tool
+  answers, the device answered.
+- **`adu218_set_watchdog` changes what silence means,** and **any**
+  command refeeds the timer — so a model that polls state in a loop
+  silently prevents the watchdog from ever tripping. Arm it for a test
+  that needs the interlock and disarm it when that test ends.
+  `adu218_watchdog` returning 0 is ambiguous: it means either
+  "timed out" or "never enabled", and the device cannot tell them apart.
+
+See [`drivers.md`](drivers.md#ontrak-adu218--8-relays-8-digital-inputs-no-dependencies).
 
 Four of its tools exist because of documented firmware defects rather
 than because the SCPI surface needed them: `sdm4065a_command_error`

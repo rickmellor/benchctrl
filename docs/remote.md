@@ -1,6 +1,6 @@
 # Remote mode
 
-Run the instruments on one machine and the agent on another. The 280 MCP
+Run the instruments on one machine and the agent on another. The 406 MCP
 tools are unchanged and cannot tell the difference.
 
 The motivating setup: an Arduino Uno Q sits at the bench holding the USB
@@ -50,9 +50,34 @@ Precedence, highest first:
 
 1. `benchctrl.session.configure(...)` in code
 2. CLI flags — `--remote`, `--local`, `--sim`
-3. environment — `BENCHCTRL_REMOTE`, `BENCHCTRL_TOKEN`, `BENCHCTRL_LOCAL_DEVICES`
+3. environment — `BENCHCTRL_REMOTE`, `BENCHCTRL_TOKEN`,
+   `BENCHCTRL_LOCAL_DEVICES`, `BENCHCTRL_SIM_DEVICES`, `BENCHCTRL_CONFIG`
 4. `~/.config/benchctrl/config.json`
 5. everything local
+
+Levels 2-4 reach `session` only when an entry point installs them.
+`benchctrl-mcp` and `benchctrl` both do this before the first device opens, and
+print any non-local binding to stderr, so you can see what you got:
+
+```
+$ BENCHCTRL_SIM_DEVICES=ontrak_adu218 benchctrl-mcp
+benchctrl-mcp: ontrak_adu218 -> sim
+
+$ benchctrl --sim ontrak_adu218 adu218 relay-states
+benchctrl: ontrak_adu218 -> sim
+relays: 0=off, 1=off, 2=off, 3=off, 4=off, 5=off, 6=off, 7=off
+energised: -
+mask: 0
+```
+
+Level 2 is where the CLI flags sit; [`cli.md`](cli.md) covers the rest of that
+surface. With no flags `benchctrl` installs no config *object* at all, so an
+empty one cannot count as an override and beat levels 3 and 4.
+
+If you embed benchctrl yourself, call `session.configure_from_environment()`
+once before the first device opens — otherwise every device resolves `local`
+and a device you asked to *simulate* drives the real instrument. See
+[`KNOWN_LIMITATIONS.md`](../KNOWN_LIMITATIONS.md) § N-8.
 
 Mode resolves **per device key**, which is what lets you split a bench:
 
@@ -66,13 +91,15 @@ Mode resolves **per device key**, which is what lets you split a bench:
     "eastwood_qr10x": {"mode": "remote", "endpoint": "bench"},
     "rigol_dl3031a":  {"mode": "local"},
     "rigol_dp2031":   {"mode": "local"},
-    "siglent_sdm4065a": {"mode": "remote", "endpoint": "bench"}
+    "siglent_sdm4065a": {"mode": "remote", "endpoint": "bench"},
+    "silabs_cp2112":    {"mode": "remote", "endpoint": "bench"},
+    "ontrak_adu218":    {"mode": "remote", "endpoint": "bench"}
   }
 }
 ```
 
-Arc, QR10x and the DMM on the bench, both Rigols plugged into the
-laptop, one MCP server driving all five.
+Arc, QR10x, the DMM, the relay interface and the reset lines on the bench,
+both Rigols plugged into the laptop, one MCP server driving all seven.
 
 Agent side, `/etc/benchctrl/agent.json` (mode 0640):
 
@@ -342,6 +369,28 @@ scp -O -r staged/. board:/home/arduino/benchctrl-1.2.0/src/
 
 `libusb-1.0.so.0` itself is a system library and was already present on the
 Uno Q.
+
+### Neither USB-HID driver needs wheels — but both need a udev rule
+
+The Ontrak ADU218 is the one instrument with nothing to vendor. It speaks USB
+HID through raw `USBDEVFS` ioctls using only `fcntl`, `ctypes` and `os`, so
+`sync-board.sh` carrying the package is the whole install.
+
+It still needs `deploy/udev/63-benchctrl-adu218.rules`, because the kernel
+creates `/dev/bus/usb/BBB/DDD` `root:root 0664` and interrupt transfers need
+**write** access. That failure is honest, at least: `open()` raises and names
+the rules file, rather than reporting the device as absent the way the USB-TMC
+case does.
+
+The CP2112 is the same story with a different node: stdlib only, and
+`deploy/udev/64-benchctrl-cp2112.rules` for `/dev/hidraw*`, which the kernel
+creates `root:root 0600`. It needs **write** access even to *read* a pin,
+because a HID feature get is a `GET_REPORT` over the control pipe. Do not
+generalise that rule to `SUBSYSTEM=="hidraw"` to save a line — on this board
+that also matches the attached USB keyboard, which is a keylogging surface
+rather than a bench instrument. The shipped rule is scoped to `10c4:ea90`.
+Installing either rule is a privileged operation, so it is the operator's to
+run.
 
 Then install `deploy/udev/61-benchctrl-usbtmc.rules`, or the instruments are
 **invisible rather than unopenable** — `discover()` returns `[]` and the driver

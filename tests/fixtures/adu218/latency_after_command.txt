@@ -1,0 +1,47 @@
+ADU218 read-back latency after a relay command, + pinned-range re-read
+=====================================================================
+Device: Ontrak ADU218, USB 0a07:00da
+Witness: SDM4065A s/n SDM46A0CA00021 fw 0.0.0.20, on K0
+Wiring: K0 load side -> DMM leads only. No load current.
+
+=== A. latency of the read-back that verify=True depends on ===
+latency.txt sampled PK/RPK0 on an IDLE device. The driver's critical
+path is command-then-read-back, so this times the read-back that
+immediately follows real relay motion - the only latency that decides
+whether verify=True can trust its answer.
+
+40 SK0/RK0 alternations, each followed by one RPK0 read-back
+  write-only ioctl (SK0/RK0): min   7.35  median   7.81  max   8.19 ms
+  read-back (RPK0 round trip): min  15.82  median  16.18  p99  16.68  max  16.68 ms
+  read-backs disagreeing with the commanded state: 0
+  margin of a 200 ms timeout over the worst read-back: 12.0x
+  (compare latency.txt idle: max 16.65 ms. A materially larger figure
+   here would mean the idle sweep measured the wrong thing.)
+
+  DMM with K0 closed after the sweep: 10.69230 ohm
+  DMM with K0 open   after the sweep: overload sentinel (OPEN)
+
+=== B. was the 6.13992 ohm mean a range-dependent artefact? ===
+on_resistance.txt never recorded the DMM's range or autorange state,
+and the driver notes RANGe? reads identically whether pinned or
+autoranged - so the original transcript cannot answer this. Re-read
+here with the range explicitly pinned to 200 ohm.
+
+  K0 closed, RPK0=1
+  as-found: autorange=True range=1e+08 ohm
+  autoranged mean: 10.69128 ohm  (spread 1.848 mohm)
+  pinned:   autorange=False range=200 ohm
+  pinned 200 ohm mean: 10.69263 ohm  (spread 0.924 mohm)
+  pinned:   autorange=False range=2000 ohm
+  pinned 2 kohm mean:  10.63931 ohm  (spread 2.384 mohm)
+
+  pinned-200 vs autoranged: 1.353 mohm
+  pinned-2k  vs pinned-200: 53.322 mohm
+  Verdict: a range-dependent offset can only explain the ~5.4 ohm
+  excess if one of these deltas is of that order. Milliohm deltas
+  CLOSE that candidate; the excess is in the relay or the contacts.
+  Reference: 6.13992 ohm mean, 0.983 mohm spread (on_resistance.txt).
+  Note this is still 2-wire at ~1 mA, so it says nothing about the
+  datasheet figure, which is specified at IL = 1.0 A.
+
+restored: WD=0 PK=000 DB=1

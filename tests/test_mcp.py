@@ -1037,3 +1037,469 @@ def test_pdu41002_tools_work_against_the_simulator():
     finally:
         pdu_tools._pdu = None
         driver.close()
+
+
+# ----- ADU218: parity, and the naming that keeps the docstrings honest -----
+
+
+def test_adu218_mcp_tools_cover_the_driver_surface():
+    """Every public driver method is reachable through a tool.
+
+    The tool names are **not** the method names here: the MCP surface is phrased
+    for a model (``adu218_info``, ``adu218_counters``) while the driver is
+    phrased for the SDK (``read_identity``, ``read_counters``). So parity needs
+    an explicit map rather than a prefix strip — and the map is the useful
+    artifact, because it is what fails when a method is added and the tool is
+    forgotten, the failure mode that leaves a capability working locally and
+    invisible to an agent.
+    """
+    from benchctrl.drivers.ontrak_adu218 import mcp_tools as adu_tools
+    from benchctrl.drivers.ontrak_adu218.driver import OntrakADU218
+
+    #: tool suffix -> the driver method it exposes
+    TOOL_TO_METHOD = {
+        "info": "read_identity",
+        "relay_states": "relay_states",
+        "relay_state": "relay_state",
+        "set_relay_state": "set_relay_state",
+        "set_relay_port": "set_relay_port",
+        "reset_relays": "reset_relays",
+        "input_states": "input_states",
+        "input_state": "input_state",
+        "input_port_mask": "input_port_mask",
+        "counters": "read_counters",
+        "counter": "read_counter",
+        "clear_counter": "clear_counter",
+        "debounce": "read_debounce",
+        "set_debounce": "set_debounce",
+        "watchdog": "read_watchdog",
+        "set_watchdog": "set_watchdog",
+    }
+    #: tools with no single method behind them — they compose properties
+    COMPOSED = {"open", "close", "allowed_relays"}
+
+    # Deliberately not exposed:
+    #   open/close   — the tools exist, but wrap lifecycle rather than a
+    #                  capability, and their signatures differ from the
+    #                  classmethod's
+    #   relay_mask   — folded into adu218_relay_states' dict, which returns the
+    #                  per-relay map, the energised list and the mask together;
+    #                  a separate tool would be a second round trip for a value
+    #                  the model already has
+    #   input_mask   — same, folded into adu218_input_states. Note this is *not*
+    #                  the same read as adu218_input_port_mask, which does get a
+    #                  tool of its own: input_mask is ``PI``, both ports packed
+    #                  into one byte, and the folded dict already carries it.
+    #                  input_port_mask is ``Py``, one port, and is the only input
+    #                  read whose bits need no reordering — a model asking about
+    #                  one port should not have to mask a two-port value and get
+    #                  the nibble order right to do it
+    #   read_debounce_ms — same, folded into adu218_debounce, which returns both
+    #                  ``debounce`` and ``debounce_ms``. Returning them together
+    #                  is the point: the setting number runs *backwards* to the
+    #                  filter width (0 = 10 ms, 2 = 100 us), so a tool handing a
+    #                  model the bare number invites "2 filters hardest"
+    #   read_watchdog_tripped — folded into adu218_watchdog, and deliberately:
+    #                  it *clears* the driver-held expectation when it detects a
+    #                  trip, so a standalone tool would let a model consume the
+    #                  only trace of a trip without seeing the setting it must
+    #                  be compared against
+    #   watchdog_setting — the cached expectation, not a measurement. As a tool
+    #                  a model could not tell a cache from a device read; it is
+    #                  returned as ``expected`` inside adu218_watchdog instead
+    exempt = {
+        "open",
+        "close",
+        "relay_mask",
+        "input_mask",
+        "read_debounce_ms",
+        "read_watchdog_tripped",
+        "watchdog_setting",
+    }
+
+    methods = {
+        name
+        for name in vars(OntrakADU218)
+        if not name.startswith("_") and callable(getattr(OntrakADU218, name, None))
+    } - exempt
+    tools = {fn.__name__[len("adu218_"):] for fn in adu_tools._TOOLS}
+
+    assert tools == set(TOOL_TO_METHOD) | COMPOSED, (
+        "the tool list changed — update TOOL_TO_METHOD so parity is still "
+        f"checked. Unmapped: {sorted(tools - set(TOOL_TO_METHOD) - COMPOSED)}"
+    )
+    covered = set(TOOL_TO_METHOD.values())
+    assert not (methods - covered), (
+        f"driver methods with no MCP tool: {sorted(methods - covered)}"
+    )
+    # Every mapped method must actually exist, or the map rots into a
+    # comfortable fiction that passes while covering nothing.
+    for tool, method in TOOL_TO_METHOD.items():
+        assert hasattr(OntrakADU218, method), (
+            f"adu218_{tool} maps to missing method {method}"
+        )
+
+
+def test_adu218_tools_are_registered_on_the_shared_server():
+    from benchctrl import mcp as m
+    from benchctrl.drivers.ontrak_adu218 import mcp_tools as adu_tools
+
+    registered = {fn.__name__ for fn in adu_tools._TOOLS}
+    for name in registered:
+        assert hasattr(m, name), f"{name} is not re-exported from benchctrl.mcp"
+
+
+def test_adu218_tools_have_docstrings():
+    """The docstring *is* the interface for an MCP tool — it is what a model
+    reads before deciding to call it."""
+    from benchctrl.drivers.ontrak_adu218 import mcp_tools as adu_tools
+
+    for fn in adu_tools._TOOLS:
+        assert (fn.__doc__ or "").strip(), f"{fn.__name__} has no docstring"
+
+
+def test_adu218_exposes_exactly_the_reviewed_switching_tools():
+    """Which tools can move a contact is pinned in both directions.
+
+    A new switching tool arriving without review is the thing to catch
+    mechanically. Adding a fourth means updating this list on purpose.
+    """
+    from benchctrl.drivers.ontrak_adu218 import mcp_tools as adu_tools
+
+    switching = {
+        "adu218_set_relay_state",
+        "adu218_set_relay_port",
+        "adu218_reset_relays",
+    }
+    names = {fn.__name__ for fn in adu_tools._TOOLS}
+    assert names & switching == switching, "a reviewed switching tool went missing"
+
+    suspicious = {
+        n
+        for n in names - switching
+        if any(w in n for w in ("set_relay", "toggle", "switch", "energis", "close_"))
+    }
+    assert not suspicious, (
+        f"unreviewed tool(s) that look like they switch a relay: {sorted(suspicious)}"
+    )
+
+
+def test_adu218_switching_tools_say_what_they_physically_do():
+    """A tool documented as neutrally as a read is one a model treats as
+    neutral. These make and break real circuits — on this bench including
+    instrument sense leads, so a switch mid-measurement changes what another
+    instrument is reading."""
+    from benchctrl.drivers.ontrak_adu218 import mcp_tools as adu_tools
+
+    for name in ("set_relay_state", "set_relay_port"):
+        doc = getattr(adu_tools, f"adu218_{name}").__doc__ or ""
+        assert "allowed_relays" in doc, f"{name} does not point at the allowlist"
+        assert any(
+            word in doc.lower() for word in ("circuit", "conduct", "connected")
+        ), f"{name} does not say it moves a physical contact"
+
+
+def test_the_watchdog_tool_warns_that_reading_it_refeeds_the_timer():
+    """The property that makes a monitoring loop dangerous, and the one a model
+    is most likely to get wrong: polling ``adu218_watchdog`` in a loop keeps an
+    armed watchdog alive and guarantees ``tripped`` stays false."""
+    from benchctrl.drivers.ontrak_adu218 import mcp_tools as adu_tools
+
+    doc = adu_tools.adu218_watchdog.__doc__ or ""
+    assert "refeed" in doc.lower()
+    arm_doc = adu_tools.adu218_set_watchdog.__doc__ or ""
+    assert "de-energise" in arm_doc.lower()
+    # RST emphasis markers land *inside* the phrase — "**Any** command" is how
+    # this sentence is written, and rightly so, since that word is the whole
+    # hazard. Strip the markup before matching rather than forbidding emphasis
+    # on the one clause that most needs it.
+    plain = arm_doc.lower().replace("*", "")
+    assert "any command" in plain
+    # Also assert the consequence, not just the word: a docstring can say "any
+    # command" while describing something harmless. The refeed only matters
+    # because a polling loop is the thing that silently neuters the watchdog.
+    assert "poll" in plain
+
+
+def test_adu218_read_tools_report_a_clear_error_before_open():
+    """A model that calls a read first must get "call open" back, not a
+    ``NoneType`` traceback — the message is what tells it what to do next."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.ontrak_adu218 import ADU218ConnectionError
+    from benchctrl.drivers.ontrak_adu218 import mcp_tools as adu_tools
+
+    adu_tools._adu218 = None
+    with pytest.raises(ADU218ConnectionError, match="adu218_open"):
+        m.adu218_relay_states()
+
+
+def test_adu218_close_is_safe_to_call_when_not_open():
+    """Teardown must not raise, or cleanup code becomes unreliable."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.ontrak_adu218 import mcp_tools as adu_tools
+
+    adu_tools._adu218 = None
+    assert m.adu218_close()["closed"] is False
+
+
+def test_adu218_tools_work_against_the_simulator():
+    """The tools end to end, through the module singleton.
+
+    Bypasses ``adu218_open`` (which would need real USB) by injecting the
+    simulator-backed driver, so the tools' own logic is what is under test.
+    """
+    from benchctrl import mcp as m
+    from benchctrl.drivers.ontrak_adu218 import ADU218PolicyError
+    from benchctrl.drivers.ontrak_adu218 import mcp_tools as adu_tools
+    from benchctrl.sim.factories import make_adu218
+
+    driver = make_adu218(allowed_relays=(0, 1))
+    adu_tools._adu218 = driver
+    try:
+        assert m.adu218_info()["model"] == "ADU218"
+
+        # JSON object keys are strings, so the tool must key by str(index) — and
+        # relay 0 makes that sharper than the PDU's 1-indexed equivalent.
+        states = m.adu218_relay_states()
+        assert set(states["relays"]) == {str(i) for i in range(8)}
+        assert states["energised"] == []
+        assert states["mask"] == 0
+
+        assert m.adu218_relay_state(0)["on"] is False
+        assert m.adu218_allowed_relays()["allowed_relays"] == [0, 1]
+        assert m.adu218_counters()["counters"]["0"] == 0
+
+        # The de-bounce tool must carry the *width* as well as the setting,
+        # because the two run in opposite directions: setting 1 is 1 ms, but
+        # setting 0 is the longest filter (10 ms) and 2 the shortest (100 us).
+        # This is what licenses read_debounce_ms's parity exemption above.
+        debounce = m.adu218_debounce()
+        assert debounce["debounce"] == 1
+        assert debounce["debounce_ms"] == 1.0
+        assert m.adu218_set_debounce(0) == {"debounce": 0, "debounce_ms": 10.0}
+        assert m.adu218_set_debounce(2) == {"debounce": 2, "debounce_ms": 0.1}
+        m.adu218_set_debounce(1)
+
+        # Switching through the tool layer. `state` is the verified read-back, so
+        # asserting it proves the tool reports what the device did rather than
+        # what was asked of it.
+        result = m.adu218_set_relay_state(0, True)
+        assert result["state"] is True
+        assert result["verified"] is True
+        assert m.adu218_relay_states()["energised"] == [0]
+
+        # The allowlist is enforced through the tool layer too, not just in the
+        # SDK — a model calling the tool directly must hit the same wall.
+        with pytest.raises(ADU218PolicyError):
+            m.adu218_set_relay_state(5, True)
+        # ...and de-energising an unlisted relay is still allowed, which is the
+        # asymmetry the tool docstrings promise.
+        assert m.adu218_set_relay_state(5, False)["state"] is False
+
+        # Ports A and B are four lines each, and the input map must arrive
+        # already reversed out of the device's MSB-first reply.
+        driver._benchctrl_sim.device_model.set_input("B", 3, True)
+        ports = m.adu218_input_states()["ports"]
+        assert ports["B"] == [False, False, False, True]
+        assert m.adu218_input_state("b", 3)["asserted"] is True
+
+        # Arming reports the measured timeout, not a manual-derived one.
+        armed = m.adu218_set_watchdog(3)
+        assert armed["timeout_s"] == 60.0 and armed["armed"] is True
+        assert m.adu218_watchdog()["setting"] == 3
+        assert m.adu218_set_watchdog(0)["armed"] is False
+
+        assert m.adu218_reset_relays()["mask"] == 0
+    finally:
+        adu_tools._adu218 = None
+        driver.close()
+
+
+# --------------------------------------------------------------------------
+# The generated CLI's contract: ``_TOOLS`` is the whole surface
+# --------------------------------------------------------------------------
+#
+# ``benchctrl`` (the CLI) builds its subcommands by walking each module's
+# ``_TOOLS`` tuple rather than asking a live FastMCP server, because importing
+# ``benchctrl.mcp`` costs ~0.6 s and drags in the optional ``[mcp]`` extra —
+# which needs Python >=3.10 while the package supports 3.9. That is only sound
+# while the two routes describe the same surface. The tests below are what make
+# it sound: a tool added with a bare ``@mcp.tool()`` against the module-level
+# server would be reachable over MCP and *silently absent from the CLI*, which
+# is the exact failure mode that motivated moving the framework tools out of
+# ``benchctrl.mcp`` into ``benchctrl.framework_tools``.
+
+
+#: Every module that contributes tools. The CLI reads this same list, so a new
+#: driver missing here is missing from both — a visible failure, not a silent
+#: one.
+TOOL_MODULES = (
+    "benchctrl.drivers.otii_arc.mcp_tools",
+    "benchctrl.drivers.eastwood_qr10x.mcp_tools",
+    "benchctrl.drivers.rigol_dl3031a.mcp_tools",
+    "benchctrl.drivers.rigol_dp2031.mcp_tools",
+    "benchctrl.drivers.siglent_sdm4065a.mcp_tools",
+    "benchctrl.drivers.siglent_sdg1032x.mcp_tools",
+    "benchctrl.drivers.cyberpower_pdu41002.mcp_tools",
+    "benchctrl.drivers.silabs_cp2112.mcp_tools",
+    "benchctrl.drivers.ontrak_adu218.mcp_tools",
+    "benchctrl.drivers.bench_vision.mcp_tools",
+    "benchctrl.framework_tools",
+)
+
+
+def _tools_route_names() -> list[str]:
+    """The surface as the CLI sees it: no FastMCP import anywhere."""
+    import importlib
+
+    names = []
+    for mod_name in TOOL_MODULES:
+        mod = importlib.import_module(mod_name)
+        names += [fn.__name__ for fn in mod._TOOLS]
+    return names
+
+
+def test_every_tool_module_exposes_the_registration_contract():
+    """``_TOOLS`` plus ``register_mcp_tools`` — the shape the CLI relies on."""
+    import importlib
+
+    for mod_name in TOOL_MODULES:
+        mod = importlib.import_module(mod_name)
+        assert isinstance(mod._TOOLS, tuple), f"{mod_name}._TOOLS must be a tuple"
+        assert mod._TOOLS, f"{mod_name}._TOOLS is empty"
+        assert callable(mod.register_mcp_tools), f"{mod_name} has no register_mcp_tools"
+        for fn in mod._TOOLS:
+            assert callable(fn), f"{mod_name}._TOOLS holds a non-callable: {fn!r}"
+
+
+def test_tools_route_has_no_duplicate_names():
+    """Two modules exporting one name would collide into a single subcommand,
+    and argparse takes the last one silently. Checked separately from parity
+    because a duplicate makes the *set* comparison pass while the CLI loses a
+    tool."""
+    names = _tools_route_names()
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert dupes == [], f"tool names exported by more than one module: {dupes}"
+
+
+def test_tools_route_matches_the_live_mcp_server_exactly():
+    """The parity guarantee, asserted as set equality in both directions.
+
+    A tool present only on the server is missing from the CLI; a tool present
+    only in ``_TOOLS`` is a CLI subcommand that no MCP client can reach. Both
+    are defects, so neither ``<=`` nor ``>=`` is the right assertion.
+    """
+    import asyncio
+
+    pytest.importorskip("mcp.server.fastmcp")
+    from benchctrl.mcp import mcp
+
+    served = {t.name for t in asyncio.run(mcp.list_tools())}
+    generated = set(_tools_route_names())
+
+    assert sorted(served - generated) == [], (
+        "on the MCP server but not in any _TOOLS tuple — the CLI cannot see "
+        "these. A bare @mcp.tool() in benchctrl.mcp is the usual cause."
+    )
+    assert sorted(generated - served) == [], (
+        "in a _TOOLS tuple but never registered on the server — a "
+        "register_mcp_tools call is missing from benchctrl.mcp."
+    )
+
+
+def test_framework_tools_are_reachable_without_importing_fastmcp():
+    """The whole point of the ``_TOOLS`` route.
+
+    Imports the framework module into a fresh interpreter with ``mcp`` poisoned,
+    proving the CLI's enumeration path does not reach FastMCP even transitively.
+    A subprocess is needed because ``benchctrl.mcp`` is almost certainly already
+    in ``sys.modules`` by the time this test runs, which would make an in-process
+    check pass vacuously.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    program = textwrap.dedent(
+        """
+        import sys
+
+        class _Poison:
+            def __getattr__(self, name):
+                raise AssertionError("FastMCP was imported by the _TOOLS route")
+
+        sys.modules["mcp"] = _Poison()
+        sys.modules["mcp.server"] = _Poison()
+        sys.modules["mcp.server.fastmcp"] = _Poison()
+
+        from benchctrl import framework_tools
+
+        assert len(framework_tools._TOOLS) == 13, len(framework_tools._TOOLS)
+        assert "benchctrl.mcp" not in sys.modules
+        print("ok")
+        """
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "ok"
+
+
+def test_framework_tools_are_importable_from_the_orchestrator():
+    """The re-export block: ``from benchctrl.mcp import plot_recording`` is a
+    documented import path and predates the move, so it must keep working."""
+    from benchctrl import framework_tools
+    from benchctrl import mcp as m
+
+    missing = [fn.__name__ for fn in framework_tools._TOOLS if not hasattr(m, fn.__name__)]
+    assert missing == []
+    # Same object, not a copy — a re-export that shadowed the original would
+    # mean the emulator's module-global state had two homes.
+    assert m.plot_recording is framework_tools.plot_recording
+    assert m.battery_emulator_stop is framework_tools.battery_emulator_stop
+
+
+def test_framework_tools_have_docstrings():
+    """The docstring is the tool description a model sees and the CLI's
+    ``--help`` text, so an empty one degrades two interfaces at once."""
+    from benchctrl import framework_tools
+
+    for fn in framework_tools._TOOLS:
+        assert fn.__doc__ and fn.__doc__.strip(), f"{fn.__name__} missing docstring"
+
+
+def test_every_public_function_in_framework_tools_is_in_the_tuple():
+    """Closes a blind spot the parity test structurally cannot see.
+
+    A function defined here but left out of ``_TOOLS`` is never registered
+    *and* never generated, so both routes agree it does not exist and parity
+    passes. Every driver catches this with a "tools cover the driver surface"
+    test; framework tools have no driver to compare against, so the module
+    itself is the reference.
+
+    Underscore-prefixed helpers and imported symbols are excluded — only
+    functions actually defined in this module.
+    """
+    import inspect
+
+    from benchctrl import framework_tools
+
+    declared = {fn.__name__ for fn in framework_tools._TOOLS}
+    public = {
+        name
+        for name, obj in vars(framework_tools).items()
+        if inspect.isfunction(obj)
+        and not name.startswith("_")
+        and obj.__module__ == framework_tools.__name__
+        and name != "register_mcp_tools"
+    }
+    assert public - declared == set(), (
+        f"defined in framework_tools but absent from _TOOLS, so invisible to "
+        f"both the MCP server and the CLI: {sorted(public - declared)}"
+    )
+    assert declared - public == set(), (
+        f"in _TOOLS but not a function defined in this module: {sorted(declared - public)}"
+    )

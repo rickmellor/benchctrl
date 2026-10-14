@@ -290,8 +290,46 @@ def test_every_registered_exception_round_trips():
         }
         exc = errors.decode_exception(payload)
         assert isinstance(exc, BaseException)
-        # KeyError stringifies as repr(arg), so assert containment.
-        assert f"{name} message" in str(exc)
+        # Assert on args, not on `in str(exc)`. Containment was the original
+        # assertion and it is satisfied by a *re-composed* message that merely
+        # quotes the original -- which is how SDM4065AOverloadError shipped
+        # doubling its own sentence. args is exact, and it also works for
+        # KeyError, whose __str__ is always a repr of its argument.
+        assert exc.args == (f"{name} message",), (
+            f"{name} did not carry the message verbatim: {exc.args!r}"
+        )
+        # ...and it must still be the class the agent raised. A message check
+        # alone passes on a silent degradation to RemoteBenchError.
+        assert type(exc).__name__ == name, (
+            f"{name} degraded to {type(exc).__name__} on decode"
+        )
+
+
+def test_a_constructor_that_reinterprets_its_first_argument_does_not_corrupt_the_message():
+    """A constructor can *accept* the message and still not store it.
+
+    ``SDM4065AOverloadError(function, range_)`` takes a string first, so
+    ``cls(message)`` raises nothing and silently files the whole message under
+    ``function``, then composes a new message quoting it. Measured over the real
+    RPC wire on the bench: "RESistance input overloaded — ..." came back as
+    "RESistance input overloaded — ... input overloaded — ...".
+
+    This is a wire-fidelity bug, not a cosmetic one: the operator reads that text
+    to decide what to widen, and ``function`` is meant to name a DMM function.
+    """
+    from benchctrl.drivers.siglent_sdm4065a.driver import SDM4065AOverloadError
+    from benchctrl.net.errors import decode_exception, encode_exception
+
+    original = SDM4065AOverloadError("RESistance", 100.0)
+    restored = decode_exception(encode_exception(original))
+
+    assert type(restored) is SDM4065AOverloadError
+    assert str(restored) == str(original)
+    # The give-away the containment check missed: the sentence appearing twice.
+    assert str(restored).count("input overloaded") == 1
+    # The attrs pass restores the real field values, so `function` is a function.
+    assert restored.function == "RESistance"
+    assert restored.range == 100.0
 
 
 # --------------------------------------------------------------------------

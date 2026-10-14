@@ -241,7 +241,10 @@ runs). Output: `frames/<label>/<seq>.jpg`, `manifest.json` (spec + digest,
 camera settings *read back*, per-frame seq/frame_id/sha256/actuator state/
 sanity, discards, as-found, restored) and `labels.csv`. The MCP tool is
 `vision_label_capture(spec, out_dir, sanity)`, using the devices the other
-tools opened and their allow-lists.
+tools opened (`pdu41002_open`, `cp2112_open`, `sdg1032x_open`) and their
+allow-lists. From the generated CLI it is `benchctrl vision label-capture`; a
+one-shot opens only the camera, so there only `sysfs_led` states can run — any
+other actuator is refused as not open before anything moves.
 
 Note the Pi 5's `ACT` LED is active-low: brightness 0 is *lit*. The spec spells
 the raw value per state and labels it; the truth is the label. First real

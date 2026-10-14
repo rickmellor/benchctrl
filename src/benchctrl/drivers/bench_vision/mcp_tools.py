@@ -221,6 +221,68 @@ def vision_clear_crop() -> dict:
     return {"crop": None}
 
 
+def vision_label_capture(spec: dict, out_dir: str, sanity: bool = False) -> dict:
+    """Build a labelled frame set from states benchctrl commands itself.
+
+    ``spec`` is the label-loop spec (``docs/vision.md`` § Label loop): a name, a
+    list of states — each an actuator to command (a PDU outlet, a CP2112 line,
+    an SDG1032X output, or the bench box's own ``sysfs_led``) and the label
+    frames taken in that state receive — plus frames per state, rounds, settle
+    time, and optional camera setup (crop, exposure, gain). The loop commands
+    each state, waits, fires N ``seq``-tagged captures, writes
+    ``frames/<label>/<seq>.jpg`` under ``out_dir`` with ``manifest.json`` and
+    ``labels.csv``, and **restores every actuator to how it was found** — also
+    when something fails half way.
+
+    Uses the devices already opened by ``vision_open`` and, as the spec needs
+    them, ``pdu41002_open`` / ``cp2112_open`` / ``sdg1032x_open``; their
+    allow-lists apply unchanged (an outlet, line or channel outside them is
+    refused by the driver). The ``sysfs_led`` actuator drives a host LED and is
+    only meaningful when this server runs on the bench box itself.
+
+    A frame that comes back with the wrong ``seq`` is discarded, never
+    labelled. ``sanity=True`` stores a mean-brightness read of
+    ``spec.sanity_roi`` beside each frame (needs Pillow on this host) so a
+    frame whose pixels disagree with its label can be flagged.
+
+    Returns the manifest summary: frame counts per label, discards, whether
+    the restore succeeded, and the spec digest to cite from a training run.
+    """
+    # Cross-driver, but it lives here rather than in framework_tools so the
+    # generated CLI's ``vision`` group opens the camera for it; the other
+    # drivers' modules are imported lazily so this one stays importable alone.
+    from benchctrl.vision.labelloop import (
+        LabelSpec,
+        build_actuators,
+        mean_brightness,
+        run_label_capture,
+    )
+
+    parsed = LabelSpec.from_dict(spec)
+    kinds = {s.actuator["device"] for s in parsed.states}
+    devices: dict = {}
+    if "cyberpower_pdu41002" in kinds:
+        from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as _pdu_tools
+
+        devices["cyberpower_pdu41002"] = _pdu_tools._get_pdu()
+    if "silabs_cp2112" in kinds:
+        from benchctrl.drivers.silabs_cp2112 import mcp_tools as _cp2112_tools
+
+        devices["silabs_cp2112"] = _cp2112_tools._get_dev()
+    if "siglent_sdg1032x" in kinds:
+        from benchctrl.drivers.siglent_sdg1032x import mcp_tools as _sdg_tools
+
+        devices["siglent_sdg1032x"] = _sdg_tools._get_sdg()
+    manifest = run_label_capture(
+        _get_vision(),
+        build_actuators(devices),
+        parsed,
+        out_dir,
+        sanity=mean_brightness if sanity else None,
+    )
+    return manifest.summary()
+
+
 _TOOLS = (
     vision_open,
     vision_close,
@@ -235,6 +297,7 @@ _TOOLS = (
     vision_set_fps,
     vision_set_crop,
     vision_clear_crop,
+    vision_label_capture,
 )
 
 

@@ -9,6 +9,728 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### A user guide, separate from the reference docs — `docs/guide/`
+
+Fifteen task-oriented pages for people *using* the bench rather than changing
+it: an overview, the theory of operation, the equipment matrix, installation,
+bench-host setup, local vs remote, driving it from an agent harness, how to add
+a driver, and six worked examples — board bringup, sleep current, power
+characterization, battery emulation, power cycling, unattended runs.
+
+**Why a new tree rather than more files in `docs/`.** The existing docs are
+reference: `api_reference.md` is exhaustive by design, `drivers.md` is per-device,
+`design.md` is internals. None of them answer "I have a new board and want to
+know what it draws." The guide is organised by task, one file per page, so it
+maps 1:1 onto a wiki space — directory becomes page tree — when it moves under
+document management. `docs/*.md` is unchanged and is the layer the guide links
+down into.
+
+Written to be **externally distributable**: no product names, part numbers or
+internal project identifiers. The campaigns that motivated the examples appear
+by technique and measured result, so a reader outside the org gets the method
+and the numbers without the provenance.
+
+Two conventions the pages hold to, both learned the hard way here.
+**Limitations go in the body, not an appendix** — the emulator-and-recording
+deadlock belongs next to the emulator example, because an appendix is read after
+the mistake. And **numbers are measured, not nominal**: every figure traces to
+`scenarios/README.md`, `docs/battery.md`, `docs/drivers.md` or
+`KNOWN_LIMITATIONS.md`, including the ones that make the bench look worse — the
+27× instrument-regime error, the 4.2 V output ceiling that silently clamps a
+fresh LiPo, and the 100 Hz loop that cannot see a switching converter.
+
+**Verified rather than proofread.** A link/anchor checker over all fifteen pages
+reports zero broken links; every backticked tool name is cross-checked against
+the live 324-entry `TOOL_TIERS`; every subcommand resolves in `--help`; and both
+example run specs were parsed verbatim through `RunSpec.from_dict`, so the JSON
+in the docs is executable rather than decorative. That pass found fourteen
+defects in the first drafts — `Channel` for `OtiiArcChannel` in eleven places,
+`--yes` trailing the device group (a parse error, not an authorisation) on five
+pages, three tool names that do not exist, and four undefined imports in the
+profiler snippet.
+
+It also found one **product** bug, disclosed in the affected page rather than
+papered over: `cp2112_open` calls `CP2112.open()` directly instead of
+`session.resolve()`, so `--sim silabs_cp2112` is accepted, logged and then
+ignored. Seven of the eight drivers resolve correctly; the sim factory and the
+registry opener both exist, so only the MCP-tool layer is wrong.
+
+### The whole bench from a shell — 406 CLI subcommands, generated
+
+`benchctrl` reached seven drivers with ten hand-written Arc-only commands. Every
+other device was Python-or-MCP only, so "tell me the relay state" meant writing
+a script. Now every MCP tool is a shell command:
+
+```bash
+benchctrl adu218 relay-states
+benchctrl --yes adu218 set-relay-state 0 on
+benchctrl --remote unoq.local sdm4065a measure-dc-voltage
+```
+
+**Nothing is hand-written per device.** The subcommands are built by reflection
+over each driver's `_TOOLS` tuple — the same tuple the MCP server registers — so
+a tool added to a driver becomes a shell command with no edit to the CLI. 406
+across eleven groups: arc 23, qr10x 11, dl3031a 45, dp2031 135, sdm4065a 54,
+sdg1032x 67, pdu41002 15, cp2112 10, adu218 19, vision 14, framework 13. The
+parity tests in `test_mcp.py` were decorative before and are load-bearing now.
+
+`_TOOLS` rather than asking a live server, for two reasons and the second one
+decided it. Importing `benchctrl.mcp` costs ~0.64 s (FastMCP alone is 0.44 s of
+it) against 0.06 s for all eight drivers, and a full remote round trip is 63 ms
+— so introspecting a server would be slower than every call the CLI makes. More
+decisively, it would hard-depend the `benchctrl` console script on the optional
+`[mcp]` extra, which needs Python ≥3.10 while the package declares
+`requires-python = ">=3.9"`.
+
+**Risk is the part that is *not* generated**, and that is the whole design.
+`cli_tiers.py` classifies all 406 tools explicitly — 194 read, 162 tier 2, 47
+needing `--yes`, 3 needing `--yes` *and* a named environment variable — and a
+tool with no entry raises rather than defaulting to safe. Two tests assert
+completeness in both directions, so adding a driver tool fails the suite until
+somebody decides what it can do to the hardware.
+
+Reusing the agent's `dispatch.is_mutator()` was the obvious move and is measurably
+wrong. It is a bare name-prefix match: `is_mutator("write")` is **False** — the
+raw SCPI passthrough on all three SCPI drivers — while `take_snapshot` matches
+and only samples, and `step_voltage_up` moves a live output and matches nothing.
+A CLI keying its read/write split on that predicate would file arbitrary SCPI
+under "safe". A test asserts `is_mutator` still disagrees, so if the drivers are
+ever renamed the table can be simplified deliberately rather than by accident.
+
+Four tiers, not two, because a confirmation nobody reads protects nothing.
+`set_voltage` on a de-energised output needs no `--yes`: requiring one for every
+setpoint would make the flag reflexive, which is how a real prompt gets waved
+through. And the *de-energising* direction is deliberately frictionless —
+`adu218 reset-relays` and `cp2112 reset-lines` are tier 2, with a test asserting
+de-energising is never gated harder than energising. An operator fighting a live
+output should not meet a gate on the way to safety.
+
+The three environment gates are for effects that outlive the command:
+`BENCHCTRL_PDU_ALLOW_SWITCHING` for `pdu41002 set-outlet-state` / `reset-outlet`
+(it switches mains) and `BENCHCTRL_ADU218_ARM_WATCHDOG` for `adu218
+set-watchdog` (`WDn` sets *and* arms, and the relay opens later, after the CLI
+has exited). Separate variables because one authorisation must not grant the
+other: `--yes` says you meant to run a command, the variable says you know what
+is physically attached, and those are different claims. `--help` marks the two
+tiers `[!]` and `[!!]` so an operator can see which commands move hardware
+before typing one.
+
+**`bool("off")` is `True`, and a CLI passes strings.** A boolean parameter routed
+through `argparse`'s `type=bool` would energise on *every* spelling, including
+the ones that mean no. Every boolean takes an explicit word instead — `on`/`off`,
+`true`/`false`, `1`/`0`, `yes`/`no`, `enable`/`disable` — and anything else is
+refused by argparse. The PDU driver's `isinstance(on, bool)` guard would have
+caught the resulting non-bool, but a CLI that is only safe because a driver three
+layers down is defensive is not safe.
+
+**A one-shot needs a lifecycle a server does not**, and four things follow that
+reflection cannot infer (`cli_lifecycle.py`):
+
+- **Teardown depends on the mode.** Locally, the driver's `*_close` tool.
+  Remotely, `close()` is *refused* by the proxy — closing is governor-mediated so
+  an armed output is never orphaned — and the correct exit is a clean client
+  disconnect, which the agent reads as consent to release the writer claim.
+  `agent.close` is **not** the remote equivalent: it trips the governor
+  bench-wide, so one command finishing would drive every armed device on the
+  bench to safe, including instruments the command never touched.
+- **A one-shot must not disarm what a previous one armed.** `adu218_open`
+  defaults `disarm_watchdog=True` and its connect path sends `WD0`. Right for a
+  long-lived server, since the watchdog setting reads 0 for both "timed out" and
+  "never enabled" (§ F-29) so a fresh session cannot interpret an inherited
+  value — and wrong here, where *every* invocation is a fresh session. Left
+  alone, `benchctrl adu218 relay-states` would silently disarm a watchdog the
+  previous command armed. The CLI overrides the default; the driver is unchanged.
+- **A failed de-energise is a dict key, not an exception.** `dl3031a_close`
+  disables the load input and `dp2031_close` disables three outputs, and both
+  report failure as `input_off_failed` / `outputs_off_failed` in their *result*
+  while the close itself completes. A CLI checking only for exceptions would
+  print your measurement and exit 0 with the load still sinking current. Hence
+  **exit code 4**: the reading still prints, the warning goes to stderr so
+  `--json` stays parseable, and the shell learns something went wrong. Losing the
+  measurement to a teardown problem would make the CLI unusable exactly when the
+  bench is misbehaving.
+- **The open is implicit**, and its arguments come from the `open` block of
+  `~/.config/benchctrl/config.json` — the same dict the MCP server and the agent
+  already forward — so `allowed_outlets` and the port live in one reviewable
+  file rather than a second CLI-only one that would eventually disagree.
+
+**`--remote` / `--local` / `--sim` now exist.** `docs/remote.md:52` had
+documented them as CLI flags since remote mode landed, and until now only
+`benchctrl-agent` had them. Any non-local binding is announced on stderr
+(`benchctrl: ontrak_adu218 -> sim`), so *"why did that read a simulator"* has an
+answer; silence means everything resolved local, because a line per device would
+train you to ignore the one that matters. With no flags the CLI installs no
+config object at all — an empty one would count as an override and beat the
+environment and the config file, which have documented precedence.
+
+Exit codes are a contract: 0 ran, 1 ran but found nothing, 2 the device or
+library refused, 3 the *CLI* refused, 4 teardown could not de-energise, 130
+interrupted. 2 and 3 are distinct so a script can tell "the device is not there"
+from "you did not authorise this", and a refusal happens before anything is
+configured or opened and says `Nothing has been sent to the device.`
+
+Catching only `BenchError` would have let ordinary failures escape as tracebacks:
+**no driver exception subclasses it** — `ADU218Error`, `PDU41002Error`,
+`QR10xError` and the rest all descend straight from `RuntimeError` — so "device
+not plugged in" would have exited 1 with a traceback, and 1 is already
+`discover`'s code for "found nothing". The class list comes from
+`net/errors._registry()`, which is maintained anyway so exceptions survive the
+RPC wire, filtered to `benchctrl.`-owned classes so a bare `ValueError` from a
+CLI bug is not disguised as an instrument refusing something.
+
+A claim conflict gets its own explanation, because the server's wording is aimed
+at a protocol client: it names an opaque session id and says this session "is a
+read-only observer", which reads as though the operator asked for that. From a
+shell it is nearly always a second `benchctrl` process or a dashboard that got
+there first, and `RemoteClient.attach` calls `agent.claim` once with no retry and
+no backoff anywhere in `net/client.py` — so the advice is to wait, and the device
+is untouched. Keying on message text is fragile and is contained by a test that
+produces the error from a **real** agent with two connected clients, so a
+reworded server message fails the test rather than silently turning the
+explanation off.
+
+Also fixed on the way through: `_render_scalar` JSON-dumped nested collections,
+so `benchctrl adu218 relay-states` printed `relays: {"0": false, ...}` from the
+*non-JSON* output mode — the on/off rendering never reached the values that
+needed it most, on the one device where on/off is the whole answer. Found by
+running every example in the new documentation instead of trusting it.
+
+The ten legacy Arc commands are untouched and still open the Arc directly, so
+`--sim` and `--remote` do not apply to them; `benchctrl set-voltage 3.3` and
+`benchctrl arc set-voltage 3.3` are different commands reaching the same
+instrument until the legacy ten are removed.
+
+Two limits are documented rather than fixed. **Local mode has no governor** —
+`SafetyGovernor` is built only by `AgentServer`, so a local one-shot has no arm
+tracking and no deadman while `--remote` has both (§ A-6); the ADU218 is covered
+anyway by its hardware watchdog and the PDU is exempt by design, but the Arc and
+the two Rigols are real exposure. And **mains switching is now one shell line**,
+which does not change the cabling invariant that makes self-kill impossible but
+does raise the cost of anyone ever changing it (§ F-12).
+
+**Two claims needed a real process against a real device**, so
+`tests/test_hardware_cli.py` spawns `python3 -m benchctrl` as a subprocess: that a
+reflected subcommand drives the instrument through a cold open/call/teardown, and
+that the exit codes are what `$?` sees rather than what `main()` returned — the
+second also depends on `__main__` and on no traceback escaping, and scripts branch
+on `$?`.
+
+The gate is tested as a *pair*, because a refusal proves nothing alone: a
+permanently-closed gate passes every refusal assertion, so the **satisfied** case
+is the discriminator and is checked against real hardware, where it has to get
+past the gate and reach the device. With nothing attached that run also fails —
+with 2 — and 2-vs-3 would stop being a distinction. Measured on the board:
+`adu218 set-relay-state 0 on` exits **3** with `Nothing has been sent to the
+device.` and an empty stdout; `--yes` plus `BENCHCTRL_ADU218_ARM_WATCHDOG=1`
+reaches the instrument and exits **0**.
+
+Eight of the ten pass on the bench today. The two that switch a relay skip unless
+`BENCHCTRL_CLI_HW_WRITE=1`: the CLI deliberately has no `allowed_relays` flag, so
+a CLI write reaches whatever relay is named, and the nomination has to come from
+the operator. It shares `BENCHCTRL_ADU218_RELAY` with the driver's own hardware
+tests so the two files cannot drift about which contact is safe to move.
+
+New: `src/benchctrl/cli_generated.py`, `cli_tiers.py`, `cli_lifecycle.py`,
+[`docs/cli.md`](docs/cli.md), 140 hardware-free tests across
+`test_cli_generated.py`, `test_cli_tiers.py` and `test_cli_main.py`, and 10
+hardware-marked in `test_hardware_cli.py`.
+
+### Ontrak ADU218 relay / digital I/O interface — zero dependencies
+
+Eight 1 A solid-state relays, eight opto-isolated digital inputs with
+hardware event counters, and a hardware watchdog that de-energises every
+relay by itself if the host stops talking. First driver in benchctrl with
+**no dependencies at all** — not pyserial, not pyvisa, not `hid` or
+`pyusb`.
+
+The device is USB HID, not serial: the starting assumption was pyserial
+and it was wrong. Ontrak's own Linux path is `libusb` plus their `AduHid`
+shared library, neither of which is available on the Uno Q and both of
+which are dependencies. The route taken instead is raw USBDEVFS ioctls
+from the standard library — `fcntl.ioctl`, `ctypes`, `os` — which needs
+nothing installed.
+
+Three kernel facts make that route contractual rather than a trick:
+`USBDEVFS_BULK` on an interrupt endpoint is explicitly handled by
+`devio.c`, which rewrites the pipe and calls `usb_fill_int_urb()` with the
+endpoint's own `bInterval`; `usbhid` *deliberately* ignores Ontrak devices
+via `hid_ignore_list`, so `CLAIMINTERFACE` succeeds with no driver to
+detach and no udev unbind rule; and `usbdev_open()` holds a runtime-PM
+reference for the life of the fd, so autosuspend cannot strand a live
+session. The ioctl request numbers are **computed**, not copied —
+`USBDEVFS_BULK` encodes a struct size that differs between 32- and 64-bit,
+so a hardcoded constant works on the laptop and fails on the board.
+
+**Silence is the device's only error signal**, and that shaped everything
+else. There is no error reply: an unknown command, a valid command with an
+out-of-range argument, and a write-only command working perfectly are
+byte-identical on the wire — nothing comes back. So the driver carries an
+explicit whitelist of every command it can render, an explicit
+per-command `responsive: bool` (never inferred — `RKn` is write-only
+despite starting with `R`, while every other `R` command answers, and it
+is the most-called command on the device), and an explicit per-command
+reply width taken from hardware captures rather than the manual, because a
+width wrong by one turns a desynced reply into a plausible value.
+`ADU218TimeoutError` is documented as ambiguous *by construction*: the
+information needed to disambiguate is not on the wire. The mitigating
+half, unlike the SDM4065A: an ignored command does not poison the session.
+
+Four more device behaviours drove decisions that look odd without them:
+
+- **Writes are unacknowledged**, so `set_relay_state` returns the
+  **verified read-back** rather than `None`, and `open()` drains the IN
+  endpoint before anything else — replies queue rather than overwrite, so
+  a reply left by a crashed previous process would be returned as the
+  answer to this process's first query, a silently wrong value rather than
+  an exception.
+- **The watchdog is fed by *any* command**, including a plain state read
+  and including one the device rejects. So a status-polling loop silently
+  neuters it — measured on a synthetic clock, ten rounds of "advance 9 s,
+  read the relays" held a relay across 90 s with a 10 s watchdog armed and
+  zero trips. There is deliberately **no keep-alive helper**: a background
+  feeder would keep the timer fed precisely while the failure it guards
+  against was happening. `close()` also does not disarm it, because
+  releasing the device *is* the silence it exists to detect.
+- **`WD` reads 0 both for "timed out" and for "never enabled"**, so a trip
+  leaves no trace the device can be asked about. The driver holds its own
+  armed state and compares, and writes `WD0` at `open()` unless told
+  otherwise, because a fresh process would otherwise inherit the ambiguity.
+- **`RCn` is the only command that both answers and mutates.** A lost
+  reply after the device has cleared loses the count permanently, and a
+  retry would report 0 — indistinguishable from "no events". So
+  `clear_counter()` never retries and the returned value is the only copy.
+
+Safety differs from the PDU41002 on purpose: these are 1 A signal SSRs on
+instrument leads, not mains contactors, so `allowed_relays` defaults to
+all eight per the operator's stated policy rather than being mandatory.
+The allowlist guards *closing* a contact, not opening one —
+`set_relay_state` always de-energises and `reset_relays()` bypasses the
+list entirely, so the safe state stays reachable on exactly the benches
+most carefully configured. `set_relay_port` is the exception and enforces
+on the whole mask, because `MKddd` moves all eight lines in one
+indivisible command. `open()` warns about relays it found already
+energised rather than driving them off, since it cannot know what they are
+holding.
+
+Two index ranges, not one: relays are 0-7 and **input lines are 0-3**
+(ports A and B are four bits each). A shared validator would accept
+`RPA5`, which the device answers with silence — a timeout three layers
+from the bad argument. `RPy` also replies MSB-first, so the leftmost
+character is line 3; indexing it directly is an off-by-three that reads
+correctly for the all-zero case every unwired bench produces.
+
+Naming is constrained by `agent/dispatch.py`, which derives which calls
+need a writer claim purely from name prefixes: every mutator takes an
+existing prefix, and `is_open` keeps its framework meaning (*link
+connected*) while nothing relay-facing borrows open/close — a test
+enforces it, since a `close_relay()` would be remotely callable with no
+claim. The device key is deliberately absent from `SWITCHED_PDU_KEYS` and
+the FUI's `PDU_KEYS`, which mean "switches mains".
+
+The simulator subclasses the **production** USBDEVFS link and replaces
+only the ioctl and the device node, so framing, the mandatory `0x01` report id, NUL
+padding, the desync check, the timeout mapping and `drain()` all remain
+shipping code paths under test. Its reply widths are asserted against
+`tests/fixtures/adu218/reads.txt` at run time rather than transcribed, so
+it replays the device instead of agreeing with a reading of the manual.
+Its clock is manual, so the watchdog ladder is deterministic.
+
+Also included: 19 MCP tools (`adu218_*`), a passive discovery signature
+(VID `0x0A07` / PID `0x00DA`, identified from sysfs — nothing is written
+to the device), full agent/remote registration, and
+`KNOWN_LIMITATIONS.md` entries H-6, H-7, F-28 through F-31, and A-5 —
+which is not about this device alone: no simulator in the repo reaches its
+instrument's real transport, and writing the ADU218's version of that gap
+was what made the general case worth stating.
+
+There is also a hardware suite (`tests/test_hardware_ontrak_adu218.py`),
+and it earns its keep for one reason: the driver's own verification is the
+device talking about itself. Since writes are unacknowledged,
+`set_relay_state()` confirms a switch by re-reading the same device — which
+catches a device that ignored a command but not a driver whose read-back is
+secretly its own commanded value. So relay K0 is wired across the
+SDM4065A's leads and the suite asserts both instruments agree across five
+alternating transitions. No resistance threshold is asserted: the same
+closed relay has measured between 6.14 Ω and 10.69 Ω across sessions, all
+of it probe seating. What is asserted is that a closed contact reads *a
+number* and an open one reads the DMM's overload sentinel — an open contact
+is unmeasurable rather than merely large, so no amount of contact drift can
+confuse the two. The suite was then verified to fail on the defect it
+exists for: a `set_relay_state` patched to return its own argument without
+touching the device fails three of the six tests.
+
+The input, counter and de-bounce half of the device was implemented and
+simulator-covered long before any input line was ever driven to a `1`,
+which meant no counter had ever incremented on hardware. A square wave into
+PA3 closed that gap and produced two findings:
+
+- **Counters count cycles, not edges.** Cross-checked against host level
+  sampling, whose failure mode is different: at 10 Hz the device counted
+  10.030/s while the host saw 9.997 rising *and* 9.997 falling edges/s —
+  ratio 1.003, where counting both edges would give 2.0. Confirmed again at
+  0.5 Hz. This matters because the two hypotheses differ by exactly 2× and a
+  doubled frequency looks plausible indefinitely.
+- **The counter-to-input map is only an image.** Counter assignments live in
+  a "Table 1" *image* that the manual's text layer omits entirely, so the
+  mapping the driver uses was unverifiable from the document. Driving PA3
+  moved counter 3 and nothing else, with the other seven flat.
+
+Moving the generator to **PB2** later closed the other half, and it is the
+half that carries the information: with the stimulus on PORT A every counter
+index equals its line number, so offsets of 4, 3 and 0 are all consistent
+with the PA3 result. On PB2, counter **6** was the only one of eight to move
+— 201 events in 20.13 s, 9.987/s against a 10 Hz wave — which pins the
+offset at 4. PA3 falling silent and counter 3 freezing is part of that
+result: it is what rules out "everything counts regardless" and proves the
+lead moved rather than the measurement repeating. Mutating the offset to 3
+fails all three counter tests, so the map is now pinned rather than merely
+consistent.
+
+**Then all eight positions were measured**, by walking both the meter and the
+generator across the device one terminal pair at a time. Every input line moved
+its own counter and only its own — PA0-PA3 → counters 0-3, PB0-PB3 → counters
+4-7 — each setting its own `PI` bit and no other, every rate within ±0.5 % of
+the 10 Hz stimulus (which is ±1 event of quantisation in a 10 s window). The
+Table 1 image is now redundant rather than corroborated, and the PORT B offset
+rests on three independent readings (PB0 → 4, PB2 → 6, PB3 → 7).
+
+The same walk **independently witnessed all eight relays**, which the opt-in
+all-eight sweep cannot: the bench has one meter, so that test checks seven
+relays against the device's own read-back. Here each relay in turn read
+*overload* open and a finite value closed, with the alternating
+five-transition check passing at every position. Closed readings: **16.87 /
+17.50 / 20.77 / 28.37 / 31.36 / 32.09 / 41.19 / 45.65 Ω** — a **2.7× spread
+with no relation to index**, which settles F-34's wiring-not-relay conclusion on
+eight points instead of two. Within-position spread was ≤ 0.06 Ω everywhere but
+one relay, so the drift that once broke a `hi < lo * 2` bound is clip seating.
+
+A loose screw terminal during that walk made one relay read **336 kΩ closed**,
+and the suite passed. Deliberately left that way: the claim is that the relay's
+state follows the command, and overload → finite is a real state change, so the
+claim held. What was broken was bench wiring quality — not the driver's claim,
+not visible to it, and a ceiling would be exactly the
+threshold-on-a-wiring-property F-34 exists to forbid.
+
+**The hardware watchdog was armed on the bench and allowed to trip**, which is
+the claim the whole watchdog design rests on and the last thing here that had
+only ever been tested against a synthetic clock. Armed at `WD2`, the DMM held
+17.471–17.474 Ω across 24 consecutive readings spanning 9.86 s after arming,
+then read the overload sentinel — the trip brackets to **(9.86, 10.83] s**
+against a 10.0 s nominal, one meter read wide. The *device* de-energised its own
+relays, with no benchctrl process, no GPIO and no kernel driver in the decision
+path.
+
+Running it exposed a hole in the test making the claim, and closed it. The
+original form armed `WD1` (1 s), waited 1.5 s and asserted the contact was open
+— which is satisfied by two different hypotheses: that the relay opens when the
+timer **expires**, or that it opens as a side effect of **arming at all**. The
+second would make the interlock useless, since it would drop the load the moment
+it was enabled. `WD1` cannot separate them, because one meter read costs ~0.41 s
+and the entire window is 1 s, leaving no room to sample inside it. The test now
+arms `WD2` and asserts the contact is **still closed** early in the window,
+guarded by a check that the early sample really landed early — a slow VISA round
+trip would otherwise silently degrade it back into the form that cannot tell the
+difference. Proven by mutation in both directions: de-energising the relay right
+after arming fails the `WD2` form on the early assertion and **passes** the
+`WD1` form, so the added coverage is measured rather than asserted.
+
+The same run witnessed **PORT B's bit ordering for the first time**, across
+all four input commands, which had only ever been checked against PORT A —
+`RPy`'s MSB-first text reversal, `Py`'s LSB weighting, `PI` placing PORT B in
+the *high* nibble, and the per-line read all agreed on line 2. Sampled as a
+union with an equality assertion, because a single read of a 10 Hz line is
+exactly the coin flip that made an earlier test flaky, and "ever high" would
+pass on a reply with every bit set. The earlier sweep's "no PORT B line ever
+high" was an absence of evidence — nothing was attached there — not evidence
+the ordering was right.
+
+**A skip that names the right line can still hide a stale default.**
+`BENCHCTRL_ADU218_INPUT` defaulted to `B2`, and skipping with the line named
+rather than false-passing was treated as sufficient. It is not: the bench walk
+left the generator on **PB3**, so with the bench fully wired and nothing
+misconfigured, this file ran 7 passed / 5 skipped instead of 10 / 2 and three
+input/counter tests silently stopped running. "PB2 is not toggling" is equally
+true whether the generator is unplugged or one terminal over, and the second is
+what had happened. The default is now `B3`, found by sampling all eight lines
+rather than assumed, and the skip now says where the generator **is** — one
+extra sweep of the port, since the device is already open. Verified with
+`INPUT=A1`: it names PB3 and says to set the variable or move the default. A
+default that tracks the bench needs a message that can distinguish "moved" from
+"absent", or it degrades into a green run with less coverage than it claims.
+
+The vendor manual also supplied what no capture had: **de-bounce settings
+are durations, and they run backwards** — `0` = 10 ms, `1` = 1 ms
+(default), `2` = 100 µs. So the *highest* setting is the *weakest* filter,
+and an operator chasing maximum de-bounce would pick `2` and get the least.
+`read_debounce_ms()` and `DEBOUNCE_MS` exist for that reason, and the MCP
+tools now return `debounce_ms` beside the raw setting.
+
+Measuring the ladder against a real signal produced a **negative result
+worth recording with its scope**: at 10 Hz all three settings counted
+identically (10.042 / 9.992 / 9.992 counts/s, 0.5 % spread). That is
+expected rather than broken — every filter width is far shorter than a
+50 ms half-period, so none has anything to reject — but it means a passing
+de-bounce round-trip proves acceptance, *not* effect. Telling the settings
+apart needs a few hundred Hz against counters rated to only 1 kHz, above
+which the count under-reports silently. New entries F-32 and F-33.
+
+The hardware suite grew from 6 tests to 12: the inputs, the counters, the
+cycles-not-edges cross-check and the de-bounce round trip now run against
+the real device (**10 passed, 1 skipped** with a live 10 Hz stimulus). Two
+are opt-in behind environment variables, because their default should not
+be to act: `BENCHCTRL_ADU218_SWEEP_ALL` for the all-eight-relay sweep,
+which previously existed only as an uncodified ad-hoc run so nothing would
+have caught a regression on relays 1-7, and `BENCHCTRL_ADU218_ARM_WATCHDOG`
+for the witnessed trip. Both energise outputs the operator has not
+otherwise nominated, and per `AGENTS.md` that is the operator's call to
+make, not a default.
+
+Hardware-free coverage closed the two gaps that inspection had found and
+nothing asserted: the 65535 → 0 counter wrap (including the negative
+`after - before` it produces, since differencing is the only correct way to
+use these counters) and the reply-above-maximum protocol error. Relays 6
+and 7 also previously appeared *only* inside port-mask tests, so all eight
+now switch individually with the emitted `SKn`/`RKn` commands asserted —
+each verified against a deliberately shifted command builder, which the
+per-index test kills at exactly index 7.
+
+A late audit of the command whitelist against the public method surface
+found the driver **documenting a capability it could not use**. `PA`/`PB` —
+one input port's nibble — was whitelisted, given a hardware-measured reply
+width, modelled by the simulator and written into a `docs/drivers.md` table
+row, while no method could send it. The whitelist serves double duty here,
+as the safety gate and as the response-width table, and an unreachable
+entry satisfies both, so nothing in the suite objected. The SDK ↔ MCP
+parity test guards the opposite direction and was silent too.
+
+Closed with `input_port_mask(port)` and `adu218_input_port_mask`, which are
+worth having rather than a fourth spelling of the same read: `Py` is the
+only input read whose reply is **LSB-weighted decimal**, so bit 0 is line 0
+with no reordering, where `RPy` is MSB-first text and `PI` packs both ports
+into one byte. It is also a *different* answer from a masked `PI` — one
+port, with the other port's state absent rather than masked off.
+
+The general guard matters more than the method:
+`test_every_whitelisted_command_is_reachable_from_the_sdk` drives the
+public surface and asserts no whitelist entry goes unsent, so the next
+command documented as present and absent at once fails a test instead of
+shipping. It drives the surface rather than grepping the source, because a
+grep passes on a method that renders a command and is never called — and it
+asserts a floor on the number of distinct commands sent first, since a
+reachability test that exercises nothing passes trivially.
+
+Fixed along the way: `scan_usbfs()` now returns `[]` rather than raising
+when the USB bus cannot be enumerated. `enumerate_devices()` raising is
+correct for a driver about to open a device and wrong for a scan, and
+because `discover()` builds one merged list, letting it propagate took out
+**every other transport's results too** — a machine with no `/sys/bus/usb`
+reported no VISA instruments either.
+
+The hardware suite's DMM witness gained two skips, both for conditions that
+previously arrived looking like something else. A resistance read cannot
+tell an open contact from **leads that are not on the contact at all** —
+both are unmeasurable — so the witness now reads DC volts first and skips
+when the leads sit on a powered net, naming the wiring instead of failing as
+`assert None is not None`. It cannot mask a stuck relay: a dry contact reads
+~0 V open or closed. Measured after the CP2112 work moved the meter: 3.392 V
+standing, unmoved by K0. And because a running agent opens the SDM4065A
+lazily and keeps the VISA handle *after* the claim is released, a direct open
+returns errno 16 while the meter sits idle — indistinguishable from an
+unplugged instrument. The witness now borrows the meter *through* the agent
+in that case, the way `tests/test_hardware_cp2112.py` does by design, rather
+than requiring the whole bench be safe-stopped to run one file.
+
+The leads then moved again — to **K7** — and that exercised the volts gate's
+blind spot: it catches a *powered* net, but another **dry** contact reads ~0 V
+exactly like the right one, so a stale `BENCHCTRL_ADU218_RELAY` fails rather
+than skips. Both witnessed relay assertions now name **both** causes ("either
+that relay is not switching, or the leads are not across it — this test cannot
+tell them apart") and print the device's own read-back to say which to go and
+look at. `test_reset_relays_reaches_a_genuinely_open_contact`'s control read was
+a bare `assert witness() is not None` with no message at all; it has one now,
+because that assertion failing is what makes the open-contact claim below it
+unfalsifiable. Verified by pointing the suite at K5 with the leads on K7: both
+tests fail with the wiring named. `TEST_RELAY`'s default moved 0 → 7 to match
+the bench.
+
+**K7 is also the strongest evidence yet for refusing a resistance threshold.**
+Same meter, same session, identical PhotoMOS parts: K0 closed reads
+**9.483 Ω**, K7 closed reads **36.02–36.22 Ω** — nearly 4× apart, because the
+excess is lead and contact resistance *outside* the relay. Any `< 10 Ω` rule
+derived from K0 would call a perfectly good K7 open. Keying on the overload
+sentinel instead is what makes the witness survive being re-wired at all.
+
+Re-wiring also exposed a **second flaky assertion** in the same test, and it
+failed for the reason the first one did: a bound calibrated on the old wiring.
+`hi < lo * 2` on the two closed readings carried the comment "the within-session
+spread is milliohms" — true of K0's screw clamps, false of K7's spring clips.
+Measured over 15 back-to-back runs of that exact sequence, K7 closed drifted
+**62 → 127 → 61 Ω**, monotonically and then back, worst within-trial ratio
+**1.80** against a limit of 2.00 — so it failed about one suite run in seven.
+Now an order of magnitude, with what that gives up written down rather than
+implied: at ×10 a K7→K0 lead move (ratio 3.81) no longer trips it. That
+coverage was illusory anyway, since no threshold separates 3.81 from a 1.80 the
+clips produce unaided; the assertions that actually catch a lead on the wrong
+relay are the two above it. 6 consecutive full-suite runs green after. New
+entry **F-34** collects every closed-contact resistance figure measured on this
+bench and states why no test may assert a threshold or assume stability.
+
+`test_a_driven_input_line_reads_high_and_only_its_own_counter_moves` was
+**flaky on real hardware, 2 passes in 6 runs**, and the cause was one
+`input_mask()` read asserted high on a line toggling at 10 Hz — a coin flip
+sitting directly beneath a block that samples 60 times *because* the line
+toggles. It now samples the union the same way (measured: 32 of 60 reads
+catch the low half, so a single read fails about half the time) and asserts
+the union equals exactly the driven bit, so the bit-position claim a wrong
+shift would break is still tested. 6 of 6 after.
+
+**"Simultaneous" said six times without saying which claim it was.** Asked
+what the gated all-eight test needs and whether it wanted a logic analyzer,
+the honest answer turned out to require a distinction the docs never drew.
+`MKddd` being *indivisible* is a claim about the **command**: eight
+`SKn`/`RKn` writes are eight USB transfers, so the port really does pass
+through `0b10101000` en route to `0b10101010`, and one `MKddd` does not —
+which is the whole basis for `set_relay_port` enforcing the allowlist on the
+entire mask. Contact-to-contact **skew inside that one command is unmeasured
+and now says so**, in the driver, the MCP tool description and
+`docs/drivers.md`: verification is a `PK` read-back of the landed state,
+which cannot see timing, and the manual gives no per-relay switching time to
+compare against. The previous wording would have been cited as evidence for
+make-before-break ordering it does not support.
+
+Two vendor specs surfaced while looking for that switching time, neither
+recorded anywhere. `RELAY_MAX_SWITCH_HZ = 1.0` carries the spec table's
+*1 CPS at full load* and the CAUTION that PhotoMOS dissipation rises with
+switching speed — the ADU218 is explicitly not for PWM. It is **documented
+and deliberately not enforced**, because the figure is qualified *at full
+load* and nothing in USB, HID or the ADU command set reports what a contact
+is switching, so a limiter would throttle the dry-contact sweeps that are
+most of this bench's use on a condition it cannot observe. The inversion is
+worth knowing: the ADU208's *mechanical* relays manage 10 CPS, so the
+solid-state part is the slower one to cycle. The test pins the absence of a
+limiter on **elapsed time rather than on "it returned"**, since a throttle
+has two shapes and only one raises — a version that sleeps to pace the
+writes leaves every state assertion passing, just slowly. A
+`sleep(1/RELAY_MAX_SWITCH_HZ)` mutant held outside the module fails it at
+8.00 s against a 2.0 s ceiling.
+
+And on-state resistance, **700 mΩ typical / 1.1 Ω maximum** (Panasonic
+AQZ207), added to F-34 — which corroborates that entry independently of this
+bench. Every reading in the eight-relay walk is **15× to 41× the vendor
+maximum**, so the relay accounts for under 4 % of even the lowest one. The
+wiring conclusion had rested on "the spread has no relation to index", an
+inference from a single bench.
+
+**The whole-port command path now has an independent witness.** With the
+operator opening the bench up for the all-eight sweep, that gated test ran for
+the first time — and running it exposed that its two port-mask writes were
+checked only against `relay_mask()`, i.e. the device reporting on itself. A
+firmware that accepted `MKddd`, updated its own state word and never moved a
+contact satisfied it completely, which is the one defect class the per-relay
+path had been protected from since the first bench session.
+
+The bench closed it for free: the two masks the sweep already writes,
+`0b10101010` and `0b01010101`, are **complements**, so whichever relay the one
+meter is clamped across, one mask closes it and the other opens it. A new
+witnessed test asserts that, and asserts the two masks are still complements so
+a later edit cannot silently reduce it to measuring one state twice.
+
+Proven by mutation, and the first two attempts are the instructive part. A
+bit-reversal mutant *was* killed — but at the pre-existing read-back assertion
+(`assert 85 == 170`), not at the meter, so the witness contributed nothing:
+two guards catching one fixture. Two further mutants leaked through
+`reset_relays`, whose `MK000` takes its own `_send` path. The discriminating
+mutant swallows only a **nonzero** `MKddd` at the `_send` seam while
+`relay_mask()` returns the commanded value, leaving the safe state genuinely
+reachable and no read-back anywhere able to see the lie: against it the
+**existing sweep passes and the witnessed test fails**, on its own DMM
+assertion, naming the cause. Ordering in the test is deliberate — the mask that
+*opens* the metered relay is sent while seven others close, which is the
+reading a state-word-only bug cannot fake.
+
+The `SWEEP_ALL` gate was **kept**, not removed. This bench is safe and its
+operator said so, which satisfies the gate; the skip is the repo's contract
+with the next bench, where it may not be. Verified both ways: 13 passed / 0
+skipped with the gates set, and the gate still skips with the line named when
+unset.
+
+The readings themselves are on file in
+`tests/fixtures/adu218/whole_port_witness.txt`, because the test asserts
+**categorically** — finite versus the overload sentinel, per F-34, since the
+closed value is a property of the wiring — and a categorical pass does not show
+how far from the boundary it sat. That capture carries a corroboration the test
+cannot make: the bench walk read K7 at **17.50 Ω** through the *per-relay* `SKn`
+path, and `MK170` puts the same contact at **17.5134–17.5152 Ω** over three
+passes. Two independent command paths, one contact, the same resistance to four
+decimal places — so `MKddd` closes the relay the way `SKn` does, rather than by
+some other route that merely ends up reported as closed. F-34 records it as a
+cross-check on its own eight-relay table.
+
+### `benchctrl-mcp` never installed its configuration, so four of the five precedence levels were inert
+
+`session.resolve()` is the local / remote / sim seam, and it reads a module
+global that something has to populate. `session.configure_from_environment()`
+is what populates it from the documented layers — and it had **no callers
+anywhere in `src/` or `tests/`**. So `benchctrl-mcp` resolved every device
+`local`, unconditionally. `BENCHCTRL_REMOTE`, `BENCHCTRL_TOKEN`,
+`BENCHCTRL_SIM_DEVICES`, `BENCHCTRL_LOCAL_DEVICES` and
+`~/.config/benchctrl/config.json` all parsed correctly, produced a correct
+`Config`, and were then dropped. Only precedence level 1 —
+`session.configure()` called from Python — ever worked, which is why every
+test and every remote-mode demo passed: they all take that route.
+
+**The failure mode points the wrong way, which is the reason this is a
+safety fix and not a papercut.** Ask for `mode="sim"` and you got the real
+instrument, silently, with no diagnostic — because the seam's whole purpose
+is that the 406 tools cannot tell a simulator, a remote proxy and real
+silicon apart. Someone stepping relays or switching mains while reading
+"simulated" in their own shell history is the concrete hazard;
+`KNOWN_LIMITATIONS.md § N-8` records it.
+
+`mcp.install_config()` now runs before `mcp.run()`, and any non-local
+binding is announced on **stderr** — an MCP server inherits no logging
+configuration from its client and stdout is the JSON-RPC channel, so a
+`log.info` would have gone nowhere. A malformed config is fatal rather
+than a warning, since carrying on means driving hardware nobody asked for.
+
+`main()` also now calls `session.shutdown()` in its `finally`, which
+`session.shutdown()`'s own docstring had been instructing readers to do
+("call this from any process-exit path that can arm hardware — see
+`benchctrl.mcp.main`") while `main()` did not. The agent reads a clean
+disconnect as consent to drop the writer claim and drive an armed device to
+its safe state; without it, exiting the MCP server left that to the deadman.
+
+The tests assert on what `session.resolve()` hands back rather than that a
+function was called, and they are split by *route*: `load_env()` returns
+`None` when no variable is set, so a fix that only handled the environment
+would leave the config file just as inert. Both fail against the pre-fix
+behaviour; the "with nothing configured, nothing changes" test passes either
+way, correctly, since it does not depend on the wiring.
+
+### `net/errors.py` — a constructor that accepts the message but does not store it
+
+Found by that witness, over the real RPC wire: a `SDM4065AOverloadError`
+crossing the agent link arrived with its **sentence doubled**, and its
+`function` field set to an entire error message rather than a DMM function.
+
+`_instantiate()` tries `cls(message)` first and treated *not raising* as
+succeeding. `SDM4065AOverloadError(function, range_)` takes a string first,
+so that call is perfectly legal — it files the whole message under
+`function` and then composes a new message quoting it. Every strategy in the
+cascade now has to store the message unchanged (`args == (message,)`) to be
+accepted, so a re-composing constructor falls through to `__new__` instead.
+The check is on `args` rather than `str()` because `KeyError.__str__` is
+always a `repr` of its argument, and comparing text there would reject a
+faithful `KeyError` and degrade it to `RemoteBenchError` — losing the type
+this module exists to preserve.
+
+The existing round-trip test asserted `f"{name} message" in str(exc)`, and
+**containment is exactly what a re-composed message satisfies**, which is
+how this shipped. It now asserts `args` exactly and that the decoded class is
+still the class the agent raised, since a message check alone also passes on
+a silent degradation. All 59 registered exceptions round-trip under the
+stricter assertion; two did not before.
+
 ### Siglent SDG1032X — a function / arbitrary waveform generator (`siglent_sdg1032x`)
 
 The bench's first signal source. Sixty-seven `sdg1032x_*` tools over the
@@ -153,6 +875,12 @@ and `labels.csv`. CLI `python -m benchctrl.vision.labelloop`, MCP tool
 `vision_label_capture`. First real dataset on benchpi: the Pi's ACT LED,
 200 frames in 15 s, zero discards. `deploy/vision/` gains a udev rule for
 the host LEDs.
+
+`vision_label_capture` now lives in the vision driver's `_TOOLS` (it was a
+bare `@mcp.tool()` in `benchctrl.mcp`, invisible to the generated CLI) and
+hands an open SDG1032X to the loop. It wired the PDU and the CP2112 but not
+the generator, so an SDG state was refused as "not open" even after
+`sdg1032x_open`, though the loop and its own `python -m` CLI took one.
 
 ### Raspberry Pi 5 as a second agent platform
 

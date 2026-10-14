@@ -1,0 +1,57 @@
+ADU218 invalid / out-of-range command transcript
+===============================================
+Device: Ontrak ADU218, USB 0a07:00da
+State:  all relays OPEN throughout; none of these changed relay state
+Read timeout: 2000 ms; the ioctl itself raises OSError errno 110.
+
+Headline finding: an ADU218 answers a command it does not understand
+with SILENCE - no error string, no sentinel. So a driver cannot learn
+at runtime whether a response is due; it needs a per-command table.
+
+Mitigating half: the session is NOT poisoned. The next valid command
+answers normally, with no re-claim, re-open or power cycle. Unlike the
+SDM4065A, where an undefined header can strand the endpoints
+(KNOWN_LIMITATIONS.md section F-8).
+
+=== COMMAND THE MANUAL'S SUMMARY TABLE INVENTS ===
+# RI is listed in section 5 but the function is called PI in 6b.
+# A valid command is sent immediately after, to show recovery.
+RI       -> TIMEOUT (errno 110)
+PI       -> b'\x01000\x00\x00\x00\x00'         payload='000'    len=3
+
+=== OUTRIGHT GARBAGE ===
+XYZ      -> TIMEOUT (errno 110)
+PK       -> b'\x01000\x00\x00\x00\x00'         payload='000'    len=3
+(empty)  -> TIMEOUT (errno 110)
+PK       -> b'\x01000\x00\x00\x00\x00'         payload='000'    len=3
+
+=== VALID VERB, OUT-OF-RANGE INDEX ===
+# Eight relays (K0..K7), four lines per input port (0..3), eight counters.
+RPK8     -> TIMEOUT (errno 110)
+RPK9     -> TIMEOUT (errno 110)
+RPA4     -> TIMEOUT (errno 110)
+RPB4     -> TIMEOUT (errno 110)
+RE8      -> TIMEOUT (errno 110)
+PK       -> b'\x01000\x00\x00\x00\x00'         payload='000'    len=3
+
+=== TRUNCATED / MALFORMED ARGUMENTS ===
+RPK      -> TIMEOUT (errno 110)
+MK       -> TIMEOUT (errno 110)
+MK9999   -> TIMEOUT (errno 110)
+DB9      -> TIMEOUT (errno 110)
+PK       -> b'\x01000\x00\x00\x00\x00'         payload='000'    len=3
+
+=== WRITE-ONLY COMMANDS PRODUCE NO RESPONSE EITHER ===
+# Silence here is CORRECT, not an error, and is indistinguishable on
+# the wire from the invalid-command case above. That is precisely why
+# the driver needs an explicit 'expects a response' flag per command.
+RK0      -> (sent; no response expected, nothing read)
+MK000    -> (sent; no response expected, nothing read)
+DB1      -> (sent; no response expected, nothing read)
+
+=== NOT EXERCISED HERE, DELIBERATELY ===
+# WD1/WD2/WD3 arm the hardware watchdog, which resets all relays on
+# timeout. Arming it during characterisation would make every later
+# reading depend on how fast the next command arrived. Watchdog
+# behaviour belongs in the simulator and in a separately scoped
+# hardware test.

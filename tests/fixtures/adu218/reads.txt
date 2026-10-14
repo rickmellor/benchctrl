@@ -1,0 +1,53 @@
+ADU218 read-only command transcript
+===================================
+Device: Ontrak ADU218, USB 0a07:00da
+Node:   /dev/bus/usb/001/015
+Access: stdlib fcntl.ioctl USBDEVFS_BULK on EP 0x01 (OUT) / 0x81 (IN)
+State:  all relays OPEN, nothing wired to the digital inputs
+
+Each line: command, the literal 8 bytes read from EP 0x81, then the
+decoded ASCII payload (byte 0 stripped, NUL-terminated).
+
+=== RELAY STATE ===
+PK       -> b'\x01000\x00\x00\x00\x00'         payload='000'    len=3
+RPK0     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+RPK1     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+RPK2     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+RPK3     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+RPK4     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+RPK5     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+RPK6     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+RPK7     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+
+=== DIGITAL INPUTS ===
+# PORT A and PORT B are FOUR BITS EACH (n = 0..3), eight inputs in total.
+PA       -> b'\x0100\x00\x00\x00\x00\x00'      payload='00'     len=2
+PB       -> b'\x0100\x00\x00\x00\x00\x00'      payload='00'     len=2
+RPA      -> b'\x010000\x00\x00\x00'            payload='0000'   len=4
+RPB      -> b'\x010000\x00\x00\x00'            payload='0000'   len=4
+RPA0     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+RPA3     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+RPB0     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+RPB3     -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
+
+=== BOTH INPUT PORTS IN ONE CALL ===
+# The manual contradicts itself: summary section 5 calls this RI,
+# description section 6b calls it PI. Both are sent below.
+PI       -> b'\x01000\x00\x00\x00\x00'         payload='000'    len=3
+RI       -> TIMEOUT (errno 110)
+
+=== EVENT COUNTERS ===
+# RCn also CLEARS, so only REn is read here.
+RE0      -> b'\x0100000\x00\x00'               payload='00000'  len=5
+RE1      -> b'\x0100000\x00\x00'               payload='00000'  len=5
+RE2      -> b'\x0100000\x00\x00'               payload='00000'  len=5
+RE3      -> b'\x0100000\x00\x00'               payload='00000'  len=5
+RE4      -> b'\x0100000\x00\x00'               payload='00000'  len=5
+RE5      -> b'\x0100000\x00\x00'               payload='00000'  len=5
+RE6      -> b'\x0100000\x00\x00'               payload='00000'  len=5
+RE7      -> b'\x0100000\x00\x00'               payload='00000'  len=5
+
+=== SETTINGS ===
+# DB = de-bounce, WD = watchdog.
+DB       -> b'\x011\x00\x00\x00\x00\x00\x00'   payload='1'      len=1
+WD       -> b'\x010\x00\x00\x00\x00\x00\x00'   payload='0'      len=1
