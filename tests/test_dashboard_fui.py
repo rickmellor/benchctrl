@@ -4609,6 +4609,23 @@ def test_the_panel_starts_unknown_in_the_markup_not_at_a_plausible_address():
     assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", html), "an address literal in the markup"
 
 
+def test_the_markup_colours_an_unknown_lan_the_way_the_renderer_does():
+    """UNKNOWN is amber, not red: a probe that has not answered is not a cable that
+    is out. renderLan() applies that, but the skeleton is what shows until the first
+    frame (and forever, if the JS never runs), so it must say the same thing. It
+    first shipped as ``v bad``, so a just-booted board flashed the pane's only red
+    LAN row for a state the design says is not a fault."""
+    html = (pathlib.Path(fui_static.__file__).parent / "static" / "index.html").read_text()
+
+    def classes(element: str) -> list[str]:
+        tag = html.split(f'id="{element}"')[0].rsplit("<span", 1)[1]
+        return re.search(r'class="([^"]*)"', tag).group(1).split()
+
+    assert "warn" in classes("sys-lan") and "bad" not in classes("sys-lan")
+    # The address row is red with no address in the renderer too: unchanged.
+    assert "bad" in classes("sys-ip")
+
+
 def test_the_lan_rows_are_in_the_top_left_pane():
     """Placement is the requirement, not an aesthetic: it is what an operator at
     a just-rebooted board reads before anything else on screen is reachable."""
