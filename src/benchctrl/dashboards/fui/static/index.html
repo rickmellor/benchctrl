@@ -37,6 +37,19 @@
       <section class="panel">
         <div class="title"><span>SYSTEM.MGR</span><span class="val" id="sys-verdict">NO LINK</span></div>
         <div class="body" id="sys-body">
+          <!-- This host's own address, not the bench's. First rows in the pane
+               because they are what an operator standing at a rebooted board
+               needs before anything else on the screen is reachable remotely:
+               the board is headless on DHCP, and when its address moves, ssh and
+               the tunnel this panel is tested over both break with it.
+
+               Starts as UNKNOWN, not as a blank or a plausible 192.168.x: an
+               address nobody has confirmed sends someone to ssh at a host that
+               is no longer the bench, and the timeout reads as the bench being
+               down. -->
+          <div class="kv"><span class="k">LAN</span><span class="v bad" id="sys-lan">UNKNOWN</span></div>
+          <div class="kv"><span class="k">ADDRESS</span><span class="v bad" id="sys-ip">UNKNOWN</span></div>
+          <div class="kv"><span class="k">HOST</span><span class="v" id="sys-host">–</span></div>
           <div class="kv"><span class="k">AGENT LINK</span><span class="v bad" id="sys-link">NO LINK</span></div>
           <div class="kv"><span class="k">VIEW</span><span class="v bad" id="sys-view">UNKNOWN</span></div>
           <div class="kv"><span class="k">SESSION</span><span class="v" id="sys-session">OBSERVER / RO</span></div>

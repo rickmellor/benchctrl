@@ -24,6 +24,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import threading
@@ -33,6 +34,7 @@ import urllib.request
 import pytest
 
 import benchctrl.dashboards.fui as fui_static
+import benchctrl.dashboards.hostnet as hostnet
 from benchctrl.config import EndpointConfig
 from benchctrl.dashboards.feed import AgentFeed
 from benchctrl.dashboards.fui.server import FuiServer
@@ -58,6 +60,12 @@ from benchctrl.dashboards.fui.view import (
     _recent_action,
     _slot_state,
     build_view,
+)
+from benchctrl.dashboards.hostnet import (
+    LAN_OK,
+    LAN_UNKNOWN,
+    NO_ADDRESS,
+    NO_CARRIER,
 )
 from benchctrl.dashboards.state import BenchStatus
 
@@ -2534,6 +2542,36 @@ def server():
         srv.stop()
 
 
+@pytest.fixture()
+def server_lan():
+    """A server whose LAN probe is a fixed reading, so the wiring is provable.
+
+    A real probe would report whatever this developer's box has, which no
+    assertion can pin — and a test that cannot fail is worse than none.
+    """
+    feed = AgentFeed(
+        EndpointConfig(host="127.0.0.1", port=9737, token="t"),
+        poll_s=0.05,
+        connect=lambda: FakeClient(),
+    )
+    srv = FuiServer(
+        feed.endpoint,
+        host="127.0.0.1",
+        port=0,
+        feed=feed,
+        lan=lambda: {
+            "state": LAN_OK,
+            "ip": "192.168.1.66",
+            "iface": "eth0",
+            "hostname": "benchpi",
+        },
+    ).start()
+    try:
+        yield srv
+    finally:
+        srv.stop()
+
+
 def get(srv, path, *, timeout=5.0):
     host, port = srv.address
     return urllib.request.urlopen(f"http://{host}:{port}{path}", timeout=timeout)
@@ -4269,3 +4307,356 @@ def test_the_stylesheet_does_not_spend_red_on_an_energised_outlet():
     rule = css.split(".port.on {")[1].split("}")[0]
     assert "--amber" in rule
     assert "--red" not in rule
+
+
+# --------------------------------------------------------------------------
+# The host's own LAN identity
+#
+# The one block on the panel that is not bench data. Its hazard is the mirror of
+# the rail's: not a fabricated measurement, but a *stale address* — an IP that
+# was true at boot and now belongs to nothing, shown with the same authority as
+# one read a moment ago. Someone reads it off the glass, ssh hangs, and the
+# bench looks down.
+# --------------------------------------------------------------------------
+
+
+def lan_view(block):
+    """A view built with a given LAN reading, everything else empty."""
+    snap = BenchStatus().to_dict()
+    snap["reconnects"] = 0
+    return build_view(snap, None, lan=lambda: block)
+
+
+def test_an_unprobed_host_says_unknown_rather_than_claiming_no_network():
+    """No probe is not the same fact as no network, and the panel may not
+    upgrade one into the other. LAN_UNKNOWN is amber; NO CARRIER is red and
+    sends someone to check a cable that may be fine."""
+    snap = BenchStatus().to_dict()
+    snap["reconnects"] = 0
+
+    lan = build_view(snap, None)["lan"]
+
+    assert lan["state"] == LAN_UNKNOWN
+    assert lan["ip"] == ""
+    assert lan["state"] not in (NO_CARRIER, NO_ADDRESS)
+
+
+def test_a_probe_that_raises_costs_the_address_and_not_the_arm_state():
+    """The LAN block is the least safety-relevant thing on the panel and the
+    only one sourced from the OS. A /sys read that fails mid-reconfiguration
+    must not take down the view that carries ARMED."""
+    snap = BenchStatus().to_dict()
+    snap["reconnects"] = 0
+
+    def boom():
+        raise OSError("interface went away")
+
+    view = build_view(snap, None, lan=boom)
+
+    assert view["lan"]["state"] == LAN_UNKNOWN
+    assert view["lan"]["ip"] == ""
+    # The rest of the view is intact: this is the assertion that matters.
+    assert len(view["instruments"]) == len(INSTRUMENTS)
+    assert "armed" in view and "headline" in view
+
+
+def test_an_address_is_shown_only_alongside_a_state_that_claims_one():
+    """Belt-and-braces against a future edit returning an IP with a not-OK
+    state: the panel would then print an address it had just said it lacks.
+
+    Each not-OK state is reached by the inputs that actually produce it. An
+    earlier version of this test looped over the three state constants while
+    passing the *same* inputs every time, so it asserted one case three times and
+    two of the three states were never built at all — the loop variable was
+    unused, which is precisely what gave it away.
+    """
+    cases = {
+        # no carrier: the cable is out
+        NO_CARRIER: ({"route": _ROUTE_ETH0, "operstate": "up", "carrier": "0"}, None),
+        # carrier but nothing assigned: DHCP is the thing to look at
+        NO_ADDRESS: ({"route": _ROUTE_ETH0, "operstate": "up", "carrier": "1"}, None),
+        # nothing readable at all: no evidence for any claim
+        LAN_UNKNOWN: ({"route": None, "operstate": None, "carrier": None}, None),
+    }
+    for expected, (spec, ip) in cases.items():
+        block = hostnet.lan_status(probe_ip=lambda ip=ip: ip, read_text=_fake_sys(spec))
+        assert block["state"] == expected, block
+        assert block["ip"] == "", block
+
+    # And the positive case, so this test cannot pass by the address never being
+    # populated at all — the failure mode that would make every assertion above
+    # vacuous.
+    ok = hostnet.lan_status(
+        probe_ip=lambda: "192.168.1.66",
+        read_text=_fake_sys({"route": _ROUTE_ETH0, "operstate": "up", "carrier": "1"}),
+    )
+    assert ok["state"] == LAN_OK
+    assert ok["ip"] == "192.168.1.66"
+
+
+def test_a_renderer_is_never_handed_a_none_where_a_string_goes():
+    """The renderer prints these onto a bench display. A probe returning None
+    for an interface would put the word "None" on the glass."""
+    view = lan_view({"state": LAN_OK, "ip": None, "iface": None, "hostname": None})
+
+    lan = view["lan"]
+    assert lan["ip"] == "" and lan["iface"] == "" and lan["hostname"] == ""
+    assert all(isinstance(x, str) for x in lan.values())
+
+
+def test_a_malformed_lan_payload_is_replaced_not_passed_through():
+    for junk in (None, [], "LAN", {"ip": "192.168.1.66"}):
+        view = lan_view(junk)
+        assert view["lan"]["state"] == LAN_UNKNOWN, junk
+        assert view["lan"]["ip"] == "", junk
+
+
+# --------------------------------------------------------------------------
+# hostnet: the probing half
+#
+# Driven entirely through injected readers, so every state the panel can show is
+# asserted without a network and without caring what this developer's box has
+# plugged into it.
+# --------------------------------------------------------------------------
+
+#: A /proc/net/route with one default route on eth0. Real format: tab-separated,
+#: header first, destination as little-endian hex.
+_ROUTE_ETH0 = (
+    "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+    "eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\n"
+    "eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\n"
+)
+
+
+def _fake_sys(spec):
+    """A read_text that answers for /proc/net/route and /sys/class/net/*.
+
+    ``spec`` keys: ``route``, ``operstate``, ``carrier``. A value of None makes
+    that read raise OSError, which is how a vanished interface behaves.
+    """
+
+    def read_text(path):
+        name = pathlib.PurePath(path).name
+        if name == "route":
+            value = spec.get("route")
+        elif name in ("operstate", "carrier"):
+            value = spec.get(name)
+        else:  # pragma: no cover - no other path is read
+            raise AssertionError(f"unexpected read: {path}")
+        if value is None:
+            raise OSError(f"no such thing: {path}")
+        return value
+
+    return read_text
+
+
+def test_an_address_outranks_an_uninformative_operstate():
+    """Checked before operstate on purpose. A bridge — or a WSL interface —
+    reports "unknown" while demonstrably carrying traffic, and downgrading a
+    host that is holding an address would report a fault on a working bench."""
+    block = hostnet.lan_status(
+        probe_ip=lambda: "10.0.0.5",
+        read_text=_fake_sys({"route": _ROUTE_ETH0, "operstate": "unknown", "carrier": "1"}),
+    )
+
+    assert block["state"] == LAN_OK
+    assert block["ip"] == "10.0.0.5"
+
+
+def test_an_address_outranks_a_carrier_file_that_says_otherwise():
+    """The ordering inside classify(), pinned by the one input that can see it.
+
+    The test above uses operstate="unknown", which classify() treats as
+    inconclusive either way round — so it passes whether the address is checked
+    first or last, and a reordering of those two branches survived it. This is the
+    case that separates them: an interface demonstrably holding an address while
+    /sys claims the link is down. That happens on a bridge, and on a stale read
+    taken mid-reconfiguration. Holding an address is the stronger evidence, and
+    reporting NO CARRIER here would blank a reachable bench's address.
+    """
+    assert hostnet.classify("192.168.1.66", operstate="down", carrier=False) == LAN_OK
+    # And with no address, the same inputs must still report the cable.
+    assert hostnet.classify(None, operstate="down", carrier=False) == NO_CARRIER
+
+
+def test_no_address_with_carrier_blames_dhcp_not_the_cable():
+    """The distinction that earns its keep: these two send an operator to
+    different places, and both look like a dark row on a screen."""
+    block = hostnet.lan_status(
+        probe_ip=lambda: None,
+        read_text=_fake_sys({"route": _ROUTE_ETH0, "operstate": "up", "carrier": "1"}),
+    )
+
+    assert block["state"] == NO_ADDRESS
+
+
+def test_no_carrier_is_reported_as_the_cable_it_is():
+    block = hostnet.lan_status(
+        probe_ip=lambda: None,
+        read_text=_fake_sys({"route": _ROUTE_ETH0, "operstate": "up", "carrier": "0"}),
+    )
+
+    assert block["state"] == NO_CARRIER
+
+
+def test_nothing_readable_is_unknown_and_not_a_diagnosis():
+    """With no route and no /sys entries there is no evidence for any claim.
+    Saying NO CARRIER here would be inventing the diagnosis."""
+    block = hostnet.lan_status(
+        probe_ip=lambda: None,
+        read_text=_fake_sys({"route": None, "operstate": None, "carrier": None}),
+    )
+
+    assert block["state"] == LAN_UNKNOWN
+    assert block["iface"] == ""
+
+
+def test_a_loopback_address_is_not_a_lan_address():
+    """gethostbyname(gethostname()) returns 127.0.1.1 on Debian. Printing that
+    on a bench display would be the exact failure this module exists to avoid:
+    a plausible address no workstation can reach."""
+    block = hostnet.lan_status(
+        probe_ip=lambda: "127.0.1.1",
+        read_text=_fake_sys({"route": _ROUTE_ETH0, "operstate": "up", "carrier": "1"}),
+    )
+
+    assert block["ip"] == ""
+    assert block["state"] != LAN_OK
+
+
+def test_the_lowest_metric_default_route_wins():
+    """A board with wired and wireless both up has two default routes. Reading
+    carrier off the wrong one reports a link no traffic actually uses."""
+    both = (
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+        "wlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\n"
+        "eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\n"
+    )
+
+    block = hostnet.lan_status(
+        probe_ip=lambda: "192.168.1.66",
+        read_text=_fake_sys({"route": both, "operstate": "up", "carrier": "1"}),
+    )
+
+    assert block["iface"] == "eth0"
+
+
+def test_a_route_file_with_no_default_route_names_no_interface():
+    only_link_local = (
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+        "eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\n"
+    )
+
+    block = hostnet.lan_status(
+        probe_ip=lambda: None,
+        read_text=_fake_sys({"route": only_link_local}),
+    )
+
+    assert block["iface"] == ""
+    assert block["state"] == LAN_UNKNOWN
+
+
+def test_the_probe_is_cached_but_a_change_still_reaches_the_screen():
+    """Two requests a second forever must not be two socket setups a second. But
+    the cache is what would let a moved address linger on the glass, so the TTL
+    is asserted to actually expire."""
+    clock = [1000.0]
+    calls = []
+
+    def status():
+        calls.append(clock[0])
+        return {"state": LAN_OK, "ip": f"10.0.0.{len(calls)}", "iface": "eth0", "hostname": "b"}
+
+    probe = hostnet.LanProbe(ttl_s=2.0, clock=lambda: clock[0], status=status)
+
+    assert probe()["ip"] == "10.0.0.1"
+    clock[0] += 1.9
+    assert probe()["ip"] == "10.0.0.1", "re-probed inside the TTL"
+    assert len(calls) == 1
+    clock[0] += 0.2  # now past ttl_s
+    assert probe()["ip"] == "10.0.0.2", "a moved address never reached the screen"
+    assert len(calls) == 2
+
+
+def test_the_cache_does_not_hold_a_good_address_across_a_drop():
+    """The stale-readout rule, applied to the cache itself. A network that goes
+    away must replace the cached reading, not be masked by it."""
+    clock = [1000.0]
+    readings = [
+        {"state": LAN_OK, "ip": "192.168.1.66", "iface": "eth0", "hostname": "b"},
+        {"state": NO_CARRIER, "ip": "", "iface": "eth0", "hostname": "b"},
+    ]
+    probe = hostnet.LanProbe(ttl_s=1.0, clock=lambda: clock[0], status=lambda: readings.pop(0))
+
+    assert probe()["ip"] == "192.168.1.66"
+    clock[0] += 1.5
+
+    after = probe()
+    assert after["state"] == NO_CARRIER
+    assert after["ip"] == "", "a dead link kept showing the address it used to have"
+
+
+def test_the_panel_starts_unknown_in_the_markup_not_at_a_plausible_address():
+    """This module's rule, applied to the address rows. If the JS never runs, a
+    hard-coded 192.168.x would be the most dangerous string on the page: it looks
+    exactly like a reading and is not one."""
+    html = (pathlib.Path(fui_static.__file__).parent / "static" / "index.html").read_text()
+
+    for element in ("sys-lan", "sys-ip"):
+        after = html.split(f'id="{element}"')[1].split("</span>")[0]
+        assert LAN_UNKNOWN in after, element
+    # No address-shaped literal anywhere in the skeleton.
+    assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", html), "an address literal in the markup"
+
+
+def test_the_lan_rows_are_in_the_top_left_pane():
+    """Placement is the requirement, not an aesthetic: it is what an operator at
+    a just-rebooted board reads before anything else on screen is reachable."""
+    html = (pathlib.Path(fui_static.__file__).parent / "static" / "index.html").read_text()
+
+    left = html.split('id="left"')[1].split('id="stage"')[0]
+    sysmgr = left.split("SYSTEM.MGR")[1].split("</section>")[0]
+    for element in ("sys-lan", "sys-ip", "sys-host"):
+        assert element in sysmgr, element
+    # Ahead of the agent-link row: first rows in the pane, by the reasoning above.
+    assert sysmgr.index('id="sys-ip"') < sysmgr.index('id="sys-link"')
+
+
+def test_the_address_gets_tabular_figures_without_outranking_an_armed_output():
+    """An IP is compared digit by digit off the glass, so it needs tabular nums.
+    But red and its glow are reserved for an armed output — the one signal on the
+    page that must stay expensive."""
+    css = FUI_CSS.read_text(encoding="utf-8")
+
+    rule = css.split(".kv .v.addr")[1].split("}")[0]
+    assert "tabular-nums" in rule
+    assert "--red" not in rule
+    assert "glow" not in rule
+
+
+def test_the_renderer_has_no_fallback_to_a_remembered_address():
+    """The renderer's honesty rule, asserted against the source: there must be no
+    branch that reaches for a previous value when this frame has no address."""
+    js = (pathlib.Path(fui_static.__file__).parent / "static" / "fui.js").read_text()
+
+    fn = js.split("function renderLan(")[1].split("\nfunction ")[0]
+    assert "M.view" not in fn, "the LAN renderer reached outside this frame"
+    assert "last" not in fn.lower(), "a remembered-address branch appeared"
+
+
+def test_the_served_view_carries_the_hosts_address(server):
+    """End to end through the HTTP surface, which is where the board reads it."""
+    body = json.loads(get(server, "/api/view").read())
+
+    assert "lan" in body
+    assert set(body["lan"]) == {"state", "ip", "iface", "hostname"}
+    assert isinstance(body["lan"]["state"], str)
+
+
+def test_the_server_uses_the_injected_probe(server_lan):
+    """That the wiring exists at all. Without this, every assertion above is
+    about a function the server might not be calling."""
+    body = json.loads(get(server_lan, "/api/view").read())
+
+    assert body["lan"]["ip"] == "192.168.1.66"
+    assert body["lan"]["state"] == LAN_OK
