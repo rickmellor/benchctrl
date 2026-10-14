@@ -7,7 +7,7 @@ in its result dict, not as an exception, so without a distinct code the CLI woul
 print the measurement and exit 0 with the load still sinking current.
 
 The legacy Arc commands are covered here too. They predate all of this and are
-documented in ``docs/getting_started.md``; adding nine device groups to the same
+documented in ``docs/getting_started.md``; adding eleven generated groups to the same
 parser must not have moved them.
 """
 
@@ -22,7 +22,7 @@ from benchctrl.exceptions import BenchError
 
 
 def test_the_parser_builds_with_every_group_and_the_legacy_commands():
-    """One assertion over the whole surface: 324 generated subcommands plus the
+    """One assertion over the whole surface: 406 generated subcommands plus the
     ten hand-written ones, in one parser, with no name collision."""
     parser = cli.build_parser()
     sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))

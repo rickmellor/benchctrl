@@ -210,8 +210,9 @@ with RigolDL3031A.open() as dl:        # auto-discover by Rigol VID/PID
 ### `benchctrl.mcp` — Model Context Protocol server
 
 406 tools exposing the whole SDK to MCP-aware clients (Claude Code,
-Claude Desktop, etc) — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
-SDM4065A 54, PDU41002 15, ADU218 19, CP2112 10, plus 13 cross-driver. Each driver
+Claude Desktop, etc) — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 135,
+SDM4065A 54, SDG1032X 67, PDU41002 15, ADU218 19, CP2112 10, vision 14, plus 13
+cross-driver. Each driver
 registers its own tools via
 `register_mcp_tools(mcp)` and the orchestrator wires them together.
 Lets an LLM agent run real measurements: "discover the Arc, set

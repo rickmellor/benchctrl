@@ -276,7 +276,7 @@ wire.
 **Why the CLI did not just reuse the predicate**: it is wrong in both
 directions. `take_snapshot` matches the prefix list and only samples, while
 `step_voltage_up` moves a live output and matches nothing. `cli_tiers.py`
-classifies all 324 tools explicitly instead, and a test asserts `is_mutator`
+classifies all 406 tools explicitly instead, and a test asserts `is_mutator`
 still disagrees — so this entry has a tripwire, not just a note.
 
 **Scope when picked up**:

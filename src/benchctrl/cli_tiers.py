@@ -116,6 +116,53 @@ SUPPRESSED: dict[str, dict[str, str]] = {
     },
 }
 
+#: The SDG1032X has no error queue: a value it cannot take is silently ignored
+#: and the command still "succeeds". On every one of its setters the read-back
+#: is therefore the *only* error report there is, so ``--no-verify`` would not
+#: skip a check, it would remove the whole of error detection — most of all on
+#: ``sdg1032x_set_output``, where it is the only evidence an output switched.
+_SDG1032X_VERIFY_REASON = (
+    "the SDG has no error queue, so a value it does not take is silently "
+    "ignored; the read-back is its only error report"
+)
+SUPPRESSED.update(
+    {
+        tool: {"verify": _SDG1032X_VERIFY_REASON}
+        for tool in (
+            "sdg1032x_set_output",
+            "sdg1032x_set_output_load",
+            "sdg1032x_set_output_polarity",
+            "sdg1032x_set_basic_wave",
+            "sdg1032x_set_wave_type",
+            "sdg1032x_set_frequency",
+            "sdg1032x_set_amplitude",
+            "sdg1032x_set_offset",
+            "sdg1032x_set_phase",
+            "sdg1032x_select_arb",
+            "sdg1032x_write_arb",
+            "sdg1032x_set_modulation",
+            "sdg1032x_set_sweep",
+            "sdg1032x_set_burst",
+            "sdg1032x_set_sync",
+            "sdg1032x_set_clock",
+            "sdg1032x_set_phase_mode",
+            "sdg1032x_set_invert",
+            "sdg1032x_apply_channel_copy",
+            "sdg1032x_set_coupling",
+            "sdg1032x_set_harmonics",
+            "sdg1032x_set_combine",
+            "sdg1032x_set_counter",
+            "sdg1032x_set_protection",
+            "sdg1032x_set_buzzer",
+            "sdg1032x_set_screen_saver",
+            "sdg1032x_set_number_format",
+            "sdg1032x_set_language",
+            "sdg1032x_set_power_on_config",
+            "sdg1032x_set_lan_config",
+        )
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # The table. One entry per tool, grouped by module, in ``_TOOLS`` order so a
@@ -227,6 +274,7 @@ TOOL_TIERS: dict[str, str] = {
     "dp2031_set_output": TIER1,
     "dp2031_get_output": READ,
     "dp2031_set_output_all": TIER1,  # all three channels at once
+    "dp2031_disable_outputs": TIER2,  # disarms all three: the safe-stop
     "dp2031_output_regulation": READ,
     "dp2031_set_ovp_level": TIER2,
     "dp2031_get_ovp_level": READ,
@@ -402,6 +450,79 @@ TOOL_TIERS: dict[str, str] = {
     "sdm4065a_reading_timeout_ms": READ,
     "sdm4065a_write": TIER1,  # arbitrary SCPI. is_mutator() says False.
     "sdm4065a_query": TIER1,  # a query string can carry a setting command
+    # --- siglent_sdg1032x: a two-channel function generator. The BNC is live
+    # whenever its output is on, so the setpoint rule from the supplies holds
+    # (amplitude is a setpoint, capped driver-side by max_amplitude_vpp), and
+    # Tier 1 is reserved for what switches an output or moves volts onto it
+    # from somewhere the cap cannot see: instrument-side copy, coupling and
+    # combining, triggers, raw SCPI and front-panel keys.
+    "sdg1032x_open": TIER2,
+    "sdg1032x_close": TIER2,  # switches both outputs off on the way out
+    "sdg1032x_info": READ,
+    "sdg1032x_reset": TIER2,  # *RST leaves both outputs OFF, load HiZ
+    "sdg1032x_operation_complete": READ,
+    "sdg1032x_write": TIER1,  # arbitrary SCPI, and no error queue to object
+    "sdg1032x_query": TIER1,  # a query string can carry a setting command
+    "sdg1032x_get_output": READ,
+    "sdg1032x_set_output": TIER1,
+    "sdg1032x_set_output_load": TIER1,  # the load decides the volts on the BNC
+    "sdg1032x_set_output_polarity": TIER2,
+    "sdg1032x_disable_outputs": TIER2,  # both outputs off: the safe-stop
+    "sdg1032x_get_basic_wave": READ,
+    "sdg1032x_set_basic_wave": TIER2,  # does not switch the output on
+    "sdg1032x_set_wave_type": TIER2,
+    "sdg1032x_set_frequency": TIER2,
+    "sdg1032x_set_amplitude": TIER2,  # capped by max_amplitude_vpp
+    "sdg1032x_set_offset": TIER2,
+    "sdg1032x_set_phase": TIER2,
+    "sdg1032x_set_max_amplitude": TIER2,  # can only lower the cap
+    "sdg1032x_list_arbs": READ,
+    "sdg1032x_get_arb": READ,
+    "sdg1032x_select_arb": TIER2,
+    "sdg1032x_write_arb": TIER2,  # stores a waveform; selecting it plays it
+    "sdg1032x_read_arb": READ,  # save_to writes host-side only
+    "sdg1032x_get_modulation": READ,
+    "sdg1032x_set_modulation": TIER2,
+    "sdg1032x_get_sweep": READ,
+    "sdg1032x_set_sweep": TIER2,
+    "sdg1032x_trigger_sweep": TIER1,  # fires the configured sweep into the DUT
+    "sdg1032x_get_burst": READ,
+    "sdg1032x_set_burst": TIER2,
+    "sdg1032x_trigger_burst": TIER1,  # fires the configured burst into the DUT
+    "sdg1032x_get_sync": READ,
+    "sdg1032x_set_sync": TIER2,  # a logic marker, like dp2031's trigger out
+    "sdg1032x_get_clock": READ,
+    "sdg1032x_set_clock": TIER2,
+    "sdg1032x_get_phase_mode": READ,
+    "sdg1032x_set_phase_mode": TIER2,
+    "sdg1032x_apply_equal_phase": TIER2,
+    "sdg1032x_get_invert": READ,
+    "sdg1032x_set_invert": TIER2,
+    "sdg1032x_apply_channel_copy": TIER1,  # rewrites every parameter of a channel
+    "sdg1032x_get_coupling": READ,
+    "sdg1032x_set_coupling": TIER1,  # CH2 follows CH1 instrument-side, uncapped
+    "sdg1032x_get_harmonics": READ,
+    "sdg1032x_set_harmonics": TIER2,
+    "sdg1032x_get_combine": READ,
+    "sdg1032x_set_combine": TIER1,  # two channels summed onto one BNC
+    "sdg1032x_read_counter": READ,
+    "sdg1032x_set_counter": TIER2,
+    "sdg1032x_get_protection": READ,
+    "sdg1032x_set_protection": TIER1,  # disabling OVP removes a DUT's protection
+    "sdg1032x_read_screen": READ,  # save_to writes host-side only
+    "sdg1032x_get_buzzer": READ,
+    "sdg1032x_set_buzzer": TIER2,
+    "sdg1032x_get_screen_saver": READ,
+    "sdg1032x_set_screen_saver": TIER2,
+    "sdg1032x_get_number_format": READ,
+    "sdg1032x_set_number_format": TIER2,
+    "sdg1032x_get_language": READ,
+    "sdg1032x_set_language": TIER2,
+    "sdg1032x_get_power_on_config": READ,
+    "sdg1032x_set_power_on_config": TIER1,  # decides what comes back at power-on
+    "sdg1032x_get_lan_config": READ,
+    "sdg1032x_set_lan_config": TIER1,  # can strand the unit off the network
+    "sdg1032x_trigger_key": TIER1,  # any front-panel key but the two Outputs
     # --- cyberpower_pdu41002: switches mains. The only device where the
     # write surface is smaller than the read surface, and the only one where
     # a write can de-power the rest of the bench.
@@ -454,6 +575,26 @@ TOOL_TIERS: dict[str, str] = {
     "adu218_set_debounce": TIER2,
     "adu218_watchdog": READ,
     "adu218_set_watchdog": TIER1_ENV,  # arms; WDn both sets and arms
+    # --- bench_vision: a camera and an NPU. Nothing it does reaches the DUT
+    # except the label loop, which commands other drivers' actuators.
+    "vision_open": TIER2,
+    "vision_close": TIER2,  # forgets the sidecar; the camera is untouched
+    "vision_info": READ,
+    "vision_status": READ,
+    "vision_frame": READ,  # save_to writes host-side only
+    "vision_trigger_capture": TIER2,  # a software trigger, to the camera only
+    "vision_detect": READ,
+    "vision_classify": READ,
+    "vision_set_exposure_us": TIER2,
+    "vision_set_gain_db": TIER2,
+    "vision_set_fps": TIER2,
+    "vision_set_crop": TIER2,
+    "vision_clear_crop": TIER2,
+    # Switches PDU outlets, CP2112 lines and SDG outputs as the spec says. Each
+    # driver's allow-list still applies, and in a one-shot only the camera is
+    # open, so from the CLI just the host-LED actuator can run (the rest fail
+    # "not open" before anything is commanded). Tier 1 for when that changes.
+    "vision_label_capture": TIER1,
     # --- framework tools: analytics on saved files, plus the two that attach
     # to a live SMU and drive it for hours.
     "plot_recording": READ,

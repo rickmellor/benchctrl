@@ -1,6 +1,6 @@
 # The `benchctrl` command line
 
-Every MCP tool is a shell command. 324 of them, across nine groups:
+Every MCP tool is a shell command. 406 of them, across eleven groups:
 
 ```bash
 benchctrl adu218 relay-states
@@ -24,11 +24,13 @@ lifecycle](#why-a-one-shot-needs-its-own-lifecycle).
 | `arc` | Otii Arc / Arc Pro source-measure unit | 23 |
 | `qr10x` | Eastwood QR10x programmable resistance standard | 11 |
 | `dl3031a` | Rigol DL3031A electronic load | 45 |
-| `dp2031` | Rigol DP2031 triple-output supply | 134 |
+| `dp2031` | Rigol DP2031 triple-output supply | 135 |
 | `sdm4065a` | Siglent SDM4065A digital multimeter | 54 |
+| `sdg1032x` | Siglent SDG1032X two-channel waveform generator | 67 |
 | `pdu41002` | CyberPower PDU41002 switched PDU (switches mains) | 15 |
 | `cp2112` | SiLabs CP2112 GPIO / DUT reset lines | 10 |
 | `adu218` | Ontrak ADU218 relays, inputs, counters and watchdog | 19 |
+| `vision` | bench camera, NPU detection, and capture-and-label | 14 |
 | `framework` | recording I/O and battery analytics (no device needed) | 13 |
 
 `benchctrl <group> --help` lists a group's commands; `benchctrl <group> <command>
@@ -67,7 +69,7 @@ one: `[!]` needs `--yes`, `[!!]` needs `--yes` **and** a named environment
 variable.
 
 Four tiers, in [`cli_tiers.py`](../src/benchctrl/cli_tiers.py), with every one of
-the 324 tools classified explicitly and a test asserting completeness in both
+the 406 tools classified explicitly and a test asserting completeness in both
 directions:
 
 - **read** — no gate.
@@ -219,7 +221,8 @@ The contract with a shell script:
 or opened, and says so: `Nothing has been sent to the device.`
 
 **Code 4 exists because the alternative is silent.** `dl3031a_close` disables
-the load input and `dp2031_close` disables three outputs; both report a *failed*
+the load input, `dp2031_close` disables three outputs and `sdg1032x_close` two;
+all three report a *failed*
 de-energise as a key in their result dict rather than as an exception, so the
 close itself still completes. A CLI checking only for exceptions would print
 your measurement and exit 0 with the load still sinking current. So:
@@ -294,6 +297,24 @@ strings — so a boolean parameter routed through `type=bool` would energise on
 *every* spelling, including the ones that mean no. The PDU driver's
 `isinstance(on, bool)` guard would catch the resulting non-bool, but a CLI that
 is only safe because a driver three layers down is defensive is not safe.
+
+## List and dict arguments
+
+A parameter that is a list, a sequence or a dict takes JSON, in one shell word:
+
+```bash
+benchctrl pdu41002 open --allowed-outlets '[1, 2]'
+benchctrl --yes sdg1032x write-arb ramp '[-1.0, 0.0, 1.0]'
+benchctrl --yes vision label-capture "$(cat spec.json)" ./dataset
+```
+
+Malformed JSON is refused by argparse, before anything is opened. The one
+exception is a list of strings (`arc record --channels mc mv`), which takes plain
+words. A count-or-keyword parameter such as `sdg1032x set-burst --cycles` takes
+`5` as a number and `INF` as the word.
+
+The same bug class as the booleans: a list passed through as its own text
+iterates as characters, and nothing refuses it early.
 
 ## Why a one-shot needs its own lifecycle
 
@@ -400,10 +421,15 @@ cannot drift about which contact is safe to move.
   destroy the recovery path in one command. `allowed_outlets` and
   `panic_outlets` are the controls to revisit *before* any such move
   (`KNOWN_LIMITATIONS.md` § F-12).
+- **`vision label-capture` can only drive the host LED from a one-shot.** The
+  CLI opens the group's own device, the camera. A spec naming a PDU outlet,
+  CP2112 line or SDG1032X output is refused as "not open" before anything moves.
+  Use the MCP tool, or `python -m benchctrl.vision.labelloop`, which resolves
+  every device the spec names.
 
 ## See also
 
 - [`getting_started.md`](getting_started.md) — the legacy Arc commands
 - [`remote.md`](remote.md) — config precedence, endpoints, the agent
-- [`mcp.md`](mcp.md) — the same 324 tools, for an LLM
+- [`mcp.md`](mcp.md) — the same 406 tools, for an LLM
 - [`KNOWN_LIMITATIONS.md`](../KNOWN_LIMITATIONS.md) — the § references above

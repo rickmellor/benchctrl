@@ -384,9 +384,11 @@ def test_the_table_covers_every_device_and_the_framework_tools():
         "dl3031a_",
         "dp2031_",
         "sdm4065a_",
+        "sdg1032x_",
         "pdu41002_",
         "cp2112_",
         "adu218_",
+        "vision_",
         "battery_",
     )
     for prefix in prefixes:

@@ -1,6 +1,6 @@
 # Driving it from an AI agent
 
-benchctrl exposes its whole surface — all 324 functions — as [Model Context
+benchctrl exposes its whole surface — all 406 functions — as [Model Context
 Protocol](https://modelcontextprotocol.io) tools. Any MCP client can then run
 real measurements:
 
@@ -200,7 +200,7 @@ functions, so what it proves by hand transfers directly into the script.
 
 ## The run engine's model is a different, much smaller surface
 
-Do not confuse the two. This MCP server is your agent's full 324-tool surface.
+Do not confuse the two. This MCP server is your agent's full 406-tool surface.
 The **run engine's on-bench supervisor** is eight allowlisted tools, and the
 constraint that shaped it is that a small on-board model runs at roughly
 3.3 tokens/second — about two minutes per turn. That single fact means it cannot

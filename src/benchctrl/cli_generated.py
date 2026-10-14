@@ -26,11 +26,21 @@ Booleans are the trap
 so ``--state off`` would energise the thing the operator was turning off. Every
 boolean parameter therefore gets :py:func:`_parse_onoff` with an explicit
 choice list, and a test asserts ``off`` arrives as ``False``.
+
+Structured parameters are the same trap, quieter
+------------------------------------------------
+A ``dict`` or ``list`` parameter given the shell's string reaches the tool as a
+``str``. Nothing refuses that early: ``"[1, 2]"`` iterates as characters, and a
+label-loop spec fails three calls deep with an ``AttributeError``. So every
+structured hint — ``dict``, ``list``, ``Sequence[...]``, and unions of them —
+takes JSON through :py:func:`_parse_json`. ``list[str]`` is the exception: it
+keeps ``nargs="*"``, which needs no quoting and produces exactly that type.
 """
 
 from __future__ import annotations
 
 import argparse
+import collections.abc
 import importlib
 import inspect
 import json
@@ -49,9 +59,11 @@ TOOL_MODULES: tuple[tuple[str, str], ...] = (
     ("dl3031a", "benchctrl.drivers.rigol_dl3031a.mcp_tools"),
     ("dp2031", "benchctrl.drivers.rigol_dp2031.mcp_tools"),
     ("sdm4065a", "benchctrl.drivers.siglent_sdm4065a.mcp_tools"),
+    ("sdg1032x", "benchctrl.drivers.siglent_sdg1032x.mcp_tools"),
     ("pdu41002", "benchctrl.drivers.cyberpower_pdu41002.mcp_tools"),
     ("cp2112", "benchctrl.drivers.silabs_cp2112.mcp_tools"),
     ("adu218", "benchctrl.drivers.ontrak_adu218.mcp_tools"),
+    ("vision", "benchctrl.drivers.bench_vision.mcp_tools"),
     ("framework", "benchctrl.framework_tools"),
 )
 
@@ -92,6 +104,37 @@ def _parse_onoff(text: str) -> bool:
     raise argparse.ArgumentTypeError(
         f"expected one of {'/'.join(ONOFF_CHOICES)}, got {text!r}"
     )
+
+
+def _parse_json(text: str) -> Any:
+    """Decode a structured argument, or refuse it before anything is opened."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(
+            f"expected JSON (e.g. '[1, 2]' or '{{\"key\": 1}}'), got {text!r}: {exc.msg}"
+        ) from None
+
+
+def _parse_int_or_text(text: str) -> Any:
+    """``Union[int, str]`` — a count or a keyword, e.g. burst ``cycles=5|INF``."""
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+_STRUCTURED_ORIGINS = (dict, list, tuple, collections.abc.Sequence, collections.abc.Mapping)
+
+
+def _is_structured(hint: Any) -> bool:
+    """True for a hint whose value cannot be typed as one shell word."""
+    if hint in (dict, list, tuple):
+        return True
+    origin = typing.get_origin(hint)
+    if origin is typing.Union:
+        return any(_is_structured(a) for a in typing.get_args(hint))
+    return origin in _STRUCTURED_ORIGINS
 
 
 def _subcommand_name(tool_name: str, prefix: str) -> str:
@@ -175,14 +218,25 @@ def add_tool_arguments(parser: argparse.ArgumentParser, fn: Callable) -> None:
             kwargs["type"] = int
         elif hint is float:
             kwargs["type"] = float
-        elif typing.get_origin(hint) is list:
+        elif typing.get_origin(hint) is list and typing.get_args(hint) == (str,):
             kwargs["nargs"] = "*"
-        # Everything else — str, and the handful of dict/Any parameters —
-        # arrives as a string and is validated by the driver, which owns the
-        # real vocabulary ("low"/"high", channel codes, and so on). Duplicating
-        # those choice lists here would be a second place to get them wrong.
+        elif _is_structured(hint):
+            kwargs["type"] = _parse_json
+            kwargs["metavar"] = "JSON"
+        elif typing.get_origin(hint) is typing.Union and set(typing.get_args(hint)) - {
+            type(None)
+        } == {int, str}:
+            kwargs["type"] = _parse_int_or_text
+        # Everything else — str and Any — arrives as a string and is validated
+        # by the driver, which owns the real vocabulary ("low"/"high", channel
+        # codes, and so on). Duplicating those choice lists here would be a
+        # second place to get them wrong.
 
         if required:
+            if kwargs.get("type") is _parse_json:
+                # A positional's metavar replaces its name in errors too, and
+                # "argument JSON: ..." does not say which argument.
+                kwargs.pop("metavar")
             parser.add_argument(name, **kwargs)
         else:
             kwargs["default"] = param.default
@@ -315,9 +369,11 @@ _GROUP_HELP = {
     "dl3031a": "Rigol DL3031A electronic load",
     "dp2031": "Rigol DP2031 triple-output supply",
     "sdm4065a": "Siglent SDM4065A digital multimeter",
+    "sdg1032x": "Siglent SDG1032X two-channel waveform generator",
     "pdu41002": "CyberPower PDU41002 switched PDU (switches mains)",
     "cp2112": "SiLabs CP2112 GPIO / DUT reset lines",
     "adu218": "Ontrak ADU218 relays, inputs, counters and watchdog",
+    "vision": "bench camera, NPU detection, and capture-and-label",
     "framework": "recording I/O and battery analytics (no device needed)",
 }
 

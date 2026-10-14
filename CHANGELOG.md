@@ -55,7 +55,7 @@ papered over: `cp2112_open` calls `CP2112.open()` directly instead of
 ignored. Seven of the eight drivers resolve correctly; the sim factory and the
 registry opener both exist, so only the MCP-tool layer is wrong.
 
-### The whole bench from a shell — 324 CLI subcommands, generated
+### The whole bench from a shell — 406 CLI subcommands, generated
 
 `benchctrl` reached seven drivers with ten hand-written Arc-only commands. Every
 other device was Python-or-MCP only, so "tell me the relay state" meant writing
@@ -69,10 +69,10 @@ benchctrl --remote unoq.local sdm4065a measure-dc-voltage
 
 **Nothing is hand-written per device.** The subcommands are built by reflection
 over each driver's `_TOOLS` tuple — the same tuple the MCP server registers — so
-a tool added to a driver becomes a shell command with no edit to the CLI. 324
-across nine groups: arc 23, qr10x 11, dl3031a 45, dp2031 134, sdm4065a 54,
-pdu41002 15, cp2112 10, adu218 19, framework 13. The parity tests in
-`test_mcp.py` were decorative before and are load-bearing now.
+a tool added to a driver becomes a shell command with no edit to the CLI. 406
+across eleven groups: arc 23, qr10x 11, dl3031a 45, dp2031 135, sdm4065a 54,
+sdg1032x 67, pdu41002 15, cp2112 10, adu218 19, vision 14, framework 13. The
+parity tests in `test_mcp.py` were decorative before and are load-bearing now.
 
 `_TOOLS` rather than asking a live server, for two reasons and the second one
 decided it. Importing `benchctrl.mcp` costs ~0.64 s (FastMCP alone is 0.44 s of
@@ -83,7 +83,7 @@ decisively, it would hard-depend the `benchctrl` console script on the optional
 `requires-python = ">=3.9"`.
 
 **Risk is the part that is *not* generated**, and that is the whole design.
-`cli_tiers.py` classifies all 324 tools explicitly — 163 read, 125 tier 2, 33
+`cli_tiers.py` classifies all 406 tools explicitly — 194 read, 162 tier 2, 47
 needing `--yes`, 3 needing `--yes` *and* a named environment variable — and a
 tool with no entry raises rather than defaulting to safe. Two tests assert
 completeness in both directions, so adding a driver tool fails the suite until
@@ -682,7 +682,7 @@ test and every remote-mode demo passed: they all take that route.
 **The failure mode points the wrong way, which is the reason this is a
 safety fix and not a papercut.** Ask for `mode="sim"` and you got the real
 instrument, silently, with no diagnostic — because the seam's whole purpose
-is that the 324 tools cannot tell a simulator, a remote proxy and real
+is that the 406 tools cannot tell a simulator, a remote proxy and real
 silicon apart. Someone stepping relays or switching mains while reading
 "simulated" in their own shell history is the concrete hazard;
 `KNOWN_LIMITATIONS.md § N-8` records it.
@@ -875,6 +875,12 @@ and `labels.csv`. CLI `python -m benchctrl.vision.labelloop`, MCP tool
 `vision_label_capture`. First real dataset on benchpi: the Pi's ACT LED,
 200 frames in 15 s, zero discards. `deploy/vision/` gains a udev rule for
 the host LEDs.
+
+`vision_label_capture` now lives in the vision driver's `_TOOLS` (it was a
+bare `@mcp.tool()` in `benchctrl.mcp`, invisible to the generated CLI) and
+hands an open SDG1032X to the loop. It wired the PDU and the CP2112 but not
+the generator, so an SDG state was refused as "not open" even after
+`sdg1032x_open`, though the loop and its own `python -m` CLI took one.
 
 ### Raspberry Pi 5 as a second agent platform
 

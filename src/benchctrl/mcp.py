@@ -481,6 +481,7 @@ from benchctrl.drivers.bench_vision.mcp_tools import (
     vision_detect,
     vision_frame,
     vision_info,
+    vision_label_capture,
     vision_open,
     vision_set_crop,
     vision_set_exposure_us,
@@ -531,63 +532,6 @@ from benchctrl.drivers.ontrak_adu218.mcp_tools import (
     adu218_set_watchdog,
     adu218_watchdog,
 )
-
-
-# ---------------------------------------------------------------------------
-# Vision: capture-and-label (cross-device — it commands the PDU or CP2112 and
-# captures with the camera). See docs/vision.md § Label loop.
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def vision_label_capture(spec: dict, out_dir: str, sanity: bool = False) -> dict:
-    """Build a labelled frame set from states benchctrl commands itself.
-
-    ``spec`` is the label-loop spec (``docs/vision.md`` § Label loop): a name, a
-    list of states — each an actuator to command (a PDU outlet, a CP2112 line,
-    or the bench box's own ``sysfs_led``) and the label frames taken in that
-    state receive — plus frames per state, rounds, settle time, and optional
-    camera setup (crop, exposure, gain). The loop commands each state, waits,
-    fires N ``seq``-tagged captures, writes ``frames/<label>/<seq>.jpg`` under
-    ``out_dir`` with ``manifest.json`` and ``labels.csv``, and **restores every
-    actuator to how it was found** — also when something fails half way.
-
-    Uses the devices already opened by ``vision_open`` and, as the spec needs
-    them, ``pdu41002_open`` / ``cp2112_open``; their allow-lists apply
-    unchanged (an outlet or line outside them is refused by the driver). The
-    ``sysfs_led`` actuator drives a host LED and is only meaningful when this
-    server runs on the bench box itself.
-
-    A frame that comes back with the wrong ``seq`` is discarded, never
-    labelled. ``sanity=True`` stores a mean-brightness read of
-    ``spec.sanity_roi`` beside each frame (needs Pillow on this host) so a
-    frame whose pixels disagree with its label can be flagged.
-
-    Returns the manifest summary: frame counts per label, discards, whether
-    the restore succeeded, and the spec digest to cite from a training run.
-    """
-    from benchctrl.vision.labelloop import (
-        LabelSpec,
-        build_actuators,
-        mean_brightness,
-        run_label_capture,
-    )
-
-    parsed = LabelSpec.from_dict(spec)
-    kinds = {s.actuator["device"] for s in parsed.states}
-    devices: dict = {}
-    if "cyberpower_pdu41002" in kinds:
-        devices["cyberpower_pdu41002"] = _pdu41002_tools._get_pdu()
-    if "silabs_cp2112" in kinds:
-        devices["silabs_cp2112"] = _cp2112_tools._get_dev()
-    manifest = run_label_capture(
-        _vision_tools._get_vision(),
-        build_actuators(devices),
-        parsed,
-        out_dir,
-        sanity=mean_brightness if sanity else None,
-    )
-    return manifest.summary()
 
 
 # ---------------------------------------------------------------------------

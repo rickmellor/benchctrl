@@ -16,8 +16,8 @@ firmware caps see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
   merged in (Raspberry Pi agent, bench vision, SDG1032X)
 - **Tests**: 3034 hardware-free + 245 hardware-marked (collected).
 - **MCP tools**: 406 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 135,
-  SDM4065A 54, SDG1032X 67, PDU41002 15, CP2112 10, ADU218 19, vision 13,
-  cross-driver 14
+  SDM4065A 54, SDG1032X 67, PDU41002 15, CP2112 10, ADU218 19, vision 14,
+  cross-driver 13
 - **Drivers**: Otii Arc / Arc Pro (SMU), Eastwood QR10x (programmable
   resistor), Rigol DL3031A (electronic load), Rigol DP2031
   (triple-output PSU), Siglent SDM4065A (6½-digit DMM), Siglent SDG1032X

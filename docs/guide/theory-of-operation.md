@@ -218,7 +218,7 @@ The API assumes you meant what you called. The CLI and the agent surface do
 not, because a typo in a shell and a confident language model are different
 risks from a reviewed script.
 
-Every one of the 324 functions is explicitly classified into one of four tiers,
+Every one of the 406 functions is explicitly classified into one of four tiers,
 and a test fails the build if a new function ships unclassified:
 
 | Tier | Gate | Examples |

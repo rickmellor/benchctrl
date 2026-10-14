@@ -72,7 +72,7 @@ def test_the_arc_exemption_is_reachable_only_by_a_tool_named_arc_something():
 
     ``_subcommand_name`` special-cases ``arc`` because the Arc's tools are
     unprefixed. Dropping that special case is invisible on today's surface: no
-    Arc tool is named ``arc_*``, so both branches agree on all 324 tools and a
+    Arc tool is named ``arc_*``, so both branches agree on all 406 tools and a
     test over the real surface cannot tell them apart. The discriminating input
     has to be constructed. With the guard, an Arc tool called ``arc_reset``
     becomes ``arc-reset``; without it, ``reset`` — a name that could then
@@ -198,6 +198,60 @@ def test_an_int_parameter_is_coerced_not_left_as_a_string():
     parser = argparse.ArgumentParser()
     cli_generated.add_tool_arguments(parser, _all_tools()["adu218_counter"])
     assert parser.parse_args(["5"]).index == 5
+
+
+def test_a_structured_parameter_arrives_as_the_structure_not_its_text():
+    """A ``dict`` given the shell's string used to reach the tool as a ``str``:
+    the label-loop spec then failed three calls deep with an AttributeError,
+    and an allow-list ``"[1, 2]"`` would iterate as characters."""
+    parser = argparse.ArgumentParser()
+    cli_generated.add_tool_arguments(parser, _all_tools()["vision_label_capture"])
+    args = parser.parse_args(['{"name": "t", "states": []}', "/tmp/out"])
+    assert args.spec == {"name": "t", "states": []}
+
+    parser = argparse.ArgumentParser()
+    cli_generated.add_tool_arguments(parser, _all_tools()["pdu41002_open"])
+    assert parser.parse_args(["--allowed-outlets", "[1, 2]"]).allowed_outlets == [1, 2]
+
+
+def test_malformed_json_is_refused_by_the_parser_before_anything_opens(capsys):
+    parser = argparse.ArgumentParser()
+    cli_generated.add_tool_arguments(parser, _all_tools()["sdg1032x_write_arb"])
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["wave", "1, 2, 3"])
+    assert exc.value.code == 2
+    assert "expected JSON" in capsys.readouterr().err
+
+
+def test_every_structured_parameter_in_the_whole_surface_takes_json():
+    """Derived, like the bool check: a new list or dict parameter is the case a
+    hand-written list misses. ``list[str]`` is the one exception (``nargs``)."""
+    checked = 0
+    for name, fn in _all_tools().items():
+        hints = cli_generated._resolve_hints(fn)
+        for param in inspect.signature(fn).parameters:
+            if param in cli_tiers.suppressed_params(name):
+                continue
+            hint, _opt = cli_generated._unwrap_optional(hints.get(param, str))
+            if not cli_generated._is_structured(hint) or hint == list[str]:
+                continue
+            checked += 1
+            parser = argparse.ArgumentParser()
+            cli_generated.add_tool_arguments(parser, fn)
+            action = next(a for a in parser._actions if a.dest == param)
+            assert action.type is cli_generated._parse_json, (
+                f"{name}.{param} is structured ({hint}) but does not take JSON"
+            )
+    assert checked >= 10, f"only {checked} structured parameters found"
+
+
+def test_a_count_or_keyword_parameter_keeps_both_shapes():
+    """``sdg1032x_set_burst(cycles=5|"INF")``: a number must arrive as an int,
+    and the keyword must still get through."""
+    parser = argparse.ArgumentParser()
+    cli_generated.add_tool_arguments(parser, _all_tools()["sdg1032x_set_burst"])
+    assert parser.parse_args(["1", "--cycles", "5"]).cycles == 5
+    assert parser.parse_args(["1", "--cycles", "INF"]).cycles == "INF"
 
 
 def test_suppressed_parameters_get_no_flag_and_are_named_in_the_epilog():

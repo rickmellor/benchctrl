@@ -241,8 +241,8 @@ Tool inventory:
 | CyberPower PDU41002 | 15 |
 | Silicon Labs CP2112 | 10 |
 | Ontrak ADU218 | 19 |
-| Bench vision (camera + Metis NPU) | 13 |
-| Cross-driver (recording I/O, battery, emulator, vision label loop) | 14 |
+| Bench vision (camera + Metis NPU, label loop) | 14 |
+| Cross-driver (recording I/O, battery, emulator) | 13 |
 | **Total** | **406** |
 
 The MCP layer is intentionally thin: each tool wraps one SDK method,

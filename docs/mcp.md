@@ -18,8 +18,8 @@ Claude Desktop, Cursor, custom agents) can call. Built on the official
 | CyberPower PDU41002 | 15 |
 | Silicon Labs CP2112 | 10 |
 | Ontrak ADU218 | 19 |
-| Bench vision (camera + Metis) | 13 |
-| Cross-driver (battery, recording I/O, connection, vision label loop) | 14 |
+| Bench vision (camera + Metis, label loop) | 14 |
+| Cross-driver (battery, recording I/O, connection) | 13 |
 | **Total** | **406** |
 
 Each driver registers its own surface via `register_mcp_tools(mcp)`;
@@ -160,7 +160,7 @@ their SDK methods, which are documented in [`drivers.md`](drivers.md):
 | `pdu41002_*` | CyberPower PDU41002 | 15 |
 | `cp2112_*` | Silicon Labs CP2112 | 10 |
 | `adu218_*` | Ontrak ADU218 | 19 |
-| `vision_*` | Bench vision (camera + Metis NPU) | 13 |
+| `vision_*` | Bench vision (camera + Metis NPU) | 14 |
 
 The DP2031 set is the large one, covering source/measure, protection,
 IEEE 488.2 status, channel pairing and tracking, the Arb timer

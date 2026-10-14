@@ -56,7 +56,7 @@ with OtiiArc.open() as smu:
 
 ### Shell
 
-Every instrument function is also a subcommand — 324 of them. Use it for the
+Every instrument function is also a subcommand — 406 of them. Use it for the
 one-shot question, and in shell scripts and CI.
 
 ```bash
@@ -116,7 +116,7 @@ Being clear about this saves you evaluating it for the wrong job.
 ## How the pieces fit
 
 ```
-        Python API   ·   CLI (324 commands)   ·   MCP tools (324)
+        Python API   ·   CLI (406 commands)   ·   MCP tools (406)
         └──────────────────────┬──────────────────────┘
                                │
                     session.resolve()  — per device, one of:

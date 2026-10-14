@@ -1339,9 +1339,11 @@ TOOL_MODULES = (
     "benchctrl.drivers.rigol_dl3031a.mcp_tools",
     "benchctrl.drivers.rigol_dp2031.mcp_tools",
     "benchctrl.drivers.siglent_sdm4065a.mcp_tools",
+    "benchctrl.drivers.siglent_sdg1032x.mcp_tools",
     "benchctrl.drivers.cyberpower_pdu41002.mcp_tools",
     "benchctrl.drivers.silabs_cp2112.mcp_tools",
     "benchctrl.drivers.ontrak_adu218.mcp_tools",
+    "benchctrl.drivers.bench_vision.mcp_tools",
     "benchctrl.framework_tools",
 )
 

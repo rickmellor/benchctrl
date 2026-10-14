@@ -314,7 +314,7 @@ benchctrl capture 5.0 run.csv -c mc mv          # record for 5 s
 benchctrl stream 10                             # live print
 ```
 
-Every other device is reachable too — all 324 MCP tools are shell commands,
+Every other device is reachable too — all 406 MCP tools are shell commands,
 grouped by device:
 
 ```bash

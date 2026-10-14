@@ -23,8 +23,8 @@ inside a second. Four things follow, and each is a defect if it is guessed.
     one CLI command finishing would drive every armed device on the bench to its
     safe state, including instruments this invocation never touched.
 
-2. Three closes change output state, and two report failure in the *result*
---------------------------------------------------------------------------
+2. Four closes change output state, and three report failure in the *result*
+----------------------------------------------------------------------------
 It would be convenient if closing were always inert. It is not:
 
 ===================  ======================================================
@@ -32,11 +32,13 @@ It would be convenient if closing were always inert. It is not:
                      ``input_off_failed`` in the returned dict
 ``dp2031_close``     disables all three outputs; on failure sets
                      ``outputs_off_failed``
+``sdg1032x_close``   switches both generator outputs off; on failure sets
+                     ``outputs_off_failed``
 ``cp2112_close``     releases asserted lines and restores the as-found GPIO
                      configuration, so a DUT is not left held in reset
 ===================  ======================================================
 
-The first two report a failed de-energise **as a dict key, not an exception** —
+The first three report a failed de-energise **as a dict key, not an exception** —
 deliberately, so the close still completes. A teardown that discarded the result
 would therefore swallow "the load may still be sinking current" precisely when it
 is true. :py:func:`teardown` returns the result and
@@ -110,6 +112,12 @@ DEVICE_LIFECYCLE: dict[str, dict[str, Optional[str]]] = {
         "open": "sdm4065a_open",
         "close": "sdm4065a_close",
     },
+    "sdg1032x": {
+        "device_key": "siglent_sdg1032x",
+        "module": "benchctrl.drivers.siglent_sdg1032x.mcp_tools",
+        "open": "sdg1032x_open",
+        "close": "sdg1032x_close",
+    },
     "pdu41002": {
         "device_key": "cyberpower_pdu41002",
         "module": "benchctrl.drivers.cyberpower_pdu41002.mcp_tools",
@@ -127,6 +135,13 @@ DEVICE_LIFECYCLE: dict[str, dict[str, Optional[str]]] = {
         "module": "benchctrl.drivers.ontrak_adu218.mcp_tools",
         "open": "adu218_open",
         "close": "adu218_close",
+    },
+    # Closing forgets the sidecar and changes nothing on the camera.
+    "vision": {
+        "device_key": "bench_vision",
+        "module": "benchctrl.drivers.bench_vision.mcp_tools",
+        "open": "vision_open",
+        "close": "vision_close",
     },
     # The framework tools work on saved files and, for the profiler/emulator,
     # on whatever SMU the Arc's singleton holds. No lifecycle of their own.
@@ -213,7 +228,7 @@ def _tool(module_name: str, tool_name: str) -> Callable:
 #: rather than exceptions, and a teardown that ignored the result would drop them.
 TEARDOWN_FAILURE_KEYS: tuple[str, ...] = (
     "input_off_failed",  # dl3031a_close: the load may still be sinking current
-    "outputs_off_failed",  # dp2031_close: an output may still be energised
+    "outputs_off_failed",  # dp2031_close, sdg1032x_close: an output may be live
 )
 
 
@@ -279,8 +294,8 @@ def teardown(group: str, *, mode: str) -> Optional[dict]:
         return _tool(entry["module"], close_tool)()
     except Exception as exc:
         log.warning("cli: %s raised: %r", close_tool, exc)
-        # dl3031a_close and dp2031_close disable outputs *before* closing, so a
-        # raise here can mean the de-energise never happened.
+        # dl3031a_close, dp2031_close and sdg1032x_close disable outputs *before*
+        # closing, so a raise here can mean the de-energise never happened.
         return {"outputs_off_failed": f"{close_tool}(): {exc!r}"}
 
 
