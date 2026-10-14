@@ -151,11 +151,27 @@ Four panels and a rail.
 
 | Panel | Shows |
 |---|---|
-| `SYSTEM.MGR` | agent link, whether the view is trustworthy, session role, dropped events, paint rate |
+| `SYSTEM.MGR` | the board's own LAN state, address and hostname; agent link, whether the view is trustworthy, session role, dropped events, paint rate |
 | `STATE.MGR` | the headline, what is armed, active runs, current stage |
 | `LOG.MGR` | recent events, newest last |
 | `MAINS.MGR` | the PDU: voltage, frequency, load, per-outlet state |
 | instrument rail | one slot per instrument, right-hand column |
+
+**The top three rows of `SYSTEM.MGR` are the board's own address.** They are
+the first place to look when ssh to the bench stops working, since a new DHCP
+lease breaks every remote route at once:
+
+| `LAN` row | Means | What to do |
+|---|---|---|
+| `LAN` | an address on a real interface, shown in `ADDRESS` | ssh to that address |
+| `NO ADDRESS` | cable in, but no lease | look at the DHCP server |
+| `NO CARRIER` | nothing plugged in, or the switch port is dark | check the cable |
+| `UNKNOWN` (amber) | not probed yet, or the probe failed | wait a few seconds; it is not a network fault |
+
+An address is only ever shown if the board holds it right now. The panel never
+falls back to the last one it saw: without an address, `ADDRESS` repeats the
+state in red instead. `HOST` is the durable half of the identity, because it
+survives a new lease, so the hostname is what belongs in your `~/.ssh/config`.
 
 **A dark slot says *which* dark it is**, because your next action differs for
 each. This distinction is the single most useful thing on the panel:

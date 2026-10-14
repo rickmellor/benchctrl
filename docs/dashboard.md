@@ -304,6 +304,40 @@ What the rail surfaced immediately on the real board is a genuine config gap the
 old five-`NO_LINK` version hid: three instruments identified on the bus at
 `exact` confidence that the agent does not serve.
 
+## SYSTEM.MGR · LAN — the board's own address
+
+The board boots headless on a DHCP lease, and when the lease moves every remote
+route to the bench breaks at once. So the top three rows of `SYSTEM.MGR` report
+the board's own network identity: `LAN` (state plus interface), `ADDRESS` and
+`HOST`.
+
+This is the one thing on the panel that is **not** bench data. It is read from
+the kernel of the machine serving the page, by `benchctrl.dashboards.hostnet`,
+and not from the agent. It lives outside `fui/view.py` because that module
+touches no socket and no clock, and "what is my address" needs both. The probe
+is injected into `build_view(..., lan=...)`, so the view stays testable from
+data alone.
+
+| State | Evidence | Colour |
+|---|---|---|
+| `LAN` | a routable address on the default-route interface | normal |
+| `NO ADDRESS` | carrier, but no address | red |
+| `NO CARRIER` | `carrier` is 0 or `operstate` is `down`, and no address | red |
+| `UNKNOWN` | not probed yet, or the probe failed | amber |
+
+Holding an address outranks a `down` operstate: a bridge, or a reading taken
+mid-reconfiguration, can report `down` while the host is reachable, and
+`NO CARRIER` there would blank a working bench's address.
+
+**A displayed address is one this kernel holds right now, or none is
+displayed.** The reading is cached for 2 s (`CACHE_TTL_S`), because the kiosk
+fetches the view twice a second. A failed probe *replaces* the cached reading
+rather than being masked by it. The renderer has no fallback to a remembered
+address: without one, the `ADDRESS` row repeats the state in red. The shipped
+markup says `UNKNOWN` with no address-shaped placeholder. Loopback (`127.*`, including Debian's `127.0.1.1`) is filtered at
+the one point the address is decided, so no probe, including an injected one,
+can put it on screen.
+
 ## MAINS.MGR — the PDU is not an instrument
 
 A switched PDU gets its own panel in the bottom-left column and deliberately

@@ -9,6 +9,30 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### The bench display shows the board's own address — or why it has none
+
+The board boots headless into the kiosk on a DHCP lease. When that address
+moves, every remote route to the bench breaks at once (ssh, the tunnel the
+display is reviewed over, the `~/.ssh/config` entry), and the screen on the
+bench was then the only place the new address existed — and the one thing it
+did not say. Three rows at the top of `SYSTEM.MGR` now do: `LAN` (with the
+interface), `ADDRESS` and `HOST`.
+
+The link state is one of four, kept distinct because the operator's next move
+differs: `LAN` (an address on a real interface), `NO ADDRESS` (carrier but no
+lease — look at the DHCP server), `NO CARRIER` (unplugged, or the far end is
+dark) and `UNKNOWN` (not probed yet, or the probe failed). `UNKNOWN` is amber,
+not red: a probe that could not answer is not a cable that is out.
+
+**A shown address is one this kernel holds right now, or none is shown.** A
+stale IP on a bench display is worse than a blank one — it sends someone to ssh
+at a host that stopped being the bench. So a failed probe replaces the reading
+instead of falling back to the last address, and loopback (Debian's
+`127.0.1.1`) is filtered at the single point the address is decided, so no
+probe can bypass it. The probe lives in `benchctrl.dashboards.hostnet`, outside
+the pure `fui/view.py`, and is injected into `build_view`, so the tests drive
+all four states with no network.
+
 ### A user guide, separate from the reference docs — `docs/guide/`
 
 Fifteen task-oriented pages for people *using* the bench rather than changing
