@@ -12,16 +12,19 @@ firmware caps see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 ## Status snapshot
 
 - **Version**: 1.2.0
-- **Branch**: `feat/ontrak-adu218` off `master`
-- **Tests**: 2450 hardware-free + 213 hardware-marked. Hardware-free
-  suite runs in ~22 minutes with nothing plugged in.
-- **MCP tools**: 324 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
-  SDM4065A 54, PDU41002 15, ADU218 19, CP2112 10, cross-driver 13
+- **Branch**: `feat/cli-generated` (ADU218 + generated CLI), with `master`
+  merged in (Raspberry Pi agent, bench vision, SDG1032X)
+- **Tests**: 3034 hardware-free + 245 hardware-marked (collected).
+- **MCP tools**: 406 — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 135,
+  SDM4065A 54, SDG1032X 67, PDU41002 15, CP2112 10, ADU218 19, vision 13,
+  cross-driver 14
 - **Drivers**: Otii Arc / Arc Pro (SMU), Eastwood QR10x (programmable
   resistor), Rigol DL3031A (electronic load), Rigol DP2031
-  (triple-output PSU), Siglent SDM4065A (6½-digit DMM), CyberPower
-  PDU41002 (8-outlet switched PDU), Silicon Labs CP2112 (8 open-drain
-  control lines), Ontrak ADU218 (8 relays + 8 digital inputs)
+  (triple-output PSU), Siglent SDM4065A (6½-digit DMM), Siglent SDG1032X
+  (function / arbitrary waveform generator), CyberPower PDU41002 (8-outlet
+  switched PDU), Silicon Labs CP2112 (8 open-drain control lines), Ontrak
+  ADU218 (8 relays + 8 digital inputs), bench vision (Basler camera +
+  Axelera Metis NPU)
 - **Scenarios captured**: 27 — 11 QR10x + 11 DL3031A standard + 3 hires
   + 2 dynamic-list
 - **Entry points**: `benchctrl`, `benchctrl-mcp`, `benchctrl-agent`
@@ -100,8 +103,8 @@ confirmed by reading state back, with the setters returning the
 
 Three device behaviours are documented in `KNOWN_LIMITATIONS` because
 they will otherwise be rediscovered as bugs: any command refeeds the
-watchdog, so a polling loop silently neuters it (F-23); `WD` reads 0 for
-both "timed out" and "never enabled" (F-22); and relay state survives a
+watchdog, so a polling loop silently neuters it (F-30); `WD` reads 0 for
+both "timed out" and "never enabled" (F-29); and relay state survives a
 host reset, because USB suspend holds the outputs (H-7).
 
 Hardware status: run against the real device (serial E02246) with relay

@@ -244,8 +244,9 @@ link died.
 Hardware the scan finds that no driver claims gets its own list below the rail,
 because the rail only has rows for devices benchctrl has drivers for, and
 "something is plugged in that benchctrl cannot drive" is a real bench fact. On the
-development board that list is a CH340 bridge plus an SDG1032X and a DS1000Z
-scope — both attached, both identified, neither having a driver yet.
+development board that list is a CH340 bridge plus a DS1000Z scope — attached,
+identified, no driver yet. (The SDG1032X sat in this list until it got a driver;
+it now has a rail slot, which is exactly how an instrument leaves the list.)
 
 ### The rail adapts to the bench, but never to cable state
 
@@ -433,6 +434,46 @@ Design questions still open, and deliberately not guessed at:
 - Whether `TripReason` grows one `estop` member or one per mechanism. The
   artifact log has to be able to answer "which one did the operator press"
   afterwards, which argues for two.
+
+## VISION · LIVE — the camera in the detail quadrant
+
+The right-hand detail panel was a supply/load scope with no waveform to draw
+(the status payload carries none), so it showed a graticule reading NO SIGNAL
+forever. It now shows the bench camera's MJPEG stream. The FUI server relays
+`/vision/stream` and `/vision/frame.jpg` from the vision sidecar's loopback
+(`BENCHCTRL_VISION_URL`, default `http://127.0.0.1:8095`) under the page's own
+origin, so the picture works on the kiosk and through an ssh tunnel to the FUI,
+and the sidecar's unauthenticated control port is never published. Only those
+two paths are relayed; a control path through the FUI is refused by the static
+handler and never reaches the sidecar (`tests/test_fui_vision.py`).
+
+Two facts are kept apart in the quadrant: the verdict is the VISION rail slot's
+word (what the *agent* says about the device), and NO FEED means the *sidecar*
+did not answer — the picture is absent even if the agent lists the device. The
+`<img>` is armed once and left alone (an MJPEG connection repaints itself); on
+error the note returns and a retry backs off to 30 s so a bench with no camera
+does not hammer a dead port.
+
+## SDG1032X · SCREEN — the generator's own screen in the DMM pane
+
+While the function generator is linked, the DIGITAL MULTIMETER pane switches to
+the SDG1032X's own display — its `SCDP` screen bitmap (480x272 BMP) — so a test
+that drives the generator can be watched from across the bench without walking
+over to it. The title changes to `SDG1032X · SCREEN`, the verdict stays the
+AWG rail slot's word, and NO SCREEN means no current picture (the first tick
+after the pane opens, or a grab that failed); when the AWG is unlinked the pane
+is the DMM readout again.
+
+It is observer-side and polled only while watched. The feed grabs the screen
+inside its own session loop (a claim-free `device.call` of `read_screen`, which
+is not a mutator — the dashboard never takes a writer claim), every 2 s, and
+only while a page has fetched `/sdg/screen` within the last 10 s. The page
+re-fetches on that same 2 s clock, so closing the browser stops the reads. The
+handler serves the feed's last grab (`image/bmp`, `X-Screen-Age`) or 404 when
+there is none, and each hit is what arms the poll — which is why the first
+fetch is a 404 by design. `/api/view` carries `sdg_screen.present/age_s/bytes`.
+A failed grab clears the picture rather than leaving a stale one up as live
+(`tests/test_fui_sdg_screen.py`).
 
 ## Display takeover
 

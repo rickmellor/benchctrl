@@ -947,6 +947,18 @@ function render(v) {
   renderUnclaimed(v.unclaimed);
   renderFlow(v.stages, v.stage_unknown);
 
+  // The DMM pane is the generator's screen while the AWG is linked: during a
+  // test the one thing worth watching in that quadrant is what the instrument
+  // itself is doing, and the DMM has no measurement channel to lose yet.
+  const awg = v.instruments.find((i) => i.kind === 'awg');
+  if (awg && awg.linked) {
+    showSdgScreen(v);
+    renderVision(v);
+    $('dut-verdict').textContent = dutLabel(v);
+    return;
+  }
+  hideSdgScreen();
+
   // The DMM readout. There is no measurement in the observer status payload, so
   // this is NO LINK until one exists — deliberately not a plausible number.
   // When agent.status grows per-channel readings, they land here.
@@ -974,9 +986,119 @@ function render(v) {
   $('dmm-pills').innerHTML = ['Vdc', 'Vac', 'Idc', 'Iac', 'Ω']
     .map((m) => `<span class="pill">${m}</span>`).join('');
 
-  const psu = v.instruments.find((i) => i.kind === 'psu');
-  $('psu-verdict').textContent = psu && psu.linked ? psu.status : 'NO LINK';
+  renderVision(v);
   $('dut-verdict').textContent = dutLabel(v);
+}
+
+/* The generator's screen in the DMM pane.
+ *
+ * Unlike the camera this is a still, re-fetched on a fixed 2 s clock: the feed
+ * grabs the SDG1032X's SCDP bitmap only while /sdg/screen keeps being asked
+ * for, so the fetch loop here is what keeps the instrument being read — and
+ * stopping it (the AWG unlinked, the DMM back) is what stops the reads. The
+ * first fetch after arming is a 404 by design (the feed has not grabbed yet);
+ * that shows NO SCREEN for one tick and the picture lands on the next.
+ *
+ * The verdict beside the title stays the rail's word for the AWG (OPEN, IN RUN,
+ * …), the same split as the camera: the agent's fact about the device, and
+ * NO SCREEN for the picture being absent, are never the same thing.
+ */
+const SDG = { timer: null, showing: false, pollMs: 2000 };
+
+function showSdgScreen(v) {
+  const img = $('sdg-screen');
+  const note = $('dmm-note');
+  const awg = v.instruments.find((i) => i.kind === 'awg');
+  $('dmm-title').textContent = 'SDG1032X · SCREEN';
+  $('dmm-verdict').textContent = awg ? awg.status : 'NO LINK';
+  $('dmm-readout').classList.add('hidden');
+  $('dmm-pills').classList.add('hidden');
+  $('dmm-body').classList.add('screen');
+  if (SDG.showing) return;
+  SDG.showing = true;
+  note.textContent = 'NO SCREEN';
+  note.className = 'readout-note';
+  img.onload = () => {
+    img.classList.remove('hidden');
+    note.classList.add('hidden');
+  };
+  img.onerror = () => {
+    img.classList.add('hidden');
+    note.textContent = 'NO SCREEN';
+    note.className = 'readout-note';
+  };
+  const tick = () => {
+    if (!SDG.showing) return;
+    img.src = '/sdg/screen?t=' + Date.now();
+    SDG.timer = setTimeout(tick, SDG.pollMs);
+  };
+  tick();
+}
+
+function hideSdgScreen() {
+  if (!SDG.showing) return;
+  SDG.showing = false;
+  clearTimeout(SDG.timer);
+  SDG.timer = null;
+  const img = $('sdg-screen');
+  img.onload = null;
+  img.onerror = null;
+  img.removeAttribute('src');
+  img.classList.add('hidden');
+  $('dmm-title').textContent = 'DIGITAL MULTIMETER';
+  $('dmm-readout').classList.remove('hidden');
+  $('dmm-pills').classList.remove('hidden');
+  $('dmm-body').classList.remove('screen');
+  // The DMM block that follows repaints the readout, note and verdict.
+}
+
+/* The VISION · LIVE quadrant: the camera's MJPEG stream, relayed by the FUI
+ * server from the sidecar on the bench box.
+ *
+ * Two facts, kept apart on purpose:
+ *
+ *   verdict  the VISION rail slot's word (STANDBY, OPEN, ABSENT, NOT SERVED…)
+ *            — what the *agent* says about the device
+ *   NO FEED  the *sidecar* did not answer /vision/stream — the picture is
+ *            absent even if the agent lists the device
+ *
+ * The <img> is armed once and left alone: an MJPEG connection stays open and
+ * repaints itself, so re-setting src every poll would reconnect twice a second.
+ * On error the note comes back and a retry is scheduled, backing off so a
+ * bench with no camera does not hammer a port nothing listens on.
+ */
+const VISION = { armed: false, retryMs: 2000, timer: null };
+
+function renderVision(v) {
+  const slot = v && v.instruments ? v.instruments.find((i) => i.key === 'bench_vision') : null;
+  // The rail's word, whether or not a client holds the device: the picture
+  // beside it is live regardless, and a NO LINK next to a live feed reads as a
+  // contradiction rather than as "nobody has opened it".
+  $('vision-verdict').textContent = slot ? slot.status : 'NO LINK';
+  if (!VISION.armed) armVision();
+}
+
+function armVision() {
+  const img = $('vision-stream');
+  const note = $('vision-note');
+  if (!img || !note) return;
+  VISION.armed = true;
+  img.onload = () => {
+    img.classList.remove('hidden');
+    note.classList.add('hidden');
+    VISION.retryMs = 2000;
+  };
+  img.onerror = () => {
+    img.classList.add('hidden');
+    note.classList.remove('hidden');
+    note.textContent = 'NO FEED';
+    clearTimeout(VISION.timer);
+    VISION.timer = setTimeout(() => {
+      VISION.retryMs = Math.min(VISION.retryMs * 2, 30000);
+      img.src = `/vision/stream?_=${Date.now()}`;
+    }, VISION.retryMs);
+  };
+  img.src = `/vision/stream?_=${Date.now()}`;
 }
 
 /* What to print beside DEVICE UNDER TEST. Extracted for the same reason
@@ -1065,11 +1187,6 @@ function frame(t) {
 
   const [dctx, dw, dh] = fitCanvas($('dut'), q.res);
   drawDut(dctx, dw, dh, t, { live, alarm, glow: q.glow });
-
-  const [tctx, tw, th] = fitCanvas($('trace'), q.res);
-  // null series: there is no waveform data in the status payload, so the scope
-  // shows its graticule and says NO SIGNAL rather than plotting an invention.
-  drawTrace(tctx, tw, th, null, { alarm, glow: q.glow });
 
   // Let the governor see how late this frame was relative to the tier's target.
   governFrame(t);

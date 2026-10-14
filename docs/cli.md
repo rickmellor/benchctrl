@@ -129,7 +129,7 @@ exposed"* with the reason. An operator who cannot find a flag deserves to know
 it was withheld on purpose rather than forgotten.
 
 - **`verify`** — defaults `True` on both switching drivers and is load-bearing:
-  the ADU218 reports no error, ever (`KNOWN_LIMITATIONS.md` §F-21), so
+  the ADU218 reports no error, ever (`KNOWN_LIMITATIONS.md` §F-28), so
   `verify=False` returns the value you *commanded*, not the one the device is
   at. Verification is not a preference.
 - **`allowed_relays` / `allowed_outlets` / `panic_outlets`** — safety
@@ -312,7 +312,7 @@ including instruments the command never touched.
 **A one-shot must not disarm what a previous one armed.** `adu218_open` defaults
 `disarm_watchdog=True`, and its connect path sends `WD0`. That default is right
 for a long-lived server — the watchdog setting reads 0 both for "timed out" and
-"never enabled" (§F-22), so a fresh session cannot interpret an inherited value
+"never enabled" (§F-29), so a fresh session cannot interpret an inherited value
 — and wrong here, because *every* invocation is a fresh session. Left alone:
 
 ```bash

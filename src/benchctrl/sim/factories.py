@@ -125,6 +125,41 @@ def make_sdm4065a(**kwargs) -> Any:
     return _bind_lifetime(driver, sim)
 
 
+def make_sdg1032x(**kwargs) -> Any:
+    """A real ``SiglentSDG1032X`` over pyvisa-py's serial backend.
+
+    ``allowed_channels``, ``max_amplitude_vpp`` and ``timeout_ms`` pass
+    through to ``open()`` untouched: both channels and no cap is the driver's
+    own default, and against a simulator there is no DUT to protect, so the
+    factory adds no policy of its own — a test narrows the grant to exercise
+    the policy errors.
+
+    Arbitrary-waveform transfer goes over the instrument's LAN socket (USB
+    drops it on the bench firmware), and the simulator serves that socket on
+    loopback at an ephemeral port. The port cannot be discovered over SCPI,
+    so unless the caller names ``lan_host``/``lan_port`` the factory hands
+    the driver ``lan_host="127.0.0.1", lan_port=sim.lan_port``. Pass
+    ``sim={"lan": False}`` for a unit with no Ethernet: the factory then
+    passes nothing and the driver's no-LAN error path runs.
+    """
+    from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X
+    from benchctrl.sim.sdg1032x import SimulatedSDG1032X
+
+    sim_kwargs = kwargs.pop("sim", {})
+    kwargs.pop("resource", None)
+    sim = SimulatedSDG1032X(**sim_kwargs)
+    sim.start()
+    if sim.lan_port is not None and "lan_host" not in kwargs and "lan_port" not in kwargs:
+        kwargs["lan_host"] = "127.0.0.1"
+        kwargs["lan_port"] = sim.lan_port
+    try:
+        driver = SiglentSDG1032X.open(_asrl(sim.port), **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
 def make_pdu41002(**kwargs) -> Any:
     """A real ``CyberPowerPDU41002`` driving a :py:class:`SimulatedPDU41002`.
 
@@ -225,6 +260,33 @@ def make_adu218(**kwargs) -> Any:
     return _bind_lifetime(driver, sim)
 
 
+def make_bench_vision(**kwargs) -> Any:
+    """A real ``BenchVision`` driving a :py:class:`SimulatedVisionSidecar`.
+
+    Like ``make_cp2112`` this substitutes below the driver rather than behind a
+    pty — the seam here is HTTP on loopback, and the simulator serves the
+    *same* ``VisionService`` router the production sidecar runs, with a
+    synthetic camera and a canned detector plugged in. So the driver's real
+    ``urllib`` path, the wire contract and the codec are all exercised; only
+    pylon and the Axelera runtime are not. ``sim`` kwargs go to the sidecar
+    (``aipu=False`` for a camera-only host, ``frame_bytes=200_000`` to push
+    frames over the blob threshold); ``url`` is ignored, the simulator picks
+    its own port.
+    """
+    from benchctrl.drivers.bench_vision import BenchVision
+    from benchctrl.sim.vision import SimulatedVisionSidecar
+
+    sim_kwargs = dict(kwargs.pop("sim", {}))
+    kwargs.pop("url", None)  # the simulator's socket is the only one that exists
+    sim = SimulatedVisionSidecar(**sim_kwargs)
+    try:
+        driver = BenchVision.open(sim.url, **kwargs)
+    except Exception:
+        sim.close()
+        raise
+    return _bind_lifetime(driver, sim)
+
+
 FACTORIES: dict[str, Callable[..., Any]] = {
     "otii_arc": make_otii_arc,
     "eastwood_qr10x": make_qr10x,
@@ -234,6 +296,8 @@ FACTORIES: dict[str, Callable[..., Any]] = {
     "cyberpower_pdu41002": make_pdu41002,
     "silabs_cp2112": make_cp2112,
     "ontrak_adu218": make_adu218,
+    "bench_vision": make_bench_vision,
+    "siglent_sdg1032x": make_sdg1032x,
 }
 
 
@@ -242,6 +306,5 @@ def factory_for(device_key: str) -> Callable[..., Any]:
         return FACTORIES[device_key]
     except KeyError:
         raise BenchValueError(
-            f"no simulator for device key {device_key!r}; "
-            f"available: {sorted(FACTORIES)}"
+            f"no simulator for device key {device_key!r}; available: {sorted(FACTORIES)}"
         ) from None

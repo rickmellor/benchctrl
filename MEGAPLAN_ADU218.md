@@ -1,6 +1,10 @@
 # benchctrl game plan — Ontrak ADU218 relay I/O driver
 
 **Branch:** `feat/ontrak-adu218` (off `master` @ `2eb0003`)
+**Renumbered 2026-10-14:** the ADU218's limitations were F-21–F-27 when this was
+written; master had independently used those IDs for the SDG1032X, so on the
+merge they became **F-28–F-34** (each +7). References below use the new IDs;
+commit messages before the merge still use the old ones.
 **State as of:** 2026-08-27 — **all stages landed, every bench claim witnessed,
 the PR open, everything pushed.** Get the commit count from
 `git rev-list --count master..HEAD` rather than from here; it was carried forward
@@ -1050,7 +1054,7 @@ ADU file was simply wrong. What it settled:
   means more filtering — and **no millisecond value existed anywhere in the
   repo**. This was a real footgun in my own driver, fixed by adding
   `DEBOUNCE_MS`, `read_debounce_ms()`, `debounce_ms` alongside `debounce` in the
-  MCP returns, a `docs/drivers.md` table, limitation F-25, and a test asserting
+  MCP returns, a `docs/drivers.md` table, limitation F-32, and a test asserting
   the **strict ordering** `ms[0] > ms[1] > ms[2]` so the values cannot be
   silently re-sorted into "sensible" order by a later reader.
 - **"Count low to high transitions" (§6c)** — once per cycle, not once per edge.
@@ -1160,7 +1164,7 @@ calls a perfectly good K7 open.** §3's decision to read that table as *"a finit
 resistance vs the overload sentinel"* rather than as a measurement is what
 survived the re-wiring — a categorical distinction rather than a quantitative
 one. This is the single most load-bearing decision in the hardware file, and it
-is now recorded as **F-27** in `KNOWN_LIMITATIONS.md`.
+is now recorded as **F-34** in `KNOWN_LIMITATIONS.md`.
 
 ### Within-session stability was also a wiring property, and it was a latent flake
 
@@ -1289,7 +1293,7 @@ check.
   so `BENCHCTRL_ADU218_INPUT=XY` raised `ValueError` from the fixture instead of
   skipping — the guard could not fire for most of the inputs it was written to
   catch. Now one `re.fullmatch(r"[AaBb][0-3]", spec)` before any parsing.
-- F-26, the module docstring, the fixture docstring and the CHANGELOG now say
+- F-33, the module docstring, the fixture docstring and the CHANGELOG now say
   the map is measured on both ports, and say which lines are *not* driven, so
   "witnessed" is not read as "exhaustive".
 
@@ -1340,7 +1344,7 @@ alternating five-transition check passing.
 | K0 | 45.65 | ≤ 0.06 |
 
 A **2.7× spread with no relation to index**, on identical PhotoMOS parts, one
-meter, one hour. F-27's "the excess is outside the relay" conclusion now rests on
+meter, one hour. F-34's "the excess is outside the relay" conclusion now rests on
 eight points rather than two. The within-position figures localise something the
 two-relay version could not: the drift that once broke `hi < lo * 2` is **clip
 seating specifically**, not the bench and not the device — seven positions held
@@ -1386,7 +1390,7 @@ implies self-healing. The operator corrected that: *"i snugged the screw termina
 before your retest."* So the clean run is the **post-repair** state, not evidence
 of recovery. The fault was real and persistent until a human fixed it.
 
-Then I proposed adding a **~1 kΩ ceiling** on the closed reading, and argued F-27
+Then I proposed adding a **~1 kΩ ceiling** on the closed reading, and argued F-34
 did not forbid it because this case was categorically different. The operator
 pushed back: *"Do we need a ceiling? In practice we won't be measuring the
 relays... they'll be controlling something. So long as their resistance is low
@@ -1400,7 +1404,7 @@ recurring failure shape:
   state change. A test is not holed by failing to catch something it never
   claimed.
 - **"Categorically different" was special pleading.** A loose screw terminal *is*
-  a wiring property. That puts it **inside** F-27's rule rather than justifying an
+  a wiring property. That puts it **inside** F-34's rule rather than justifying an
   exception to it — I was reaching for an exemption for the first case that
   actually stung.
 - **The driver cannot see the thing a ceiling would police.** Bench wiring quality
@@ -1411,7 +1415,7 @@ recurring failure shape:
 
 The rejection is recorded in three places so nobody "fixes" it later: a **"Do not
 add a ceiling on the closed reading"** comment block at the assertion itself, a
-closing paragraph in F-27, and the CHANGELOG.
+closing paragraph in F-34, and the CHANGELOG.
 
 ### What landed
 
@@ -1420,9 +1424,9 @@ the direct consequence of the ceiling decision, and it is the right shape for th
 commit: eight positions of measurement that *confirmed* the existing assertions
 rather than moving them.
 
-- **F-26** — the eight-position table, the ±0.5 % rate note, and the
+- **F-33** — the eight-position table, the ±0.5 % rate note, and the
   measure-where-hypotheses-diverge lesson stated generally.
-- **F-27** — the eight-relay table with per-position spreads, plus "A ceiling on
+- **F-34** — the eight-relay table with per-position spreads, plus "A ceiling on
   the closed reading was considered and rejected."
 - The module docstring's resistance paragraph, rewritten from two relays to
   eight; claim 5 rewritten to say all eight positions are measured.
@@ -1514,14 +1518,14 @@ evidence rules:
 That is measured, not argued, and it is the whole justification for the change:
 the coverage is new, not restated.
 
-### What F-22 does and does not cover
+### What F-29 does and does not cover
 
-Worth separating, because they read as the same thing. F-22 is about **reading**
+Worth separating, because they read as the same thing. F-29 is about **reading**
 a trip — `WD=0` means both "timed out" and "never enabled", so it is
 interpretable only against a driver-held expectation. That ambiguity is
 unchanged. What is new is the other half: **whether the trip happens at all**,
 which is now witnessed on hardware independently of anything the device reports
-about itself. F-22 gained the measurement and the bracket.
+about itself. F-29 gained the measurement and the bracket.
 
 ### Verification
 
@@ -1610,7 +1614,7 @@ Proven by pointing `INPUT` at an undriven `A1`: the skip fires and names PB3.
 being the operator gates; **11 passed / 1 skipped** with the watchdog armed;
 hardware-free 12 deselected; `test_bench_adu218.py` 115 passed; ruff clean; board
 `IN SYNC`, 105 files identical. Recorded in the CHANGELOG — which had to
-**correct its own earlier claim** — and in F-26. The discovery probe was removed
+**correct its own earlier claim** — and in F-33. The discovery probe was removed
 from host and board.
 
 ## 19. Addendum, 2026-08-27 — "simultaneous" meant two things, and B1 needs neither instrument
@@ -1697,8 +1701,8 @@ this bench's use on the strength of a condition it cannot observe. Worth
 knowing that it **inverts the usual expectation** — the ADU208's *mechanical*
 relays manage 10 CPS, so the solid-state part is the slower one to cycle.
 
-**On-state resistance, 700 mΩ typical / 1.1 Ω maximum.** This corroborates F-27
-*independently of our own bench*, which matters because F-27's wiring conclusion
+**On-state resistance, 700 mΩ typical / 1.1 Ω maximum.** This corroborates F-34
+*independently of our own bench*, which matters because F-34's wiring conclusion
 previously rested on "the spread has no relation to index" — an inference from
 one bench. Every reading in the eight-relay walk is **15× to 41× the vendor
 maximum**, so by the manufacturer's own number the relay accounts for under 4 %
@@ -1729,7 +1733,7 @@ would have read as a pass).
 claim); mutant kills it at 8.00 s vs the 2.0 s ceiling and the module was
 restored and re-checked for the mutant by grep; ruff on the changed files shows
 only the pre-existing `UP045`/`UP037` `Optional`-annotation baseline, and these
-edits add no annotations. Commits `bdaa835` (code, tests, docs, F-27) and
+edits add no annotations. Commits `bdaa835` (code, tests, docs, F-34) and
 `9ca2285` (CHANGELOG), both pushed. **No behaviour change** — the driver sends
 exactly what it sent before.
 
@@ -1841,11 +1845,11 @@ attempts.
 
 ### The numbers, because a categorical pass hides its own margin
 
-Every other bench claim in this driver has numbers on file — F-26's
-eight-position counter table, F-27's eight-relay resistance table,
+Every other bench claim in this driver has numbers on file — F-33's
+eight-position counter table, F-34's eight-relay resistance table,
 `watchdog_trip.txt`'s brackets. This one had only prose, and that is a real gap
 rather than a tidiness complaint: the test asserts **categorically** (finite
-versus the overload sentinel, which F-27 requires, since the closed value is a
+versus the overload sentinel, which F-34 requires, since the closed value is a
 property of the wiring), and a categorical pass does not show how far from the
 boundary it sat. Captured in `tests/fixtures/adu218/whole_port_witness.txt`:
 
@@ -1860,7 +1864,7 @@ standing DC at 0.0006 V confirming the leads were on a dry contact, and the
 device left at mask `0b00000000` / `WD` 0.
 
 **And the numbers turned out to corroborate something the test cannot.** The
-bench walk (§16, F-27) measured K7 at **17.50 Ω** through the *per-relay* `SKn`
+bench walk (§16, F-34) measured K7 at **17.50 Ω** through the *per-relay* `SKn`
 path. `MKddd` puts the same contact at 17.5134–17.5152 Ω. Two independent command
 paths, one contact, the same resistance to four decimal places — so `MKddd` is
 closing the relay the way `SKn` does, not by some other route that merely ends up
@@ -1871,4 +1875,4 @@ command route rather than of the wiring, the two paths would not agree like that
 
 None of which becomes an assertion. 17.5 Ω is still a property of K7's leads and
 would break the moment they move — which is exactly why the numbers live in a
-fixture and F-27 gets them as corroboration rather than as a threshold.
+fixture and F-34 gets them as corroboration rather than as a threshold.

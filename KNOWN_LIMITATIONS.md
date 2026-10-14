@@ -160,7 +160,7 @@ interrupted.
 
 The mitigation that actually works across a host reset is the device's own
 watchdog (`set_watchdog`), which drops the relays without any host
-involvement — see F-22 and F-23 for what it costs.
+involvement — see F-29 and F-30 for what it costs.
 
 Code reference:
 `src/benchctrl/drivers/ontrak_adu218/driver.py` — `_connect`;
@@ -1087,7 +1087,93 @@ Code reference:
 `src/benchctrl/drivers/silabs_cp2112/hidraw.py` -- `HidrawLink.open`;
 `src/benchctrl/discovery.py` -- `scan_hidraw`.
 
-### F-21. ADU218 reports no error, ever
+### F-21. The SDG1032X has no error queue — read-back is the only rejection signal
+The generator implements no ``SYST:ERR?`` and no status byte worth reading. A
+value it cannot represent, or one outside the range of the current waveform or
+load, is **silently refused or clamped**: bench-measured, ``C1:BSWV AMP,0.001``
+reads back ``AMP,0.002V`` (the 2 mVpp floor) and ``DUTY,99`` at 20 MHz square
+reads back ``DUTY,59``. So every setter in the driver reads the state back,
+returns it, and raises ``SDG1032XVerifyError`` (a distinct wire type) when a
+requested field differs beyond the instrument's own resolution. ``verify=False``
+returns the read-back without raising. A raw ``write()`` verifies nothing.
+
+### F-22. `CHDR` is not supported on the SDG1000X; headers are fixed
+The guide's ``CHDR OFF`` (drop the response header) is marked unsupported for
+the SDG1000X, so every answer carries its short header (``C1:BSWV …``) and the
+parser strips it. Three answers carry **no** header and one carries a stray
+comma, all bench-measured: ``VOLTPRT?`` → ``ON``; the three LAN queries → a
+quoted dotted quad; ``C1:HARM?`` when on → ``C1:HARM ,HARMSTATE,ON,…``. The
+parser accepts all four and the simulator renders them the same way.
+
+### F-23. Firmware 1.01.01.33R1B6 deviates from the programming guide in eight places
+Measured on the bench unit; the driver follows the instrument, not the guide:
+``MODE?`` answers ``PHASE-LOCKED`` and the *set* form must be ``MODE
+PHASE-LOCKED`` (the guide's ``PHASELOCKED`` is silently ignored — the driver
+translates); ``C1:MDWV?`` when on is ``STATE,ON,<TYPE>,<params>,CARR,…`` (the
+guide puts the type first — both are parsed); ``C1:SYNC?`` never echoes
+``TYPE``; ``ROSC?`` never echoes ``10MOUT``; ``CURRPRT?`` and ``VOLTSTAT?`` are
+not implemented — the query goes unanswered (a USB pipe error, surfaced as
+``SDG1032XTimeoutError``). Unlike the SDM4065A (§ F-8), an unanswered query
+does **not** wedge this instrument: the next query works. And a ``BSWV``
+command that carries ``WVTP`` **together with** other fields makes the
+instrument swallow exactly one following message (the read-back query times
+out; the one after answers) — no delay helps, ``WVTP`` alone or fields
+without it answer at once — so ``set_basic_wave`` sends the wave type in its
+own command first. ``HARM?`` goes unanswered unless the channel's wave is
+SINE, so ``get_harmonics`` answers "disabled" without asking on any other
+wave and ``set_harmonics`` refuses. And the first query after selecting a
+large user waveform (``ARWV NAME``) is lost while the channel loads it —
+``select_arb`` polls. The simulator models the swallows.
+
+### F-24. `MAX_OUTPUT_AMP` is accepted, never echoed, and not enforced
+The guide's instrument-side amplitude cap does nothing on this firmware: after
+``C1:BSWV MAX_OUTPUT_AMP,2`` a request for 3 Vpp reads back 3 Vpp. The driver
+therefore does not rely on it: ``max_amplitude_vpp`` (``open()``,
+``agent.json``) is enforced by the driver on every amplitude it sends, and
+``set_max_amplitude`` can only *lower* that cap at run time. A raw ``write``
+bypasses it — which is why ``allowed_channels`` and the cap are the driver's
+policy, and the agent's writer claim is the bench's.
+
+### F-25. Arbitrary-waveform upload works only over the LAN socket, which is line-terminated
+Over USB-TMC the bench firmware (1.01.01.33R1B6) **silently drops** every
+`WVDT` upload framing tried — with or without `LENGTH`, with or without a
+terminator, newline-free payloads included, chunked or as one transfer (the
+32 KB single transfer stalled the USB stack until a rear-switch power cycle).
+Over the instrument's raw SCPI socket (Ethernet, port 5025) the upload lands
+and a full 16384-point waveform reads back byte-exact. That socket server is
+**line-oriented**: a message ends at the first `0x0A` byte, payload included,
+and `LENGTH` is ignored — so the driver escapes newline bytes first
+(`escape_codes`: a sample whose low byte is `0x0A` moves one code, below the
+14-bit DAC's resolution; one whose high byte is `0x0A` moves to the nearer of
+2559/2816, up to 128 codes on the ~0.4 % of samples in that band) and reports
+the count as `ArbData.nudged`. `write_arb`/`read_arb` use the LAN only, never
+USB; the address is `lan_host` from `open()`/`agent.json` or the one the
+instrument reports for itself. Read-back is `WVDT POS, /Local, WVNM, <name>,
+LENGTH, <n>B, TYPE, 6, WAVEDATA, ` + n bytes; it carries no wave parameters.
+A user waveform selects **by name** and reads back as `NAME,<name>.bin`. There
+is no delete command in the SDG1000X set: stale user waveforms are removed
+from the front panel (Store/Recall) — which has its own bugs: an entry whose
+upload was cut off mid-message could not be deleted or read back until it
+was overwritten with a valid one, and after one deletion the next fails
+until the menu is left and re-entered (delete from the top of the list).
+
+### F-26. `STL? BUILDIN` names differ from the `ARWV INDEX` table
+The built-in list the instrument returns (``M4, StairUD``, ``M12, LogFall``…)
+spells several names differently from the guide's index table (``Stairud``,
+``Logfall``) and lists them in string order of ``M<n>`` (M10, M100, M101, …,
+M11). ``list_arbs("builtin")`` re-sorts by index; select built-ins **by
+index** and user waveforms **by name** — the instrument refuses the other way
+round.
+
+### F-27. `SCDP` (screen dump) is undocumented in the programming guide
+Siglent's operating tip confirms it for the SDG1000X; the guide does not list
+it. Bench-measured: a 480×272 24-bit BMP of 391734 bytes followed by a stray
+newline, delivered by pyvisa-py in 20 KB chunks in about 450 ms (a 1 MB
+``chunk_size`` is four times slower). ``read_screen()`` reads the size from
+the BMP header, loops until complete and drains the newline. The FUI shows it
+in the former DMM pane (``docs/dashboard.md``).
+
+### F-28. ADU218 reports no error, ever
 
 The Ontrak ADU218 has **no error reply**. Three different failures are
 byte-identical on the wire — nothing comes back:
@@ -1127,7 +1213,7 @@ Code reference:
 `command_spec`, `_send`; `tests/fixtures/adu218/errors.txt`;
 `tests/test_bench_adu218.py` — `TestSilence`.
 
-### F-22. ADU218 `WD` cannot distinguish "timed out" from "never enabled"
+### F-29. ADU218 `WD` cannot distinguish "timed out" from "never enabled"
 
 Reading `WD` returns `0` in both cases. A watchdog that fired self-clears
 to 0, which is also exactly what a watchdog that was never armed reports.
@@ -1174,7 +1260,7 @@ Code reference:
 `read_watchdog_tripped`, `_connect`; `tests/test_bench_adu218.py` —
 `TestWatchdog`; `tests/fixtures/adu218/watchdog_trip.txt` — both brackets.
 
-### F-23. Any ADU218 command refeeds the watchdog, so a poller neuters it
+### F-30. Any ADU218 command refeeds the watchdog, so a poller neuters it
 
 The hardware watchdog is fed by **any** command reaching the device —
 including a plain state read, and including a command the device rejects.
@@ -1210,7 +1296,7 @@ Code reference:
 `adu218_set_watchdog`, `adu218_watchdog`; `tests/test_bench_adu218.py` —
 `test_any_command_refeeds_the_timer`.
 
-### F-24. ADU218 out of scope, deliberately
+### F-31. ADU218 out of scope, deliberately
 
 Three capabilities the device has that this driver does not expose, each
 because getting it wrong is worse than not having it:
@@ -1243,7 +1329,7 @@ Code reference:
 `ADU218Info`; `src/benchctrl/drivers/ontrak_adu218/__init__.py`;
 `tests/test_bench_adu218.py` — `TestLifecycle`, `TestDispatchGate`.
 
-### F-25. ADU218 de-bounce settings run backwards, and are unobservable below a few hundred Hz
+### F-32. ADU218 de-bounce settings run backwards, and are unobservable below a few hundred Hz
 
 Two separate traps in one setting, and the first is the kind of thing that
 silently does the opposite of what an operator intended.
@@ -1278,7 +1364,7 @@ Code reference:
 `tests/fixtures/adu218/counters_live_signal.txt`;
 `tests/test_bench_adu218.py` — `TestDebounce`.
 
-### F-26. ADU218 counter-to-input map exists only as an image, and counters wrap silently
+### F-33. ADU218 counter-to-input map exists only as an image, and counters wrap silently
 
 **The map is not in the manual's text.** Counter-to-input assignments live
 in a "Table 1: Event Counter Port Assignments" **image**, which `pdftotext`
@@ -1329,7 +1415,7 @@ actually checks.
 
 `BENCHCTRL_ADU218_RELAY` is the other bench-tracking default and it is
 **deliberately not treated the same way** — a stale value there *fails*
-rather than skips (see F-27), and that asymmetry should survive review
+rather than skips (see F-34), and that asymmetry should survive review
 rather than be tidied away. Failing is noisy and sometimes wrong about the
 cause; skipping is quiet, and quiet is what let the input default sit stale.
 Nor is the self-diagnosing fix even available: sweeping eight input lines is
@@ -1357,7 +1443,7 @@ Code reference:
 `tests/fixtures/adu218/counters_live_signal.txt`;
 `tests/test_bench_adu218.py` — `TestCounters`.
 
-### F-27. ADU218 closed-contact resistance is a property of the wiring, not the relay
+### F-34. ADU218 closed-contact resistance is a property of the wiring, not the relay
 
 **No test may assert a resistance threshold, and no test may assume the
 reading is stable within a session.** Both were tried and both produced
@@ -1715,19 +1801,21 @@ Verified end to end on real hardware: QR101A-1M-R1, serial 00000248 — opened,
 closed and reopened through the auto-selected userspace transport, the reopen
 proving the USB claim is released rather than leaked.
 
-**Two validation gaps, both needing a host this bench doesn't have.** Neither
-is a known defect; they are untested paths, which is a different and lesser
-claim than "works". Tracked in [`ROADMAP.md`](ROADMAP.md) § *Revalidate serial
-transport selection on a desktop Linux host*, to be closed when we move back
-to big-iron Linux hosts.
+**Validated on a second host, 2026-09-11.** The kernel-first branch has now
+run on a host that has the module — the Raspberry Pi 5 bench agent — against
+the same QR101A-1M-R1 (serial 00000248): `how="kernel"`, no pty, identical
+`info()` and setpoint read-back to the userspace path, clean reopen,
+`scan_driverless_bridges()` empty. Results in `ROADMAP.md` § *Revalidate
+serial transport selection*. Two things remain:
 
-- **The kernel-first branch has never run on a host that has the module.** It
-  is covered by `tests/test_autoserial.py`, including a mutation check that
-  inverting the precedence fails a test, but the Uno Q is built without
-  `ch341` and WSL has no CH340 passed through. So "the kernel driver is
-  preferred where it exists" is asserted, not observed. The negative case
-  matters most: a kernel tty that fails to open must raise rather than
-  silently falling back to the userspace driver.
+- **A kernel tty is not exclusive.** The negative case ("hold the tty from
+  another process, then open through autoserial") did not fall back — there is
+  no path from a failed kernel open to the bridge — but it did not fail
+  either: Linux allows a second `open(2)` of a tty, pyserial's `exclusive=True`
+  is only an advisory `flock`, and `QR10x.open` sets neither. Two processes
+  can share the instrument's port on a kernel-tty host, which the libusb claim
+  ruled out on the Uno Q. Tracked in `ROADMAP.md` § *Exclusive open on kernel
+  ttys*.
 - **`serial_number=` selection cannot work on our adapter.** This CH340G
   reports `iSerialNumber=0` — no serial-number descriptor at all — so
   `CH341Device.open(serial_number=...)` has nothing to match and `index=` is
@@ -1897,6 +1985,136 @@ and shortening a trip delay deserves its own change with its own test — a
 timing assertion, since every "did it go safe" assertion passes on both
 hypotheses (§ A-6 makes the related point that a governor is damage limitation;
 § N-1 that it is not a guarantee).
+
+## Vision (camera + Metis NPU)
+
+### V-1. The Metis needs PCIe, so the Arduino Uno Q is camera-only at best
+The Axelera Metis M.2 is a PCIe device. A Raspberry Pi 5 (M.2 HAT) or a desktop
+has a slot; an Uno Q does not, and no USB path exists. On such a host the
+`bench_vision` sidecar can still serve the camera, but every detection call —
+`detect()`, `trigger_capture(infer=True)` — raises `VisionCapabilityError`,
+and that type survives the agent wire on purpose: the remedy is to fall back
+(classical CV, a human), never to retry. `aipu_present` says which kind of host
+you are on before you ask.
+
+### V-2. The sidecar container runs privileged
+The Axelera runtime maps the card's PCIe BARs from user space, which needs
+`CAP_SYS_RAWIO`, and enumerates the device through `/sys/class/metis`. The
+invocation that works — `--privileged -v /dev:/dev -v /sys:/sys` — is the one
+verified on scrub and reused unchanged in `deploy/vision/run-vision.sh`. A
+narrower grant (`--cap-add SYS_RAWIO,SYS_ADMIN --device /dev/metis-… --device
+/dev/dma_heap/system`, `/sys/class/metis` and `/sys/bus/pci` read-only,
+`/dev/bus/usb` for the camera) is written out in that script for the day it is
+worth the experiment; it has not been proven. Until then the container sees
+the whole of `/dev`, which is one more reason the sidecar stays on loopback
+(§ V-3) and the box it runs on is a bench appliance, not a workstation.
+
+### V-3. The sidecar is unauthenticated and must stay on loopback
+`benchctrl-vision` binds `127.0.0.1` by default and has no auth of its own. The
+agent is the network face, exactly as for every other instrument: a remote
+client reaches the camera only through the agent's HMAC handshake and claim
+gate. Binding the sidecar's control port to `0.0.0.0` would expose a
+trigger-and-capture surface to the LAN with no credential. Don't; if a second
+host needs to *drive* the camera, give it an agent.
+
+Two read-only ways to *watch* exist, and both are deliberately unable to fire
+or configure anything: the sidecar's optional **view listener** (`VIEW_PORT`,
+default 8096 on the LAN) serves `/stream`, `/frame.jpg` and `/health` and
+answers everything else 403; and the FUI relays exactly those two paths from
+the sidecar's loopback under its own origin (`/vision/stream`,
+`/vision/frame.jpg`) for the kiosk's VISION · LIVE quadrant. Neither carries
+`/status`, so a watcher cannot read the bench's structured state either.
+
+### V-4. `seq` correlation is only as good as the trigger path
+`trigger_capture(seq=N)` returns the frame tagged `N` or raises — but the tag is
+stamped by the *software* trigger in the sidecar. A free-run camera, or a
+hardware trigger wired before the cable lands on the same `TriggerSource` seam,
+produces untagged frames (`seq=-1`) which `/capture` refuses and `read_frame`
+returns as what they are. A frame's `seq` says "the sidecar fired this on
+request N"; it does not yet say when in the exposure the LED changed.
+
+### V-5. On a Raspberry Pi the blob spill is the SD card
+Frames are small enough to stay in the agent's RAM blob store (a 1920x1200
+q80 JPEG is ~150-300 KB; the spill threshold is 4 MB), so vision alone never
+touches the card. Recordings do spill, and on `benchpi` `blob_dir` is on the
+microSD. For long recordings point `blob_dir` at a USB SSD (`STATE_DIR=` on
+`install-agent.sh`, or edit `agent.json`).
+
+### V-6. The Metis link depends on the HAT
+A Pi 5 has one PCIe lane. The official M.2 HAT+ is 2230/2242 and the Metis is
+2280, so it overhangs and needs securing (kapton tape on benchpi), but it is
+switchless and gives Gen3 x1 (8 GT/s). A dual-slot HAT with an ASM1182e switch
+caps the link at Gen2 x1 (4 Gb/s). Either is ample for YOLOv8n-class work
+(~0.6 Gb/s at 60 fps). `install-metis-driver.sh` prints the negotiated link.
+
+### V-7. `aipu_temp_c` is whatever `axcmd` says, or `None`
+The Axelera Python runtime exposes no thermal call we know of, so the sidecar
+shells out to `axcmd --board-temp` inside its container and parses the first
+temperature it prints, cached for a few seconds. Any failure — no `axcmd`, a
+changed output format, a card mid-reset — reads as `None`. It is never
+estimated from anything else. Firmware ≥ 1.4 has its own thermal management
+(HW throttle at 105 °C; 1.8.0 is what the bench runs); on 1.3.0 the card
+hard-hung under load and no software reading would have warned you.
+
+### V-8. The Metis on a Raspberry Pi 5 needs three host-side fixes, all shipped
+Found 2026-09-12 after every hardware variable had been ruled out (the card
+was fine in an x86 desktop). Each fails in its own way and they stack, which
+is why no single change looked like it helped:
+
+1. **The card resets its BARs after the kernel enumerates it.** The Pi
+   enumerates PCIe ~7 s after power-on; the card's firmware finishes booting
+   a few seconds later and resets its PCIe configuration, so the BARs no
+   longer hold what the kernel wrote. Every host read of the card returns
+   0xFF, the driver logs `vmsi not available`, every command ends in
+   `IRQ MSI timeout`. An x86 BIOS enumerates tens of seconds later and never
+   sees this. `benchctrl-metis-rescan.service` removes and rescans the device
+   once per boot when the driver reports it unhealthy.
+2. **The card's DMA is 32-bit; the Pi maps RAM to PCIe above 4 GB.** Needs
+   `dtoverlay=pcie-32bit-dma-pi5` (bounce-buffered 2 GB inbound window), which
+   also moves the MSI doorbell below 4 GB. Without it the runtime's firmware
+   load times out (`USR_DMA_XFER failed`).
+3. **Max Payload Size mismatch.** The root port defaults to 512 bytes, the
+   card to 128, `pci=pcie_bus_safe` notwithstanding; every completion the
+   root port returns is malformed to the card (`UESta MalfTLP+ CmpltTO+`) and
+   the same DMA times out. The rescan service sets both ends to 128 on every
+   boot, after a rescan too, because re-enumeration re-derives them.
+
+Also pinned: `options metis single_msi=1`. With 32 MSI vectors the card's
+firmware programs its DMA-completion interrupts with bare vector indices,
+which a Broadcom brcmstb host encodes as `0x6540|index`; one vector is the
+virtual-MSI path the card uses on x86 anyway. `install-metis-driver.sh`
+writes it. Diagnosed with the driver's debugfs (`/sys/kernel/debug/metis/…`:
+`dma-statistics`, `dma-regs`, `vmsi`) and `lspci -vv` error bits on both ends
+of the link, which is the order to look in if it ever regresses.
+
+### V-9. An indicator classifier is bound to the sensor region and lighting it was trained under
+A classifier (`classify()`, `vision_classify`) is a small CNN trained on the
+label loop's frames of **one** sensor region at **one** exposure/gain. The
+region travels with the model (`classes.json` `crop`) and the sidecar
+translates it into the camera's current crop — a full frame for the
+dashboard, or any crop that contains it — and **refuses** one that does not
+(`VisionValueError`, "does not contain"), so a read is never taken from the
+wrong patch. Exposure and gain do not travel: the dataset manifest records
+what they were, and a read under different lighting is what the logit
+`margin` is for. Treat `confident=False` as "capture again", never as a
+weak yes. The first model (Pi 5 `ACT` LED, 2026-09-12) measures margins of
+11–23 on the bench at its training exposure (40 ms); the default gate is 3.
+Moving the camera, the DUT or the lights means a new dataset — the loop
+takes seconds, the training a minute on scrub.
+
+The classifier and the YOLO detector each hold their own runtime context;
+on the Pi the detector on 4 cores and a classifier on 1 load side by side
+(the runtime time-slices), ~1.3 ms per read on the AIPU, ~46 ms round trip
+through the agent with the trigger. Not measured: several classifiers plus
+detection under sustained load.
+
+### V-10. The `led` classifier is stale on this bench since the camera moved
+The ACT-LED model (§ V-9) is bound to sensor region (1040, 620, 160×160). On
+2026-09-12 the camera was re-aimed at the SDG1032X's front panel, so that
+region now shows a patch of the generator and ``classify(name="led")``
+returns a plausible-looking label for the wrong thing. It stays loaded
+(harmless) but must not be trusted until the camera returns to the Pi or the
+model is retrained; the generator's Output-key classifiers are the live ones.
 
 ## What's not in this list
 

@@ -238,10 +238,15 @@ class BlobStore:
 
 
 def default_spill_dir() -> Optional[Path]:
-    """``/home/arduino`` on the board; the system temp dir elsewhere.
+    """``/home/arduino`` on the Uno Q; the system temp dir elsewhere.
 
     The root partition on an Uno Q has under 2 GB free and is shared with
     Docker and App Lab's models. Spilling recordings there would fill it.
+
+    This is only the fallback for an ``agent.json`` with no ``blob_dir``.
+    ``deploy/install-agent.sh`` writes an explicit ``blob_dir`` under the
+    service user's home on every platform, so on a Raspberry Pi (user
+    ``rick``, not ``arduino``) the agent never reaches this default.
     """
     candidate = Path("/home/arduino")
     if candidate.is_dir() and os.access(candidate, os.W_OK):

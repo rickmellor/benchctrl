@@ -21,8 +21,9 @@ client has never heard of still arrives as the nearest known ancestor, so
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from benchctrl.exceptions import (
     BenchCommandError,
@@ -180,6 +181,50 @@ def _registry() -> dict[str, type]:
             ("ADU218Error", "ADU218ConnectionError", "ADU218ProtocolError",
              "ADU218TimeoutError", "ADU218ValueError", "ADU218PolicyError"),
         ),
+        (
+            "benchctrl.drivers.bench_vision.driver",
+            # Two beyond the usual, and each only means something if its type
+            # survives the wire:
+            #
+            # - CapabilityError: no AIPU / no model on the bench host. The
+            #   remedy is to fall back (classical CV, a human), never to
+            #   retry; degraded to RuntimeError it looks like a fault in a
+            #   sidecar that is in fact healthy.
+            # - CaptureError: the frame that came back is not the one that
+            #   was triggered (wrong seq), or the camera would not fire. A
+            #   label loop must discard on this and must be able to tell it
+            #   from a timeout, which is retryable.
+            #
+            # TimeoutError is real here: urllib has a socket timeout and a
+            # long-poll has a deadline.
+            ("VisionError", "VisionConnectionError", "VisionProtocolError",
+             "VisionTimeoutError", "VisionValueError", "VisionCapabilityError",
+             "VisionCaptureError"),
+        ),
+        (
+            "benchctrl.drivers.siglent_sdg1032x.driver",
+            # Three beyond Connection/Timeout/Value, and the generator has no
+            # error queue, which is what makes each of them load-bearing:
+            #
+            # - VerifyError: the command was accepted and the read-back
+            #   disagrees with what was asked. With no error queue this is the
+            #   *only* rejection signal the instrument gives, and its remedy
+            #   (ask for a value the current waveform/load can represent, or
+            #   pass verify=False) differs from a ValueError's (the request
+            #   was impossible before anything was sent). Degraded to
+            #   RuntimeError, a quantised amplitude would look like a fault.
+            # - PolicyError: the channel is outside allowed_channels, the
+            #   amplitude is above max_amplitude_vpp, or an Output key went
+            #   through trigger_key. A wiring/grant decision made at open() or
+            #   in agent.json -- for a human, never a retry.
+            # - ProtocolError: the instrument answered in a shape the parser
+            #   does not know. There is no error code to carry; the remedy is
+            #   a quirk entry in the driver, not a retry, so it must not blur
+            #   into TimeoutError (which *is* retryable here).
+            ("SDG1032XError", "SDG1032XConnectionError", "SDG1032XTimeoutError",
+             "SDG1032XValueError", "SDG1032XProtocolError", "SDG1032XVerifyError",
+             "SDG1032XPolicyError"),
+        ),
     ):
         try:
             module = __import__(module_path, fromlist=["*"])
@@ -266,10 +311,8 @@ def decode_exception(payload: dict) -> BaseException:
             exc = built
             for key, value in (payload.get("attrs") or {}).items():
                 if isinstance(value, _SAFE_ATTR_TYPES) and not key.startswith("_"):
-                    try:
+                    with contextlib.suppress(AttributeError):  # slotted classes
                         setattr(exc, key, value)
-                    except AttributeError:  # pragma: no cover - slotted classes
-                        pass
 
     exc.remote_class = name  # type: ignore[attr-defined]
     exc.remote_traceback = payload.get("tb", "")  # type: ignore[attr-defined]

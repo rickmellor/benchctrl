@@ -676,6 +676,133 @@ def test_sdm4065a_tools_have_docstrings():
         assert fn.__doc__ and fn.__doc__.strip(), f"{fn.__name__} missing docstring"
 
 
+# ----- Siglent SDG1032X: setters return the read-back, there is no error queue
+
+
+def test_sdg1032x_mcp_tools_cover_the_driver_surface():
+    """Every public driver method has a tool, except a documented few.
+
+    Same mechanism as the SDM4065A test: a method added to the driver without
+    a tool works locally and is invisible to an agent, and this is the test
+    that says so.
+    """
+    from benchctrl.drivers.siglent_sdg1032x import mcp_tools as sdg_tools
+    from benchctrl.drivers.siglent_sdg1032x.driver import SiglentSDG1032X
+
+    # Deliberately not exposed:
+    #   open — sdg1032x_open is the tool; the classmethod is internal. The
+    #          driver's properties (is_connected, resource, channels,
+    #          allowed_channels, max_amplitude_vpp) are not callables and
+    #          sdg1032x_open reports the policy ones in its result.
+    exempt = {"open"}
+    methods = {
+        name
+        for name in vars(SiglentSDG1032X)
+        if not name.startswith("_") and callable(getattr(SiglentSDG1032X, name))
+    } - exempt
+    tools = {fn.__name__[len("sdg1032x_") :] for fn in sdg_tools._TOOLS}
+
+    assert not (methods - tools), f"driver methods with no MCP tool: {sorted(methods - tools)}"
+    assert not (tools - methods - {"open"}), (
+        f"MCP tools with no driver method: {sorted(tools - methods - {'open'})}"
+    )
+
+
+def test_sdg1032x_tools_are_registered_on_the_shared_server():
+    """Owning the tools is not the same as registering them. This fails if
+    ``benchctrl.mcp`` forgot the ``register_mcp_tools`` call."""
+    import asyncio
+
+    from benchctrl.drivers.siglent_sdg1032x import mcp_tools as sdg_tools
+    from benchctrl.mcp import mcp
+
+    registered = {t.name for t in asyncio.run(mcp.list_tools())}
+    for fn in sdg_tools._TOOLS:
+        assert fn.__name__ in registered, f"{fn.__name__} not registered on the server"
+
+
+def test_sdg1032x_tools_are_importable_from_the_orchestrator():
+    """The re-export block in ``benchctrl.mcp`` is how tests and callers
+    reach these; a missing name there breaks them without breaking MCP."""
+    from benchctrl import mcp as m
+    from benchctrl.drivers.siglent_sdg1032x import mcp_tools as sdg_tools
+
+    missing = [fn.__name__ for fn in sdg_tools._TOOLS if not hasattr(m, fn.__name__)]
+    assert missing == []
+
+
+def test_sdg1032x_tools_have_docstrings():
+    """The docstring is the tool description the model sees. For this driver
+    it carries the read-back rule and the two SAFETY notes (set_output,
+    write_arb), so an empty one is a real defect."""
+    from benchctrl.drivers.siglent_sdg1032x import mcp_tools as sdg_tools
+
+    for fn in sdg_tools._TOOLS:
+        assert fn.__doc__ and fn.__doc__.strip(), f"{fn.__name__} missing docstring"
+    assert "SAFETY" in sdg_tools.sdg1032x_set_output.__doc__
+    assert "SAFETY" in sdg_tools.sdg1032x_write_arb.__doc__
+    assert "verified" in sdg_tools.sdg1032x_write.__doc__
+    assert "unanswered" in sdg_tools.sdg1032x_query.__doc__
+
+
+def test_sdg1032x_tools_raise_driver_connection_error_when_not_open():
+    from benchctrl.drivers.siglent_sdg1032x import mcp_tools as sdg_tools
+    from benchctrl.drivers.siglent_sdg1032x.driver import SDG1032XConnectionError
+
+    with sdg_tools._sdg1032x_lock:
+        saved = sdg_tools._sdg1032x
+        sdg_tools._sdg1032x = None
+    try:
+        with pytest.raises(SDG1032XConnectionError, match="sdg1032x_open"):
+            sdg_tools.sdg1032x_get_output(1)
+        assert sdg_tools.sdg1032x_close() == {"closed": False, "note": "no SDG1032X was open"}
+    finally:
+        sdg_tools._sdg1032x = saved
+
+
+def test_sdg1032x_close_disables_outputs_and_read_screen_saves(tmp_path):
+    """close() disarms both channels first (best effort, like dp2031_close);
+    read_screen never returns bytes, only size/sha256/path."""
+    import hashlib
+
+    from benchctrl.drivers.siglent_sdg1032x import mcp_tools as sdg_tools
+
+    class FakeGen:
+        def __init__(self):
+            self.calls = []
+            self.closed = False
+
+        def disable_outputs(self):
+            self.calls.append("disable_outputs")
+            return {}
+
+        def close(self):
+            self.closed = True
+
+        def read_screen(self):
+            return b"BM" + bytes(20)
+
+        def set_max_amplitude(self, amplitude_vpp):
+            return float(amplitude_vpp)
+
+    fake = FakeGen()
+    with sdg_tools._sdg1032x_lock:
+        saved = sdg_tools._sdg1032x
+        sdg_tools._sdg1032x = fake
+    try:
+        out = sdg_tools.sdg1032x_read_screen(save_to=str(tmp_path / "s" / "screen.bmp"))
+        assert out["bytes"] == 22
+        assert out["sha256"] == hashlib.sha256(b"BM" + bytes(20)).hexdigest()
+        assert (tmp_path / "s" / "screen.bmp").read_bytes() == b"BM" + bytes(20)
+        assert sdg_tools.sdg1032x_read_screen()["path"] is None
+        assert sdg_tools.sdg1032x_set_max_amplitude(2) == {"max_amplitude_vpp": 2.0}
+        assert sdg_tools.sdg1032x_close() == {"closed": True}
+        assert fake.calls == ["disable_outputs"] and fake.closed
+        assert sdg_tools._sdg1032x is None
+    finally:
+        sdg_tools._sdg1032x = saved
+
+
 # ----- CyberPower PDU41002: the first MCP surface that could cut mains ------
 
 

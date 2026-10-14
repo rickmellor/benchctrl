@@ -19,6 +19,14 @@
 SUBSYSTEM=="usb", ATTR{idVendor}=="f4ec", ATTR{idProduct}=="1220", \
     MODE="0660", GROUP="dialout"
 
+# Siglent SDG1000X-series function/arbitrary waveform generator (SDG1032X and
+# siblings share 0xf4ec:0x1103). On a Raspberry Pi the kernel's own usbtmc
+# module binds it and leaves /dev/usbtmc0 root-only; this rule is what lets
+# pyusb detach the kernel driver and claim the interface, exactly as for the
+# SDM above.
+SUBSYSTEM=="usb", ATTR{idVendor}=="f4ec", ATTR{idProduct}=="1103", \
+    MODE="0660", GROUP="dialout"
+
 # Rigol DL3000-series electronic load.
 SUBSYSTEM=="usb", ATTR{idVendor}=="1ab1", ATTR{idProduct}=="0e11", \
     MODE="0660", GROUP="dialout"

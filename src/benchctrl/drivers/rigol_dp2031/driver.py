@@ -497,6 +497,18 @@ class RigolDP2031:
         """
         self.write(f":OUTPut:STATe ALL,{'ON' if on else 'OFF'}")
 
+    def disable_outputs(self) -> None:
+        """Disarm all three channels — the no-argument form the agent's
+        safe-stop can reach.
+
+        :py:func:`benchctrl.agent.safety.default_safe_state` calls
+        ``set_output(False)`` with a single argument, which this driver's
+        per-channel :py:meth:`set_output` rejects (``False`` is not a
+        channel), so until this method existed a service stop left the PSU
+        armed. Equivalent to ``set_output_all(False)``.
+        """
+        self.set_output_all(False)
+
     def output_regulation(self, channel: ChannelLike) -> str:
         """Return the channel's regulation state.
 

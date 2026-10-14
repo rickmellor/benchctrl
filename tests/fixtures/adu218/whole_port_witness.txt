@@ -64,7 +64,7 @@ Two things the numbers add that the assertions cannot
    the plausible defect, and it lands here.
 
 2. The closed reading matches the OTHER command path. The bench walk
-   measured K7 at 17.50 ohm through the per-relay SKn route (F-27's
+   measured K7 at 17.50 ohm through the per-relay SKn route (F-34's
    eight-relay table). MKddd puts the same contact at 17.5134-17.5152
    ohm, spread 0.0018 ohm across three passes. Two independent command
    paths, one contact, the same resistance -- so MKddd is closing the
@@ -74,7 +74,7 @@ Two things the numbers add that the assertions cannot
 Deliberately NOT asserted
 -------------------------
 The committed test asserts CATEGORICALLY -- finite vs the overload
-sentinel -- and must keep doing so. Per F-27 the closed reading is a
+sentinel -- and must keep doing so. Per F-34 the closed reading is a
 property of the WIRING, not the relay: K0 read 9.483 ohm and K7 reads
 ~17.5 ohm on identical PhotoMOS parts (vendor maximum 1.1 ohm, so the
 relay is under 7% of even this reading). A 17.5 ohm expectation would

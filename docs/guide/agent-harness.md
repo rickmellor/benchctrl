@@ -195,7 +195,7 @@ Two hard edges:
   through MCP it is fine. Remote, it is not viable — run it on the bench.
 
 A useful pattern: let the agent drive the bench interactively while it *writes*
-the Python for the long version. The 324 tools and the SDK are the same
+the Python for the long version. The 406 tools and the SDK are the same
 functions, so what it proves by hand transfers directly into the script.
 
 ## The run engine's model is a different, much smaller surface

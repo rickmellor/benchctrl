@@ -424,6 +424,64 @@ dl.set_input(True)
 | Sub-ms / sub-100 ms transients | DL3031A LIST or transient mode |
 | Built-in battery discharge characterization | DL3031A |
 
+### Siglent SDG1032X (function / arbitrary waveform generator)
+
+`siglent_sdg1032x`, tools `sdg1032x_*`. **No error queue**: every setter
+returns the instrument's read-back and fails with `SDG1032XVerifyError` when
+it differs from the request — that is the signal a value was refused or
+clamped; do not retry blindly, pick a representable value. `open()` energises
+nothing; `set_output(ch, True)` arms the BNC (know what is attached); the
+driver's `max_amplitude_vpp` is the amplitude cap (the instrument's own is
+not honoured); `disable_outputs()` is the disarm. Built-in arbs select by
+index, user arbs by name; `write_arb` goes over the instrument's LAN socket
+(`lan_host`, or the IP it reports itself — USB drops uploads) and reports
+`nudged` newline-escaped samples. `sdg1032x_read_screen(save_to=…)` grabs the
+instrument's screen; the FUI shows it live. Full contract: `docs/drivers.md` § Siglent SDG1032X.
+
+```python
+from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X
+
+with SiglentSDG1032X.open(max_amplitude_vpp=5.0) as gen:
+    w = gen.set_basic_wave(1, wave_type="SINE", frequency_hz=1e3, amplitude_vpp=1.0)
+    gen.set_output(1, True)      # verified read-back; the camera classifier "sdg-out1" sees the key light
+    gen.disable_outputs()
+```
+
+### Bench vision (camera + Metis NPU)
+
+`bench_vision` reads the bench through a Basler camera and, on a host with
+PCIe (Raspberry Pi 5, desktop — **not** an Uno Q), runs YOLOv8n on an Axelera
+Metis NPU. The driver is a stdlib HTTP client to a loopback sidecar, so it
+works in local, remote and sim mode unchanged. Full contract: `docs/vision.md`.
+
+```python
+from benchctrl.drivers.bench_vision import BenchVision
+
+with BenchVision.open() as cam:            # $BENCHCTRL_VISION_URL or loopback :8095
+    cam.set_exposure_us(6000)               # tune exposure FIRST; SNR beats fps
+    cam.set_crop(640, 300, 400, 300)        # where the LEDs are
+    f = cam.trigger_capture(seq=42, infer=True)
+    assert f.seq == 42                      # guaranteed, or it raised VisionCaptureError
+    print([(d.label, d.score) for d in f.detections.items])
+    r = cam.trigger_capture(seq=43, classify=True).classification   # a trained indicator model
+    print(r.label, r.margin, r.confident)   # 'lit' 11.8 True — act only on confident reads
+```
+
+Rules: **choose `seq` yourself** when correlating a capture with a commanded
+state, and treat a `VisionCaptureError` as "discard, never label". A
+`VisionCapabilityError` means no NPU on this host — fall back, don't retry.
+MCP tools are `vision_*`; none returns image bytes, pass `save_to=`.
+
+**Building a training set** (`docs/vision.md` § Label loop): write a spec of
+states (PDU outlet / CP2112 line / host `sysfs_led`) with labels, then
+`python -m benchctrl.vision.labelloop spec.json out/ --sanity` on the bench
+box, or `vision_label_capture(spec, out_dir)` over MCP. Labels come from the
+commanded state; a wrong-`seq` frame is discarded; actuators are restored.
+Train + compile on scrub (`docs/vision.md` § Classifiers), ship with
+`deploy/vision/fetch-classifier.sh`, then `vision_classify()` /
+`vision_trigger_capture(classify="*")` read it; `vision_status()` lists
+`classifiers` with the sensor region each expects.
+
 ## Anti-patterns — don't do these
 
 - **Don't reach for a vendor TCP server / external client library.**

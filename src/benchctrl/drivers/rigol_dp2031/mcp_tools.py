@@ -34,9 +34,7 @@ def _get_dp2031():
     # threads, and reading it unguarded was a latent race.
     with _dp2031_lock:
         if _dp2031 is None:
-            raise RigolDP2031ConnectionError(
-                "DP2031 not open — call dp2031_open() first."
-            )
+            raise RigolDP2031ConnectionError("DP2031 not open — call dp2031_open() first.")
         return _dp2031
 
 
@@ -57,6 +55,7 @@ def dp2031_open(resource: Optional[str] = None) -> dict:
     global _dp2031
     from benchctrl import session
     from benchctrl.drivers.rigol_dp2031 import RigolDP2031
+
     with _dp2031_lock:
         if _dp2031 is not None:
             info = _dp2031.info()
@@ -74,8 +73,10 @@ def dp2031_open(resource: Optional[str] = None) -> dict:
     return {
         "resource": info.resource,
         "info": {
-            "manufacturer": info.manufacturer, "model": info.model,
-            "serial": info.serial, "firmware": info.firmware,
+            "manufacturer": info.manufacturer,
+            "model": info.model,
+            "serial": info.serial,
+            "firmware": info.firmware,
         },
     }
 
@@ -99,16 +100,15 @@ def dp2031_close() -> dict:
                 failures.append(f"CH{ch}: {type(e).__name__}: {e}")
                 log.warning(
                     "DP2031 set_output(CH%d, False) failed during close: %s",
-                    ch, e,
+                    ch,
+                    e,
                 )
         _dp2031.close()
         _dp2031 = None
     result: dict = {"closed": True}
     if failures:
         result["outputs_off_failed"] = failures
-        result["warning"] = (
-            "one or more channels may still be enabled — verify DUT is safe"
-        )
+        result["warning"] = "one or more channels may still be enabled — verify DUT is safe"
     return result
 
 
@@ -116,8 +116,10 @@ def dp2031_info() -> dict:
     """Identity from ``*IDN?``: manufacturer, model, serial, firmware."""
     info = _get_dp2031().info()
     return {
-        "manufacturer": info.manufacturer, "model": info.model,
-        "serial": info.serial, "firmware": info.firmware,
+        "manufacturer": info.manufacturer,
+        "model": info.model,
+        "serial": info.serial,
+        "firmware": info.firmware,
         "resource": info.resource,
     }
 
@@ -229,6 +231,13 @@ def dp2031_set_output_all(on: bool) -> dict:
     return {"output_all_on": on}
 
 
+def dp2031_disable_outputs() -> dict:
+    """Disarm all three outputs. The same disarm the agent's safe-stop runs
+    on a service stop or a governor trip; safe to call at any time."""
+    _get_dp2031().disable_outputs()
+    return {"output_all_on": False}
+
+
 def dp2031_output_regulation(channel: int) -> dict:
     """``CV`` / ``CC`` / ``UR`` — what's regulating CHn right now."""
     return {
@@ -249,8 +258,7 @@ def dp2031_set_ovp_level(channel: int, volts: float) -> dict:
 
 
 def dp2031_get_ovp_level(channel: int) -> dict:
-    return {"channel": channel,
-            "ovp_level_V": _get_dp2031().get_ovp_level(channel)}
+    return {"channel": channel, "ovp_level_V": _get_dp2031().get_ovp_level(channel)}
 
 
 def dp2031_set_ovp_enabled(channel: int, on: bool) -> dict:
@@ -260,8 +268,7 @@ def dp2031_set_ovp_enabled(channel: int, on: bool) -> dict:
 
 
 def dp2031_get_ovp_enabled(channel: int) -> dict:
-    return {"channel": channel,
-            "ovp_enabled": _get_dp2031().get_ovp_enabled(channel)}
+    return {"channel": channel, "ovp_enabled": _get_dp2031().get_ovp_enabled(channel)}
 
 
 # ---------------------------------------------------------------------------
@@ -276,8 +283,7 @@ def dp2031_set_ocp_level(channel: int, amps: float) -> dict:
 
 
 def dp2031_get_ocp_level(channel: int) -> dict:
-    return {"channel": channel,
-            "ocp_level_A": _get_dp2031().get_ocp_level(channel)}
+    return {"channel": channel, "ocp_level_A": _get_dp2031().get_ocp_level(channel)}
 
 
 def dp2031_set_ocp_enabled(channel: int, on: bool) -> dict:
@@ -287,8 +293,7 @@ def dp2031_set_ocp_enabled(channel: int, on: bool) -> dict:
 
 
 def dp2031_get_ocp_enabled(channel: int) -> dict:
-    return {"channel": channel,
-            "ocp_enabled": _get_dp2031().get_ocp_enabled(channel)}
+    return {"channel": channel, "ocp_enabled": _get_dp2031().get_ocp_enabled(channel)}
 
 
 # ---------------------------------------------------------------------------
@@ -297,18 +302,15 @@ def dp2031_get_ocp_enabled(channel: int) -> dict:
 
 
 def dp2031_measure_voltage(channel: int) -> dict:
-    return {"channel": channel,
-            "voltage_V": _get_dp2031().measure_voltage(channel)}
+    return {"channel": channel, "voltage_V": _get_dp2031().measure_voltage(channel)}
 
 
 def dp2031_measure_current(channel: int) -> dict:
-    return {"channel": channel,
-            "current_A": _get_dp2031().measure_current(channel)}
+    return {"channel": channel, "current_A": _get_dp2031().measure_current(channel)}
 
 
 def dp2031_measure_power(channel: int) -> dict:
-    return {"channel": channel,
-            "power_W": _get_dp2031().measure_power(channel)}
+    return {"channel": channel, "power_W": _get_dp2031().measure_power(channel)}
 
 
 def dp2031_measure_all(channel: int) -> dict:
@@ -342,14 +344,12 @@ def dp2031_clear_ocp(channel: int) -> dict:
 
 def dp2031_ovp_tripped(channel: int) -> dict:
     """Is CHn's OVP currently latched?"""
-    return {"channel": channel,
-            "ovp_tripped": _get_dp2031().ovp_tripped(channel)}
+    return {"channel": channel, "ovp_tripped": _get_dp2031().ovp_tripped(channel)}
 
 
 def dp2031_ocp_tripped(channel: int) -> dict:
     """Is CHn's OCP currently latched?"""
-    return {"channel": channel,
-            "ocp_tripped": _get_dp2031().ocp_tripped(channel)}
+    return {"channel": channel, "ocp_tripped": _get_dp2031().ocp_tripped(channel)}
 
 
 def dp2031_set_ocp_delay_ms(channel: int, milliseconds: int) -> dict:
@@ -359,8 +359,7 @@ def dp2031_set_ocp_delay_ms(channel: int, milliseconds: int) -> dict:
 
 
 def dp2031_get_ocp_delay_ms(channel: int) -> dict:
-    return {"channel": channel,
-            "ocp_delay_ms": _get_dp2031().get_ocp_delay_ms(channel)}
+    return {"channel": channel, "ocp_delay_ms": _get_dp2031().get_ocp_delay_ms(channel)}
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +443,7 @@ def dp2031_questionable_event() -> dict:
 
 def dp2031_channel_status_event(channel: int) -> dict:
     """Per-channel questionable event register (read clears)."""
-    return {"channel": channel,
-            "event": _get_dp2031().channel_status_event(channel)}
+    return {"channel": channel, "event": _get_dp2031().channel_status_event(channel)}
 
 
 def dp2031_health_check() -> dict:
@@ -600,8 +598,7 @@ def dp2031_set_remote_sense(channel, on: bool) -> dict:
 
 
 def dp2031_get_remote_sense(channel: int) -> dict:
-    return {"channel": channel,
-            "remote_sense": _get_dp2031().get_remote_sense(channel)}
+    return {"channel": channel, "remote_sense": _get_dp2031().get_remote_sense(channel)}
 
 
 def dp2031_set_sampling_mode(mode: str) -> dict:
@@ -625,8 +622,7 @@ def dp2031_set_voltage_step(channel: int, volts: float) -> dict:
 
 
 def dp2031_get_voltage_step(channel: int) -> dict:
-    return {"channel": channel,
-            "voltage_step_V": _get_dp2031().get_voltage_step(channel)}
+    return {"channel": channel, "voltage_step_V": _get_dp2031().get_voltage_step(channel)}
 
 
 def dp2031_set_current_step(channel: int, amps: float) -> dict:
@@ -636,8 +632,7 @@ def dp2031_set_current_step(channel: int, amps: float) -> dict:
 
 
 def dp2031_get_current_step(channel: int) -> dict:
-    return {"channel": channel,
-            "current_step_A": _get_dp2031().get_current_step(channel)}
+    return {"channel": channel, "current_step_A": _get_dp2031().get_current_step(channel)}
 
 
 def dp2031_step_voltage_up(channel: int) -> dict:
@@ -690,8 +685,7 @@ def dp2031_query_applied(channel: int, option: Optional[str] = None) -> dict:
     result = _get_dp2031().query_applied(channel, option=option)
     if option is None:
         rated, v, i = result
-        return {"channel": channel, "rated": rated,
-                "voltage_V": v, "current_A": i}
+        return {"channel": channel, "rated": rated, "voltage_V": v, "current_A": i}
     key = "voltage_V" if option.strip().upper().startswith("V") else "current_A"
     return {"channel": channel, key: result}
 
@@ -703,15 +697,13 @@ def dp2031_voltage_bounds(channel: int) -> dict:
     envelope (e.g. 33.6 V on CH1, whose nominal is 32 V).
     """
     lo, hi, dflt = _get_dp2031().voltage_bounds(channel)
-    return {"channel": channel,
-            "min_V": lo, "max_V": hi, "default_V": dflt}
+    return {"channel": channel, "min_V": lo, "max_V": hi, "default_V": dflt}
 
 
 def dp2031_current_bounds(channel: int) -> dict:
     """Device-reported ``(min, max, default)`` current bounds for CHn."""
     lo, hi, dflt = _get_dp2031().current_bounds(channel)
-    return {"channel": channel,
-            "min_A": lo, "max_A": hi, "default_A": dflt}
+    return {"channel": channel, "min_A": lo, "max_A": hi, "default_A": dflt}
 
 
 # ---------------------------------------------------------------------------
@@ -788,8 +780,7 @@ def dp2031_get_timer_group_params(count: int = 1) -> dict:
     rows = _get_dp2031().get_timer_group_params(count)
     return {
         "groups": [
-            {"index": idx, "voltage_V": v, "current_A": i, "dwell_s": t}
-            for idx, v, i, t in rows
+            {"index": idx, "voltage_V": v, "current_A": i, "dwell_s": t} for idx, v, i, t in rows
         ]
     }
 
@@ -818,9 +809,7 @@ def dp2031_program_timer(
     SAFETY: subsequent Timer execution can drive significant
     voltages and currents on CHn. Confirm DUT-side ratings.
     """
-    step_tuples = [
-        (float(s[0]), float(s[1]), float(s[2])) for s in steps
-    ]
+    step_tuples = [(float(s[0]), float(s[1]), float(s[2])) for s in steps]
     _get_dp2031().program_timer(
         channel,
         step_tuples,
@@ -912,8 +901,7 @@ def dp2031_set_trigger_in_enabled(line: str, on: bool) -> dict:
 
 
 def dp2031_get_trigger_in_enabled(line: str) -> dict:
-    return {"line": line,
-            "trigger_in_enabled": _get_dp2031().get_trigger_in_enabled(line)}
+    return {"line": line, "trigger_in_enabled": _get_dp2031().get_trigger_in_enabled(line)}
 
 
 def dp2031_set_trigger_in_type(line: str, type_: str) -> dict:
@@ -923,8 +911,7 @@ def dp2031_set_trigger_in_type(line: str, type_: str) -> dict:
 
 
 def dp2031_get_trigger_in_type(line: str) -> dict:
-    return {"line": line,
-            "trigger_in_type": _get_dp2031().get_trigger_in_type(line)}
+    return {"line": line, "trigger_in_type": _get_dp2031().get_trigger_in_type(line)}
 
 
 def dp2031_set_trigger_in_source(line: str, channels: list) -> dict:
@@ -934,8 +921,7 @@ def dp2031_set_trigger_in_source(line: str, channels: list) -> dict:
 
 
 def dp2031_get_trigger_in_source(line: str) -> dict:
-    return {"line": line,
-            "channels": _get_dp2031().get_trigger_in_source(line)}
+    return {"line": line, "channels": _get_dp2031().get_trigger_in_source(line)}
 
 
 def dp2031_set_trigger_in_response(line: str, response: str) -> dict:
@@ -1032,92 +1018,158 @@ def dp2031_save_screenshot(path: str) -> dict:
 
 _TOOLS = (
     # Connection + identity
-    dp2031_open, dp2031_close, dp2031_info,
-    dp2031_reset, dp2031_clear_status,
-    dp2031_last_error, dp2031_raise_if_error,
+    dp2031_open,
+    dp2031_close,
+    dp2031_info,
+    dp2031_reset,
+    dp2031_clear_status,
+    dp2031_last_error,
+    dp2031_raise_if_error,
     # Channel selection
-    dp2031_select_channel, dp2031_current_channel,
+    dp2031_select_channel,
+    dp2031_current_channel,
     # Setpoints
-    dp2031_set_voltage, dp2031_get_voltage,
-    dp2031_set_current, dp2031_get_current,
+    dp2031_set_voltage,
+    dp2031_get_voltage,
+    dp2031_set_current,
+    dp2031_get_current,
     # Output enable
-    dp2031_set_output, dp2031_get_output,
-    dp2031_set_output_all, dp2031_output_regulation,
+    dp2031_set_output,
+    dp2031_get_output,
+    dp2031_set_output_all,
+    dp2031_disable_outputs,
+    dp2031_output_regulation,
     # OVP
-    dp2031_set_ovp_level, dp2031_get_ovp_level,
-    dp2031_set_ovp_enabled, dp2031_get_ovp_enabled,
+    dp2031_set_ovp_level,
+    dp2031_get_ovp_level,
+    dp2031_set_ovp_enabled,
+    dp2031_get_ovp_enabled,
     # OCP
-    dp2031_set_ocp_level, dp2031_get_ocp_level,
-    dp2031_set_ocp_enabled, dp2031_get_ocp_enabled,
+    dp2031_set_ocp_level,
+    dp2031_get_ocp_level,
+    dp2031_set_ocp_enabled,
+    dp2031_get_ocp_enabled,
     # Measurements
-    dp2031_measure_voltage, dp2031_measure_current,
-    dp2031_measure_power, dp2031_measure_all,
+    dp2031_measure_voltage,
+    dp2031_measure_current,
+    dp2031_measure_power,
+    dp2031_measure_all,
     dp2031_measure_all_channels,
     # Phase B — protection trip / clear / delay
-    dp2031_clear_ovp, dp2031_clear_ocp,
-    dp2031_ovp_tripped, dp2031_ocp_tripped,
-    dp2031_set_ocp_delay_ms, dp2031_get_ocp_delay_ms,
+    dp2031_clear_ovp,
+    dp2031_clear_ocp,
+    dp2031_ovp_tripped,
+    dp2031_ocp_tripped,
+    dp2031_set_ocp_delay_ms,
+    dp2031_get_ocp_delay_ms,
     # IEEE 488.2 status
     dp2031_event_status_register,
-    dp2031_set_event_status_enable, dp2031_get_event_status_enable,
+    dp2031_set_event_status_enable,
+    dp2031_get_event_status_enable,
     dp2031_status_byte,
-    dp2031_set_service_request_enable, dp2031_get_service_request_enable,
-    dp2031_wait_op_complete, dp2031_self_test,
-    dp2031_installed_options, dp2031_set_power_on_status_clear,
-    dp2031_save_state, dp2031_recall_state,
+    dp2031_set_service_request_enable,
+    dp2031_get_service_request_enable,
+    dp2031_wait_op_complete,
+    dp2031_self_test,
+    dp2031_installed_options,
+    dp2031_set_power_on_status_clear,
+    dp2031_save_state,
+    dp2031_recall_state,
     # :STATus subsystem
-    dp2031_operation_event, dp2031_questionable_event,
-    dp2031_channel_status_event, dp2031_health_check,
+    dp2031_operation_event,
+    dp2031_questionable_event,
+    dp2031_channel_status_event,
+    dp2031_health_check,
     # System basics
-    dp2031_beep_once, dp2031_set_beeper, dp2031_get_beeper,
-    dp2031_set_brightness, dp2031_get_brightness,
+    dp2031_beep_once,
+    dp2031_set_beeper,
+    dp2031_get_beeper,
+    dp2031_set_brightness,
+    dp2031_get_brightness,
     dp2031_scpi_version,
-    dp2031_set_keyboard_lock, dp2031_set_touchscreen_lock,
-    dp2031_set_remote, dp2031_set_local,
+    dp2031_set_keyboard_lock,
+    dp2031_set_touchscreen_lock,
+    dp2031_set_remote,
+    dp2031_set_local,
     dp2031_set_screen_saver,
-    dp2031_set_language, dp2031_set_power_on_mode,
+    dp2031_set_language,
+    dp2031_set_power_on_mode,
     # Phase C — pair / tracking / sense / sampling
-    dp2031_set_channel_pair, dp2031_get_channel_pair,
-    dp2031_set_tracking, dp2031_get_tracking,
-    dp2031_set_track_mode, dp2031_get_track_mode,
-    dp2031_set_output_sync, dp2031_get_output_sync,
-    dp2031_set_remote_sense, dp2031_get_remote_sense,
-    dp2031_set_sampling_mode, dp2031_get_sampling_mode,
+    dp2031_set_channel_pair,
+    dp2031_get_channel_pair,
+    dp2031_set_tracking,
+    dp2031_get_tracking,
+    dp2031_set_track_mode,
+    dp2031_get_track_mode,
+    dp2031_set_output_sync,
+    dp2031_get_output_sync,
+    dp2031_set_remote_sense,
+    dp2031_get_remote_sense,
+    dp2031_set_sampling_mode,
+    dp2031_get_sampling_mode,
     # Phase C — step + apply + bounds
-    dp2031_set_voltage_step, dp2031_get_voltage_step,
-    dp2031_set_current_step, dp2031_get_current_step,
-    dp2031_step_voltage_up, dp2031_step_voltage_down,
-    dp2031_step_current_up, dp2031_step_current_down,
-    dp2031_apply, dp2031_query_applied,
-    dp2031_voltage_bounds, dp2031_current_bounds,
+    dp2031_set_voltage_step,
+    dp2031_get_voltage_step,
+    dp2031_set_current_step,
+    dp2031_get_current_step,
+    dp2031_step_voltage_up,
+    dp2031_step_voltage_down,
+    dp2031_step_current_up,
+    dp2031_step_current_down,
+    dp2031_apply,
+    dp2031_query_applied,
+    dp2031_voltage_bounds,
+    dp2031_current_bounds,
     # Phase D — Timer
-    dp2031_set_timer_enabled, dp2031_get_timer_enabled,
-    dp2031_set_timer_channel, dp2031_get_timer_channel,
-    dp2031_set_timer_cycles, dp2031_get_timer_cycles,
-    dp2031_set_timer_end_state, dp2031_get_timer_end_state,
-    dp2031_set_timer_run_mode, dp2031_get_timer_run_mode,
-    dp2031_set_timer_trigger, dp2031_get_timer_trigger,
-    dp2031_get_timer_group_params, dp2031_delete_timer_groups,
+    dp2031_set_timer_enabled,
+    dp2031_get_timer_enabled,
+    dp2031_set_timer_channel,
+    dp2031_get_timer_channel,
+    dp2031_set_timer_cycles,
+    dp2031_get_timer_cycles,
+    dp2031_set_timer_end_state,
+    dp2031_get_timer_end_state,
+    dp2031_set_timer_run_mode,
+    dp2031_get_timer_run_mode,
+    dp2031_set_timer_trigger,
+    dp2031_get_timer_trigger,
+    dp2031_get_timer_group_params,
+    dp2031_delete_timer_groups,
     dp2031_program_timer,
-    dp2031_set_timer_template, dp2031_construct_timer_from_template,
+    dp2031_set_timer_template,
+    dp2031_construct_timer_from_template,
     # Phase D — Analyzer
-    dp2031_set_analyzer_enabled, dp2031_get_analyzer_enabled,
-    dp2031_set_analyzer_type, dp2031_get_analyzer_type,
+    dp2031_set_analyzer_enabled,
+    dp2031_get_analyzer_enabled,
+    dp2031_set_analyzer_type,
+    dp2031_get_analyzer_type,
     dp2031_set_analyzer_common_objects,
-    dp2031_set_analyzer_save, dp2031_set_analyzer_save_path,
+    dp2031_set_analyzer_save,
+    dp2031_set_analyzer_save_path,
     # Phase D — Trigger I/O
-    dp2031_set_trigger_in_enabled, dp2031_get_trigger_in_enabled,
-    dp2031_set_trigger_in_type, dp2031_get_trigger_in_type,
-    dp2031_set_trigger_in_source, dp2031_get_trigger_in_source,
-    dp2031_set_trigger_in_response, dp2031_trigger_in_immediate,
+    dp2031_set_trigger_in_enabled,
+    dp2031_get_trigger_in_enabled,
+    dp2031_set_trigger_in_type,
+    dp2031_get_trigger_in_type,
+    dp2031_set_trigger_in_source,
+    dp2031_get_trigger_in_source,
+    dp2031_set_trigger_in_response,
+    dp2031_trigger_in_immediate,
     dp2031_set_trigger_out_enabled,
-    dp2031_set_trigger_out_source, dp2031_set_trigger_out_polarity,
+    dp2031_set_trigger_out_source,
+    dp2031_set_trigger_out_polarity,
     # Phase D — Memory
-    dp2031_list_files, dp2031_change_directory, dp2031_current_directory,
-    dp2031_delete_file, dp2031_store_file, dp2031_load_file,
-    dp2031_external_disks, dp2031_file_exists,
+    dp2031_list_files,
+    dp2031_change_directory,
+    dp2031_current_directory,
+    dp2031_delete_file,
+    dp2031_store_file,
+    dp2031_load_file,
+    dp2031_external_disks,
+    dp2031_file_exists,
     # Phase D — License + screenshot
-    dp2031_install_license, dp2031_save_screenshot,
+    dp2031_install_license,
+    dp2031_save_screenshot,
 )
 
 

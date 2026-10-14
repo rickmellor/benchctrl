@@ -15,7 +15,7 @@ any concrete driver.
 ```
                            ┌──────────────────────────────────────────┐
                            │   MCP server  (benchctrl.mcp)            │
-                           │   324 tools — orchestrator that calls    │
+                           â   406 tools â orchestrator that calls    â
                            │   each driver's register_mcp_tools(mcp)  │
                            └──────────────────────────────────────────┘
                                           │
@@ -235,13 +235,15 @@ Tool inventory:
 | Otii Arc SMU | 23 |
 | QR10x | 11 |
 | Rigol DL3031A | 45 |
-| Rigol DP2031 | 134 |
+| Rigol DP2031 | 135 |
 | Siglent SDM4065A | 54 |
+| Siglent SDG1032X | 67 |
 | CyberPower PDU41002 | 15 |
 | Silicon Labs CP2112 | 10 |
 | Ontrak ADU218 | 19 |
-| Cross-driver (recording I/O, battery, emulator) | 13 |
-| **Total** | **324** |
+| Bench vision (camera + Metis NPU) | 13 |
+| Cross-driver (recording I/O, battery, emulator, vision label loop) | 14 |
+| **Total** | **406** |
 
 The MCP layer is intentionally thin: each tool wraps one SDK method,
 coerces JSON-friendly argument types where needed, returns a dict.
@@ -382,7 +384,7 @@ is `local` and behaviour is unchanged.
    host laptop                                    bench (e.g. Uno Q)
    ┌────────────────────────┐                     ┌──────────────────────────┐
    │ benchctrl.mcp          │                     │ benchctrl-agent          │
-   │   324 tools, unchanged │                     │   registry / dispatch    │
+   â   406 tools, unchanged â                     â   registry / dispatch    â
    │        │               │                     │   DeviceWorker per device│
    │        ▼               │                     │   SafetyGovernor         │
    │ session.resolve()      │   length-prefixed   │   RunManager             │

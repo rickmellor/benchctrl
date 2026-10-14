@@ -47,7 +47,7 @@ and it becomes a non-zero exit.
 ------------------------------------------------------
 ``adu218_open`` defaults ``disarm_watchdog=True`` and its ``_connect`` sends
 ``WD0``. That default is right for a long-lived server — the watchdog's setting
-reads 0 both for "timed out" and "never enabled" (``KNOWN_LIMITATIONS`` §F-22),
+reads 0 both for "timed out" and "never enabled" (``KNOWN_LIMITATIONS`` §F-29),
 so a fresh session cannot interpret an inherited value — and wrong here, because
 every CLI invocation is a fresh session. Left alone,
 

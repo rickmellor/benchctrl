@@ -110,7 +110,13 @@ COMPLETED_OK = (STATUS_COMPLETE, STATUS_PASSED, STATUS_FAILED)
 
 
 def default_runs_dir() -> Path:
-    """``/home/arduino/benchctrl/runs`` on the board, else under the cwd."""
+    """``/home/arduino/benchctrl/runs`` on the Uno Q, else under the cwd.
+
+    Fallback only. ``deploy/install-agent.sh`` writes an explicit ``runs_dir``
+    into ``agent.json`` under the service user's home on every platform; a
+    systemd service's cwd is ``/``, which ``ProtectSystem=full`` makes
+    read-only, so the cwd branch is for interactive use, not the unit.
+    """
     board = Path("/home/arduino")
     if board.is_dir() and os.access(board, os.W_OK):
         return board / "benchctrl" / "runs"

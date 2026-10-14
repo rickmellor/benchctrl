@@ -1,0 +1,19 @@
+[Unit]
+Description=benchctrl: re-enumerate the Axelera Metis once its firmware has booted
+Documentation=https://github.com/rickmellor/benchctrl/blob/master/deploy/vision/README.md
+# After the driver's first probe, before the sidecar (which needs the card
+# healthy) — the sidecar also retries on its own, so ordering is a courtesy.
+After=systemd-modules-load.service
+Before=benchctrl-vision.service
+
+[Service]
+Type=oneshot
+# The card's firmware takes a few seconds after power-on to finish booting;
+# a rescan before that would be undone the same way the first enumeration was.
+ExecStartPre=/bin/sleep 15
+ExecStart=/usr/local/bin/benchctrl-metis-rescan
+RemainAfterExit=yes
+SyslogIdentifier=benchctrl-metis-rescan
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+# Let the bench user drive the host's own status LEDs from the capture-and-label
+# loop (benchctrl.vision.labelloop, actuator "sysfs_led"). On a Raspberry Pi 5
+# these are ACT (green status; active-low: brightness 0 is lit) and PWR (red).
+# The loop parks the trigger at "none" for the run and restores it afterwards.
+#
+# sysfs attributes are created root:root 0644 with no udev-settable owner, so
+# the rule runs chgrp/chmod at add time; the gpio group is what the Pi already
+# uses for "bench user may touch hardware". Installed by deploy/vision/install-vision.sh
+# on hosts that have /sys/class/leds/ACT.
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="ACT|PWR", \
+    RUN+="/bin/sh -c 'chgrp gpio /sys%p/brightness /sys%p/trigger && chmod g+w /sys%p/brightness /sys%p/trigger'"

@@ -333,7 +333,7 @@ codes, `--remote`/`--sim`, and why a one-shot command needs its own lifecycle.
 Two more entry points ship with the package:
 
 ```bash
-benchctrl-mcp                    # MCP server — 324 tools for LLM agents
+benchctrl-mcp                    # MCP server — 406 tools for LLM agents
 benchctrl-agent --token <token>  # bench-side server for remote mode
 ```
 

@@ -36,3 +36,6 @@ references/
 *.pdf
 *.pdf:Zone.Identifier
 *.pdf:MSOAVINFO
+
+# compiled vision models (deploy/vision/fetch-model.sh puts them here on a bench box)
+/models/

@@ -17,6 +17,14 @@
 set -eu
 
 PYTHON=${BENCHCTRL_FUI_PYTHON:-/usr/bin/python3}
+# Where the package lives. The kiosk session has no environment of its own to
+# set BENCHCTRL_SRC_DIR in, so fall back to the agent's PYTHONPATH from
+# /etc/benchctrl/agent.env (0644, written by install-agent.sh on every
+# platform) before the Uno Q's fixed path. Same answer on both boards, and a
+# Pi's git checkout is found without anyone hand-editing a launcher.
+if [ -z "${BENCHCTRL_SRC_DIR:-}" ] && [ -r /etc/benchctrl/agent.env ]; then
+    BENCHCTRL_SRC_DIR=$(sed -n 's/^PYTHONPATH=//p' /etc/benchctrl/agent.env | head -1)
+fi
 SRC_DIR=${BENCHCTRL_SRC_DIR:-/home/arduino/benchctrl-1.2.0/src}
 AGENT_CONF=${BENCHCTRL_AGENT_CONF:-/etc/benchctrl/agent.json}
 PORT=${BENCHCTRL_FUI_PORT:-8600}

@@ -135,9 +135,18 @@ HW_PORT = os.environ.get("BENCHCTRL_QR10X_PORT", "COM7")
 
 @pytest.fixture
 def qr():
-    """Open the connected QR10x. Skips if unreachable."""
+    """Open the connected QR10x. Skips if unreachable.
+
+    Goes through ``autoserial`` rather than ``QR10x.open`` directly, so
+    ``BENCHCTRL_QR10X_PORT=auto`` exercises the same transport selection the
+    agent uses — kernel tty where the host has ``ch341``, userspace bridge
+    where it does not. An explicit port (the ``COM7`` default) passes straight
+    through, exactly as before.
+    """
+    from benchctrl.transports.autoserial import open_serial_driver
+
     try:
-        qr = QR10x.open(HW_PORT)
+        qr = open_serial_driver(QR10x.open, port=HW_PORT)
     except Exception as exc:
         pytest.skip(f"QR10x not reachable on {HW_PORT}: {exc}")
     try:

@@ -131,9 +131,7 @@ def test_an_observer_polling_does_not_keep_an_armed_bench_alive(bench):
     assert agent.governor.any_armed
 
     def tripped():
-        return any(
-            t["reason"] == "heartbeat_lost" for t in agent.governor.status()["trips"]
-        )
+        return any(t["reason"] == "heartbeat_lost" for t in agent.governor.status()["trips"])
 
     deadline = time.monotonic() + (agent.deadman_s * 6)
     hit, polls = _poll_until(observer, deadline, tripped)
@@ -275,9 +273,7 @@ def test_an_observer_receives_events(bench):
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and not received:
         time.sleep(0.01)
-    assert any(e.get("kind") == "test_event" for e in received), (
-        f"observer got {received}"
-    )
+    assert any(e.get("kind") == "test_event" for e in received), f"observer got {received}"
 
 
 def test_an_observer_receives_a_safety_trip_event(bench):
@@ -371,9 +367,7 @@ def test_a_failed_action_reaches_the_panel_and_is_more_severe(bench):
     received = _collect(observer)
     client = bench.connect()
     client.call("agent.claim", {"device": "otii_arc"})
-    client.call(
-        "device.call", {"device": "otii_arc", "method": "set_voltage", "args": [3.3]}
-    )
+    client.call("device.call", {"device": "otii_arc", "method": "set_voltage", "args": [3.3]})
     # A method the driver does not have: refused by the dispatch allowlist.
     with pytest.raises(Exception):  # noqa: B017 - any refusal will do
         client.call("device.call", {"device": "otii_arc", "method": "no_such_method"})
@@ -399,9 +393,7 @@ def test_an_arming_call_is_logged_more_severely_than_a_read(bench):
     received = _collect(observer)
     client = bench.connect()
     client.call("agent.claim", {"device": "otii_arc"})
-    client.call(
-        "device.call", {"device": "otii_arc", "method": "set_output", "args": [True]}
-    )
+    client.call("device.call", {"device": "otii_arc", "method": "set_output", "args": [True]})
     client.call("device.getprops", {"device": "otii_arc"})
 
     assert _wait_for(received, lambda e: e.get("action") == "set_output")
@@ -425,9 +417,7 @@ def test_the_auth_token_never_appears_in_an_event(bench):
     client.call("agent.claim", {"device": "otii_arc"})
     client.call("agent.hello", {})
     client.call("agent.status", {})
-    client.call(
-        "device.call", {"device": "otii_arc", "method": "set_voltage", "args": [3.3]}
-    )
+    client.call("device.call", {"device": "otii_arc", "method": "set_voltage", "args": [3.3]})
     with pytest.raises(Exception):  # noqa: B017 - we want the error text logged
         client.call("device.call", {"device": "otii_arc", "method": "no_such_method"})
 
@@ -1073,9 +1063,7 @@ def test_dropping_a_session_removes_its_subscriber(bench):
     """A closed session must not leave a sender thread behind."""
     observer = bench.connect(observer=True)
     session_id = observer.welcome["session"]
-    assert any(
-        s["name"] == session_id for s in bench.agent.events.stats()["subscribers"]
-    )
+    assert any(s["name"] == session_id for s in bench.agent.events.stats()["subscribers"])
 
     observer.close()
 
@@ -1422,9 +1410,7 @@ def test_a_slow_bus_scan_cannot_delay_the_deadman(bench, monkeypatch):
     agent.governor.state_for("otii_arc").output_armed = True
 
     def tripped():
-        return any(
-            t["reason"] == "heartbeat_lost" for t in agent.governor.status()["trips"]
-        )
+        return any(t["reason"] == "heartbeat_lost" for t in agent.governor.status()["trips"])
 
     started = time.monotonic()
     agent._maybe_start_presence_sweep()
@@ -1662,9 +1648,57 @@ def test_a_presence_event_reaches_a_real_observer_over_the_wire(bench, monkeypat
     agent._maybe_start_presence_sweep()
 
     assert _await(lambda: any(e.get("kind") == PRESENCE_KIND for e in list(seen))), (
-        f"no presence event reached the observer; got "
-        f"{sorted({e.get('kind') for e in list(seen)})}"
+        f"no presence event reached the observer; got {sorted({e.get('kind') for e in list(seen)})}"
     )
     event = next(e for e in list(seen) if e.get("kind") == PRESENCE_KIND)
     assert event["present"] == ["otii_arc"]
     assert event["served"] == ["otii_arc"]
+
+
+# --------------------------------------------------------------------------
+# device.read — the one device verb an observer has
+# --------------------------------------------------------------------------
+
+
+def test_an_observer_can_read_an_open_device_but_never_call_it(bench):
+    """``device.read`` of a non-mutating method works for an observer on a
+    device that is already open; ``device.call`` stays refused outright."""
+    from benchctrl.net.errors import PolicyError
+
+    obs = bench.connect(observer=True)
+    setpoint = obs.call(
+        "device.read",
+        {"device": "otii_arc", "method": "get_main_voltage_setpoint", "args": [], "kwargs": {}},
+    )
+    assert setpoint is not None, "the read returned nothing"
+    assert obs.call("device.read", {"device": "otii_arc", "method": "is_connected"}) is True
+    with pytest.raises(PolicyError):
+        obs.call(
+            "device.call",
+            {"device": "otii_arc", "method": "get_main_voltage_setpoint", "args": [], "kwargs": {}},
+        )
+
+
+def test_device_read_refuses_a_mutator_even_for_a_normal_session(bench):
+    from benchctrl.net.errors import PolicyError
+
+    obs = bench.connect(observer=True)
+    with pytest.raises(PolicyError) as excinfo:
+        obs.call("device.read", {"device": "otii_arc", "method": "set_output", "args": [False]})
+    assert "not a read" in str(excinfo.value)
+
+
+def test_device_read_never_opens_a_device(bench):
+    """A display must not power a session up: a device nobody opened is refused,
+    and stays unopened."""
+    from benchctrl.net.errors import PolicyError
+
+    bench.agent.registry.register(
+        "cyberpower_pdu41002",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("device.read must not open a device")),
+    )
+    obs = bench.connect(observer=True)
+    with pytest.raises(PolicyError) as excinfo:
+        obs.call("device.read", {"device": "cyberpower_pdu41002", "method": "info"})
+    assert "not open" in str(excinfo.value)
+    assert not bench.agent.registry.entry("cyberpower_pdu41002").is_open

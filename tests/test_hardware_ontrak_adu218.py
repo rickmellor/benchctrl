@@ -153,7 +153,7 @@ of accusing the relay.
 ``BENCHCTRL_ADU218_INPUT`` has — a bench-tracking default that goes stale when the
 bench moves — and the two behave *oppositely*, each mode being the other's
 problem. A stale ``INPUT`` skips, which is quiet, and quiet is how it silently
-un-ran three tests for an afternoon (see F-26). A stale ``RELAY`` **fails**, which
+un-ran three tests for an afternoon (see F-33). A stale ``RELAY`` **fails**, which
 is noisy and occasionally wrong about the cause, but cannot cost coverage without
 saying so. Turning the failure into a skip would trade the louder problem for the
 one that already bit us here.
@@ -721,7 +721,7 @@ def test_a_whole_port_mask_moves_a_contact_an_instrument_can_see(
 
     The readings are on file in ``tests/fixtures/adu218/whole_port_witness.txt``,
     because the assertions below are deliberately **categorical** (finite vs the
-    overload sentinel, per F-27 — the closed value is a property of the wiring)
+    overload sentinel, per F-34 — the closed value is a property of the wiring)
     and a categorical pass does not show how far from the boundary it sat. That
     capture also carries the corroboration this test cannot make: the bench walk
     measured K7 at 17.50 Ω through the *per-relay* ``SKn`` path, and ``MK170``

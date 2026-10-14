@@ -10,7 +10,7 @@ bench to LLM agents. Cross-platform (Windows / Linux / macOS) via
 The bench doesn't have to be on the same machine as the agent, and it
 doesn't have to exist: `benchctrl.net` puts the instruments on a
 remote host and `benchctrl.sim` replaces them with wire-protocol
-simulators — the same 324 MCP tools drive all three cases unchanged.
+simulators â the same 406 MCP tools drive all three cases unchanged.
 
 Driver-symmetric architecture: every instrument lives under
 `benchctrl.drivers.<vendor_model>/`, the Otii Arc included. Battery
@@ -21,11 +21,11 @@ slots in.
 | | |
 |---|---|
 | **Version** | 1.2.0 |
-| **Tests** | 2450 hardware-free + 213 hardware-marked |
-| **MCP tools** | 324 |
+| **Tests** | 3034 hardware-free + 245 hardware-marked |
+| **MCP tools** | 406 |
 | **License** | MIT |
-| **Python** | 3.9 – 3.13 |
-| **Hardware (today)** | Qoitech Otii Arc / Arc Pro (SMU), Eastwood Tech QR10x (resistor), Rigol DL3031A (load), Rigol DP2031 (PSU), Siglent SDM4065A (DMM), CyberPower PDU41002 (switched PDU), Ontrak ADU218 (relays / digital I/O), Silicon Labs CP2112 (open-drain control lines) |
+| **Python** | 3.9 â 3.13 |
+| **Hardware (today)** | Qoitech Otii Arc / Arc Pro (SMU), Eastwood Tech QR10x (resistor), Rigol DL3031A (load), Rigol DP2031 (PSU), Siglent SDM4065A (DMM), Siglent SDG1032X (function / arbitrary waveform generator), CyberPower PDU41002 (switched mains), Ontrak ADU218 (relays / digital I/O), Silicon Labs CP2112 (open-drain control lines), Basler a2A1920 + Axelera Metis (bench vision) |
 | **No hardware?** | Every driver has a wire-protocol simulator — `--simulate` runs the whole stack |
 
 [otii]: https://www.qoitech.com/otii/
@@ -68,7 +68,7 @@ benchctrl is all of that, in one package.
 
 ```
             +-----------------------------------------+
-            |  MCP server (benchctrl.mcp)             |   324 tools — drives every driver
+            |  MCP server (benchctrl.mcp)             |   406 tools â drives every driver
             |    orchestrates per-driver registration |   from Claude Code / Desktop / etc
             +-----------------------------------------+
                                  |
@@ -108,7 +108,7 @@ benchctrl is all of that, in one package.
 Two seams make the rest optional. `session.resolve()` decides
 per device whether you get real hardware, a proxy to another machine
 (`benchctrl.net`), or a wire-protocol simulator (`benchctrl.sim`) —
-and the 324 tools above it cannot tell the difference. The
+and the 406 tools above it cannot tell the difference. The
 `SourceMeasurementUnit` Protocol means battery, scenarios, and the run
 engine never name a concrete driver.
 
@@ -209,7 +209,7 @@ with RigolDL3031A.open() as dl:        # auto-discover by Rigol VID/PID
 
 ### `benchctrl.mcp` — Model Context Protocol server
 
-324 tools exposing the whole SDK to MCP-aware clients (Claude Code,
+406 tools exposing the whole SDK to MCP-aware clients (Claude Code,
 Claude Desktop, etc) — Otii Arc 23, QR10x 11, DL3031A 45, DP2031 134,
 SDM4065A 54, PDU41002 15, ADU218 19, CP2112 10, plus 13 cross-driver. Each driver
 registers its own tools via
@@ -231,7 +231,7 @@ arguments.
 
 ### `benchctrl.net` + `benchctrl.agent` — remote mode
 
-Instruments on one machine, agent on another — the 324 MCP tools are
+Instruments on one machine, agent on another â the 406 MCP tools are
 unchanged and cannot tell the difference.
 
 ```bash

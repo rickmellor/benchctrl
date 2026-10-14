@@ -67,7 +67,7 @@ Two consequences, both load-bearing:
   **17.5134–17.5152 Ω** and `MK085` opens it. **The corroboration is the number:**
   the bench walk read K7 at 17.50 Ω through the *per-relay* `SKn` path, so two
   independent command paths put the same contact at the same resistance. Records
-  what is deliberately **not** asserted, and why (F-27)
+  what is deliberately **not** asserted, and why (F-34)
 - `on_resistance.txt` — characterisation of the closed-contact reading. **Carries
   two corrections**: the repeats are 2-wire (not 4-wire), and its comparison
   against the datasheet maximum was never like-for-like

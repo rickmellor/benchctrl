@@ -61,6 +61,7 @@ free-running thread.
 | `SimulatedPDU41002` | CyberPower PDU41002 | The line-oriented CLI over a pty: the login handshake, the `CyberPower > ` prompt, per-outlet state / names / delays, the three distinct error shapes, and `menumode` as the one-way trap it is |
 | `SimulatedCP2112` | Silicon Labs CP2112 | The HID feature-report pair at the *link* seam, **not** a pty: whole-port config and latch registers, and three chip behaviours a naive fake gets wrong — a write to a pin still configured as an input is silently ignored, open-drain cannot force a line high against a modelled pull-down, and an undriven pin latches 1 |
 | `SimulatedADU218` | Ontrak ADU218 | The USB HID report pair, **not** a pty: relays, the two four-bit input ports, event counters, de-bounce, the watchdog ladder against an injectable clock, and — most importantly — the device's *silence*, since an unknown command and a write-only one are byte-identical |
+| `SimulatedSDG1032X` | Siglent SDG1032X | Siglent's `Cn:HEADER KEY,VAL` dialect over ASRL with byte-exact firmware 1.01.01.33R1B6 read-backs (`PHASE-LOCKED`, headerless `VOLTPRT?`, the `HARM?` stray comma, lexicographic `STL?`), **silent rejection with no error queue** (out-of-range values clamped or dropped and logged in `rejections`, unimplemented queries left unanswered), coupled FRQ/PERI and AMP/OFST/HLEV/LLEV, mutually exclusive modulation/sweep/burst, `SCDP` BMP screen dumps, `VKEY` Output-key toggles, and **both of the bench unit's transports for arbitrary waveforms**: a `WVDT` upload over the pty (USB-TMC on the bench) is consumed and silently dropped, exactly as firmware 1.01.01.33R1B6 does, while a `threading` TCP server on loopback (`lan_port`; `lan=False` disables it) models the instrument's line-terminated LAN SCPI socket — messages end at the first `\n` even inside the binary payload (so an unescaped upload is truncated and logged in `lan_truncated`), `WVDT? USER,<name>` answers the firmware's `WVDT POS, /Local, WVNM, <name>, LENGTH, <n>B, TYPE, 6, WAVEDATA,` header plus the stored bytes, `STL? USER` lists the uploads, and a selected user wave reads back as `C1:ARWV NAME,<name>.bin`; the factory passes the sim's port to the driver as `lan_host`/`lan_port` |
 
 The SCPI simulators use a generic register model that covers the bulk
 of the ~254 distinct SCPI strings across the two Rigols; measurement,
@@ -101,7 +102,7 @@ the hardware does — which is why the driver has an explicit
 
 `benchctrl.session` resolves each device to `local`, `remote` or `sim`
 independently, so you can simulate part of a bench and leave the rest
-real. Nothing above the seam changes — all 324 MCP tools are unaware.
+real. Nothing above the seam changes — all 406 MCP tools are unaware.
 
 ```bash
 # whole bench simulated

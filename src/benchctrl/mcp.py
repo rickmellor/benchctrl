@@ -42,6 +42,7 @@ import sys
 from mcp.server.fastmcp import FastMCP
 
 from benchctrl import framework_tools as _framework_tools
+from benchctrl.drivers.bench_vision import mcp_tools as _vision_tools
 from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as _pdu41002_tools
 from benchctrl.drivers.silabs_cp2112 import mcp_tools as _cp2112_tools
 from benchctrl.drivers.eastwood_qr10x import mcp_tools as _qr10x_tools
@@ -49,6 +50,7 @@ from benchctrl.drivers.ontrak_adu218 import mcp_tools as _adu218_tools
 from benchctrl.drivers.otii_arc import mcp_tools as _arc_tools
 from benchctrl.drivers.rigol_dl3031a import mcp_tools as _dl3031a_tools
 from benchctrl.drivers.rigol_dp2031 import mcp_tools as _dp2031_tools
+from benchctrl.drivers.siglent_sdg1032x import mcp_tools as _sdg1032x_tools
 from benchctrl.drivers.siglent_sdm4065a import mcp_tools as _sdm4065a_tools
 from benchctrl.config import DEVICE_KEYS
 
@@ -71,9 +73,11 @@ _qr10x_tools.register_mcp_tools(mcp)
 _dl3031a_tools.register_mcp_tools(mcp)
 _dp2031_tools.register_mcp_tools(mcp)
 _sdm4065a_tools.register_mcp_tools(mcp)
+_sdg1032x_tools.register_mcp_tools(mcp)
 _pdu41002_tools.register_mcp_tools(mcp)
 _cp2112_tools.register_mcp_tools(mcp)
 _adu218_tools.register_mcp_tools(mcp)
+_vision_tools.register_mcp_tools(mcp)
 _framework_tools.register_mcp_tools(mcp)
 
 
@@ -209,6 +213,7 @@ from benchctrl.drivers.rigol_dp2031.mcp_tools import (
     dp2031_set_ocp_level,
     dp2031_set_output,
     dp2031_set_output_all,
+    dp2031_disable_outputs,
     dp2031_set_ovp_enabled,
     dp2031_set_ovp_level,
     dp2031_set_voltage,
@@ -383,6 +388,77 @@ from benchctrl.drivers.siglent_sdm4065a.mcp_tools import (
     sdm4065a_write,
 )
 
+# SDG1032X tools — setters return the instrument's read-back; no error queue.
+from benchctrl.drivers.siglent_sdg1032x.mcp_tools import (
+    sdg1032x_apply_channel_copy,
+    sdg1032x_apply_equal_phase,
+    sdg1032x_close,
+    sdg1032x_disable_outputs,
+    sdg1032x_get_arb,
+    sdg1032x_get_basic_wave,
+    sdg1032x_get_burst,
+    sdg1032x_get_buzzer,
+    sdg1032x_get_clock,
+    sdg1032x_get_combine,
+    sdg1032x_get_coupling,
+    sdg1032x_get_harmonics,
+    sdg1032x_get_invert,
+    sdg1032x_get_lan_config,
+    sdg1032x_get_language,
+    sdg1032x_get_modulation,
+    sdg1032x_get_number_format,
+    sdg1032x_get_output,
+    sdg1032x_get_phase_mode,
+    sdg1032x_get_power_on_config,
+    sdg1032x_get_protection,
+    sdg1032x_get_screen_saver,
+    sdg1032x_get_sweep,
+    sdg1032x_get_sync,
+    sdg1032x_info,
+    sdg1032x_list_arbs,
+    sdg1032x_open,
+    sdg1032x_operation_complete,
+    sdg1032x_query,
+    sdg1032x_read_arb,
+    sdg1032x_read_counter,
+    sdg1032x_read_screen,
+    sdg1032x_reset,
+    sdg1032x_select_arb,
+    sdg1032x_set_amplitude,
+    sdg1032x_set_basic_wave,
+    sdg1032x_set_burst,
+    sdg1032x_set_buzzer,
+    sdg1032x_set_clock,
+    sdg1032x_set_combine,
+    sdg1032x_set_counter,
+    sdg1032x_set_coupling,
+    sdg1032x_set_frequency,
+    sdg1032x_set_harmonics,
+    sdg1032x_set_invert,
+    sdg1032x_set_lan_config,
+    sdg1032x_set_language,
+    sdg1032x_set_max_amplitude,
+    sdg1032x_set_modulation,
+    sdg1032x_set_number_format,
+    sdg1032x_set_offset,
+    sdg1032x_set_output,
+    sdg1032x_set_output_load,
+    sdg1032x_set_output_polarity,
+    sdg1032x_set_phase,
+    sdg1032x_set_phase_mode,
+    sdg1032x_set_power_on_config,
+    sdg1032x_set_protection,
+    sdg1032x_set_screen_saver,
+    sdg1032x_set_sweep,
+    sdg1032x_set_sync,
+    sdg1032x_set_wave_type,
+    sdg1032x_trigger_burst,
+    sdg1032x_trigger_key,
+    sdg1032x_trigger_sweep,
+    sdg1032x_write,
+    sdg1032x_write_arb,
+)
+
 # PDU41002 tools — read-only in this build: nothing here switches mains.
 from benchctrl.drivers.silabs_cp2112.mcp_tools import (
     cp2112_allowed_lines,
@@ -395,6 +471,23 @@ from benchctrl.drivers.silabs_cp2112.mcp_tools import (
     cp2112_set_line_asserted,
     cp2112_set_line_mode,
     cp2112_trigger_reset_pulse,
+)
+
+# Vision tools
+from benchctrl.drivers.bench_vision.mcp_tools import (
+    vision_classify,
+    vision_clear_crop,
+    vision_close,
+    vision_detect,
+    vision_frame,
+    vision_info,
+    vision_open,
+    vision_set_crop,
+    vision_set_exposure_us,
+    vision_set_fps,
+    vision_set_gain_db,
+    vision_status,
+    vision_trigger_capture,
 )
 from benchctrl.drivers.cyberpower_pdu41002.mcp_tools import (
     pdu41002_allowed_outlets,
@@ -438,6 +531,63 @@ from benchctrl.drivers.ontrak_adu218.mcp_tools import (
     adu218_set_watchdog,
     adu218_watchdog,
 )
+
+
+# ---------------------------------------------------------------------------
+# Vision: capture-and-label (cross-device — it commands the PDU or CP2112 and
+# captures with the camera). See docs/vision.md § Label loop.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def vision_label_capture(spec: dict, out_dir: str, sanity: bool = False) -> dict:
+    """Build a labelled frame set from states benchctrl commands itself.
+
+    ``spec`` is the label-loop spec (``docs/vision.md`` § Label loop): a name, a
+    list of states — each an actuator to command (a PDU outlet, a CP2112 line,
+    or the bench box's own ``sysfs_led``) and the label frames taken in that
+    state receive — plus frames per state, rounds, settle time, and optional
+    camera setup (crop, exposure, gain). The loop commands each state, waits,
+    fires N ``seq``-tagged captures, writes ``frames/<label>/<seq>.jpg`` under
+    ``out_dir`` with ``manifest.json`` and ``labels.csv``, and **restores every
+    actuator to how it was found** — also when something fails half way.
+
+    Uses the devices already opened by ``vision_open`` and, as the spec needs
+    them, ``pdu41002_open`` / ``cp2112_open``; their allow-lists apply
+    unchanged (an outlet or line outside them is refused by the driver). The
+    ``sysfs_led`` actuator drives a host LED and is only meaningful when this
+    server runs on the bench box itself.
+
+    A frame that comes back with the wrong ``seq`` is discarded, never
+    labelled. ``sanity=True`` stores a mean-brightness read of
+    ``spec.sanity_roi`` beside each frame (needs Pillow on this host) so a
+    frame whose pixels disagree with its label can be flagged.
+
+    Returns the manifest summary: frame counts per label, discards, whether
+    the restore succeeded, and the spec digest to cite from a training run.
+    """
+    from benchctrl.vision.labelloop import (
+        LabelSpec,
+        build_actuators,
+        mean_brightness,
+        run_label_capture,
+    )
+
+    parsed = LabelSpec.from_dict(spec)
+    kinds = {s.actuator["device"] for s in parsed.states}
+    devices: dict = {}
+    if "cyberpower_pdu41002" in kinds:
+        devices["cyberpower_pdu41002"] = _pdu41002_tools._get_pdu()
+    if "silabs_cp2112" in kinds:
+        devices["silabs_cp2112"] = _cp2112_tools._get_dev()
+    manifest = run_label_capture(
+        _vision_tools._get_vision(),
+        build_actuators(devices),
+        parsed,
+        out_dir,
+        sanity=mean_brightness if sanity else None,
+    )
+    return manifest.summary()
 
 
 # ---------------------------------------------------------------------------

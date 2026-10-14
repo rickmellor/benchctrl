@@ -298,6 +298,28 @@ def build_default_registry(
         # renumbers on re-plug.
         return OntrakADU218.open(**kw)
 
+    def _vision(**kw):
+        from benchctrl.drivers.bench_vision import BenchVision
+
+        # No URL injected here. The sidecar's address comes from agent.json
+        # (`open.bench_vision.url`) or BENCHCTRL_VISION_URL in *this agent's*
+        # environment, defaulting to loopback. The host never needs to know
+        # it: in remote mode the agent is the network face and the sidecar
+        # is unauthenticated on purpose, so it must stay on loopback.
+        return BenchVision.open(**kw)
+
+    def _sdg(**kw):
+        from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X
+
+        # Nothing injected: allowed_channels and max_amplitude_vpp come from
+        # agent.json (`open.siglent_sdg1032x`). Both are wiring decisions --
+        # which BNC has a DUT on it and how many volts that DUT survives -- and
+        # a default here would let an agent config that forgot them energise
+        # an output at the instrument's full 20 Vpp. The driver's own default
+        # (both channels, no cap) is the bench-side choice, made on the board
+        # that can see the cables, not in the opener.
+        return SiglentSDG1032X.open(**kw)
+
     openers = {
         "otii_arc": _arc,
         "eastwood_qr10x": _qr,
@@ -307,6 +329,8 @@ def build_default_registry(
         "cyberpower_pdu41002": _pdu,
         "silabs_cp2112": _cp2112,
         "ontrak_adu218": _adu,
+        "bench_vision": _vision,
+        "siglent_sdg1032x": _sdg,
     }
 
     for key in keys:

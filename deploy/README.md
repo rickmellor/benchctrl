@@ -6,14 +6,14 @@ none of it; see [`docs/remote.md`](../docs/remote.md) for the client config.
 
 | | |
 |---|---|
-| [`install-agent.sh`](install-agent.sh) | the agent as a systemd service, disarming the bench on stop |
+| [`install-agent.sh`](install-agent.sh) | the agent as a systemd service, disarming the bench on stop — Uno Q or Raspberry Pi, autodetected |
 | [`install-display-hotplug.sh`](install-display-hotplug.sh) | optional: makes HDMI-through-a-USB-C-hub work on an Uno Q |
 | [`verify-ch341-qr10x.sh`](verify-ch341-qr10x.sh) | required for a QR10x on a kernel without `ch341`: installs the udev rule, then proves the instrument end to end |
 | [`install-fui.sh`](install-fui.sh) | optional: the read-only HDMI status display (`benchctrl-fui`) |
 | [`install-kiosk.sh`](install-kiosk.sh) | optional: boots the board straight into that display, **no login prompt** — run `install-fui.sh` first |
-| [`udev/61-benchctrl-usbtmc.rules`](udev/61-benchctrl-usbtmc.rules) | required for USB-TMC instruments (SDM4065A, both Rigols) on a kernel without `usbtmc` |
+| [`udev/61-benchctrl-usbtmc.rules`](udev/61-benchctrl-usbtmc.rules) | required for USB-TMC instruments (SDM4065A, SDG1032X, both Rigols) on a kernel without `usbtmc` |
 | [`udev/62-benchctrl-ftdi.rules`](udev/62-benchctrl-ftdi.rules) | recommended for the CyberPower PDU41002's serial console: grants no permissions (`ftdi_sio` already does), but pins a stable symlink so `ttyUSB0` cannot be handed to another adapter |
-| [`udev/63-benchctrl-adu218.rules`](udev/63-benchctrl-adu218.rules) | required for the Ontrak ADU218 — a USB HID device with **no** kernel driver, so raw `USBDEVFS` is the only route in |
+| [`udev/63-benchctrl-adu218.rules`](udev/63-benchctrl-adu218.rules) | required for the Ontrak ADU218 â a USB HID device with **no** kernel driver, so raw `USBDEVFS` is the only route in |
 | [`sync-board.sh`](sync-board.sh) | during development: push this checkout to a board and **prove** it landed — runs from your workstation, not the board |
 | [`board_sync_manifest.py`](board_sync_manifest.py) | what `sync-board.sh` compares with; also useful on its own to answer "is the board current?" |
 | [`board_apply_sync.sh`](board_apply_sync.sh) | the board-side half of that: extract, then delete what the tarball did not carry |
@@ -48,12 +48,26 @@ Installed layout:
 | `/etc/benchctrl/agent.json` | 0640 `root:arduino` | config **and token** |
 | `/etc/benchctrl/agent.env` | 0644 | `PYTHONPATH`, no secrets |
 
-Tune with environment variables:
+The defaults are **derived, then printed**, before anything is installed:
+
+| | git checkout beside `deploy/` (Raspberry Pi, desktop) | unzipped tree (Uno Q) |
+|---|---|---|
+| `SRC_DIR` | `<checkout>/src` | `/home/arduino/benchctrl-1.2.0/src` |
+| `PYTHON` | `<checkout>/.venv/bin/python` if present | `/usr/bin/python3` |
+| `RUN_USER` | `$SUDO_USER` | `arduino` (also when `SUDO_USER` is empty or `root`) |
+| `STATE_DIR` | `/home/$RUN_USER/benchctrl` (`blob_dir`, `runs_dir` in a fresh `agent.json`) | same |
+
+Override any of them with environment variables:
 
 ```bash
 sudo SRC_DIR=/opt/benchctrl/src RUN_USER=bench ./install-agent.sh
 sudo PYTHON=/opt/venv/bin/python ./install-agent.sh     # pip/venv install
+sudo STATE_DIR=/mnt/ssd/benchctrl ./install-agent.sh    # blobs/runs off the SD card
 ```
+
+`RUN_USER` never resolves to `root`: the unit drops privileges on purpose, and a
+bare `sudo` from a root shell falls back to `arduino` rather than installing a
+root-owned service.
 
 `SRC_DIR` is the directory holding **both** `benchctrl/` and `serial/`. The
 script imports them before touching systemd, because a wrong `PYTHONPATH`
@@ -131,8 +145,13 @@ needs root. Two settings are deliberately *not* tightened:
 
 ## The QR10x on a kernel without `ch341`
 
-Only needed where the kernel omits the CH340/CH341 driver — Arduino's Uno Q
-does (`# CONFIG_USB_SERIAL_CH341 is not set`, and no generic fallback). The
+Only needed where the kernel omits the CH340/CH341 driver. On a host that has
+it (Raspberry Pi OS, any desktop distro) `verify-ch341-qr10x.sh` prints
+"kernel ch341 driver present" and exits 0 without installing anything —
+`autoserial` will use `/dev/ttyUSB*` and never touch the bridge.
+
+Arduino's Uno Q omits the driver (`# CONFIG_USB_SERIAL_CH341 is not set`, and
+no generic fallback). The
 symptom is a device that enumerates as `USB Serial` but binds no driver, so no
 `/dev/ttyUSB*` appears and the QR10x is unreachable.
 
@@ -176,9 +195,12 @@ Verified end to end on a real QR101A-1M-R1 (serial 00000248, fw 5.967KS): a
 | `udev/61-benchctrl-usbtmc.rules` | `/etc/udev/rules.d/` (0644) |
 
 Same mechanism as the CH341 rule above, different missing driver. The Uno Q
-builds without `CONFIG_USB_TMC`, so there is no `/dev/usbtmc0` for the SDM4065A
-or either Rigol; pyvisa-py drives them over libusb instead, which again needs
-write access to `/dev/bus/usb/BBB/DDD`.
+builds without `CONFIG_USB_TMC`, so there is no `/dev/usbtmc0` for the SDM4065A,
+the SDG1032X or either Rigol; pyvisa-py drives them over libusb instead, which
+again needs write access to `/dev/bus/usb/BBB/DDD`. The SDG1032X rule (`f4ec:1103`)
+matters on the Raspberry Pi as well: there the kernel *does* have `usbtmc`, binds
+the generator and leaves `/dev/usbtmc0` root-only, and the rule is what lets
+pyusb detach that driver and claim the interface as the bench user.
 
 **The failure mode is worse than a permission error.** Without the rule the
 instrument is *invisible*, not merely unopenable:
