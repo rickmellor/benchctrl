@@ -32,7 +32,103 @@ jobs:
           pip install -e ".[dev,mcp,bench-visa,science]"
 
       - name: Run hardware-free tests
-        run: pytest -m "not hardware" -q
+        run: pytest -m "not hardware" -q --junitxml=junit.xml
+
+      # One leg's results feed the plan-status job (tools/plancheck.py). It
+      # uploads even when tests fail, so a failure can be named by plan item.
+      - name: Upload junit for plan-status
+        if: always() && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-ubuntu-3.12
+          path: junit.xml
+          if-no-files-found: warn
+
+  plan-status:
+    name: plan status (docs/plan)
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Evidence files name the commit they measured; plancheck checks it
+          # is an ancestor of HEAD, which needs the history.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: junit-ubuntu-3.12
+          path: results
+        continue-on-error: true
+
+      # The base status is the last master run's report. Master CI may be red,
+      # so take the newest completed run that has the artifact, not the newest
+      # green one. Without it, regressions are reported as not checked.
+      - name: Fetch base plan status
+        if: github.event_name == 'pull_request' || github.ref_name != 'master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p base
+          for id in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+                --branch master --status completed --limit 10 --json databaseId \
+                --jq '.[].databaseId'); do
+            if gh run download "$id" --repo "$GITHUB_REPOSITORY" -n plan-status -D base; then
+              echo "base status from run $id"; break
+            fi
+          done
+
+      - name: Plan status
+        run: |
+          diff_base=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            diff_base="--diff-base origin/${{ github.base_ref }}"
+          fi
+          python tools/plancheck.py --repo . --plan docs/plan/pro-core.md \
+            --tests tests --evidence docs/plan/evidence \
+            $(ls results/*.xml 2>/dev/null | sed 's/^/--junit /') \
+            --base-status base/plan-status.json $diff_base \
+            --out-json plan-status.json --out-md plan-status.md
+          rc=$?
+          cat plan-status.md >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+        shell: bash {0}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: plan-status
+          path: |
+            plan-status.json
+            plan-status.md
+
+      - name: Sticky PR comment
+        if: always() && github.event_name == 'pull_request' && hashFiles('plan-status.md') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- plancheck -->';
+            const body = marker + '\n' + fs.readFileSync('plan-status.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number });
+            const mine = comments.find(c => c.body && c.body.startsWith(marker));
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
 
   lint:
     name: ruff + mypy
@@ -50,7 +146,7 @@ jobs:
           pip install -e ".[dev,mcp,bench-visa]"
 
       - name: Ruff
-        run: ruff check src tests scenarios
+        run: ruff check src tests scenarios tools
 
       - name: Mypy
         run: mypy src

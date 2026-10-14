@@ -120,6 +120,7 @@ testpaths = ["tests"]
 markers = [
     "hardware: tests that require a connected Arc Pro device",
     "slow: tests that take more than a few seconds",
+    "plan(id, ...): the plan item(s) this test proves (docs/plan/pro-core.md)",
 ]
 
 [tool.ruff]
