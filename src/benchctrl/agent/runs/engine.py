@@ -42,11 +42,19 @@ from benchctrl.agent.runs.spec import (
     RunSpec,
 )
 from benchctrl.agent.runs.store import RunStore, new_run_id
-from benchctrl.exceptions import BenchValueError
+from benchctrl.agent.safety import run_owner
+from benchctrl.exceptions import BenchTimeoutError, BenchValueError
 
 log = logging.getLogger("benchctrl.agent.runs.engine")
 
 TICK_S = 0.25
+
+#: Longest the engine waits on anything without proving it is alive. Every wait
+#: on a worker, the PDU, or a settle window is cut into slices of at most this,
+#: with a watchdog touch between them, so a *slow but bounded* operation (a 30 s
+#: verified contactor switch) is never mistaken for a wedged engine. Only a
+#: thread that has stopped coming back to touch trips ``RUN_WATCHDOG``.
+WAIT_SLICE_S = 1.0
 
 #: How long one verified outlet switch may take on the PDU's worker.
 #: The driver derives its own read-back budget from the outlet's configured
@@ -101,6 +109,9 @@ class RunEngine:
             )
 
         self.run_id = new_run_id(spec.name)
+        #: The governor owner this run arms as. Its devices stay alive only as
+        #: long as this engine keeps touching it, whoever else is connected.
+        self.owner = run_owner(self.run_id)
         base = Path(runs_dir) if runs_dir else store_mod.default_runs_dir()
         self.store = RunStore(base / self.run_id, self.run_id)
         self.store.create(spec, agent_version=agent_version)
@@ -120,6 +131,7 @@ class RunEngine:
         #: a state change into a heartbeat, leaving a consumer unable to tell
         #: "the run advanced" from "the run is still going".
         self._stage = ""
+        self._started = 0.0
         self.status = store_mod.STATUS_PENDING
 
     # --- lifecycle ------------------------------------------------------
@@ -203,13 +215,14 @@ class RunEngine:
         # run_start so a consumer learns the run exists before it hears where the
         # run is.
         self._emit_stage("INIT")
-        started = time.monotonic()
+        self._started = time.monotonic()
+        self._touch()
 
         try:
             for idx, phase in enumerate(self.spec.phases):
                 if self._stop.is_set():
                     break
-                if (time.monotonic() - started) > self.spec.safety.max_duration_s:
+                if self._over_max_duration():
                     self._finish(
                         store_mod.STATUS_SAFE_STOPPED, "safety.max_duration_s exceeded"
                     )
@@ -258,9 +271,18 @@ class RunEngine:
         exit_reason = ""
 
         while not self._stop.is_set():
+            self._touch()
             now = time.monotonic()
             if now >= deadline:
                 exit_reason = "duration elapsed"
+                break
+
+            # Inside the phase, not only between phases: a single long phase
+            # (or one with no duration, waiting on an exit rule that never
+            # fires) would otherwise run past the envelope's time limit.
+            if self._over_max_duration():
+                exit_reason = "safety.max_duration_s exceeded"
+                self._abort_reason = "safety: max_duration_s exceeded"
                 break
 
             # Checked on the tick loop, not applied from the LLM thread, so
@@ -312,10 +334,44 @@ class RunEngine:
 
     # --- device interaction ---------------------------------------------
 
+    def _touch(self) -> None:
+        """Prove this engine is alive to the governor's run watchdog."""
+        if self.governor is not None:
+            self.governor.touch(self.owner)
+
+    def _over_max_duration(self) -> bool:
+        return (time.monotonic() - self._started) > self.spec.safety.max_duration_s
+
     def _submit(self, fn, label: str):
         if self.worker is None:
             return fn()
-        return self.worker.submit(fn, label=label)
+        return self._await(self.worker, fn, label, None)
+
+    def _await(self, worker, fn, label: str, timeout: Optional[float]):
+        """``worker.submit``, but touching the watchdog while it waits.
+
+        Same contract as :py:meth:`DeviceWorker.submit` (same default budget,
+        same timeout error, the job's own exception re-raised), so callers
+        cannot tell the difference. The difference is for the governor: a
+        bounded wait is progress, and a 30 s PDU switch must not read as a
+        wedged engine to a 15 s deadman.
+        """
+        job = worker.submit_nowait(fn, label=label)
+        budget = timeout if timeout is not None else worker.max_blocking_s * 4
+        deadline = time.monotonic() + budget
+        while not job.done.wait(timeout=max(0.0, min(WAIT_SLICE_S, deadline - time.monotonic()))):
+            self._touch()
+            if time.monotonic() >= deadline:
+                job.cancelled = True
+                raise BenchTimeoutError(
+                    f"{worker.device_key}: {label or 'call'} did not complete within "
+                    f"{budget:.1f}s (queue depth {worker.depth}, busy with "
+                    f"{worker.busy_with!r})"
+                )
+        self._touch()
+        if job.error is not None:
+            raise job.error
+        return job.result
 
     def _apply_setpoints(self, phase: Phase) -> None:
         # Re-check against the envelope even though the spec was validated:
@@ -358,7 +414,7 @@ class RunEngine:
         self._submit(lambda: self._safe_set("set_output", True), "output_on")
         if self.governor is not None:
             self.governor.observe_call(
-                self.spec.device, "set_output", (True,), {}, session_id="run-engine"
+                self.spec.device, "set_output", (True,), {}, session_id=self.owner
             )
 
     def _apply_outlets(self, phase: Phase) -> None:
@@ -401,7 +457,13 @@ class RunEngine:
             # `wait`, not `sleep`: an abort arriving during a settle window must
             # not have to outlast it. On a 30 s DUT boot that is the difference
             # between stopping now and stopping in half a minute.
-            self._stop.wait(settle)
+            end = time.monotonic() + settle
+            while not self._stop.is_set():
+                left = end - time.monotonic()
+                if left <= 0:
+                    break
+                self._touch()
+                self._stop.wait(min(WAIT_SLICE_S, left))
 
     def _submit_pdu(self, fn, label: str):
         """Queue work on the PDU's worker, falling back to inline.
@@ -411,7 +473,7 @@ class RunEngine:
         """
         if self.pdu_worker is None:
             return fn()
-        return self.pdu_worker.submit(fn, label=label, timeout=PDU_SWITCH_TIMEOUT_S)
+        return self._await(self.pdu_worker, fn, label, PDU_SWITCH_TIMEOUT_S)
 
     def _safe_set(self, method: str, *args) -> None:
         fn = getattr(self.device, method, None)
@@ -433,7 +495,7 @@ class RunEngine:
             self._submit(lambda: self._safe_set("set_output", False), "output_off")
             if self.governor is not None:
                 self.governor.observe_call(
-                    self.spec.device, "set_output", (False,), {}, session_id="run-engine"
+                    self.spec.device, "set_output", (False,), {}, session_id=self.owner
                 )
         except Exception as exc:  # noqa: BLE001
             log.error("could not idle device at phase end: %r", exc)
@@ -883,6 +945,21 @@ class RunManager:
         for info in store_mod.list_runs(self.runs_dir):
             live.setdefault(info["run_id"], info)
         return sorted(live.values(), key=lambda r: r.get("created_utc", ""), reverse=True)
+
+    def abort_driving(self, device_keys, reason: str) -> list[str]:
+        """Abort every running engine that drives one of ``device_keys``.
+
+        Called *before* the governor trips those devices, so a run whose
+        output was cut under it records why it stopped instead of reading
+        on as ``complete``. Does not wait: the engine being aborted may be
+        the wedged thing the trip is for.
+        """
+        keys = set(device_keys)
+        with self._lock:
+            engines = [e for e in self._engines.values() if e.is_running and e.spec.device in keys]
+        for engine in engines:
+            engine.abort(reason)
+        return [e.run_id for e in engines]
 
     def abort_all(self, reason: str = "agent shutdown") -> None:
         with self._lock:

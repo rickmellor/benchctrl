@@ -1725,6 +1725,11 @@ For unattended overnight runs the only real guarantee is a hardware
 interlock: a relay on the DUT rail driven from a GPIO, or the Arc's own GPO
 (`device.py` `set_gpo`). Treat the governor as damage limitation.
 
+The run watchdog (`TripReason.RUN_WATCHDOG`) is the same layer, not a
+stronger one: it notices a run engine that stopped making progress and asks
+the device's worker to go safe. If what wedged the engine is the driver
+itself, the safe-state command can be stuck behind it too.
+
 Code reference: `src/benchctrl/agent/safety.py` — `SafetyGovernor.trip`.
 
 ### N-2. No confidentiality on the wire
@@ -1948,7 +1953,8 @@ log.warning(
 ```
 
 Nothing consumes the return value. The only thing that trips is the deadman
-thread, whose test is `any_armed and seconds_since_contact > deadman_s`, and
+thread, whose test is (since per-owner contact) "an armed device whose owner
+has been silent for more than `deadman_s`", and
 **nothing on the disconnect path touches `_last_contact`** — its only writer is
 `touch()`, called on inbound frames. So the clock the comment above the call
 site says it is shortening is not shortened, and the real delay is the full

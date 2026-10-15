@@ -9,6 +9,41 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### The deadman is per owner, and a run keeps its own output alive
+
+**Safety behaviour change. With no new configuration, some trips now happen
+earlier or on fewer devices; none happen later.**
+
+- **A submitted run no longer trips when its client leaves.** `docs/runs.md`
+  promised "submit a run, disconnect", but the engine armed its device without
+  ever counting as contact, so about `deadman_s` after the last client went
+  the governor tripped `heartbeat_lost` on a run that was working. The engine
+  now owns its device as `run:<run_id>` and touches that owner every tick.
+- **A wedged run engine trips: new `TripReason.RUN_WATCHDOG`.** An engine that
+  stops touching its owner has its device driven safe within `deadman_s` plus
+  the 0.5 s poll (measured in the test: inside `deadman_s + 1 s`). Bounded
+  waits (worker calls, the 30 s verified PDU switch, settle windows) touch in
+  ≤ 1 s slices, so slow is not mistaken for wedged.
+- **A trip aborts the run it lands on.** Before, the governor could turn a
+  run's output off and the run carried on to `complete` over an output that
+  was no longer on. Any run driving a tripped device is now aborted first and
+  ends `safe_stopped`.
+- **Contact is per owner.** Each armed device trips when *the session (or run)
+  that armed it* has been silent for `deadman_s`. Another client's traffic no
+  longer keeps it alive — before, one chatty writer held every abandoned
+  output on. A device armed with no owner keeps the old any-contact rule. A
+  new session that claims a device whose arming session has gone takes over
+  as its owner. `safety.status` gains `owners` (seconds since each owner's
+  last contact); `seconds_since_contact` is still the bench-wide figure.
+- **A trip that targets some devices leaves the others alone.** Panic outlets
+  are cut only when a trip covers every armed device, or when one of its own
+  targets could not be made safe.
+- **`agent.close` trips only the device being closed.** It used to target
+  every armed device while passing in only the one, so the others were
+  reported `failed` and panic outlets were cut for a close of one instrument.
+- **`safety.max_duration_s` is enforced inside a phase,** not only between
+  phases, so a phase waiting on an exit rule that never fires still ends.
+
 ### The bench display shows the board's own address — or why it has none
 
 The board boots headless into the kiosk on a DHCP lease. When that address

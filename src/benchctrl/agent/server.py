@@ -39,7 +39,7 @@ from benchctrl.agent.recordings import PREVIEW_HZ, IteratorTable, RecordingTable
 from benchctrl.agent.registry import SWITCHED_PDU_KEYS, DeviceRegistry
 from benchctrl.agent.runs.engine import RunManager
 from benchctrl.agent.runs.spec import RunSpec
-from benchctrl.agent.safety import SafetyGovernor, TripReason
+from benchctrl.agent.safety import RUN_OWNER_PREFIX, SafetyGovernor, TripReason
 from benchctrl.agent.worker import PRIORITY_NORMAL, WorkerPool, clamp_blocking
 from benchctrl.exceptions import BenchValueError
 from benchctrl.net import auth as authmod
@@ -965,8 +965,7 @@ class BenchAgent:
             # driving an abandoned bench safe; the heartbeat is a courtesy to a
             # display and is strictly subordinate to that.
             try:
-                if self.governor.should_trip():
-                    self.trip(TripReason.HEARTBEAT_LOST)
+                self._deadman_tick()
             except Exception:  # pragma: no cover
                 log.exception("deadman loop raised")
             # Reuses this thread rather than starting a second one: it already
@@ -999,6 +998,37 @@ class BenchAgent:
                 self._maybe_start_mains_sweep()
             except Exception:  # pragma: no cover
                 log.exception("agent: mains sweep raised")
+
+    def _deadman_tick(self) -> dict[str, str]:
+        """Trip the devices of every owner that has gone quiet. Returns outcomes.
+
+        Per owner, not bench-wide: a device armed by a session trips when
+        *that session* has been silent for ``deadman_s`` (HEARTBEAT_LOST), and
+        one armed by a run engine trips when *that engine* has stopped
+        touching its ``run:<id>`` owner (RUN_WATCHDOG). Another client's
+        traffic keeps neither alive.
+
+        Any run driving a device about to trip is aborted first, with a
+        ``safety:`` reason, so the run record ends ``safe_stopped`` rather than
+        ``complete`` over an output the governor turned off.
+        """
+        stale = self.governor.stale_devices()
+        if not stale:
+            return {}
+        by_reason: dict[TripReason, list[str]] = {}
+        for key, owner in stale.items():
+            reason = (
+                TripReason.RUN_WATCHDOG
+                if owner is not None and owner.startswith(RUN_OWNER_PREFIX)
+                else TripReason.HEARTBEAT_LOST
+            )
+            by_reason.setdefault(reason, []).append(key)
+        outcomes: dict[str, str] = {}
+        for reason, keys in by_reason.items():
+            self.runs.abort_driving(keys, f"safety: {reason.value}")
+            for key, outcome in self.trip(reason, only=keys).items():
+                outcomes[key] = outcome.value
+        return outcomes
 
     def _maybe_emit_link(self) -> None:
         """Emit a link heartbeat if one is due and anyone is listening.
@@ -1295,11 +1325,13 @@ class BenchAgent:
             with self._mains_lock:
                 self._mains_running = False
 
-    def trip(self, reason: TripReason) -> dict:
+    def trip(self, reason: TripReason, *, only: Optional[Iterable[str]] = None) -> dict:
+        devices = self.registry.open_devices()
         return self.governor.trip(
             reason,
-            self.registry.open_devices(),
-            {k: self.workers.get(k) for k in self.registry.open_devices()},
+            devices,
+            {k: self.workers.get(k) for k in devices},
+            only=only,
         )
 
     def resource_manager(self) -> Optional[Any]:
@@ -1549,6 +1581,16 @@ class BenchAgent:
                 )
             self._claims[device_key] = session.session_id
             session.claims.add(device_key)
+            # An output left armed by a session that has since gone (or armed
+            # with no owner) passes to whoever now holds the claim, so a client
+            # that reconnects under a new session id keeps its own output
+            # alive instead of watching it trip. A live owner keeps it.
+            owner = self.governor.owner_of(device_key)
+            if owner != session.session_id and (
+                owner is None
+                or (not owner.startswith(RUN_OWNER_PREFIX) and owner not in self._sessions)
+            ):
+                self.governor.transfer_owner(device_key, session.session_id)
         return {"device": device_key, "claimed": True, "session": session.session_id}
 
     def release(self, session: Session, device_key: str) -> dict:
@@ -1705,7 +1747,7 @@ class _Handler(socketserver.BaseRequestHandler):
             # fire. The bench would stay armed after the real client died,
             # because the thing reporting on it kept it alive.
             if not session.observer:
-                agent.governor.touch()
+                agent.governor.touch(session.session_id)
 
             if frame_type == FrameType.PING:
                 session.writer.send(FrameType.PONG)
@@ -1840,10 +1882,15 @@ class _Handler(socketserver.BaseRequestHandler):
             return entry.to_dict(), None
         if method == "agent.close":
             key = p["device"]
+            # ``only``: the governor would otherwise target every armed
+            # device while holding objects for just this one, and report the
+            # rest FAILED (and cut panic outlets) for a close of one device.
+            agent.runs.abort_driving([key], "safety: device closed")
             agent.governor.trip(
                 TripReason.OPERATOR,
                 {key: agent.registry.open_devices().get(key)},
                 {key: agent.workers.get(key)},
+                only=[key],
             )
             return {"device": key, "closed": agent.registry.close(key)}, None
         if method == "agent.claim":
