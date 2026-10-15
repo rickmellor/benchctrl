@@ -264,9 +264,7 @@ def test_the_cli_matches_the_code_before_the_text():
     assert cli.claim_conflict_help(PolicyError("held elsewhere", code=CLAIM_CONFLICT))
     # A different code wins over text that happens to match.
     assert (
-        cli.claim_conflict_help(
-            PolicyError("blob b-1 is claimed by session s-2", code=NOT_OWNER)
-        )
+        cli.claim_conflict_help(PolicyError("blob b-1 is claimed by session s-2", code=NOT_OWNER))
         is None
     )
     # No code (an older agent): the text fallback still works.

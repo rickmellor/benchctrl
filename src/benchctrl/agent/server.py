@@ -15,9 +15,11 @@ deployable at all.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import logging
+import secrets
 import socket
 import socketserver
 import string
@@ -826,8 +828,6 @@ class Session:
        already opened (the dashboard's generator-screen pane).
     """
 
-    _ids = itertools.count(1)
-
     def __init__(
         self,
         agent: "BenchAgent",
@@ -839,7 +839,7 @@ class Session:
         self.agent = agent
         self.sock = sock
         self.address = address
-        self.session_id = f"s-{next(self._ids)}"
+        self.session_id = agent.next_session_id()
         self.reader = FrameReader(sock)
         self.writer = FrameWriter(sock)
         self.authenticated = False
@@ -874,6 +874,16 @@ class Session:
         self.writer.send(FrameType.EVT, _json(payload))
 
 
+def _agent_tag(agent_id: Optional[str]) -> str:
+    """Six hex characters naming this bench, stable across restarts.
+
+    Hashed rather than truncated, so a hostname (or, later, an enrolled
+    agent id) does not appear in every session id it prefixes.
+    """
+    seed = agent_id or socket.gethostname()
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:6]
+
+
 class BenchAgent:
     """Owns the devices, the workers, and the safety governor."""
 
@@ -890,9 +900,18 @@ class BenchAgent:
         runs_dir=None,
         llm_base_url: str = "",
         safe_stop_exempt: Iterable[str] = (),
+        agent_id: Optional[str] = None,
     ) -> None:
         self.registry = registry
         self.token = token
+        # Session ids are ``s-<agent6>-<boot6>-N``. A bare counter restarted at
+        # s-1 with every agent process, so a client or log reader holding an
+        # id from before a restart saw it name a different session after one,
+        # and two agents' ids could not be told apart in a merged log. agent6
+        # is stable for this bench; boot6 is fresh for each process.
+        self.agent_tag = _agent_tag(agent_id)
+        self.boot_tag = secrets.token_hex(3)
+        self._session_ids = itertools.count(1)
         #: Bench infrastructure the governor leaves alone (see SafetyGovernor.exempt).
         self.safe_stop_exempt = frozenset(safe_stop_exempt)
         self.deadman_s = deadman_s
@@ -1477,6 +1496,9 @@ class BenchAgent:
         """
         with self._lock:
             return sum(1 for s in self._sessions.values() if s.observer)
+
+    def next_session_id(self) -> str:
+        return f"s-{self.agent_tag}-{self.boot_tag}-{next(self._session_ids)}"
 
     def register_session(self, session: Session) -> None:
         with self._lock:

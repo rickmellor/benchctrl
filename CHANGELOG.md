@@ -9,6 +9,15 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### Session ids are `s-<agent6>-<boot6>-N`
+
+A bare `s-N` restarted at `s-1` with every agent process, so an id held from
+before a restart named a different session after it, and two benches' ids
+could not be told apart in a merged log. `agent6` is a hash of the agent's
+identity (the hostname until an agent is enrolled; `BenchAgent(agent_id=…)`)
+and is stable for a bench; `boot6` is random per process. Anything that
+parsed the number out of `s-N` must take the last `-` field instead.
+
 ### Claims now gate `agent.open`/`agent.close`, `run.abort` and releases
 
 **Behaviour change for a session that acted on something another session
