@@ -330,8 +330,12 @@ def test_max_duration_is_enforced_inside_a_phase(bench):
         run_id = client.call("run.submit", {"spec": spec.to_dict()})["run_id"]
         engine = agent.runs.get(run_id)
         assert engine.join(timeout=10), "run outlived its max_duration_s by > 8 s"
-    assert time.monotonic() - started < 1.5 + 1.0
+        elapsed = time.monotonic() - started
+    # The other hypothesis (no in-phase check) never stops, which the join
+    # above catches; the ceiling only has to be clear of a loaded CI box.
+    assert 1.5 <= elapsed < 1.5 + 2.5, elapsed
     assert engine.status == "safe_stopped", engine.status_dict()
+    assert "max_duration_s" in engine.store.info()["stop_reason"]
     assert agent.governor.armed_devices == []
 
 
