@@ -241,6 +241,14 @@ in [`deploy/`](../deploy/README.md) does — it invokes `python3 -m
 benchctrl.agent.main` rather than the console script, because the board has no
 pip and reaches the package through `PYTHONPATH`.
 
+Each row of the device table (WELCOME's `devices`) carries the instrument's
+`serial`, read from it at open, and its `binding` from `agent.json`
+(`"binding": {"siglent_sdm4065a": "dut_bound"}`; `dut_bound`, `bench_bound` or
+`routable_source`). A device not yet opened, or one whose driver reports no
+serial (the PDU, the vision sidecar), has `serial: null`; the serial is kept
+across a close, as the instrument last seen under that key. An unknown binding
+stops the agent at startup.
+
 ## What is different in remote mode
 
 Measured over USB (`adb forward`) to an Uno Q. Wifi will be slower and

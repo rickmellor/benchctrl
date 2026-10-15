@@ -9,6 +9,18 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### The device table names each instrument: `serial` and `binding`
+
+`DeviceRegistry.describe()` (and so WELCOME's `devices`) now has `serial`,
+read from the instrument when it opens, and `binding`, set per device key by
+the new `agent.json` `"binding"` map (`dut_bound`, `bench_bound`,
+`routable_source`; unknown values stop the agent). Both are `null` when
+unknown. Opening a device can now cost one identity read: the QR10x's `info()`
+(several round trips), the Rigols' and SDG's `*IDN?` (cached by the driver),
+or the Arc's device-id query when it was opened by port path. The PDU and the
+vision sidecar are never asked. `agent.json` also takes `"agent_id"`, the
+stable bench name in session ids, which defaults to the hostname.
+
 ### The handshake negotiates a version range and capabilities
 
 HELLO and CHALLENGE now carry `v_min`, `v_max` and `caps` beside `v`, and

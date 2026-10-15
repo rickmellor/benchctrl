@@ -9,6 +9,9 @@
   "_safe_stop_exempt_example": ["rigol_dp2031"],
   "_open_example": "Per-device open() keyword arguments, keyed by device key, under \"open\". The SDG1032X takes its channel grant, the driver-side amplitude cap, and (optional) the LAN socket address used for arbitrary-waveform transfer; unset, the driver asks the instrument for its own IP.",
   "_open_example_value": {"siglent_sdg1032x": {"allowed_channels": [1, 2], "max_amplitude_vpp": 5.0, "lan_host": "sdg1032x.home.arpa"}},
+  "_binding": "How each instrument is wired, reported in the device table next to its serial: dut_bound (wired to the DUT, e.g. a DMM on its rail), bench_bound (bench infrastructure, e.g. the PDU) or routable_source (a source that could be fed from elsewhere). Unset reads as unknown. Rename to binding to enable.",
+  "_binding_example": {"siglent_sdm4065a": "dut_bound", "cyberpower_pdu41002": "bench_bound", "otii_arc": "routable_source"},
+  "_agent_id": "Stable name for this bench in session ids (s-<hash of agent_id>-<boot>-N). Defaults to the hostname. Rename to agent_id to set.",
 
   "deadman_s": 15,
   "heartbeat_s": 5,

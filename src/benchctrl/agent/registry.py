@@ -29,6 +29,63 @@ log = logging.getLogger("benchctrl.agent.registry")
 #: one, not a registry that guesses.
 SWITCHED_PDU_KEYS: tuple[str, ...] = ("cyberpower_pdu41002",)
 
+#: How an instrument is tied to the bench, set per device key in agent.json
+#: (``"binding": {"siglent_sdm4065a": "dut_bound"}``). Wiring is a fact about
+#: the bench, not the driver, so nothing here guesses it; unset reads as None.
+#:
+#: - ``dut_bound``: wired to the DUT (a DMM on its rail). Never leaves the bench.
+#: - ``bench_bound``: bench infrastructure (a PDU, a reset line).
+#: - ``routable_source``: a source whose output could be fed from elsewhere.
+BINDINGS: tuple[str, ...] = ("dut_bound", "bench_bound", "routable_source")
+
+#: Devices whose identity call has no serial in it, so :py:func:`read_serial`
+#: never makes it. Each would be a round trip for nothing, with a side effect:
+#: the PDU's is a telnet ``sys show`` on a mains switch; the vision sidecar's is
+#: an HTTP ``/status`` that also fills its status cache, so a sidecar that died
+#: just after open would go on reporting a camera instead of None.
+_NO_SERIAL_IN_IDENTITY: tuple[str, ...] = (*SWITCHED_PDU_KEYS, "bench_vision")
+
+
+def _check_binding(device_key: str, binding: Optional[str]) -> Optional[str]:
+    if binding is not None and binding not in BINDINGS:
+        raise BenchValueError(
+            f"binding for {device_key!r} is {binding!r}; expected one of {list(BINDINGS)}"
+        )
+    return binding
+
+
+def read_serial(obj: Any, device_key: str = "") -> Optional[str]:
+    """The instrument's serial number, or None if the driver does not report one.
+
+    Read once at open, because the drivers disagree on where it lives: a
+    ``serial`` property (CP2112), ``info`` as a property (Arc, SDM4065A) or a
+    method (Rigols, QR10x, SDG), ``read_identity()`` (ADU218, from the USB
+    descriptor with no round trip), or ``get_device_id()`` (an Arc opened by
+    port path, which has no USB descriptor to hand). The first that answers
+    wins, so an Arc found by discovery keeps its USB serial and costs no round
+    trip. Devices in :py:data:`_NO_SERIAL_IN_IDENTITY` are only asked the
+    cheap attribute probes.
+
+    Never raises. A serial is inventory, and a device that opened but would not
+    say who it is still serves its outputs.
+    """
+    probes: tuple[str, ...] = ("serial", "info")
+    if device_key not in _NO_SERIAL_IN_IDENTITY:
+        probes += ("read_identity", "get_device_id")
+    for name in probes:
+        try:
+            value = getattr(obj, name, None)
+            if callable(value):
+                value = value()
+            if value is not None and not isinstance(value, str):
+                value = getattr(value, "serial", None)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("registry: %s.%s raised reading a serial: %r", device_key, name, exc)
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
 
 @dataclass
 class DeviceEntry:
@@ -40,13 +97,23 @@ class DeviceEntry:
     obj: Optional[Any] = None
     surface: Optional[DeviceSurface] = None
     open_error: Optional[str] = None
+    #: From agent.json; see :py:data:`BINDINGS`.
+    binding: Optional[str] = None
+    #: Read at the last successful open, and kept across a close: it names the
+    #: instrument last seen under this key, which is what inventory wants.
+    serial: Optional[str] = None
 
     @property
     def is_open(self) -> bool:
         return self.obj is not None
 
     def to_dict(self) -> dict:
-        d: dict = {"key": self.device_key, "open": self.is_open}
+        d: dict = {
+            "key": self.device_key,
+            "open": self.is_open,
+            "serial": self.serial,
+            "binding": self.binding,
+        }
         if self.surface is not None:
             d.update(self.surface.to_dict())
         if self.open_error:
@@ -69,6 +136,7 @@ class DeviceRegistry:
         opener: Callable[..., Any],
         *,
         open_kwargs: Optional[dict] = None,
+        binding: Optional[str] = None,
     ) -> None:
         """Declare a device the agent may open. Does not open it."""
         with self._lock:
@@ -76,10 +144,13 @@ class DeviceRegistry:
                 device_key=device_key,
                 opener=opener,
                 open_kwargs=dict(open_kwargs or {}),
+                binding=_check_binding(device_key, binding),
             )
             log.info("registry: declared %s", device_key)
 
-    def register_open(self, device_key: str, obj: Any) -> DeviceEntry:
+    def register_open(
+        self, device_key: str, obj: Any, *, binding: Optional[str] = None
+    ) -> DeviceEntry:
         """Register an already-open object (tests, and sim mode)."""
         with self._lock:
             entry = DeviceEntry(
@@ -87,6 +158,8 @@ class DeviceRegistry:
                 opener=lambda **kw: obj,
                 obj=obj,
                 surface=introspect(obj, device_key),
+                binding=_check_binding(device_key, binding),
+                serial=read_serial(obj, device_key),
             )
             self._entries[device_key] = entry
             return entry
@@ -101,8 +174,7 @@ class DeviceRegistry:
             entry = self._entries.get(device_key)
         if entry is None:
             raise BenchValueError(
-                f"this agent does not serve {device_key!r}; it serves: "
-                f"{self.keys}"
+                f"this agent does not serve {device_key!r}; it serves: {self.keys}"
             )
         return entry
 
@@ -126,6 +198,7 @@ class DeviceRegistry:
                 raise
             entry.obj = obj
             entry.surface = introspect(obj, device_key)
+            entry.serial = read_serial(obj, device_key)
             entry.open_error = None
             log.info(
                 "registry: opened %s (%s) — %d methods, %d properties",
@@ -210,6 +283,7 @@ def build_default_registry(
     *,
     simulate: bool = False,
     open_kwargs: Optional[dict[str, dict]] = None,
+    bindings: Optional[dict[str, str]] = None,
 ) -> DeviceRegistry:
     """Registry for the standard four drivers.
 
@@ -223,13 +297,17 @@ def build_default_registry(
     keys = device_keys or list(DEVICE_KEYS)
     registry = DeviceRegistry()
     kwargs_by_key = open_kwargs or {}
+    binding_by_key = bindings or {}
 
     if simulate:
         from benchctrl.sim import factories
 
         for key in keys:
             registry.register(
-                key, factories.factory_for(key), open_kwargs=kwargs_by_key.get(key, {})
+                key,
+                factories.factory_for(key),
+                open_kwargs=kwargs_by_key.get(key, {}),
+                binding=binding_by_key.get(key),
             )
         return registry
 
@@ -337,5 +415,7 @@ def build_default_registry(
         opener = openers.get(key)
         if opener is None:
             raise BenchValueError(f"no opener for device key {key!r}")
-        registry.register(key, opener, open_kwargs=kwargs_by_key.get(key, {}))
+        registry.register(
+            key, opener, open_kwargs=kwargs_by_key.get(key, {}), binding=binding_by_key.get(key)
+        )
     return registry
