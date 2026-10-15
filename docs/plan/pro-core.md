@@ -44,7 +44,7 @@ With no Pro configuration the agent behaves as before, except that a safety fix 
 - **CORE-P0.7** On benchpi, a run with the client disconnected completes, and the wedged-engine trip time is measured and recorded. `verify: evidence`
 - **CORE-P0.8** Claim gating:
   - `agent.open`/`agent.close` are refused across claims;
-  - `run.abort` is owner/holder only, or `force` + reason, which raises a critical event;
+  - `run.abort` is owner/holder only, or `force` + reason, which raises an `alarm` event (`critical` stays reserved for trips);
   - `blob.release`/`rec.release` are owner-only;
   - structured ERR `code`, which `cli.py` matches on, with the text match kept as a fallback.
 

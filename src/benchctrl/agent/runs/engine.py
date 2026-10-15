@@ -81,8 +81,12 @@ class RunEngine:
         clock_scale: float = 1.0,
         pdu=None,
         pdu_worker=None,
+        submitted_by: Optional[str] = None,
     ) -> None:
         self.spec = spec
+        #: The session that submitted the run. With the device's claim holder,
+        #: the only session that may abort it without ``force``.
+        self.submitted_by = submitted_by
         self.device = device
         self.worker = worker
         #: The switched PDU, if this run's phases switch mains. A *second*

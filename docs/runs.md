@@ -260,6 +260,12 @@ client.call("run.fetch_chunk", {"run_id": run_id, "idx": 0})
 client.call("run.abort", {"run_id": run_id, "reason": "..."})
 ```
 
+`run.abort` is accepted from the session that submitted the run or the one
+holding its device's claim. Any other session is refused (`not_owner`) unless
+it passes `"force": True` with a `reason`; a forced abort is published as a
+`run_abort_forced` event at `alarm` severity, so the owner can see who stopped
+its run and why.
+
 Sequence numbers are assigned inside the same transaction that persists the
 event, so `since_seq` replays exactly what a disconnected host missed —
 nothing lost, nothing duplicated.

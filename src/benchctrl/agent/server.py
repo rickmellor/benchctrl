@@ -45,7 +45,7 @@ from benchctrl.exceptions import BenchValueError
 from benchctrl.net import auth as authmod
 from benchctrl.net.codec import TAG as CODEC_TAG
 from benchctrl.net.codec import Decoder, Encoder
-from benchctrl.net.errors import PolicyError, encode_exception
+from benchctrl.net.errors import CLAIM_CONFLICT, NOT_OWNER, PolicyError, encode_exception
 from benchctrl.net.frames import FrameReader, FrameType, FrameWriter
 
 log = logging.getLogger("benchctrl.agent.server")
@@ -1577,7 +1577,9 @@ class BenchAgent:
             if holder is not None and holder != session.session_id:
                 raise PolicyError(
                     f"{device_key} is claimed by session {holder}; this session "
-                    f"is a read-only observer until it is released"
+                    f"is a read-only observer until it is released",
+                    code=CLAIM_CONFLICT,
+                    holder=holder,
                 )
             self._claims[device_key] = session.session_id
             session.claims.add(device_key)
@@ -1600,11 +1602,50 @@ class BenchAgent:
             session.claims.discard(device_key)
         return {"device": device_key, "claimed": False}
 
+    def claim_holder(self, device_key: str) -> Optional[str]:
+        with self._lock:
+            return self._claims.get(device_key)
+
+    def refuse_across_claim(self, session: Session, device_key: str, verb: str) -> None:
+        """Refuse ``verb`` on a device another session holds the claim on.
+
+        For the verbs that change what a device *is* rather than what it does
+        (``agent.open``, ``agent.close``). Closing a device trips it, so before
+        this any session could disarm another's output by closing it. An
+        unclaimed device stays open to anyone, as before.
+        """
+        holder = self.claim_holder(device_key)
+        if holder is not None and holder != session.session_id:
+            raise PolicyError(
+                f"{device_key} is claimed by session {holder}; {verb} is refused "
+                f"for any other session",
+                code=CLAIM_CONFLICT,
+                holder=holder,
+            )
+
+    def refuse_unless_owner(self, session: Session, owner: Optional[str], what: str) -> None:
+        """Refuse to release ``what`` unless ``session`` made it.
+
+        A resource with no owner, or whose owner has disconnected, is anyone's
+        to release: nobody is left to be surprised by it vanishing, and its TTL
+        would collect it anyway.
+        """
+        if owner is None or owner == session.session_id:
+            return
+        with self._lock:
+            alive = owner in self._sessions
+        if alive:
+            raise PolicyError(
+                f"{what} belongs to session {owner}; only that session may release it",
+                code=NOT_OWNER,
+                holder=owner,
+            )
+
     # --- codecs ---------------------------------------------------------
 
     def encoder(self, session: Session) -> Encoder:
         return Encoder(
-            store_blob=lambda data: self.blobs.put(data).blob_id,
+            store_blob=lambda data: self.blobs.put(data, owner=session.session_id).blob_id,
             register_iterator=lambda gen: (
                 self.iterators.register("unknown", gen, session_id=session.session_id).iter_id
             ),
@@ -1878,10 +1919,12 @@ class _Handler(socketserver.BaseRequestHandler):
         if method == "agent.time":
             return {"utc": time.time(), "mono": time.monotonic()}, None
         if method == "agent.open":
+            agent.refuse_across_claim(session, p["device"], "agent.open")
             entry = agent.registry.open(p["device"], **(p.get("open") or {}))
             return entry.to_dict(), None
         if method == "agent.close":
             key = p["device"]
+            agent.refuse_across_claim(session, key, "agent.close")
             # ``only``: the governor would otherwise target every armed
             # device while holding objects for just this one, and report the
             # rest FAILED (and cut panic outlets) for a close of one device.
@@ -1913,7 +1956,9 @@ class _Handler(socketserver.BaseRequestHandler):
         if method == "blob.fetch":
             return self._blob_fetch(session, p), None
         if method == "blob.release":
-            return {"released": agent.blobs.release(p["blob"])}, None
+            blob_id = p["blob"]
+            agent.refuse_unless_owner(session, agent.blobs.owner_of(blob_id), f"blob {blob_id}")
+            return {"released": agent.blobs.release(blob_id)}, None
 
         if method == "rec.start":
             return self._rec_start(session, p), None
@@ -1922,7 +1967,11 @@ class _Handler(socketserver.BaseRequestHandler):
         if method == "rec.stats":
             return self._rec_stats(p), None
         if method == "rec.release":
-            return {"released": agent.recordings.release(p["rec_id"])}, None
+            rec_id = p["rec_id"]
+            agent.refuse_unless_owner(
+                session, agent.recordings.owner_of(rec_id), f"recording {rec_id}"
+            )
+            return {"released": agent.recordings.release(rec_id)}, None
 
         if method == "run.submit":
             return self._run_submit(session, p), None
@@ -1936,9 +1985,7 @@ class _Handler(socketserver.BaseRequestHandler):
                 int(p.get("since_seq", 0)), limit=int(p.get("limit", 500))
             ), None
         if method == "run.abort":
-            engine = agent.runs.get(p["run_id"])
-            engine.abort(p.get("reason", "operator"))
-            return {"run_id": engine.run_id, "aborting": True}, None
+            return self._run_abort(session, p), None
         if method == "run.artifacts":
             store = agent.runs.store_for(p["run_id"])
             return {
@@ -2072,6 +2119,7 @@ class _Handler(socketserver.BaseRequestHandler):
             clock_scale=float(p.get("clock_scale", 1.0)),
             pdu=pdu,
             pdu_worker=pdu_worker,
+            submitted_by=session.session_id,
         )
         if spec.llm.enabled:
             from benchctrl.agent.llm.supervisor import build_supervisor
@@ -2081,6 +2129,52 @@ class _Handler(socketserver.BaseRequestHandler):
                 engine.attach_llm(supervisor.start())
         engine.start()
         return {"run_id": engine.run_id, "spec_sha256": spec.sha256}
+
+    def _run_abort(self, session: Session, p: dict) -> dict:
+        """Abort a run: its submitter's or its device's claim holder's to do.
+
+        Anyone else is refused unless they pass ``force`` with a ``reason``, and
+        a forced abort is announced at ``alarm`` so the session whose run it
+        was can see who stopped it and why. Not ``critical``: that grade is
+        reserved for the trip, which must always be able to evict its way into
+        a full queue (see ``ACTION_SEVERITY_CEILING``).
+        """
+        agent = self.agent
+        engine = agent.runs.get(p["run_id"])
+        reason = p.get("reason", "operator")
+        holder = agent.claim_holder(engine.spec.device)
+        if session.session_id not in (engine.submitted_by, holder):
+            owner = holder or engine.submitted_by
+            if not p.get("force"):
+                raise PolicyError(
+                    f"run {engine.run_id} belongs to session {owner}; abort it "
+                    f"from that session, claim {engine.spec.device}, or pass "
+                    f"force with a reason",
+                    code=NOT_OWNER,
+                    holder=owner,
+                )
+            if not (isinstance(p.get("reason"), str) and p["reason"].strip()):
+                raise PolicyError("a forced run.abort needs a reason", code=NOT_OWNER)
+            log.warning(
+                "agent: session %s force-aborted run %s (owner %s): %s",
+                session.session_id,
+                engine.run_id,
+                owner,
+                reason,
+            )
+            agent.events.publish(
+                {
+                    "kind": "run_abort_forced",
+                    "severity": ACTION_SEVERITY_CEILING,
+                    "run_id": engine.run_id,
+                    "device": engine.spec.device,
+                    "session": session.session_id,
+                    "owner": owner,
+                    "reason": reason,
+                }
+            )
+        engine.abort(reason)
+        return {"run_id": engine.run_id, "aborting": True}
 
     def _resolve_pdu_key(self, spec: RunSpec) -> str:
         """Which registered device this run's outlet setpoints refer to.
@@ -2115,7 +2209,9 @@ class _Handler(socketserver.BaseRequestHandler):
         if match is None:
             raise BenchValueError(f"run {p['run_id']} has no chunk {idx}")
         data = _Path(match["path"]).read_bytes()
-        info = agent.blobs.put(data, content_type="application/x-opensmu")
+        info = agent.blobs.put(
+            data, content_type="application/x-opensmu", owner=session.session_id
+        )
         return {"idx": idx, **info.to_dict()}
 
     def _read_window(self, p: dict) -> dict:
@@ -2167,7 +2263,9 @@ class _Handler(socketserver.BaseRequestHandler):
         agent.governor.set_recording(handle.device_key, False)
 
         data = handle.recording.to_bytes()
-        info = agent.blobs.put(data, content_type="application/x-opensmu")
+        info = agent.blobs.put(
+            data, content_type="application/x-opensmu", owner=session.session_id
+        )
         agent.recordings.finish(
             handle.rec_id, blob_id=info.blob_id, sha256=info.sha256, size=info.size
         )

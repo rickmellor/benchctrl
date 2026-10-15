@@ -275,6 +275,14 @@ Behavioural differences worth knowing:
 - **One writer per device.** Extra sessions are read-only observers. An observer's only
   device verb is `device.read`: a non-mutating method on a device somebody else has already
   opened (what the dashboard's generator-screen pane uses); it never opens, claims or arms.
+- **A claim also gates the verbs around the device.** Another session's
+  `agent.open`/`agent.close` on a claimed device is refused with
+  `PolicyError.code == "claim_conflict"` (and `holder`, the session holding it).
+  `run.abort` is for the run's submitter or the device's claim holder;
+  anyone else needs `force: true` and a `reason`, and the forced abort is
+  announced as an `alarm`-severity `run_abort_forced` event. `blob.release` and
+  `rec.release` are for the session that made the blob or recording, until it
+  disconnects (`code == "not_owner"`).
 - **A-1 still applies.** The emulator and a recording cannot run
   concurrently on one Arc; the run engine refuses the combination rather
   than deadlocking.

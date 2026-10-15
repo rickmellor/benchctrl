@@ -9,6 +9,34 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### Claims now gate `agent.open`/`agent.close`, `run.abort` and releases
+
+**Behaviour change for a session that acted on something another session
+holds. Such a call is now refused; before, it worked.**
+
+- **`agent.open` and `agent.close` are refused on a device another session has
+  claimed.** Closing trips the device, so before this any connected session
+  could disarm another's output by closing it. An unclaimed device is still
+  anyone's to open or close.
+- **`run.abort` belongs to the run's submitter and to its device's claim
+  holder.** Anyone else must pass `force: true` with a non-empty `reason`. A
+  forced abort is logged and published as a `run_abort_forced` event at
+  `alarm` severity, naming the session that forced it, the owner it overrode,
+  and the reason. (`alarm`, not `critical`: `critical` stays reserved for
+  safety trips, which must always be able to evict their way into a full
+  event queue.)
+- **`blob.release` and `rec.release` are owner-only** while the owner is
+  connected. A blob or recording made by the agent itself, or whose owner has
+  disconnected, can still be released by anyone. `BlobStore.put` takes an
+  `owner`.
+- **Refusals carry a structured `code`.** `PolicyError` gains `code` and
+  `holder` attributes, which cross the wire as ERR attrs: `claim_conflict`
+  for a device held elsewhere, `not_owner` for a run, blob or recording that
+  belongs to another session. `holder` names the session to ask. A refusal
+  without a code serialises exactly as before. The CLI's "another session holds
+  the claim" explanation keys on `code` first and falls back to the message
+  text for older agents.
+
 ### The deadman is per owner, and a run keeps its own output alive
 
 **Safety behaviour change. With no new configuration, some trips now happen
