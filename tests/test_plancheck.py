@@ -432,6 +432,7 @@ def test_markdown_report_shows_ran_vs_referenced(repo: Path) -> None:
 # ---------------------------------------------------------------- the repo's own plan
 
 
+@pytest.mark.plan("CORE-P0.3")
 def test_repo_plan_parses_and_every_reference_names_a_real_item() -> None:
     """The real plan and the real test tree: no junit, so nothing is done, but
     gate 1 (unknown or duplicate ID) still applies to every reference."""
