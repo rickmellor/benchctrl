@@ -844,6 +844,9 @@ class Session:
         self.writer = FrameWriter(sock)
         self.authenticated = False
         self.observer = observer
+        #: Settled from the HELLO; a pre-range client gets PROTOCOL_VERSION.
+        self.protocol_v = authmod.PROTOCOL_VERSION
+        self.peer_caps: frozenset[str] = frozenset()
         self.claims: set[str] = set()
         self.opened_at = time.monotonic()
         self._event_seq = itertools.count(1)
@@ -1725,10 +1728,12 @@ class _Handler(socketserver.BaseRequestHandler):
             return False
         hello = json.loads(frame[1] or b"{}")
 
-        version_error = authmod.check_version(hello)
+        version, version_error = authmod.negotiate(hello)
         if version_error:
             self._send_error(session, 0, PolicyError(version_error))
             return False
+        session.protocol_v = version
+        session.peer_caps = authmod.peer_caps(hello)
 
         # A client may ask for the read-only observer role. Self-declared on
         # purpose: it only ever *removes* capability, so there is nothing to gain
@@ -1750,7 +1755,7 @@ class _Handler(socketserver.BaseRequestHandler):
             self._send_welcome(session)
             return True
 
-        challenge, nonce_s = authmod.build_challenge(AGENT_NAME)
+        challenge, nonce_s = authmod.build_challenge(AGENT_NAME, session.protocol_v)
         session.writer.send(FrameType.CHALLENGE, _json(challenge))
 
         frame = session.reader.read_frame(timeout=authmod.HANDSHAKE_TIMEOUT)
@@ -1778,6 +1783,10 @@ class _Handler(socketserver.BaseRequestHandler):
                 {
                     "session": session.session_id,
                     "agent": AGENT_NAME,
+                    # The version settled from the HELLO and this agent's
+                    # caps. A pre-range client ignores both.
+                    "v": session.protocol_v,
+                    "caps": list(authmod.CAPS),
                     # Echoed so a client can assert it got the role it asked
                     # for rather than discovering it via a PolicyError later.
                     "observer": session.observer,

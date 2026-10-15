@@ -9,6 +9,19 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### The handshake negotiates a version range and capabilities
+
+HELLO and CHALLENGE now carry `v_min`, `v_max` and `caps` beside `v`, and
+WELCOME echoes the settled `v` and the agent's `caps`. `PROTOCOL_VERSION` is
+still 1 and `v` is still sent, so a peer from before this change sees the
+frames it always did, and either end still connects to it. A peer that sends
+no range gets the old strict `v` check. A peer that sends a range is held to
+it, and a half or malformed range is refused rather than guessed at. The
+client now checks the CHALLENGE before it sends AUTH, so a version mismatch
+no longer costs a MAC. `RemoteClient.protocol_v`/`peer_caps` and
+`Session.protocol_v`/`peer_caps` expose the result. The first caps are
+`err-code` and `per-owner-deadman`.
+
 ### Session ids are `s-<agent6>-<boot6>-N`
 
 A bare `s-N` restarted at `s-1` with every agent process, so an id held from
