@@ -10,6 +10,7 @@ resource so the driver's own query methods can be driven end to end through
 from __future__ import annotations
 
 import logging
+import socket
 import struct
 
 import pytest
@@ -747,7 +748,9 @@ class _FakeLanSocket:
     def recv(self, n: int) -> bytes:
         out, self._buf = self._buf[:n], self._buf[n:]
         if not out:
-            raise TimeoutError("no data")
+            # What a real socket raises. TimeoutError is only its alias from
+            # 3.10; on 3.9 the driver (rightly) does not catch it as a timeout.
+            raise socket.timeout("no data")
         return out
 
     def settimeout(self, t) -> None:

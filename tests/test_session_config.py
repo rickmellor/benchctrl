@@ -341,6 +341,7 @@ def test_mcp_globals_remain_injectable():
 # so they assert on what ``resolve`` hands back rather than on a call count.
 
 
+@pytest.mark.needs_mcp
 def test_mcp_install_config_makes_sim_env_take_effect(monkeypatch):
     """``BENCHCTRL_SIM_DEVICES`` must reach ``session.resolve``."""
     from benchctrl import mcp as mcpmod
@@ -370,6 +371,7 @@ def test_mcp_install_config_makes_sim_env_take_effect(monkeypatch):
         smu.close()
 
 
+@pytest.mark.needs_mcp
 def test_mcp_install_config_reads_the_config_file(monkeypatch, tmp_path):
     """Precedence level 4 — the file — must reach ``session`` too.
 
@@ -401,6 +403,7 @@ def test_mcp_install_config_reads_the_config_file(monkeypatch, tmp_path):
     assert session.mode_for("otii_arc") == "local"
 
 
+@pytest.mark.needs_mcp
 def test_mcp_install_config_with_nothing_set_leaves_everything_local(
     monkeypatch, tmp_path
 ):

@@ -56,7 +56,12 @@ def pytest_collection_modifyitems(config, items):
     by a fixture or a hook). A malformed ID is a usage error, so a typo fails
     the run instead of quietly referencing nothing.
     """
+    no_mcp = sys.version_info < (3, 10)
     for item in items:
+        # Skipped by Python version, never by "is it importable": from 3.10 a
+        # missing mcp is a broken install and must fail, not quietly skip.
+        if no_mcp and item.get_closest_marker("needs_mcp") is not None:
+            item.add_marker(pytest.mark.skip(reason="mcp<2 needs Python >= 3.10"))
         for marker in item.iter_markers("plan"):
             if not marker.args:
                 raise pytest.UsageError(f"{item.nodeid}: @pytest.mark.plan needs an item ID")

@@ -10,12 +10,14 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.mark.needs_mcp
 def test_mcp_module_importable():
     from benchctrl import mcp as m
 
     assert m.mcp.name == "benchctrl"
 
 
+@pytest.mark.needs_mcp
 def test_list_channels_returns_all_channels():
     from benchctrl.mcp import list_channels
 
@@ -25,6 +27,7 @@ def test_list_channels_returns_all_channels():
         assert required in codes, f"missing channel {required}"
 
 
+@pytest.mark.needs_mcp
 def test_list_channels_includes_metadata():
     from benchctrl.mcp import list_channels
 
@@ -37,6 +40,7 @@ def test_list_channels_includes_metadata():
     assert mc["toggleable"] is True
 
 
+@pytest.mark.needs_mcp
 def test_list_channels_temperature_is_not_toggleable():
     from benchctrl.mcp import list_channels
 
@@ -45,6 +49,7 @@ def test_list_channels_temperature_is_not_toggleable():
     assert tp["toggleable"] is False
 
 
+@pytest.mark.needs_mcp
 def test_tools_have_docstrings():
     """Every public tool function must have a docstring — that's what the
     LLM sees as the tool description."""
@@ -90,6 +95,7 @@ def _make_saved_recording(tmp_path):
     return p
 
 
+@pytest.mark.needs_mcp
 def test_recording_summary_returns_stats(tmp_path):
     from benchctrl.mcp import recording_summary
 
@@ -105,6 +111,7 @@ def test_recording_summary_returns_stats(tmp_path):
     assert r["channels"]["mv"]["charge_C"] is None
 
 
+@pytest.mark.needs_mcp
 def test_export_recording_to_csv(tmp_path):
     from benchctrl.mcp import export_recording
 
@@ -116,6 +123,7 @@ def test_export_recording_to_csv(tmp_path):
     assert out.read_text().startswith("timestamp_s,")
 
 
+@pytest.mark.needs_mcp
 def test_export_recording_to_parquet(tmp_path):
     pytest.importorskip("pyarrow")
     from benchctrl.mcp import export_recording
@@ -127,6 +135,7 @@ def test_export_recording_to_parquet(tmp_path):
     assert out.exists()
 
 
+@pytest.mark.needs_mcp
 def test_export_recording_unknown_extension_normalises_to_benchctrl(tmp_path):
     from benchctrl.mcp import export_recording
 
@@ -136,6 +145,7 @@ def test_export_recording_unknown_extension_normalises_to_benchctrl(tmp_path):
     assert r["output"].endswith(".opensmu")
 
 
+@pytest.mark.needs_mcp
 def test_plot_recording_writes_png(tmp_path):
     pytest.importorskip("matplotlib")
     from benchctrl.mcp import plot_recording
@@ -148,6 +158,7 @@ def test_plot_recording_writes_png(tmp_path):
     assert set(r["channels"]) == {"mc", "mv"}
 
 
+@pytest.mark.needs_mcp
 def test_plot_recording_subset_of_channels(tmp_path):
     pytest.importorskip("matplotlib")
     from benchctrl.mcp import plot_recording
@@ -158,6 +169,7 @@ def test_plot_recording_subset_of_channels(tmp_path):
     assert out.exists()
 
 
+@pytest.mark.needs_mcp
 def test_smu_state_snapshot_shape():
     """The internal state-snapshot helper produces a well-formed dict for any
     SMU. Use a transport-less SMU stub to avoid hardware."""
@@ -207,6 +219,7 @@ class _FakeDL:
     def close(self): self._closed = True
 
 
+@pytest.mark.needs_mcp
 def test_dl3031a_program_list_coerces_int_and_float_step_pairs():
     from benchctrl import mcp as m
     from benchctrl.drivers.rigol_dl3031a import mcp_tools as dl_tools
@@ -236,6 +249,7 @@ def test_dl3031a_program_list_coerces_int_and_float_step_pairs():
         dl_tools._dl3031a = None
 
 
+@pytest.mark.needs_mcp
 def test_dl3031a_program_list_rejects_malformed_steps():
     from benchctrl import mcp as m
     from benchctrl.drivers.rigol_dl3031a import mcp_tools as dl_tools
@@ -252,6 +266,7 @@ def test_dl3031a_program_list_rejects_malformed_steps():
         dl_tools._dl3031a = None
 
 
+@pytest.mark.needs_mcp
 def test_dl3031a_tools_raise_driver_connection_error_when_not_open():
     """L2 fix: _get_dl3031a now raises RigolDLConnectionError, not
     bare RuntimeError, when the singleton is None."""
@@ -263,6 +278,7 @@ def test_dl3031a_tools_raise_driver_connection_error_when_not_open():
         m.dl3031a_info()
 
 
+@pytest.mark.needs_mcp
 def test_qr10x_tools_raise_driver_connection_error_when_not_open():
     """Same as above for QR10x."""
     from benchctrl import mcp as m
@@ -273,6 +289,7 @@ def test_qr10x_tools_raise_driver_connection_error_when_not_open():
         m.qr10x_info()
 
 
+@pytest.mark.needs_mcp
 def test_dl3031a_close_surfaces_input_off_failure():
     """H5 fix: dl3031a_close returns input_off_failed when set_input(False)
     raises. Previously, errors were silently swallowed and the operator
@@ -318,6 +335,7 @@ class _FakeDP2031:
         self._closed = True
 
 
+@pytest.mark.needs_mcp
 def test_dp2031_tools_raise_driver_connection_error_when_not_open():
     """Same pattern as DL3031A/QR10x — clear singleton, expect a
     driver-specific connection error from any tool that needs the device."""
@@ -331,6 +349,7 @@ def test_dp2031_tools_raise_driver_connection_error_when_not_open():
         m.dp2031_set_voltage(1, 3.3)
 
 
+@pytest.mark.needs_mcp
 def test_dp2031_set_voltage_calls_driver():
     """Singleton-injection sanity: dp2031_set_voltage routes channel + V
     correctly to the underlying driver."""
@@ -346,6 +365,7 @@ def test_dp2031_set_voltage_calls_driver():
         dp_tools._dp2031 = None
 
 
+@pytest.mark.needs_mcp
 def test_dp2031_close_disables_all_three_channels():
     """dp2031_close should call set_output(ch, False) for ch in 1/2/3
     before close()."""
@@ -360,6 +380,7 @@ def test_dp2031_close_disables_all_three_channels():
     assert dp_tools._dp2031 is None
 
 
+@pytest.mark.needs_mcp
 def test_dp2031_close_surfaces_per_channel_failure():
     """If one channel's set_output(False) fails, the response dict
     surfaces it under outputs_off_failed (parallels dl3031a_close H5
@@ -475,6 +496,7 @@ class _FakeSDM4065A:
         self._closed = True
 
 
+@pytest.mark.needs_mcp
 def test_sdm4065a_tools_raise_driver_connection_error_when_not_open():
     """Same pattern as DL3031A/QR10x/DP2031 — a driver-specific connection
     error, not a bare RuntimeError, when the singleton is None."""
@@ -489,6 +511,7 @@ def test_sdm4065a_tools_raise_driver_connection_error_when_not_open():
         m.sdm4065a_measure_resistance()
 
 
+@pytest.mark.needs_mcp
 def test_sdm4065a_close_needs_no_disarm():
     """A DMM sources nothing, so unlike dl3031a_close/dp2031_close there is
     no output to switch off first. Pinned so a future edit that added a
@@ -507,6 +530,7 @@ def test_sdm4065a_close_needs_no_disarm():
         sdm_tools._sdm4065a = None
 
 
+@pytest.mark.needs_mcp
 def test_sdm4065a_close_when_nothing_is_open_is_not_an_error():
     from benchctrl import mcp as m
     from benchctrl.drivers.siglent_sdm4065a import mcp_tools as sdm_tools
@@ -516,6 +540,7 @@ def test_sdm4065a_close_when_nothing_is_open_is_not_an_error():
     assert result["closed"] is False
 
 
+@pytest.mark.needs_mcp
 def test_sdm4065a_measure_tools_pass_the_range_through():
     """Singleton-injection sanity: the range argument must reach the driver,
     because on this meter the default is 2 kΩ rather than autorange, and a
@@ -535,6 +560,7 @@ def test_sdm4065a_measure_tools_pass_the_range_through():
         sdm_tools._sdm4065a = None
 
 
+@pytest.mark.needs_mcp
 def test_sdm4065a_read_tool_returns_every_sample():
     """``read()`` is ``list[float]``; a tool that unwrapped it to a scalar
     would silently discard every sample after the first."""
@@ -549,6 +575,7 @@ def test_sdm4065a_read_tool_returns_every_sample():
         sdm_tools._sdm4065a = None
 
 
+@pytest.mark.needs_mcp
 def test_sdm4065a_null_now_tool_reports_auto_disarmed():
     """The tool's response is what the model reads back, so it must show
     ``null_auto`` false — if auto were still armed the instrument would
@@ -568,6 +595,7 @@ def test_sdm4065a_null_now_tool_reports_auto_disarmed():
         sdm_tools._sdm4065a = None
 
 
+@pytest.mark.needs_mcp
 def test_sdm4065a_set_null_tool_surfaces_the_armed_auto_flag():
     """``sdm4065a_set_null(True)`` alone leaves auto armed. The tool reports
     that rather than hiding it, so a model that used the low-level tool can
@@ -585,6 +613,7 @@ def test_sdm4065a_set_null_tool_surfaces_the_armed_auto_flag():
         sdm_tools._sdm4065a = None
 
 
+@pytest.mark.needs_mcp
 def test_sdm4065a_reading_timeout_ms_needs_no_open_device():
     """A pure-arithmetic helper: it has to be callable *before* open, since
     its whole purpose is choosing the timeout to open with."""
@@ -643,6 +672,7 @@ def test_sdm4065a_mcp_tools_cover_the_driver_surface():
     )
 
 
+@pytest.mark.needs_mcp
 def test_sdm4065a_tools_are_registered_on_the_shared_server():
     """Owning the tools is not the same as registering them. This fails if
     ``benchctrl.mcp`` forgot the ``register_mcp_tools`` call."""
@@ -656,6 +686,7 @@ def test_sdm4065a_tools_are_registered_on_the_shared_server():
         assert fn.__name__ in registered, f"{fn.__name__} not registered on the server"
 
 
+@pytest.mark.needs_mcp
 def test_sdm4065a_tools_are_importable_from_the_orchestrator():
     """The re-export block in ``benchctrl.mcp`` is how tests and callers
     reach these; a missing name there breaks them without breaking MCP."""
@@ -708,6 +739,7 @@ def test_sdg1032x_mcp_tools_cover_the_driver_surface():
     )
 
 
+@pytest.mark.needs_mcp
 def test_sdg1032x_tools_are_registered_on_the_shared_server():
     """Owning the tools is not the same as registering them. This fails if
     ``benchctrl.mcp`` forgot the ``register_mcp_tools`` call."""
@@ -721,6 +753,7 @@ def test_sdg1032x_tools_are_registered_on_the_shared_server():
         assert fn.__name__ in registered, f"{fn.__name__} not registered on the server"
 
 
+@pytest.mark.needs_mcp
 def test_sdg1032x_tools_are_importable_from_the_orchestrator():
     """The re-export block in ``benchctrl.mcp`` is how tests and callers
     reach these; a missing name there breaks them without breaking MCP."""
@@ -869,6 +902,7 @@ def test_pdu41002_mcp_tools_cover_the_driver_surface():
         )
 
 
+@pytest.mark.needs_mcp
 def test_pdu41002_tools_are_registered_on_the_shared_server():
     """Owning the tools is not the same as registering them."""
     import asyncio
@@ -881,6 +915,7 @@ def test_pdu41002_tools_are_registered_on_the_shared_server():
         assert fn.__name__ in registered, f"{fn.__name__} not registered on the server"
 
 
+@pytest.mark.needs_mcp
 def test_pdu41002_tools_are_importable_from_the_orchestrator():
     from benchctrl import mcp as m
     from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
@@ -962,6 +997,7 @@ def test_pdu41002_switching_tools_warn_about_mains_in_their_docstrings():
         assert "allowed_outlets" in doc, f"{name} does not point at the allowlist"
 
 
+@pytest.mark.needs_mcp
 def test_pdu41002_read_tools_report_a_clear_error_before_open():
     """A model that calls a read first must get "call open" back, not a
     ``NoneType`` traceback — the message is what tells it what to do next."""
@@ -974,6 +1010,7 @@ def test_pdu41002_read_tools_report_a_clear_error_before_open():
         m.pdu41002_status()
 
 
+@pytest.mark.needs_mcp
 def test_pdu41002_close_is_safe_to_call_when_not_open():
     """Teardown must not raise. A close that failed because nothing was open
     would make cleanup code unreliable on the one device where a *missed*
@@ -985,6 +1022,7 @@ def test_pdu41002_close_is_safe_to_call_when_not_open():
     assert m.pdu41002_close()["closed"] is False
 
 
+@pytest.mark.needs_mcp
 def test_pdu41002_tools_work_against_the_simulator():
     """The tools end to end, through the module singleton.
 
@@ -1140,6 +1178,7 @@ def test_adu218_mcp_tools_cover_the_driver_surface():
         )
 
 
+@pytest.mark.needs_mcp
 def test_adu218_tools_are_registered_on_the_shared_server():
     from benchctrl import mcp as m
     from benchctrl.drivers.ontrak_adu218 import mcp_tools as adu_tools
@@ -1221,6 +1260,7 @@ def test_the_watchdog_tool_warns_that_reading_it_refeeds_the_timer():
     assert "poll" in plain
 
 
+@pytest.mark.needs_mcp
 def test_adu218_read_tools_report_a_clear_error_before_open():
     """A model that calls a read first must get "call open" back, not a
     ``NoneType`` traceback — the message is what tells it what to do next."""
@@ -1233,6 +1273,7 @@ def test_adu218_read_tools_report_a_clear_error_before_open():
         m.adu218_relay_states()
 
 
+@pytest.mark.needs_mcp
 def test_adu218_close_is_safe_to_call_when_not_open():
     """Teardown must not raise, or cleanup code becomes unreliable."""
     from benchctrl import mcp as m
@@ -1242,6 +1283,7 @@ def test_adu218_close_is_safe_to_call_when_not_open():
     assert m.adu218_close()["closed"] is False
 
 
+@pytest.mark.needs_mcp
 def test_adu218_tools_work_against_the_simulator():
     """The tools end to end, through the module singleton.
 
@@ -1448,6 +1490,7 @@ def test_framework_tools_are_reachable_without_importing_fastmcp():
     assert out.stdout.strip() == "ok"
 
 
+@pytest.mark.needs_mcp
 def test_framework_tools_are_importable_from_the_orchestrator():
     """The re-export block: ``from benchctrl.mcp import plot_recording`` is a
     documented import path and predates the move, so it must keep working."""
