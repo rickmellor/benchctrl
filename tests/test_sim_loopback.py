@@ -172,7 +172,19 @@ def test_recording_captures_a_known_waveform(sim_arc):
         smu.set_voltage(3.3)
         smu.set_output(True)
         with smu.record("mc", "mv") as rec:
-            time.sleep(1.0)
+            # Record to a sample count, not to a wall-clock second. The
+            # assertion below is about samples, and samples per second is a
+            # property of how busy the runner is, not of the code under test:
+            # a loaded CI runner got 307-479 out of a fixed 1.0 s. Poll until
+            # the count clears the bar, holding the 1.0 s floor so the
+            # reader-batch window (KNOWN_LIMITATIONS A-4) is still covered.
+            # On timeout we fall through and the assertion reports the count.
+            started = time.monotonic()
+            while time.monotonic() - started < 15.0:
+                enough = rec.info(OtiiArcChannel.MAIN_CURRENT).count > 500
+                if enough and time.monotonic() - started >= 1.0:
+                    break
+                time.sleep(0.1)
 
         mc = rec.statistics(OtiiArcChannel.MAIN_CURRENT)
         assert mc.sample_count > 500, f"expected sub-4 packing to yield many samples, got {mc.sample_count}"

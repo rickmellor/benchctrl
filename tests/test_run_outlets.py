@@ -21,6 +21,8 @@ never on the absence of an exception.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from benchctrl.agent.runs import store as store_mod
@@ -574,15 +576,18 @@ def test_outlets_are_switched_on_the_pdus_own_worker(device, pdu, tmp_path):
     the agent needs the PDU's own worker to serialise its single CLI session."""
     from benchctrl.agent.worker import DeviceWorker
 
-    labels: list[str] = []
+    # Recorded where the switch actually runs, not at a submit method: the
+    # engine is free to queue however it likes, and a spy on one entry point
+    # reads "never queued" the moment it uses another.
+    threads: list[str] = []
     pdu_worker = DeviceWorker("cyberpower_pdu41002").start()
-    real_submit = pdu_worker.submit
+    real_set = pdu.set_outlet_state
 
-    def note(fn, **kwargs):
-        labels.append(kwargs.get("label", ""))
-        return real_submit(fn, **kwargs)
+    def note(*args, **kwargs):
+        threads.append(threading.current_thread().name)
+        return real_set(*args, **kwargs)
 
-    pdu_worker.submit = note  # type: ignore[method-assign]
+    pdu.set_outlet_state = note  # type: ignore[method-assign]
     try:
         engine = _run(_cycle_spec(settle_s=0.0), device, tmp_path, pdu=pdu,
                       pdu_worker=pdu_worker)
@@ -590,4 +595,4 @@ def test_outlets_are_switched_on_the_pdus_own_worker(device, pdu, tmp_path):
         pdu_worker.stop()
 
     assert engine.status == store_mod.STATUS_COMPLETE
-    assert labels == ["outlet_3", "outlet_3"], labels
+    assert threads == ["worker-cyberpower_pdu41002"] * 2, threads

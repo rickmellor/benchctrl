@@ -141,19 +141,35 @@ def make_sdg1032x(**kwargs) -> Any:
     the driver ``lan_host="127.0.0.1", lan_port=sim.lan_port``. Pass
     ``sim={"lan": False}`` for a unit with no Ethernet: the factory then
     passes nothing and the driver's no-LAN error path runs.
+
+    ``transport="lan"`` opens the driver's main resource on that same socket
+    (``TCPIP0::127.0.0.1::<port>::SOCKET``) instead of the pty. pyvisa-py's
+    serial backend reads one byte per call and re-takes the GIL for each, so
+    a 76.8 KB screen dump that takes ~1 s alone did not finish in 270 s next
+    to one CPU-bound thread; over the socket it took 0.3 s. Use it where the
+    transport is not the thing under test and the process is busy.
     """
     from benchctrl.drivers.siglent_sdg1032x import SiglentSDG1032X
     from benchctrl.sim.sdg1032x import SimulatedSDG1032X
 
     sim_kwargs = kwargs.pop("sim", {})
     kwargs.pop("resource", None)
+    transport = kwargs.pop("transport", "pty")
+    if transport not in ("pty", "lan"):
+        raise ValueError(f"transport must be 'pty' or 'lan', got {transport!r}")
     sim = SimulatedSDG1032X(**sim_kwargs)
     sim.start()
+    if transport == "lan" and sim.lan_port is None:
+        sim.close()
+        raise ValueError("transport='lan' needs the sim's LAN socket (sim lan=True)")
+    resource = (
+        f"TCPIP0::127.0.0.1::{sim.lan_port}::SOCKET" if transport == "lan" else _asrl(sim.port)
+    )
     if sim.lan_port is not None and "lan_host" not in kwargs and "lan_port" not in kwargs:
         kwargs["lan_host"] = "127.0.0.1"
         kwargs["lan_port"] = sim.lan_port
     try:
-        driver = SiglentSDG1032X.open(_asrl(sim.port), **kwargs)
+        driver = SiglentSDG1032X.open(resource, **kwargs)
     except Exception:
         sim.close()
         raise

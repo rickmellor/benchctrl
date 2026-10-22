@@ -50,6 +50,9 @@ class BlobInfo:
     created_at: float
     content_type: str = "application/octet-stream"
     path: Optional[Path] = None
+    #: The session the blob was made for, or None for one made by the agent
+    #: itself. Only that session may release it while it is connected.
+    owner: Optional[str] = None
 
     @property
     def on_disk(self) -> bool:
@@ -96,7 +99,11 @@ class BlobStore:
     # --- writing --------------------------------------------------------
 
     def put(
-        self, data: bytes, *, content_type: str = "application/octet-stream"
+        self,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        owner: Optional[str] = None,
     ) -> BlobInfo:
         """Store ``data`` and return its descriptor."""
         digest = hashlib.sha256(data).hexdigest()
@@ -107,6 +114,7 @@ class BlobStore:
             sha256=digest,
             created_at=time.monotonic(),
             content_type=content_type,
+            owner=owner,
         )
         with self._lock:
             self.evict_expired()
@@ -136,6 +144,12 @@ class BlobStore:
                 f"operation that produced it"
             )
         return info
+
+    def owner_of(self, blob_id: str) -> Optional[str]:
+        """The owning session, or None for an agent-made or unknown blob."""
+        with self._lock:
+            info = self._info.get(blob_id)
+        return info.owner if info is not None else None
 
     def get(self, blob_id: str) -> bytes:
         info = self.info(blob_id)

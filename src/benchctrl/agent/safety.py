@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -48,6 +49,18 @@ class TripReason(str, Enum):
     OPERATOR = "operator"
     SHUTDOWN = "shutdown"
     RUN_ABORT = "run_abort"
+    #: A run engine stopped proving it is alive: its tick loop has not touched
+    #: its own ``run:<id>`` owner for ``deadman_s``. The engine is wedged, so
+    #: its device is driven safe by the governor rather than by the engine.
+    RUN_WATCHDOG = "run_watchdog"
+
+
+#: Owner-key prefix for a run engine. A session's owner key is its session id.
+RUN_OWNER_PREFIX = "run:"
+
+
+def run_owner(run_id: str) -> str:
+    return f"{RUN_OWNER_PREFIX}{run_id}"
 
 
 class TripOutcome(str, Enum):
@@ -66,6 +79,11 @@ class ArmState:
     recording: bool = False
     emulating: bool = False
     last_armed_at: Optional[float] = None
+    #: The **owner** whose silence trips this device: a session id, or
+    #: ``run:<id>`` for a run engine. ``None`` means nobody in particular, and
+    #: such a device is kept alive by contact from anyone, as every device was
+    #: before contact was tracked per owner. The name predates run owners and
+    #: is kept because it is on the wire (``safety.status``).
     armed_by_session: Optional[str] = None
 
     @property
@@ -151,10 +169,22 @@ class SafetyGovernor:
     #: ``set_outlet_state`` being absent from :py:data:`_ARMING_CALLS`.
     exempt: frozenset[str] = frozenset()
 
+    #: Monotonic seconds. Injectable so deadman and watchdog timing can be
+    #: tested against a synthetic clock instead of by sleeping.
+    clock: Callable[[], float] = time.monotonic
+
     _states: dict[str, ArmState] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
-    _last_contact: float = field(default_factory=time.monotonic)
+    _last_contact: Optional[float] = None
+    #: Last contact per owner. A device armed by an owner is kept alive by
+    #: that owner alone, so one chatty client cannot hold another client's
+    #: abandoned output on.
+    _contact: dict[str, float] = field(default_factory=dict)
     _trips: list[dict] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self._last_contact is None:
+            self._last_contact = self.clock()
 
     # --- arm tracking ---------------------------------------------------
 
@@ -192,8 +222,9 @@ class SafetyGovernor:
             was = state.is_armed
             state.output_armed = bool(enabled)
             if state.output_armed:
-                state.last_armed_at = time.monotonic()
+                state.last_armed_at = self.clock()
                 state.armed_by_session = session_id
+                self._seed_contact(session_id)
             elif not state.is_armed:
                 state.armed_by_session = None
             if was != state.is_armed:
@@ -213,8 +244,9 @@ class SafetyGovernor:
         with self._lock:
             state.emulating = active
             if active:
-                state.last_armed_at = time.monotonic()
+                state.last_armed_at = self.clock()
                 state.armed_by_session = session_id
+                self._seed_contact(session_id)
 
     @property
     def armed_devices(self) -> list[str]:
@@ -227,18 +259,84 @@ class SafetyGovernor:
 
     # --- deadman --------------------------------------------------------
 
-    def touch(self) -> None:
-        """Record contact from a client. Any inbound frame counts."""
+    def touch(self, owner: Optional[str] = None) -> None:
+        """Record contact. ``owner`` is a session id or ``run:<id>``.
+
+        Every touch counts as contact for devices armed with no owner; a touch
+        with an owner also keeps that owner's own devices alive. Nothing else
+        does: contact from session B is not evidence that session A is alive.
+        """
+        now = self.clock()
         with self._lock:
-            self._last_contact = time.monotonic()
+            self._last_contact = now
+            if owner is not None:
+                self._contact[owner] = now
+
+    def _seed_contact(self, owner: Optional[str]) -> None:
+        # Arming is contact: the owner just acted. Without this, an owner that
+        # arms before its first touch would be judged by a missing entry.
+        if owner is not None:
+            self._contact[owner] = self.clock()
+
+    def owner_of(self, device_key: str) -> Optional[str]:
+        with self._lock:
+            state = self._states.get(device_key)
+            return state.armed_by_session if state is not None and state.is_armed else None
+
+    def transfer_owner(self, device_key: str, owner: str) -> bool:
+        """Hand an armed device to ``owner``, who becomes the one keeping it alive.
+
+        Used when a new session claims a device that a departed session left
+        armed, so a client that reconnects (and so gets a new session id) takes
+        over its own output instead of having it trip under it. Refreshes the
+        new owner's contact; the clock does not run backwards for the device.
+        """
+        with self._lock:
+            state = self._states.get(device_key)
+            if state is None or not state.is_armed:
+                return False
+            state.armed_by_session = owner
+            self._seed_contact(owner)
+            return True
+
+    def forget_owner(self, owner: str) -> None:
+        """Drop ``owner``'s contact record once it owns nothing armed."""
+        with self._lock:
+            if not any(s.is_armed and s.armed_by_session == owner for s in self._states.values()):
+                self._contact.pop(owner, None)
 
     @property
     def seconds_since_contact(self) -> float:
+        """Seconds since contact from anyone (the bench-wide figure on displays)."""
         with self._lock:
-            return time.monotonic() - self._last_contact
+            return self.clock() - self._last_contact
+
+    def seconds_since_owner_contact(self, owner: Optional[str]) -> float:
+        with self._lock:
+            if owner is None:
+                return self.clock() - self._last_contact
+            # An owner with no record has never been heard from since arming
+            # was tracked per owner; judge it from the bench-wide figure rather
+            # than treating it as infinitely stale.
+            last = self._contact.get(owner, self._last_contact)
+            return self.clock() - last
+
+    def stale_devices(self) -> dict[str, Optional[str]]:
+        """Armed devices whose owner has been silent past ``deadman_s``.
+
+        Returns ``{device_key: owner}``. Only these trip: a stale owner's
+        devices, never a live owner's.
+        """
+        with self._lock:
+            return {
+                key: state.armed_by_session
+                for key, state in self._states.items()
+                if state.is_armed
+                and self.seconds_since_owner_contact(state.armed_by_session) > self.deadman_s
+            }
 
     def should_trip(self) -> bool:
-        return self.any_armed and self.seconds_since_contact > self.deadman_s
+        return bool(self.stale_devices())
 
     def grace_for_disconnect(self) -> float:
         """Seconds to wait after a socket closes before tripping."""
@@ -253,14 +351,23 @@ class SafetyGovernor:
         workers: dict[str, DeviceWorker],
         *,
         safe_state_fns: Optional[dict[str, Callable[[Any], None]]] = None,
+        only: Optional[Iterable[str]] = None,
     ) -> dict[str, TripOutcome]:
-        """Drive every armed device to its safe state.
+        """Drive every armed device (or the armed ones in ``only``) to its safe state.
+
+        ``only`` targets a trip at the devices of one stale owner, or one
+        device being closed. Panic outlets are cut only by a trip that leaves
+        nothing armed: cutting mains under a live owner's working output
+        would turn one client's silence into an outage for another.
 
         Returns per-device outcomes. Never raises: a governor that can throw
         is a governor that can skip the rest of the bench.
         """
         outcomes: dict[str, TripOutcome] = {}
-        targets = self.armed_devices
+        armed = self.armed_devices
+        wanted = None if only is None else set(only)
+        targets = armed if wanted is None else [k for k in armed if k in wanted]
+        bench_wide = len(targets) == len(armed)
 
         # A device that authorised a panic outlet cut is a target even though
         # it is never *armed* — energising an outlet is not arming an output
@@ -268,7 +375,7 @@ class SafetyGovernor:
         # and `panic_outlets` would be a setting that did nothing. Ordered
         # after the armed devices deliberately: turn off what is driving
         # current before cutting the mains feeding it.
-        panic_targets = [
+        panic_candidates = [
             key for key, obj in devices.items() if key not in targets and panic_outlets_of(obj)
         ]
 
@@ -286,23 +393,21 @@ class SafetyGovernor:
                 "severity": "critical",
                 "reason": reason.value,
                 "devices": targets,
-                "panic_outlet_devices": panic_targets,
+                "panic_outlet_devices": panic_candidates if bench_wide else [],
             }
         )
 
-        for key in list(targets) + panic_targets:
-            obj = devices.get(key)
-            worker = workers.get(key)
-            if obj is None or worker is None:
-                outcomes[key] = TripOutcome.FAILED
-                continue
-            fn = (safe_state_fns or {}).get(key)
-            timeout_s = self.safe_state_timeout_s
-            if fn is None and key in panic_targets:
-                fn, timeout_s = _panic_cut_for(obj)
-            outcomes[key] = self._make_safe(
-                key, obj, worker, fn or default_safe_state, timeout_s=timeout_s
-            )
+        for key in targets:
+            outcomes[key] = self._make_safe_target(key, devices, workers, safe_state_fns)
+
+        # A targeted trip leaves other owners' outputs working, so it cuts
+        # mains only when one of its own targets could not be made safe: a
+        # live output nobody can turn off is what the panic cut is for.
+        if bench_wide or any(v is TripOutcome.FAILED for v in outcomes.values()):
+            for key in panic_candidates:
+                outcomes[key] = self._make_safe_target(
+                    key, devices, workers, safe_state_fns, panic=True
+                )
 
         self._trips.append(
             {
@@ -312,6 +417,25 @@ class SafetyGovernor:
             }
         )
         return outcomes
+
+    def _make_safe_target(
+        self,
+        key: str,
+        devices: dict[str, Any],
+        workers: dict[str, DeviceWorker],
+        safe_state_fns: Optional[dict[str, Callable[[Any], None]]],
+        *,
+        panic: bool = False,
+    ) -> TripOutcome:
+        obj = devices.get(key)
+        worker = workers.get(key)
+        if obj is None or worker is None:
+            return TripOutcome.FAILED
+        fn = (safe_state_fns or {}).get(key)
+        timeout_s = self.safe_state_timeout_s
+        if fn is None and panic:
+            fn, timeout_s = _panic_cut_for(obj)
+        return self._make_safe(key, obj, worker, fn or default_safe_state, timeout_s=timeout_s)
 
     def _make_safe(
         self,
@@ -420,6 +544,9 @@ class SafetyGovernor:
             return {
                 "armed": self.armed_devices,
                 "seconds_since_contact": round(self.seconds_since_contact, 3),
+                "owners": {
+                    owner: round(self.clock() - at, 3) for owner, at in self._contact.items()
+                },
                 "deadman_s": self.deadman_s,
                 "devices": {k: s.to_dict() for k, s in self._states.items()},
                 "trips": list(self._trips[-10:]),

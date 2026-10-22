@@ -59,7 +59,32 @@ class PolicyError(BenchValueError):
     mutation attempted without the writer claim. A subclass of
     ``BenchValueError`` because it is, fundamentally, the caller asking for
     something invalid.
+
+    ``code`` names the refusal for a client that must act on it without
+    parsing the message (``claim_conflict``, ``not_owner``); ``holder`` is the
+    session that holds what was refused. Both cross the wire as ERR attrs and
+    are set on the instance only when given, so a refusal without them
+    serialises exactly as it did before they existed.
     """
+
+    #: Machine-readable reason, or None for an uncategorised refusal.
+    code: Optional[str] = None
+    #: The session holding the claim or resource, when that is the reason.
+    holder: Optional[str] = None
+
+    def __init__(
+        self, *args: object, code: Optional[str] = None, holder: Optional[str] = None
+    ) -> None:
+        super().__init__(*args)
+        if code is not None:
+            self.code = code
+        if holder is not None:
+            self.holder = holder
+
+
+#: ``PolicyError.code`` values the agent sends.
+CLAIM_CONFLICT = "claim_conflict"
+NOT_OWNER = "not_owner"
 
 
 def _registry() -> dict[str, type]:

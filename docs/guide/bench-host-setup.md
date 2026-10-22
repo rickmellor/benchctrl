@@ -285,7 +285,9 @@ claim you can check:
 ```bash
 ./deploy/sync-board.sh --check     # is the board current? change nothing
 ./deploy/sync-board.sh             # make it current, then prove it
+./deploy/sync-board.sh --target benchpi # sync the Pi 5 rather than the Uno Q
 ```
+See [`deploy/README.md`](../../deploy/README.md) for the target table.
 
 It runs from your **workstation**, copies the package, then compares a `sha256`
 manifest from each end and either says `IN SYNC — N files identical` or names

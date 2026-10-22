@@ -28,6 +28,7 @@ directory of scripts that run on a board with no benchctrl installed.
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import shutil
 import subprocess
@@ -801,4 +802,263 @@ def test_the_sync_script_does_not_claim_the_kiosk_respawns_the_fui():
     assert "systemctl restart lightdm" in printed
 
 
-# ------------------------------------------------------------ the CLI contract
+# ------------------------------------------------------- sync-board.sh's own CLI
+#                          targets, and the --print-config that makes them testable
+# Two boards are kept current from this one checkout, and the whole point of a
+# target is that it says *which machine* rather than which paths. So these assert
+# the resolved configuration line by line: a target that quietly kept the other
+# board's REMOTE_SRC would sync a verified copy of the source to a machine nobody
+# asked for, and report it as IN SYNC.
+#
+# --print-config is what makes that testable at all. Every other path through the
+# script needs a board on the other end of ssh; this one resolves the target,
+# runs the same guards a real run runs, and touches nothing.
+
+SYNC = DEPLOY / "sync-board.sh"
+REPO = DEPLOY.parent
+
+# Everything the target table can set, plus PACKAGE. A value inherited from the
+# pytest environment would otherwise win over the target, and the test would pass
+# for a reason that has nothing to do with the table.
+TARGET_VARS = (
+    "BOARD",
+    "REMOTE_SRC",
+    "REMOTE_DEPLOY",
+    "TARGET",
+    "AGENT_PYTHON",
+    "FUI_PYTHON",
+    "RESTART_UNITS",
+    "PACKAGE",
+)
+
+UNOQ = {
+    "BOARD": "arduino@192.168.1.86",
+    "REMOTE_SRC": "/home/arduino/benchctrl-1.2.0/src",
+    "REMOTE_DEPLOY": "/home/arduino/deploy",
+    "AGENT_PYTHON": "/usr/bin/python3",
+    "FUI_PYTHON": "/usr/bin/python3",
+    "RESTART_UNITS": "benchctrl-agent",
+}
+
+BENCHPI = {
+    "BOARD": "rick@192.168.1.66",
+    "REMOTE_SRC": "/home/rick/benchctrl/src",
+    "REMOTE_DEPLOY": "/home/rick/benchctrl-deploy",
+    "AGENT_PYTHON": "/home/rick/benchctrl/.venv/bin/python",
+    "FUI_PYTHON": "/usr/bin/python3",
+    "RESTART_UNITS": "benchctrl-agent benchctrl-vision",
+}
+
+
+def run_sync(args, extra_env=None):
+    """Run sync-board.sh from the repo root with no target variables inherited."""
+    env = dict(os.environ)
+    for name in TARGET_VARS:
+        env.pop(name, None)
+    env.update(extra_env or {})
+    return subprocess.run(
+        ["sh", str(SYNC), *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=REPO,
+        env=env,
+    )
+
+
+def parse_config(out):
+    assert out.returncode == 0, f"exit {out.returncode}: {out.stderr}"
+    lines = out.stdout.splitlines()
+    # Exact shape, not just the values: a stray echo on the way here would
+    # otherwise be invisible to a caller that only greps for keys.
+    assert len(lines) == 8, f"expected 8 lines, got:\n{out.stdout}"
+    return dict(line.split("=", 1) for line in lines)
+
+
+def assert_config(out, target, values):
+    config = parse_config(out)
+    assert config["target"] == target
+    for key, expected in values.items():
+        assert config[key] == expected, f"{key}: {config[key]!r} != {expected!r}"
+    # PACKAGE is printed too, and is not target-specific.
+    assert config["PACKAGE"] == "benchctrl"
+
+
+def test_the_default_target_is_the_uno_q():
+    """Every command written before --target must still mean the same board.
+
+    The regression this guards is the plausible-looking one: adding a second
+    target and letting the default depend on ambient order, so a bare
+    ``./sync-board.sh`` lands on whichever machine the environment happened to
+    name.
+    """
+    assert_config(run_sync(["--print-config"]), "unoq", UNOQ)
+
+
+def test_target_benchpi_selects_the_pi_5_values():
+    """Every benchpi default, the venv and the second unit included."""
+    assert_config(
+        run_sync(["--print-config", "--target", "benchpi"]), "benchpi", BENCHPI
+    )
+
+
+def test_the_target_option_accepts_both_spellings():
+    """``--target benchpi`` and ``--target=benchpi`` must resolve identically.
+
+    Only one form can be broken at a time, so testing a single form leaves the
+    other free to drift — the positional one especially, since it has to skip the
+    value rather than match it as an unknown argument.
+    """
+    spaced = parse_config(run_sync(["--print-config", "--target", "benchpi"]))
+    joined = parse_config(run_sync(["--print-config", "--target=benchpi"]))
+    assert spaced == joined
+    assert spaced["REMOTE_SRC"] == BENCHPI["REMOTE_SRC"]
+
+
+def test_the_target_env_var_selects_a_target():
+    assert_config(
+        run_sync(["--print-config"], {"TARGET": "benchpi"}), "benchpi", BENCHPI
+    )
+
+
+def test_the_target_option_beats_the_target_env_var():
+    """An explicit argument outranks ambient configuration.
+
+    The reverse would let a stale ``export TARGET`` in a shell profile redirect a
+    command that named the other board on its own command line.
+    """
+    out = run_sync(["--print-config", "--target", "unoq"], {"TARGET": "benchpi"})
+    assert_config(out, "unoq", UNOQ)
+
+
+def test_an_explicit_variable_still_beats_the_target_default():
+    """A target sets defaults; it does not override.
+
+    The env overrides predate this option and people use them to point a run at a
+    scratch board. Making the table's assignments unconditional would silently
+    retarget those runs — the same class of mistake as a target that ignored them.
+    """
+    out = run_sync(["--print-config", "--target", "benchpi"], {"BOARD": "x@y"})
+    config = parse_config(out)
+    assert config["BOARD"] == "x@y"
+    # The rest of the target still applies: the override is per-variable, not a
+    # switch back to unoq.
+    assert config["REMOTE_SRC"] == BENCHPI["REMOTE_SRC"]
+    assert config["AGENT_PYTHON"] == BENCHPI["AGENT_PYTHON"]
+    assert config["target"] == "benchpi"
+
+
+def test_an_unknown_target_is_refused_rather_than_defaulting():
+    """Falling back to unoq would sync the wrong machine and say nothing about it.
+
+    Exit 2, matching the script's other argument mistakes, so a caller can tell
+    "bad invocation" from "the board disagreed".
+    """
+    for args in (["--target", "uno-q"], ["--target", "BenchPi"], ["--target=pi5"]):
+        out = run_sync(["--print-config", *args])
+        assert out.returncode == 2, f"{args}: exit {out.returncode}, out {out.stdout!r}"
+        assert "unknown target" in out.stderr, out.stdout
+        assert "unoq" in out.stderr and "benchpi" in out.stderr, "must name what it knows"
+        assert out.stdout == ""
+
+    out = run_sync(["--print-config"], {"TARGET": "pi5"})
+    assert out.returncode == 2 and "unknown target" in out.stderr
+
+    # `--target` as the last word must not fall through to the default target.
+    # Spelled as a missing name rather than an unknown one, since there is no
+    # name to echo back.
+    out = run_sync(["--target"])
+    assert out.returncode == 2, out.stdout
+    assert "needs a name" in out.stderr, out.stderr
+    # An explicitly empty TARGET is the unset case, by `:-`'s own meaning, and
+    # still means unoq — distinct from a malformed command line above.
+    assert_config(run_sync(["--print-config"], {"TARGET": ""}), "unoq", UNOQ)
+
+
+def test_print_config_still_runs_the_remote_src_guard():
+    """The guard is what stops the sweep reaching the agent's runs directory.
+
+    A print-only mode that skipped validation would print a configuration the
+    script would then refuse to act on — two answers to the same question, one of
+    them wrong.
+    """
+    out = run_sync(
+        ["--print-config", "--target", "benchpi"],
+        {"REMOTE_SRC": "/home/rick/benchctrl"},
+    )
+    assert out.returncode == 2, out.stdout
+    assert "must end in /src" in out.stderr
+    assert "REMOTE_SRC=" not in out.stdout
+
+
+def test_print_config_takes_no_other_mode():
+    """--print-config answers what-would-happen, so a mode flag beside it is a
+    mistake in one of the two. Refuse rather than pick a winner.
+    """
+    for flag in ("--check", "--restart"):
+        out = run_sync(["--print-config", flag])
+        assert out.returncode == 2, f"{flag}: exit {out.returncode}"
+        assert "--print-config takes no other mode" in out.stderr
+
+
+def test_the_sync_script_creates_the_staging_dir_before_filling_it():
+    """benchpi has never had a deploy/ directory, and scp cannot create one.
+
+    Text order is the assertion: mkdir after the scp fails just as quietly as a
+    missing mkdir does, and it lands as scp's own bare "No such file or directory"
+    once the transfer has already been attempted.
+    """
+    text = SYNC.read_text(encoding="utf-8")
+    mkdir = text.index("mkdir -p '$REMOTE_DEPLOY'")
+    deploy_scp = text.index('"$BOARD:$REMOTE_DEPLOY/"')
+    assert mkdir < deploy_scp, "the deploy/ scp runs before the directory exists"
+    # And on the board, not locally — a bare mkdir here would create a directory
+    # on the workstation and change nothing on the target.
+    assert 'ssh_board "mkdir -p' in text
+
+
+def test_the_agent_probe_checks_where_the_package_actually_came_from():
+    """An editable install can resolve anywhere, and importing proves nothing.
+
+    The benchpi agent runs ``.venv/bin/python -m benchctrl.agent.main``. A venv
+    left pointing at an older checkout imports cleanly while running last week's
+    code, so the probe has to compare ``benchctrl.__file__`` against the tree this
+    script just synced — and must not hand the tree to the interpreter with
+    PYTHONPATH, which would make the check pass by construction.
+    """
+    text = SYNC.read_text(encoding="utf-8")
+    assert "benchctrl.__file__" in text, "the agent probe never looks at provenance"
+    assert "sys.argv[1]" in text and "'$REMOTE_SRC'" in text
+    assert "startswith" in text, "the resolved path is never compared to REMOTE_SRC"
+    # The venv probe specifically: no PYTHONPATH on that command. Bounded by the
+    # ssh_board call that carries it and the REMOTE_SRC argument that ends it,
+    # because the FUI probe beside it legitimately has one. The anchor is the
+    # realpath call rather than `benchctrl.__file__`, which also appears in the
+    # comment above — anchoring there sliced back to the *other* probe, the one
+    # that sets PYTHONPATH, and failed on the wrong command.
+    where = text.index("os.path.realpath(benchctrl.__file__)")
+    probe = text[text.rindex("ssh_board", 0, where) : text.index("REMOTE_SRC'", where)]
+    assert "PYTHONPATH" not in probe, "PYTHONPATH on the venv probe makes it vacuous"
+    # And a mismatch must fail loudly, not warn — the closing message otherwise
+    # goes on to say the source is current and verified.
+    assert "does not load the tree" in text
+
+
+def test_the_closing_message_names_every_unit_the_target_runs():
+    """The vision container bind-mounts the synced src, so it needs naming too.
+
+    A hint that stopped at the agent would leave a benchpi operator believing the
+    sync was fully live while the container kept running old code off the same
+    read-only mount.
+    """
+    text = SYNC.read_text(encoding="utf-8")
+    assert "for unit in $RESTART_UNITS" in text, "the hint is not driven by RESTART_UNITS"
+    assert "sudo systemctl restart $unit" in text
+    assert "# disarms the bench" in text, "the agent restart must stay flagged"
+    # The lightdm half is unchanged, and --restart still means the FUI only:
+    # nothing here may restart an agent, which would drop the instruments.
+    printed = "\n".join(
+        ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+    )
+    assert "pkill" not in printed, "killing the FUI leaves nothing to restart it"
+    assert "systemctl restart lightdm" in printed

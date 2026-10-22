@@ -638,6 +638,7 @@ def test_cp2112_mcp_tools_cover_the_driver_surface():
     assert not missing, f"driver methods with no MCP tool: {sorted(missing)}"
 
 
+@pytest.mark.needs_mcp
 def test_every_cp2112_tool_is_registered_and_re_exported():
     """A tool absent from mcp.py is invisible to an agent even though it exists."""
     import benchctrl.mcp as m

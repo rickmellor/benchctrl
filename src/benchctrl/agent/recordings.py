@@ -163,6 +163,12 @@ class RecordingTable:
             raise BenchValueError(f"unknown recording {rec_id!r}")
         return handle
 
+    def owner_of(self, rec_id: str) -> Optional[str]:
+        """The session that started it, or None for an unknown recording."""
+        with self._lock:
+            handle = self._handles.get(rec_id)
+        return handle.session_id if handle is not None else None
+
     def for_device(self, device_key: str) -> Optional[RecordingHandle]:
         with self._lock:
             rec_id = self._by_device.get(device_key)

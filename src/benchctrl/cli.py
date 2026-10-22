@@ -340,13 +340,13 @@ def device_error_types() -> tuple[type, ...]:
     ) or (BenchError,)
 
 
-#: The substring that identifies claim contention inside a ``PolicyError``.
-#: Matching on text is fragile and is done anyway, because the error carries no
-#: structured field to key on — ``agent.claim`` raises
-#: ``PolicyError(f"{device_key} is claimed by session {holder}; …")``. The
-#: fragility is contained by a test that produces the error from a *real* agent
-#: with two connected clients, so a reworded server message fails the test
-#: rather than silently turning the explanation back off.
+#: The substring that identifies claim contention inside a ``PolicyError``
+#: from an agent too old to send ``code``. A current agent sets
+#: ``PolicyError.code == "claim_conflict"``, which is what is matched first;
+#: the text is the fallback, kept because a CLI is routinely newer than the
+#: bench it talks to. Both paths are tested against a *real* agent with two
+#: connected clients, so a reworded server message fails a test rather than
+#: silently turning the explanation back off.
 CLAIM_CONFLICT_MARKER = "is claimed by session"
 
 
@@ -364,7 +364,13 @@ def claim_conflict_help(exc: BaseException) -> str | None:
     queue and no backoff anywhere in ``net/client.py``, so a second invocation
     fails immediately and the device is untouched.
     """
-    if CLAIM_CONFLICT_MARKER not in str(exc):
+    from benchctrl.net.errors import CLAIM_CONFLICT
+
+    code = getattr(exc, "code", None)
+    if code is not None:
+        if code != CLAIM_CONFLICT:
+            return None
+    elif CLAIM_CONFLICT_MARKER not in str(exc):
         return None
     return (
         "Another session holds the writer claim on this device — most likely a "

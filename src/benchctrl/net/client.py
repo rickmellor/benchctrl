@@ -90,6 +90,8 @@ class RemoteClient:
         #: instead of a bare "not connected".
         self._death: Optional[BaseException] = None
         self.welcome: dict = {}
+        self.protocol_v: int = authmod.PROTOCOL_VERSION
+        self.peer_caps: frozenset[str] = frozenset()
         self.events: list[dict] = []
         self.on_event: Optional[Callable[[dict], None]] = None
         self._proxies: dict[str, Any] = {}
@@ -159,6 +161,12 @@ class RemoteClient:
                     "set it in ~/.config/benchctrl/config.json or BENCHCTRL_TOKEN"
                 )
             challenge = json.loads(payload)
+            # An agent that predates ranges sends only ``v``, and gets the
+            # strict check; one that sends a range is held to it. Checked
+            # before the AUTH so a mismatch never spends a MAC on the agent.
+            _, version_error = authmod.negotiate(challenge)
+            if version_error:
+                raise BenchProtocolError(version_error)
             self._writer.send(
                 FrameType.AUTH,
                 _json(
@@ -179,6 +187,11 @@ class RemoteClient:
                 f"expected WELCOME, got frame type 0x{frame_type:02X}"
             )
         self.welcome = json.loads(payload)
+        #: What the agent settled on, and what it can do. An agent that
+        #: predates negotiation says neither: it speaks v1 with no caps.
+        version = self.welcome.get("v", authmod.PROTOCOL_VERSION)
+        self.protocol_v = version if isinstance(version, int) else authmod.PROTOCOL_VERSION
+        self.peer_caps = authmod.peer_caps(self.welcome)
 
     def close(self) -> None:
         self._stop.set()

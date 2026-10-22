@@ -15,9 +15,11 @@ deployable at all.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import logging
+import secrets
 import socket
 import socketserver
 import string
@@ -39,13 +41,13 @@ from benchctrl.agent.recordings import PREVIEW_HZ, IteratorTable, RecordingTable
 from benchctrl.agent.registry import SWITCHED_PDU_KEYS, DeviceRegistry
 from benchctrl.agent.runs.engine import RunManager
 from benchctrl.agent.runs.spec import RunSpec
-from benchctrl.agent.safety import SafetyGovernor, TripReason
+from benchctrl.agent.safety import RUN_OWNER_PREFIX, SafetyGovernor, TripReason
 from benchctrl.agent.worker import PRIORITY_NORMAL, WorkerPool, clamp_blocking
 from benchctrl.exceptions import BenchValueError
 from benchctrl.net import auth as authmod
 from benchctrl.net.codec import TAG as CODEC_TAG
 from benchctrl.net.codec import Decoder, Encoder
-from benchctrl.net.errors import PolicyError, encode_exception
+from benchctrl.net.errors import CLAIM_CONFLICT, NOT_OWNER, PolicyError, encode_exception
 from benchctrl.net.frames import FrameReader, FrameType, FrameWriter
 
 log = logging.getLogger("benchctrl.agent.server")
@@ -826,8 +828,6 @@ class Session:
        already opened (the dashboard's generator-screen pane).
     """
 
-    _ids = itertools.count(1)
-
     def __init__(
         self,
         agent: "BenchAgent",
@@ -839,14 +839,30 @@ class Session:
         self.agent = agent
         self.sock = sock
         self.address = address
-        self.session_id = f"s-{next(self._ids)}"
+        self.session_id = agent.next_session_id()
         self.reader = FrameReader(sock)
         self.writer = FrameWriter(sock)
         self.authenticated = False
         self.observer = observer
+        #: Settled from the HELLO; a pre-range client gets PROTOCOL_VERSION.
+        self.protocol_v = authmod.PROTOCOL_VERSION
+        self.peer_caps: frozenset[str] = frozenset()
         self.claims: set[str] = set()
         self.opened_at = time.monotonic()
         self._event_seq = itertools.count(1)
+        #: Set once the WELCOME is on the wire, or when the session ends.
+        #: The subscriber is registered before the WELCOME, so this keeps an
+        #: early event from reaching a client still waiting for its handshake.
+        self._welcomed = threading.Event()
+        self._ended = False
+
+    def mark_welcomed(self) -> None:
+        self._welcomed.set()
+
+    def mark_ended(self) -> None:
+        """Release a sender thread still waiting for the WELCOME."""
+        self._ended = True
+        self._welcomed.set()
 
     @property
     def peer(self) -> str:
@@ -866,12 +882,25 @@ class Session:
         this from the governor's trip path is what used to let a stalled client
         delay a disarm.
         """
+        self._welcomed.wait()
+        if self._ended:
+            return
         payload = dict(event)
         payload.setdefault("seq", next(self._event_seq))
         payload.setdefault("ts_mono", round(time.monotonic(), 6))
         payload.setdefault("ts_utc", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         payload.setdefault("severity", "info")
         self.writer.send(FrameType.EVT, _json(payload))
+
+
+def _agent_tag(agent_id: Optional[str]) -> str:
+    """Six hex characters naming this bench, stable across restarts.
+
+    Hashed rather than truncated, so a hostname (or, later, an enrolled
+    agent id) does not appear in every session id it prefixes.
+    """
+    seed = agent_id or socket.gethostname()
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:6]
 
 
 class BenchAgent:
@@ -890,9 +919,18 @@ class BenchAgent:
         runs_dir=None,
         llm_base_url: str = "",
         safe_stop_exempt: Iterable[str] = (),
+        agent_id: Optional[str] = None,
     ) -> None:
         self.registry = registry
         self.token = token
+        # Session ids are ``s-<agent6>-<boot6>-N``. A bare counter restarted at
+        # s-1 with every agent process, so a client or log reader holding an
+        # id from before a restart saw it name a different session after one,
+        # and two agents' ids could not be told apart in a merged log. agent6
+        # is stable for this bench; boot6 is fresh for each process.
+        self.agent_tag = _agent_tag(agent_id)
+        self.boot_tag = secrets.token_hex(3)
+        self._session_ids = itertools.count(1)
         #: Bench infrastructure the governor leaves alone (see SafetyGovernor.exempt).
         self.safe_stop_exempt = frozenset(safe_stop_exempt)
         self.deadman_s = deadman_s
@@ -965,8 +1003,7 @@ class BenchAgent:
             # driving an abandoned bench safe; the heartbeat is a courtesy to a
             # display and is strictly subordinate to that.
             try:
-                if self.governor.should_trip():
-                    self.trip(TripReason.HEARTBEAT_LOST)
+                self._deadman_tick()
             except Exception:  # pragma: no cover
                 log.exception("deadman loop raised")
             # Reuses this thread rather than starting a second one: it already
@@ -999,6 +1036,37 @@ class BenchAgent:
                 self._maybe_start_mains_sweep()
             except Exception:  # pragma: no cover
                 log.exception("agent: mains sweep raised")
+
+    def _deadman_tick(self) -> dict[str, str]:
+        """Trip the devices of every owner that has gone quiet. Returns outcomes.
+
+        Per owner, not bench-wide: a device armed by a session trips when
+        *that session* has been silent for ``deadman_s`` (HEARTBEAT_LOST), and
+        one armed by a run engine trips when *that engine* has stopped
+        touching its ``run:<id>`` owner (RUN_WATCHDOG). Another client's
+        traffic keeps neither alive.
+
+        Any run driving a device about to trip is aborted first, with a
+        ``safety:`` reason, so the run record ends ``safe_stopped`` rather than
+        ``complete`` over an output the governor turned off.
+        """
+        stale = self.governor.stale_devices()
+        if not stale:
+            return {}
+        by_reason: dict[TripReason, list[str]] = {}
+        for key, owner in stale.items():
+            reason = (
+                TripReason.RUN_WATCHDOG
+                if owner is not None and owner.startswith(RUN_OWNER_PREFIX)
+                else TripReason.HEARTBEAT_LOST
+            )
+            by_reason.setdefault(reason, []).append(key)
+        outcomes: dict[str, str] = {}
+        for reason, keys in by_reason.items():
+            self.runs.abort_driving(keys, f"safety: {reason.value}")
+            for key, outcome in self.trip(reason, only=keys).items():
+                outcomes[key] = outcome.value
+        return outcomes
 
     def _maybe_emit_link(self) -> None:
         """Emit a link heartbeat if one is due and anyone is listening.
@@ -1295,11 +1363,13 @@ class BenchAgent:
             with self._mains_lock:
                 self._mains_running = False
 
-    def trip(self, reason: TripReason) -> dict:
+    def trip(self, reason: TripReason, *, only: Optional[Iterable[str]] = None) -> dict:
+        devices = self.registry.open_devices()
         return self.governor.trip(
             reason,
-            self.registry.open_devices(),
-            {k: self.workers.get(k) for k in self.registry.open_devices()},
+            devices,
+            {k: self.workers.get(k) for k in devices},
+            only=only,
         )
 
     def resource_manager(self) -> Optional[Any]:
@@ -1446,6 +1516,9 @@ class BenchAgent:
         with self._lock:
             return sum(1 for s in self._sessions.values() if s.observer)
 
+    def next_session_id(self) -> str:
+        return f"s-{self.agent_tag}-{self.boot_tag}-{next(self._session_ids)}"
+
     def register_session(self, session: Session) -> None:
         with self._lock:
             self._sessions[session.session_id] = session
@@ -1545,10 +1618,22 @@ class BenchAgent:
             if holder is not None and holder != session.session_id:
                 raise PolicyError(
                     f"{device_key} is claimed by session {holder}; this session "
-                    f"is a read-only observer until it is released"
+                    f"is a read-only observer until it is released",
+                    code=CLAIM_CONFLICT,
+                    holder=holder,
                 )
             self._claims[device_key] = session.session_id
             session.claims.add(device_key)
+            # An output left armed by a session that has since gone (or armed
+            # with no owner) passes to whoever now holds the claim, so a client
+            # that reconnects under a new session id keeps its own output
+            # alive instead of watching it trip. A live owner keeps it.
+            owner = self.governor.owner_of(device_key)
+            if owner != session.session_id and (
+                owner is None
+                or (not owner.startswith(RUN_OWNER_PREFIX) and owner not in self._sessions)
+            ):
+                self.governor.transfer_owner(device_key, session.session_id)
         return {"device": device_key, "claimed": True, "session": session.session_id}
 
     def release(self, session: Session, device_key: str) -> dict:
@@ -1558,11 +1643,50 @@ class BenchAgent:
             session.claims.discard(device_key)
         return {"device": device_key, "claimed": False}
 
+    def claim_holder(self, device_key: str) -> Optional[str]:
+        with self._lock:
+            return self._claims.get(device_key)
+
+    def refuse_across_claim(self, session: Session, device_key: str, verb: str) -> None:
+        """Refuse ``verb`` on a device another session holds the claim on.
+
+        For the verbs that change what a device *is* rather than what it does
+        (``agent.open``, ``agent.close``). Closing a device trips it, so before
+        this any session could disarm another's output by closing it. An
+        unclaimed device stays open to anyone, as before.
+        """
+        holder = self.claim_holder(device_key)
+        if holder is not None and holder != session.session_id:
+            raise PolicyError(
+                f"{device_key} is claimed by session {holder}; {verb} is refused "
+                f"for any other session",
+                code=CLAIM_CONFLICT,
+                holder=holder,
+            )
+
+    def refuse_unless_owner(self, session: Session, owner: Optional[str], what: str) -> None:
+        """Refuse to release ``what`` unless ``session`` made it.
+
+        A resource with no owner, or whose owner has disconnected, is anyone's
+        to release: nobody is left to be surprised by it vanishing, and its TTL
+        would collect it anyway.
+        """
+        if owner is None or owner == session.session_id:
+            return
+        with self._lock:
+            alive = owner in self._sessions
+        if alive:
+            raise PolicyError(
+                f"{what} belongs to session {owner}; only that session may release it",
+                code=NOT_OWNER,
+                holder=owner,
+            )
+
     # --- codecs ---------------------------------------------------------
 
     def encoder(self, session: Session) -> Encoder:
         return Encoder(
-            store_blob=lambda data: self.blobs.put(data).blob_id,
+            store_blob=lambda data: self.blobs.put(data, owner=session.session_id).blob_id,
             register_iterator=lambda gen: (
                 self.iterators.register("unknown", gen, session_id=session.session_id).iter_id
             ),
@@ -1587,11 +1711,17 @@ class _Handler(socketserver.BaseRequestHandler):
         try:
             if not self._authenticate(session):
                 return
+            # Subscribe before the WELCOME, so a client that has its session
+            # id can already find its subscriber; the session holds its
+            # events back until the WELCOME is written.
             self.agent.register_session(session)
+            self._send_welcome(session)
+            session.mark_welcomed()
             self._serve(session)
         except Exception as exc:  # noqa: BLE001
             log.info("agent: session %s ended: %r", session.session_id, exc)
         finally:
+            session.mark_ended()
             self.agent.drop_session(session)
             session.writer.close()
             try:
@@ -1620,10 +1750,12 @@ class _Handler(socketserver.BaseRequestHandler):
             return False
         hello = json.loads(frame[1] or b"{}")
 
-        version_error = authmod.check_version(hello)
+        version, version_error = authmod.negotiate(hello)
         if version_error:
             self._send_error(session, 0, PolicyError(version_error))
             return False
+        session.protocol_v = version
+        session.peer_caps = authmod.peer_caps(hello)
 
         # A client may ask for the read-only observer role. Self-declared on
         # purpose: it only ever *removes* capability, so there is nothing to gain
@@ -1642,10 +1774,9 @@ class _Handler(socketserver.BaseRequestHandler):
                 peer,
             )
             session.authenticated = True
-            self._send_welcome(session)
             return True
 
-        challenge, nonce_s = authmod.build_challenge(AGENT_NAME)
+        challenge, nonce_s = authmod.build_challenge(AGENT_NAME, session.protocol_v)
         session.writer.send(FrameType.CHALLENGE, _json(challenge))
 
         frame = session.reader.read_frame(timeout=authmod.HANDSHAKE_TIMEOUT)
@@ -1662,7 +1793,6 @@ class _Handler(socketserver.BaseRequestHandler):
 
         agent.failures.record_success(peer)
         session.authenticated = True
-        self._send_welcome(session)
         return True
 
     def _send_welcome(self, session: Session) -> None:
@@ -1673,6 +1803,10 @@ class _Handler(socketserver.BaseRequestHandler):
                 {
                     "session": session.session_id,
                     "agent": AGENT_NAME,
+                    # The version settled from the HELLO and this agent's
+                    # caps. A pre-range client ignores both.
+                    "v": session.protocol_v,
+                    "caps": list(authmod.CAPS),
                     # Echoed so a client can assert it got the role it asked
                     # for rather than discovering it via a PolicyError later.
                     "observer": session.observer,
@@ -1705,7 +1839,7 @@ class _Handler(socketserver.BaseRequestHandler):
             # fire. The bench would stay armed after the real client died,
             # because the thing reporting on it kept it alive.
             if not session.observer:
-                agent.governor.touch()
+                agent.governor.touch(session.session_id)
 
             if frame_type == FrameType.PING:
                 session.writer.send(FrameType.PONG)
@@ -1836,14 +1970,21 @@ class _Handler(socketserver.BaseRequestHandler):
         if method == "agent.time":
             return {"utc": time.time(), "mono": time.monotonic()}, None
         if method == "agent.open":
+            agent.refuse_across_claim(session, p["device"], "agent.open")
             entry = agent.registry.open(p["device"], **(p.get("open") or {}))
             return entry.to_dict(), None
         if method == "agent.close":
             key = p["device"]
+            agent.refuse_across_claim(session, key, "agent.close")
+            # ``only``: the governor would otherwise target every armed
+            # device while holding objects for just this one, and report the
+            # rest FAILED (and cut panic outlets) for a close of one device.
+            agent.runs.abort_driving([key], "safety: device closed")
             agent.governor.trip(
                 TripReason.OPERATOR,
                 {key: agent.registry.open_devices().get(key)},
                 {key: agent.workers.get(key)},
+                only=[key],
             )
             return {"device": key, "closed": agent.registry.close(key)}, None
         if method == "agent.claim":
@@ -1866,7 +2007,9 @@ class _Handler(socketserver.BaseRequestHandler):
         if method == "blob.fetch":
             return self._blob_fetch(session, p), None
         if method == "blob.release":
-            return {"released": agent.blobs.release(p["blob"])}, None
+            blob_id = p["blob"]
+            agent.refuse_unless_owner(session, agent.blobs.owner_of(blob_id), f"blob {blob_id}")
+            return {"released": agent.blobs.release(blob_id)}, None
 
         if method == "rec.start":
             return self._rec_start(session, p), None
@@ -1875,7 +2018,11 @@ class _Handler(socketserver.BaseRequestHandler):
         if method == "rec.stats":
             return self._rec_stats(p), None
         if method == "rec.release":
-            return {"released": agent.recordings.release(p["rec_id"])}, None
+            rec_id = p["rec_id"]
+            agent.refuse_unless_owner(
+                session, agent.recordings.owner_of(rec_id), f"recording {rec_id}"
+            )
+            return {"released": agent.recordings.release(rec_id)}, None
 
         if method == "run.submit":
             return self._run_submit(session, p), None
@@ -1889,9 +2036,7 @@ class _Handler(socketserver.BaseRequestHandler):
                 int(p.get("since_seq", 0)), limit=int(p.get("limit", 500))
             ), None
         if method == "run.abort":
-            engine = agent.runs.get(p["run_id"])
-            engine.abort(p.get("reason", "operator"))
-            return {"run_id": engine.run_id, "aborting": True}, None
+            return self._run_abort(session, p), None
         if method == "run.artifacts":
             store = agent.runs.store_for(p["run_id"])
             return {
@@ -2025,6 +2170,7 @@ class _Handler(socketserver.BaseRequestHandler):
             clock_scale=float(p.get("clock_scale", 1.0)),
             pdu=pdu,
             pdu_worker=pdu_worker,
+            submitted_by=session.session_id,
         )
         if spec.llm.enabled:
             from benchctrl.agent.llm.supervisor import build_supervisor
@@ -2034,6 +2180,52 @@ class _Handler(socketserver.BaseRequestHandler):
                 engine.attach_llm(supervisor.start())
         engine.start()
         return {"run_id": engine.run_id, "spec_sha256": spec.sha256}
+
+    def _run_abort(self, session: Session, p: dict) -> dict:
+        """Abort a run: its submitter's or its device's claim holder's to do.
+
+        Anyone else is refused unless they pass ``force`` with a ``reason``, and
+        a forced abort is announced at ``alarm`` so the session whose run it
+        was can see who stopped it and why. Not ``critical``: that grade is
+        reserved for the trip, which must always be able to evict its way into
+        a full queue (see ``ACTION_SEVERITY_CEILING``).
+        """
+        agent = self.agent
+        engine = agent.runs.get(p["run_id"])
+        reason = p.get("reason", "operator")
+        holder = agent.claim_holder(engine.spec.device)
+        if session.session_id not in (engine.submitted_by, holder):
+            owner = holder or engine.submitted_by
+            if not p.get("force"):
+                raise PolicyError(
+                    f"run {engine.run_id} belongs to session {owner}; abort it "
+                    f"from that session, claim {engine.spec.device}, or pass "
+                    f"force with a reason",
+                    code=NOT_OWNER,
+                    holder=owner,
+                )
+            if not (isinstance(p.get("reason"), str) and p["reason"].strip()):
+                raise PolicyError("a forced run.abort needs a reason", code=NOT_OWNER)
+            log.warning(
+                "agent: session %s force-aborted run %s (owner %s): %s",
+                session.session_id,
+                engine.run_id,
+                owner,
+                reason,
+            )
+            agent.events.publish(
+                {
+                    "kind": "run_abort_forced",
+                    "severity": ACTION_SEVERITY_CEILING,
+                    "run_id": engine.run_id,
+                    "device": engine.spec.device,
+                    "session": session.session_id,
+                    "owner": owner,
+                    "reason": reason,
+                }
+            )
+        engine.abort(reason)
+        return {"run_id": engine.run_id, "aborting": True}
 
     def _resolve_pdu_key(self, spec: RunSpec) -> str:
         """Which registered device this run's outlet setpoints refer to.
@@ -2068,7 +2260,9 @@ class _Handler(socketserver.BaseRequestHandler):
         if match is None:
             raise BenchValueError(f"run {p['run_id']} has no chunk {idx}")
         data = _Path(match["path"]).read_bytes()
-        info = agent.blobs.put(data, content_type="application/x-opensmu")
+        info = agent.blobs.put(
+            data, content_type="application/x-opensmu", owner=session.session_id
+        )
         return {"idx": idx, **info.to_dict()}
 
     def _read_window(self, p: dict) -> dict:
@@ -2120,7 +2314,9 @@ class _Handler(socketserver.BaseRequestHandler):
         agent.governor.set_recording(handle.device_key, False)
 
         data = handle.recording.to_bytes()
-        info = agent.blobs.put(data, content_type="application/x-opensmu")
+        info = agent.blobs.put(
+            data, content_type="application/x-opensmu", owner=session.session_id
+        )
         agent.recordings.finish(
             handle.rec_id, blob_id=info.blob_id, sha256=info.sha256, size=info.size
         )

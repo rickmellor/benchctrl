@@ -9,6 +9,113 @@ new failure — it's likely a documented limit.
 
 ## [Unreleased]
 
+### The device table names each instrument: `serial` and `binding`
+
+`DeviceRegistry.describe()` (and so WELCOME's `devices`) now has `serial`,
+read from the instrument when it opens, and `binding`, set per device key by
+the new `agent.json` `"binding"` map (`dut_bound`, `bench_bound`,
+`routable_source`; unknown values stop the agent). Both are `null` when
+unknown. Opening a device can now cost one identity read: the QR10x's `info()`
+(several round trips), the Rigols' and SDG's `*IDN?` (cached by the driver),
+or the Arc's device-id query when it was opened by port path. The PDU and the
+vision sidecar are never asked. `agent.json` also takes `"agent_id"`, the
+stable bench name in session ids, which defaults to the hostname.
+
+### The handshake negotiates a version range and capabilities
+
+HELLO and CHALLENGE now carry `v_min`, `v_max` and `caps` beside `v`, and
+WELCOME echoes the settled `v` and the agent's `caps`. `PROTOCOL_VERSION` is
+still 1 and `v` is still sent, so a peer from before this change sees the
+frames it always did, and either end still connects to it. A peer that sends
+no range gets the old strict `v` check. A peer that sends a range is held to
+it, and a half or malformed range is refused rather than guessed at. The
+client now checks the CHALLENGE before it sends AUTH, so a version mismatch
+no longer costs a MAC. `RemoteClient.protocol_v`/`peer_caps` and
+`Session.protocol_v`/`peer_caps` expose the result. The first caps are
+`err-code` and `per-owner-deadman`.
+
+### A session is subscribed to events before its WELCOME is sent
+
+The agent used to send the WELCOME and only then register the session's event
+subscriber. A client could hold its session id before the agent knew it, and
+an event published in that gap never reached it. Observer-session tests failed
+intermittently on CI for this reason. The session is now registered first. Its
+sender thread holds events back until the WELCOME is on the wire, so the first
+frame a client reads is still the WELCOME. An event published during the
+handshake is now delivered after the WELCOME instead of being lost.
+
+### Session ids are `s-<agent6>-<boot6>-N`
+
+A bare `s-N` restarted at `s-1` with every agent process, so an id held from
+before a restart named a different session after it, and two benches' ids
+could not be told apart in a merged log. `agent6` is a hash of the agent's
+identity (the hostname until an agent is enrolled; `BenchAgent(agent_id=…)`)
+and is stable for a bench; `boot6` is random per process. Anything that
+parsed the number out of `s-N` must take the last `-` field instead.
+
+### Claims now gate `agent.open`/`agent.close`, `run.abort` and releases
+
+**Behaviour change for a session that acted on something another session
+holds. Such a call is now refused; before, it worked.**
+
+- **`agent.open` and `agent.close` are refused on a device another session has
+  claimed.** Closing trips the device, so before this any connected session
+  could disarm another's output by closing it. An unclaimed device is still
+  anyone's to open or close.
+- **`run.abort` belongs to the run's submitter and to its device's claim
+  holder.** Anyone else must pass `force: true` with a non-empty `reason`. A
+  forced abort is logged and published as a `run_abort_forced` event at
+  `alarm` severity, naming the session that forced it, the owner it overrode,
+  and the reason. (`alarm`, not `critical`: `critical` stays reserved for
+  safety trips, which must always be able to evict their way into a full
+  event queue.)
+- **`blob.release` and `rec.release` are owner-only** while the owner is
+  connected. A blob or recording made by the agent itself, or whose owner has
+  disconnected, can still be released by anyone. `BlobStore.put` takes an
+  `owner`.
+- **Refusals carry a structured `code`.** `PolicyError` gains `code` and
+  `holder` attributes, which cross the wire as ERR attrs: `claim_conflict`
+  for a device held elsewhere, `not_owner` for a run, blob or recording that
+  belongs to another session. `holder` names the session to ask. A refusal
+  without a code serialises exactly as before. The CLI's "another session holds
+  the claim" explanation keys on `code` first and falls back to the message
+  text for older agents.
+
+### The deadman is per owner, and a run keeps its own output alive
+
+**Safety behaviour change. With no new configuration, some trips now happen
+earlier or on fewer devices; none happen later.**
+
+- **A submitted run no longer trips when its client leaves.** `docs/runs.md`
+  promised "submit a run, disconnect", but the engine armed its device without
+  ever counting as contact, so about `deadman_s` after the last client went
+  the governor tripped `heartbeat_lost` on a run that was working. The engine
+  now owns its device as `run:<run_id>` and touches that owner every tick.
+- **A wedged run engine trips: new `TripReason.RUN_WATCHDOG`.** An engine that
+  stops touching its owner has its device driven safe within `deadman_s` plus
+  the 0.5 s poll (measured in the test: inside `deadman_s + 1 s`). Bounded
+  waits (worker calls, the 30 s verified PDU switch, settle windows) touch in
+  ≤ 1 s slices, so slow is not mistaken for wedged.
+- **A trip aborts the run it lands on.** Before, the governor could turn a
+  run's output off and the run carried on to `complete` over an output that
+  was no longer on. Any run driving a tripped device is now aborted first and
+  ends `safe_stopped`.
+- **Contact is per owner.** Each armed device trips when *the session (or run)
+  that armed it* has been silent for `deadman_s`. Another client's traffic no
+  longer keeps it alive — before, one chatty writer held every abandoned
+  output on. A device armed with no owner keeps the old any-contact rule. A
+  new session that claims a device whose arming session has gone takes over
+  as its owner. `safety.status` gains `owners` (seconds since each owner's
+  last contact); `seconds_since_contact` is still the bench-wide figure.
+- **A trip that targets some devices leaves the others alone.** Panic outlets
+  are cut only when a trip covers every armed device, or when one of its own
+  targets could not be made safe.
+- **`agent.close` trips only the device being closed.** It used to target
+  every armed device while passing in only the one, so the others were
+  reported `failed` and panic outlets were cut for a close of one instrument.
+- **`safety.max_duration_s` is enforced inside a phase,** not only between
+  phases, so a phase waiting on an exit rule that never fires still ends.
+
 ### The bench display shows the board's own address — or why it has none
 
 The board boots headless into the kiosk on a DHCP lease. When that address

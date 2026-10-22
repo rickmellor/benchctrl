@@ -4,9 +4,25 @@
 #     ./sync-board.sh                      # sync, then verify
 #     ./sync-board.sh --check              # verify only; change nothing
 #     ./sync-board.sh --restart            # sync, verify, restart what runs it
+#     ./sync-board.sh --target benchpi     # the Pi 5 rather than the Uno Q
+#     ./sync-board.sh --print-config       # resolve the target and change nothing
 #
 # Runs from your workstation, not the board. Needs only ssh/scp/tar/python3 on
 # both ends — the board has no rsync.
+#
+# Targets
+# -------
+#
+# Two boards are kept current from this one checkout: unoq (the Uno Q, the
+# default, so every command written before this option still means the same
+# thing) and benchpi (the Raspberry Pi 5). Pick one with --target NAME or
+# TARGET=NAME; the option wins over the environment. An unknown name is an
+# error rather than a fallback to unoq, because syncing the wrong board silently
+# is the failure this script exists to make impossible.
+#
+# A target only sets DEFAULTS. BOARD, REMOTE_SRC, REMOTE_DEPLOY, PACKAGE and
+# SSH_OPTS still override what a target picks, as do the new AGENT_PYTHON,
+# FUI_PYTHON and RESTART_UNITS. --print-config shows the resolved result.
 #
 # Why this exists
 # ---------------
@@ -31,9 +47,9 @@
 
 set -eu
 
-BOARD=${BOARD:-arduino@192.168.1.86}
-REMOTE_SRC=${REMOTE_SRC:-/home/arduino/benchctrl-1.2.0/src}
-REMOTE_DEPLOY=${REMOTE_DEPLOY:-/home/arduino/deploy}
+# Not target-specific, so they stay outside the target table: SSH_OPTS is the
+# operator's own ssh invocation, and PACKAGE is the one subtree this script owns
+# on any board.
 SSH_OPTS=${SSH_OPTS:-}
 # The one subtree this script owns. Everything else under REMOTE_SRC — the
 # vendored pyserial/pyusb/pyvisa the board needs because it has no pip — is left
@@ -47,10 +63,23 @@ MANIFEST="$here/board_sync_manifest.py"
 
 mode=sync
 restart=no
+print_config=no
+target=${TARGET:-}
+# Consumed as a positional `--target benchpi` as well as `--target=benchpi`, so
+# the next argument must not be matched against the option table.
+next_is_target=no
 for arg in "$@"; do
+    if [ "$next_is_target" = yes ]; then
+        target=$arg
+        next_is_target=no
+        continue
+    fi
     case "$arg" in
     --check) mode=check ;;
     --restart) restart=yes ;;
+    --print-config) print_config=yes ;;
+    --target) next_is_target=yes ;;
+    --target=*) target=${arg#--target=} ;;
     -h | --help)
         # Delimited by a sentinel rather than line numbers, which silently
         # truncate mid-sentence the moment the header is edited.
@@ -63,6 +92,12 @@ for arg in "$@"; do
         ;;
     esac
 done
+if [ "$next_is_target" = yes ]; then
+    # `--target` as the last word. Reported as a missing name rather than an
+    # unknown one, because there is no name to echo back.
+    echo "--target needs a name (known: unoq, benchpi)" >&2
+    exit 2
+fi
 
 # --check changes nothing, so combining it with --restart can only mean one of
 # the two was a mistake. Refuse rather than silently honouring whichever wins.
@@ -70,6 +105,70 @@ if [ "$mode" = check ] && [ "$restart" = yes ]; then
     echo "--check and --restart are contradictory: --check changes nothing" >&2
     exit 2
 fi
+
+# --print-config answers "what would this do", so a mode flag beside it means
+# one of the two was a mistake — same reasoning as above, and printing the
+# config anyway would make the two spellings of a typo disagree.
+if [ "$print_config" = yes ] &&
+    { [ "$mode" != sync ] || [ "$restart" != no ]; }; then
+    echo "--print-config takes no other mode" >&2
+    exit 2
+fi
+
+# --- the target table ------------------------------------------------------
+# A target sets DEFAULTS only; everything below honours an already-set variable,
+# so BOARD=&c still beat the target. Resolved after argument parsing because
+# --target has to be known first.
+#
+# The two boards differ in how the same tree reaches a running process:
+#
+#   unoq    the whole tree lives under /home/arduino/benchctrl-1.2.0/src, the
+#           vendored pyserial/pyusb/pyvisa included (the board has no pip), and
+#           both the agent unit and benchctrl-fui run /usr/bin/python3 with the
+#           source on PYTHONPATH. One interpreter, so one kind of probe.
+#
+#   benchpi the agent runs from a venv holding an *editable* install of
+#           /home/rick/benchctrl — systemd ExecStart is
+#           .venv/bin/python -m benchctrl.agent.main — so it imports through the
+#           venv, not PYTHONPATH, and the interpreter has to be asked where the
+#           package actually came from. The FUI runs /usr/bin/python3 with
+#           PYTHONPATH from /etc/benchctrl/agent.env. The vision container
+#           bind-mounts that same src read-only, so it picks changes up only on
+#           a restart, which is why RESTART_UNITS has a second unit here.
+#           benchpi has no vendored deps in src (harmless — PACKAGE scoping
+#           still applies), and its blobs/ and runs/ are siblings of src/, so
+#           the existing `*/src` guard still protects them.
+#
+# An unknown name is refused rather than allowed to fall through to unoq: the
+# defaults below are two different machines, and a typo that silently picked the
+# other one is the failure this whole script exists to make impossible. The
+# default is applied by assignment, not by a `""` arm below — after `:-` the
+# value can never be empty, so such an arm would be dead code that reads as a
+# fallthrough.
+target=${target:-unoq}
+case "$target" in
+unoq)
+    : "${BOARD:=arduino@192.168.1.86}"
+    : "${REMOTE_SRC:=/home/arduino/benchctrl-1.2.0/src}"
+    : "${REMOTE_DEPLOY:=/home/arduino/deploy}"
+    : "${AGENT_PYTHON:=/usr/bin/python3}"
+    : "${FUI_PYTHON:=/usr/bin/python3}"
+    : "${RESTART_UNITS:=benchctrl-agent}"
+    ;;
+benchpi)
+    : "${BOARD:=rick@192.168.1.66}"
+    : "${REMOTE_SRC:=/home/rick/benchctrl/src}"
+    : "${REMOTE_DEPLOY:=/home/rick/benchctrl-deploy}"
+    : "${AGENT_PYTHON:=/home/rick/benchctrl/.venv/bin/python}"
+    : "${FUI_PYTHON:=/usr/bin/python3}"
+    : "${RESTART_UNITS:=benchctrl-agent benchctrl-vision}"
+    ;;
+*)
+    echo "unknown target: $target (known: unoq, benchpi)" >&2
+    exit 2
+    ;;
+esac
+export BOARD REMOTE_SRC REMOTE_DEPLOY AGENT_PYTHON FUI_PYTHON RESTART_UNITS
 
 # SSH_OPTS is deliberately word-split (SC2086), and SC2029's client-side
 # expansion is intended: every path in these commands comes from this script's
@@ -119,6 +218,22 @@ case "$REMOTE_SRC" in
     exit 2
     ;;
 esac
+
+# --- what would this do, without doing any of it ---------------------------
+# Runs after the guards above, so what it prints is the configuration a real run
+# would use — a target whose REMOTE_SRC the sweep guard rejects must not print as
+# though it were usable. Deliberately no ssh, no git, no transfer.
+if [ "$print_config" = yes ]; then
+    printf 'target=%s\n' "$target"
+    printf 'BOARD=%s\n' "$BOARD"
+    printf 'REMOTE_SRC=%s\n' "$REMOTE_SRC"
+    printf 'REMOTE_DEPLOY=%s\n' "$REMOTE_DEPLOY"
+    printf 'AGENT_PYTHON=%s\n' "$AGENT_PYTHON"
+    printf 'FUI_PYTHON=%s\n' "$FUI_PYTHON"
+    printf 'RESTART_UNITS=%s\n' "$RESTART_UNITS"
+    printf 'PACKAGE=%s\n' "$PACKAGE"
+    exit 0
+fi
 
 # --- refuse to sync a tree that is not what it appears to be ---------------
 # Syncing uncommitted work is normal during development, so this warns rather
@@ -287,6 +402,11 @@ ssh_board "rm -f /tmp/benchctrl-src-sync.tgz /tmp/board_apply_sync.sh"
 # dir, NOT installed: putting them in /usr/local/bin needs root, and this script
 # deliberately never asks for it.
 echo "sending deploy/ scripts to $BOARD:$REMOTE_DEPLOY"
+# The staging directory has to exist before scp can copy into it. On unoq it was
+# created during the original install; benchpi has never been synced, and scp
+# reports a missing destination directory only as a bare "No such file or
+# directory" after the transfer has already been attempted.
+ssh_board "mkdir -p '$REMOTE_DEPLOY'"
 # shellcheck disable=SC2086  # SSH_OPTS is deliberately word-split
 scp -O -q $SSH_OPTS \
     "$here/benchctrl-fui" \
@@ -309,14 +429,49 @@ fi
 # perfect copy and still fail to import under the board's python. Probed from
 # /tmp because $HOME holds a 'benchctrl' runs directory that shadows the package.
 #
-# /usr/bin/python3 explicitly, not `python3` from PATH — that is what the agent
-# unit and benchctrl-fui both run. Probing a different interpreter than production
-# proves the wrong thing, which is the same mistake as verifying as the wrong user.
-echo "checking it imports under the board's python"
-ssh_board "cd /tmp && PYTHONPATH='$REMOTE_SRC' /usr/bin/python3 -c '
-import benchctrl.dashboards.fui.server, benchctrl.dashboards.state, benchctrl.agent.main
-print(\"  imports OK\")
+# Each production interpreter is probed as it runs in production — FUI_PYTHON and
+# AGENT_PYTHON, not `python3` from PATH. Probing a different interpreter than the
+# one systemd and the launcher actually use proves the wrong thing, which is the
+# same mistake as verifying as the wrong user. On unoq those are the same binary
+# and both find the tree on PYTHONPATH; on benchpi the agent's interpreter is a
+# venv, where PYTHONPATH is not how the package is found at all.
+echo "checking it imports under the board's pythons"
+echo "  FUI: $FUI_PYTHON"
+ssh_board "cd /tmp && PYTHONPATH='$REMOTE_SRC' '$FUI_PYTHON' -c '
+import benchctrl.dashboards.fui.server, benchctrl.dashboards.state
+print(\"  FUI imports OK\")
 '"
+
+if [ "$AGENT_PYTHON" = /usr/bin/python3 ]; then
+    # Same story as the FUI: a bare system interpreter with the source on
+    # PYTHONPATH is exactly how the agent unit runs.
+    echo "  agent: $AGENT_PYTHON"
+    ssh_board "cd /tmp && PYTHONPATH='$REMOTE_SRC' '$AGENT_PYTHON' -c '
+import benchctrl.agent.main
+print(\"  agent imports OK\")
+'"
+else
+    # A venv (benchpi: .venv/bin/python, an editable install of the repo) must be
+    # probed WITHOUT PYTHONPATH, which would hand it the tree and so prove
+    # nothing. What has to be established is that the package the venv resolves
+    # on its own IS the tree this script just synced — an editable install can
+    # point anywhere, and one left pointing at an older checkout would import
+    # cleanly while running last week's code. Hence benchctrl.__file__ against
+    # REMOTE_SRC rather than a bare import.
+    echo "  agent: $AGENT_PYTHON (no PYTHONPATH; must resolve into $REMOTE_SRC)"
+    if ! ssh_board "cd /tmp && '$AGENT_PYTHON' -c '
+import benchctrl, benchctrl.agent.main, os, sys
+p = os.path.realpath(benchctrl.__file__)
+want = os.path.realpath(sys.argv[1])
+print(\"  agent imports\", p)
+sys.exit(0 if p.startswith(want + os.sep) else 3)
+' '$REMOTE_SRC'"; then
+        echo "the agent's interpreter ($AGENT_PYTHON) does not load the tree this" >&2
+        echo "script synced: its benchctrl package is not under $REMOTE_SRC, so a" >&2
+        echo "verified copy of the source is not what the agent would run." >&2
+        exit 1
+    fi
+fi
 
 if [ "$restart" = yes ]; then
     # lightdm, not pkill. benchctrl-kiosk starts the dashboard once and then
@@ -338,17 +493,39 @@ would be left with a dead port on a keyboard-less panel). Run:
 EOF
 fi
 
+# One restart command per unit this target runs from the synced tree, so benchpi
+# gets its vision container named too — that container bind-mounts src/
+# read-only, so a container still running is a container running old code, and a
+# hint that stopped at the agent would leave the operator thinking the sync was
+# fully live. The note stays with the agent because the agent is the unit whose
+# restart drops the instrument connections.
+unit_lines=""
+first=yes
+# shellcheck disable=SC2086  # RESTART_UNITS is a deliberate word list
+for unit in $RESTART_UNITS; do
+    note=""
+    if [ "$first" = yes ] && [ "$unit" = benchctrl-agent ]; then
+        note='   # disarms the bench'
+    fi
+    first=no
+    # The trailing newline lives inside the string so the loop can append; it is
+    # stripped below so the heredoc does not print a blank line.
+    unit_lines="$unit_lines$(printf '  %-18s' "$unit:") ssh -t $BOARD 'sudo systemctl restart $unit'$note
+"
+done
+unit_lines=${unit_lines%?}
+
 cat <<EOF
 
 Source on the board is current and verified.
 
 Nothing was restarted. The FUI is still running the OLD code. The agent is a
 mixed case, not simply old: its drivers import lazily, so a running agent picks
-up new driver modules while keeping the old core it already loaded. Restart it
-before trusting a driver change.
+up new driver modules while keeping the old core it already loaded. Restart the
+units below before trusting a driver change.
 
-  whole panel:   ssh -t $BOARD 'sudo systemctl restart lightdm'
-  the agent:     ssh -t $BOARD 'sudo systemctl restart benchctrl-agent'   # disarms the bench
+  whole panel:      ssh -t $BOARD 'sudo systemctl restart lightdm'
+$unit_lines
 
 If a launcher changed, it also needs installing (root):
 

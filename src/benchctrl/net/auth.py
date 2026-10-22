@@ -32,6 +32,22 @@ log = logging.getLogger("benchctrl.net.auth")
 PROTOCOL_VERSION = 1
 AUTH_METHOD = "hmac-sha256"
 
+#: The range of protocol versions this build can speak. Sent as ``v_min`` and
+#: ``v_max`` next to ``v`` (kept, and still ``PROTOCOL_VERSION``), so a peer
+#: that predates ranges sees exactly the HELLO/CHALLENGE it always did. Both
+#: ends of a range-aware pair settle on the highest version both can speak.
+PROTOCOL_MIN = 1
+PROTOCOL_MAX = 1
+
+#: Optional features this build supports, advertised as ``caps``. A capability
+#: never changes the meaning of a frame both sides already understand; it says
+#: "you may also send me X". Unknown caps are ignored, which is what lets them
+#: be added without a version bump.
+#:
+#: - ``err-code``: refusals carry ``PolicyError.code``/``holder`` attrs.
+#: - ``per-owner-deadman``: each armed device is kept alive by its own owner.
+CAPS: tuple[str, ...] = ("err-code", "per-owner-deadman")
+
 #: Domain separator — stops a MAC computed for one purpose being replayed
 #: for another if this token is ever reused elsewhere.
 CONTEXT = b"benchctrl-v1"
@@ -131,21 +147,31 @@ class FailureTracker:
         self._blocked_until.pop(address, None)
 
 
+def _range() -> dict:
+    return {"v_min": PROTOCOL_MIN, "v_max": PROTOCOL_MAX, "caps": list(CAPS)}
+
+
 def build_hello(client_name: str = "benchctrl") -> tuple[dict, str]:
     """Client step 1. Returns ``(payload, nonce_client)``."""
     nonce = new_nonce()
-    return {"v": PROTOCOL_VERSION, "nonce_c": nonce, "client": client_name}, nonce
+    return {"v": PROTOCOL_VERSION, "nonce_c": nonce, "client": client_name, **_range()}, nonce
 
 
-def build_challenge(agent_name: str = "benchctrl-agent") -> tuple[dict, str]:
-    """Server step 2. Returns ``(payload, nonce_server)``."""
+def build_challenge(
+    agent_name: str = "benchctrl-agent", version: int = PROTOCOL_VERSION
+) -> tuple[dict, str]:
+    """Server step 2. Returns ``(payload, nonce_server)``.
+
+    ``version`` is the one :py:func:`negotiate` chose from the HELLO.
+    """
     nonce = new_nonce()
     return (
         {
-            "v": PROTOCOL_VERSION,
+            "v": version,
             "nonce_s": nonce,
             "agent": agent_name,
             "auth": AUTH_METHOD,
+            **_range(),
         },
         nonce,
     )
@@ -156,12 +182,47 @@ def build_auth(token: str, nonce_client: str, nonce_server: str) -> dict:
     return {"mac": compute_mac(token, nonce_client, nonce_server)}
 
 
-def check_version(payload: dict) -> Optional[str]:
-    """Return an error string if the peer speaks a version we don't."""
-    version = payload.get("v")
-    if version != PROTOCOL_VERSION:
-        return (
-            f"protocol version mismatch: peer speaks v{version}, "
-            f"this build speaks v{PROTOCOL_VERSION}"
+def negotiate(payload: dict) -> tuple[Optional[int], Optional[str]]:
+    """Pick the version to speak with a peer: ``(version, None)`` or ``(None, error)``.
+
+    A peer that sends ``v_min``/``v_max`` gets the highest version in both
+    ranges. A peer that sends neither predates ranges, and gets the strict
+    check it always had: its ``v`` must be ours. A half or malformed range is
+    refused rather than guessed at.
+    """
+    has_min, has_max = "v_min" in payload, "v_max" in payload
+    if not (has_min or has_max):
+        version = payload.get("v")
+        if version != PROTOCOL_VERSION:
+            return None, (
+                f"protocol version mismatch: peer speaks v{version}, "
+                f"this build speaks v{PROTOCOL_VERSION}"
+            )
+        return PROTOCOL_VERSION, None
+    lo, hi = payload.get("v_min"), payload.get("v_max")
+    if not (_is_version(lo) and _is_version(hi) and lo <= hi):
+        return None, f"malformed protocol range from peer: v_min={lo!r} v_max={hi!r}"
+    best = min(hi, PROTOCOL_MAX)
+    if best < max(lo, PROTOCOL_MIN):
+        return None, (
+            f"protocol version mismatch: peer speaks v{lo}..v{hi}, "
+            f"this build speaks v{PROTOCOL_MIN}..v{PROTOCOL_MAX}"
         )
-    return None
+    return best, None
+
+
+def _is_version(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def peer_caps(payload: dict) -> frozenset[str]:
+    """The capabilities a peer advertised; empty for one that predates caps."""
+    caps = payload.get("caps")
+    if not isinstance(caps, list):
+        return frozenset()
+    return frozenset(c for c in caps if isinstance(c, str))
+
+
+def check_version(payload: dict) -> Optional[str]:
+    """Return an error string if the peer speaks no version we do."""
+    return negotiate(payload)[1]

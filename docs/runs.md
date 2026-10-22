@@ -86,7 +86,33 @@ Inside each tick the ordering is fixed:
 5. roll a chunk if one is due
 
 `max_duration_s` is a backstop on the whole run, independent of what the
-phases add up to.
+phases add up to. It is checked on every tick, not only between phases, so a
+phase with no duration that waits on an exit rule which never fires still
+ends — `safe_stopped`, reason `safety: max_duration_s exceeded`.
+
+## Who keeps a run's output alive
+
+The agent's deadman trips an armed output whose **owner** has gone quiet. A
+run is its own owner (`run:<run_id>` in `safety.status`), and the engine
+proves it is alive by touching that owner on every tick and through every
+wait. So:
+
+- **Disconnecting does not stop a run.** The client that submitted it can
+  leave; nothing it did or stopped doing counts for the run's device.
+- **A wedged engine is tripped.** If the engine's thread stops coming back
+  (a hung driver call outside any bounded wait, a bug), its owner goes stale
+  and the governor drives the device safe within `deadman_s` plus the 0.5 s
+  poll, with reason `run_watchdog`. The run is aborted first, so it ends
+  `safe_stopped` rather than reading on as `complete`.
+- **A slow wait is not a wedge.** Waits on a worker, on a verified PDU switch
+  (up to 30 s) and on a settle window are sliced to at most 1 s, with a touch
+  between slices. Only a thread that stops making progress trips.
+- **Other clients don't keep it alive either.** A connected client chatting
+  away is not evidence the engine is running.
+
+The deadman is damage limitation, not a guarantee: a wedged driver can also
+stop the safe-state command getting out. For runs that must not be left live,
+use a hardware interlock (KNOWN_LIMITATIONS § N-1).
 
 ## Dwell times
 
@@ -233,6 +259,12 @@ client.call("run.artifacts", {"run_id": run_id})
 client.call("run.fetch_chunk", {"run_id": run_id, "idx": 0})
 client.call("run.abort", {"run_id": run_id, "reason": "..."})
 ```
+
+`run.abort` is accepted from the session that submitted the run or the one
+holding its device's claim. Any other session is refused (`not_owner`) unless
+it passes `"force": True` with a `reason`; a forced abort is published as a
+`run_abort_forced` event at `alarm` severity, so the owner can see who stopped
+its run and why.
 
 Sequence numbers are assigned inside the same transaction that persists the
 event, so `since_seq` replays exactly what a disconnected host missed —

@@ -344,7 +344,20 @@ def test_record_captures_a_known_waveform(bench, arc):
     arc.set_output(True)
 
     with arc.record("mc", "mv") as rec:
-        time.sleep(1.0)
+        # Record to a sample count, not to a wall-clock second. The assertion
+        # below is about samples, and samples per second is a property of how
+        # busy the runner is, not of the code under test: a loaded CI runner
+        # got 307-479 out of a fixed 1.0 s. Poll the board-side count — a live
+        # query, no sample transfer — until it clears the bar, holding the
+        # 1.0 s floor so the reader-batch window (KNOWN_LIMITATIONS A-4) is
+        # still covered. On timeout we fall through and the assertion reports
+        # the count.
+        started = time.monotonic()
+        while time.monotonic() - started < 15.0:
+            enough = rec.live_statistics("mc")["sample_count"] > 500
+            if enough and time.monotonic() - started >= 1.0:
+                break
+            time.sleep(0.1)
 
     stats = rec.statistics("mc")
     assert stats.sample_count > 500

@@ -241,6 +241,14 @@ in [`deploy/`](../deploy/README.md) does — it invokes `python3 -m
 benchctrl.agent.main` rather than the console script, because the board has no
 pip and reaches the package through `PYTHONPATH`.
 
+Each row of the device table (WELCOME's `devices`) carries the instrument's
+`serial`, read from it at open, and its `binding` from `agent.json`
+(`"binding": {"siglent_sdm4065a": "dut_bound"}`; `dut_bound`, `bench_bound` or
+`routable_source`). A device not yet opened, or one whose driver reports no
+serial (the PDU, the vision sidecar), has `serial: null`; the serial is kept
+across a close, as the instrument last seen under that key. An unknown binding
+stops the agent at startup.
+
 ## What is different in remote mode
 
 Measured over USB (`adb forward`) to an Uno Q. Wifi will be slower and
@@ -275,6 +283,14 @@ Behavioural differences worth knowing:
 - **One writer per device.** Extra sessions are read-only observers. An observer's only
   device verb is `device.read`: a non-mutating method on a device somebody else has already
   opened (what the dashboard's generator-screen pane uses); it never opens, claims or arms.
+- **A claim also gates the verbs around the device.** Another session's
+  `agent.open`/`agent.close` on a claimed device is refused with
+  `PolicyError.code == "claim_conflict"` (and `holder`, the session holding it).
+  `run.abort` is for the run's submitter or the device's claim holder;
+  anyone else needs `force: true` and a `reason`, and the forced abort is
+  announced as an `alarm`-severity `run_abort_forced` event. `blob.release` and
+  `rec.release` are for the session that made the blob or recording, until it
+  disconnects (`code == "not_owner"`).
 - **A-1 still applies.** The emulator and a recording cannot run
   concurrently on one Arc; the run engine refuses the combination rather
   than deadlocking.

@@ -28,7 +28,7 @@ from typing import Optional
 
 from benchctrl._version import __version__
 from benchctrl.agent.blobs import BlobStore, default_spill_dir
-from benchctrl.agent.registry import build_default_registry
+from benchctrl.agent.registry import BINDINGS, build_default_registry
 from benchctrl.agent.server import AgentServer, BenchAgent
 from benchctrl.config import DEFAULT_PORT, DEVICE_KEYS
 from benchctrl.net import auth as authmod
@@ -142,7 +142,19 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901
         print(f"unknown device key(s): {unknown}; valid: {list(DEVICE_KEYS)}", file=sys.stderr)
         return 2
 
-    registry = build_default_registry(keys, simulate=simulate, open_kwargs=cfg.get("open") or {})
+    bindings = cfg.get("binding") or {}
+    bad = [k for k in bindings if k not in DEVICE_KEYS]
+    bad += [f"{k}={v!r}" for k, v in bindings.items() if v not in BINDINGS]
+    if bad:
+        print(
+            f"binding names unknown key(s) or value(s): {bad}; values: {list(BINDINGS)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    registry = build_default_registry(
+        keys, simulate=simulate, open_kwargs=cfg.get("open") or {}, bindings=bindings
+    )
 
     # Bench infrastructure the safe-stop and the governor leave alone. A
     # bench supply that powers the NPU and its fan is "armed" for the whole
@@ -175,6 +187,8 @@ def main(argv: Optional[list[str]] = None) -> int:  # noqa: C901
         runs_dir=Path(cfg["runs_dir"]) if cfg.get("runs_dir") else None,
         llm_base_url=cfg.get("llm_base_url", ""),
         safe_stop_exempt=exempt,
+        # Names the bench in session ids; the hostname until it is set.
+        agent_id=cfg.get("agent_id"),
     )
     if exempt:
         log.warning(

@@ -375,18 +375,21 @@ def test_a_run_power_cycling_a_dut_is_visible_on_the_panel(run_bench):
         submitted = client.call("run.submit", {"spec": _cycle_spec().to_dict()})
         run_id = submitted["run_id"]
 
+        # Watched until the settle window shows, not until the cut does: the
+        # cut and the window are two events (run_outlet clears settling_s,
+        # run_outlet_settle sets it), so a poll can land between them and see
+        # the outlet off with no window yet. Stopping there failed the test on
+        # a loaded box; a window that never arrives still fails it, here.
         block, seen = run_bench.watch(
-            lambda m: any(
-                p["index"] == OUTLET and not p["on"] for p in m["outlets"]
-            ),
-            f"the run's cut of outlet {OUTLET}",
+            lambda m: m.get("settling_s") is not None
+            and any(p["index"] == OUTLET and not p["on"] for p in m["outlets"]),
+            f"the run's cut of outlet {OUTLET} with its settle window",
         )
         assert block["energised"] == 7
         assert block["transitions"] >= 1
         assert block["last_transition"] == {"outlet": OUTLET, "state": False}
 
         settling = [s for s in seen if s.get("settling_s") is not None]
-        assert settling, "no settle window ever reached the display"
         # More specific about the same instant, so it outranks MAINS LIVE: the
         # samples being taken right now are a DUT booting.
         assert any(s["status"] == "DUT SETTLING" for s in settling), [
