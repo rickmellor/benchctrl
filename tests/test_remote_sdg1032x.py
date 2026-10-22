@@ -41,9 +41,11 @@ def remote_awg():
     from benchctrl.sim.factories import make_sdg1032x
 
     # 160 px = 76.8 KB: above the 64 KB inline limit (the blob path is the
-    # thing under test) but no larger — the screen crosses a pty, and under a
-    # loaded full-suite run a 120 KB one took the worker past its 20 s budget.
-    driver = make_sdg1032x(sim={"screen_px": 160})
+    # thing under test) but no larger. The main resource is the sim's LAN
+    # socket, not the pty: pyvisa-py reads a pty one byte per call, and in a
+    # busy full-suite process the screen took the worker past its 20 s budget
+    # on every CI leg (see make_sdg1032x). This file tests the codec, not USB.
+    driver = make_sdg1032x(sim={"screen_px": 160}, transport="lan")
 
     registry = DeviceRegistry()
     registry.register_open(KEY, driver)
@@ -175,7 +177,7 @@ def test_identity_survives_the_codec(remote_awg):
     info = remote_awg.proxy.info()
     assert isinstance(info, SDG1032XInfo)
     assert info.model.startswith("SDG10")
-    assert info.resource.startswith("ASRL")
+    assert info.resource == remote_awg.driver.info().resource  # the fixture's LAN socket
 
 
 def test_output_state_survives_the_codec(remote_awg):
