@@ -53,7 +53,7 @@ With no Pro configuration the agent behaves as before, except that a safety fix 
 - **CORE-P0.10** Handshake negotiation with `v_min`/`v_max`/`caps`. Old client ↔ new agent and new client ↔ old agent both interoperate. `verify: test`
 - **CORE-P0.11** `DeviceRegistry.describe()` reports serial and binding. `verify: test`
 - **CORE-P0.12** Fix the `docs/runs.md` unattended-run promise. KNOWN_LIMITATIONS states that the deadman is best-effort and that a hardware interlock is the guarantee. CHANGELOG entries cover each safety change. `verify: evidence`
-- **CORE-P0.13** The full suite passes on Python 3.9 and 3.13. `verify: test`
+- **CORE-P0.13** The full suite passes on Python 3.9 and 3.13. `verify: evidence`: a CI run whose 3.9 and 3.13 jobs are green, cited by run id. A single test can't show that a whole job passed.
 
 ## Phase 1a: uplink and enrollment
 

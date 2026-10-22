@@ -26,10 +26,11 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          # Hardware-free tests use mock objects; we install [bench-visa]
-          # for the pyvisa Python module but don't install a VISA backend,
-          # which the mocks don't need.
-          pip install -e ".[dev,mcp,bench-visa,science]"
+          # [bench-visa-py] brings the pure-Python VISA backend with pyvisa.
+          # The hardware-free tests still mock the instruments, but opening
+          # a ResourceManager needs a backend, and without one every VISA
+          # test errors at setup.
+          pip install -e ".[dev,mcp,bench-visa-py,science]"
 
       - name: Run hardware-free tests
         run: pytest -m "not hardware" -q --junitxml=junit.xml
