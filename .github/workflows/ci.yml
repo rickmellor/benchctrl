@@ -9,6 +9,9 @@ jobs:
   test:
     name: pytest (hardware-free) on ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
+    # Ubuntu legs take ~37 min. Without a limit a hung leg (macOS, 2026-10)
+    # holds its runner for GitHub's 6 h maximum before it is cancelled.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:

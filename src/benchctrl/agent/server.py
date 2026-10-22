@@ -850,6 +850,19 @@ class Session:
         self.claims: set[str] = set()
         self.opened_at = time.monotonic()
         self._event_seq = itertools.count(1)
+        #: Set once the WELCOME is on the wire, or when the session ends.
+        #: The subscriber is registered before the WELCOME, so this keeps an
+        #: early event from reaching a client still waiting for its handshake.
+        self._welcomed = threading.Event()
+        self._ended = False
+
+    def mark_welcomed(self) -> None:
+        self._welcomed.set()
+
+    def mark_ended(self) -> None:
+        """Release a sender thread still waiting for the WELCOME."""
+        self._ended = True
+        self._welcomed.set()
 
     @property
     def peer(self) -> str:
@@ -869,6 +882,9 @@ class Session:
         this from the governor's trip path is what used to let a stalled client
         delay a disarm.
         """
+        self._welcomed.wait()
+        if self._ended:
+            return
         payload = dict(event)
         payload.setdefault("seq", next(self._event_seq))
         payload.setdefault("ts_mono", round(time.monotonic(), 6))
@@ -1695,11 +1711,17 @@ class _Handler(socketserver.BaseRequestHandler):
         try:
             if not self._authenticate(session):
                 return
+            # Subscribe before the WELCOME, so a client that has its session
+            # id can already find its subscriber; the session holds its
+            # events back until the WELCOME is written.
             self.agent.register_session(session)
+            self._send_welcome(session)
+            session.mark_welcomed()
             self._serve(session)
         except Exception as exc:  # noqa: BLE001
             log.info("agent: session %s ended: %r", session.session_id, exc)
         finally:
+            session.mark_ended()
             self.agent.drop_session(session)
             session.writer.close()
             try:
@@ -1752,7 +1774,6 @@ class _Handler(socketserver.BaseRequestHandler):
                 peer,
             )
             session.authenticated = True
-            self._send_welcome(session)
             return True
 
         challenge, nonce_s = authmod.build_challenge(AGENT_NAME, session.protocol_v)
@@ -1772,7 +1793,6 @@ class _Handler(socketserver.BaseRequestHandler):
 
         agent.failures.record_success(peer)
         session.authenticated = True
-        self._send_welcome(session)
         return True
 
     def _send_welcome(self, session: Session) -> None:

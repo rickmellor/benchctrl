@@ -34,6 +34,16 @@ no longer costs a MAC. `RemoteClient.protocol_v`/`peer_caps` and
 `Session.protocol_v`/`peer_caps` expose the result. The first caps are
 `err-code` and `per-owner-deadman`.
 
+### A session is subscribed to events before its WELCOME is sent
+
+The agent used to send the WELCOME and only then register the session's event
+subscriber. A client could hold its session id before the agent knew it, and
+an event published in that gap never reached it. Observer-session tests failed
+intermittently on CI for this reason. The session is now registered first. Its
+sender thread holds events back until the WELCOME is on the wire, so the first
+frame a client reads is still the WELCOME. An event published during the
+handshake is now delivered after the WELCOME instead of being lost.
+
 ### Session ids are `s-<agent6>-<boot6>-N`
 
 A bare `s-N` restarted at `s-1` with every agent process, so an id held from

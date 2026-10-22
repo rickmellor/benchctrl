@@ -1077,6 +1077,52 @@ def test_dropping_a_session_removes_its_subscriber(bench):
     assert session_id not in names, f"subscriber leaked: {names}"
 
 
+def test_a_session_is_subscribed_before_its_welcome_arrives(bench, monkeypatch):
+    """A client holding its session id can already find its subscriber.
+
+    The agent used to send the WELCOME and only then register the session, so
+    a fast client could look itself up in between. Slowing registration down
+    makes that window wide enough to hit every time on the old order.
+    """
+    original = BenchAgent.register_session
+
+    def slow_register(self, session):
+        time.sleep(0.3)
+        original(self, session)
+
+    monkeypatch.setattr(BenchAgent, "register_session", slow_register)
+    observer = bench.connect(observer=True)
+    session_id = observer.welcome["session"]
+    names = {s["name"] for s in bench.agent.events.stats()["subscribers"]}
+    assert session_id in names, f"no subscriber for {session_id} at WELCOME: {names}"
+
+
+def test_an_event_published_before_the_welcome_waits_for_it(bench, monkeypatch):
+    """The subscriber exists before the WELCOME, so an event published in that
+    window must queue behind it: a frame ahead of the WELCOME fails the
+    client's handshake. The event is still delivered afterwards."""
+    from benchctrl.agent import server as server_mod
+
+    original = server_mod._Handler._send_welcome
+
+    def welcome_after_an_event(self, session):
+        self.agent._broadcast_event({"kind": "p0_race_probe", "severity": "info"})
+        time.sleep(0.3)  # long enough for the sender thread to try to write it
+        original(self, session)
+
+    monkeypatch.setattr(server_mod._Handler, "_send_welcome", welcome_after_an_event)
+    observer = bench.connect(observer=True)
+    assert observer.welcome["session"].startswith("s-")
+
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and not any(
+        e.get("kind") == "p0_race_probe" for e in observer.events
+    ):
+        time.sleep(0.05)
+    seen = list(observer.events)
+    assert any(e.get("kind") == "p0_race_probe" for e in seen), f"probe never arrived: {seen}"
+
+
 # --------------------------------------------------------------------------
 # The link heartbeat: emitted only while a dashboard is listening
 # --------------------------------------------------------------------------
