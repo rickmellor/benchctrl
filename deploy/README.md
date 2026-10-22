@@ -274,7 +274,23 @@ board is on a bench and the code changes daily.
 ./deploy/sync-board.sh --check     # is the board current? change nothing
 ./deploy/sync-board.sh             # make it current, then prove it
 ./deploy/sync-board.sh --restart   # ...and bounce the FUI (never the agent)
+./deploy/sync-board.sh --target benchpi  # sync the Pi 5 rather than the Uno Q
+./deploy/sync-board.sh --print-config    # resolve the target and change nothing
 ```
+
+`--target` (or `TARGET=`) picks the board; `unoq` is the default. A target
+only sets defaults, and `BOARD`, `REMOTE_SRC`, `REMOTE_DEPLOY`, `PACKAGE`,
+`SSH_OPTS`, `AGENT_PYTHON`, `FUI_PYTHON` and `RESTART_UNITS` still override it.
+`--print-config` shows what was resolved.
+
+| target | board | source dir | agent python | restart hints for |
+|---|---|---|---|---|
+| `unoq` | `arduino@192.168.1.86` | `/home/arduino/benchctrl-1.2.0/src` | `/usr/bin/python3` | `benchctrl-agent` |
+| `benchpi` | `rick@192.168.1.66` | `/home/rick/benchctrl/src` | `/home/rick/benchctrl/.venv/bin/python` | `benchctrl-agent`, `benchctrl-vision` |
+
+benchpi's agent runs from a venv with an editable install, so it is checked
+without `PYTHONPATH`: the sync fails unless that venv resolves `benchctrl` into
+the synced source dir.
 
 Runs from your **workstation**. Configure with `BOARD=user@host`,
 `REMOTE_SRC=...`, and `SSH_OPTS=...` if your ssh needs explicit options.
