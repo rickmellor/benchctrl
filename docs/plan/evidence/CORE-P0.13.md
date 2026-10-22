@@ -7,7 +7,7 @@ operator_role: ai-assistant
 measurements:
   ci_run_id: 39853457809
   py39_ubuntu_job_id: 120117593812
-  py39_ubuntu_attempt: 2
+  py39_ubuntu_attempt: 3
   py39_ubuntu_passed: 3126
   py39_ubuntu_failed: 0
   py39_ubuntu_skipped: 55
@@ -22,7 +22,7 @@ GitHub Actions run 39853457809 on 38a4eca (PR #4, `feat/pro-phase0`), `pytest
 (hardware-free)` on `ubuntu-latest`:
 
 - **Python 3.13**, attempt 1, job 120085429018: 3175 passed, 6 skipped, 0 failed.
-- **Python 3.9**, attempt 2, job 120117593812: 3126 passed, 55 skipped, 0 failed. The
+- **Python 3.9**, attempt 3, job 120117593812: 3126 passed, 55 skipped, 0 failed. The
   extra skips are the `mcp` tests: the `mcp` extra is limited to Python ≥ 3.10, because
   no `mcp<2` release supports 3.9.
 
