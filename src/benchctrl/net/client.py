@@ -14,7 +14,7 @@ import json
 import logging
 import socket
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 from benchctrl.config import EndpointConfig
 from benchctrl.exceptions import (
@@ -221,7 +221,8 @@ class RemoteClient:
     def _rx_loop(self) -> None:
         try:
             while not self._stop.is_set():
-                frame = self._reader.read_frame(timeout=60.0)
+                # connect() installs _reader; it is None only before or after a session.
+                frame = cast("FrameReader", self._reader).read_frame(timeout=60.0)
                 if frame is None:
                     self._die(BenchConnectionError("agent closed the connection"))
                     break
@@ -273,12 +274,12 @@ class RemoteClient:
         elif frame_type == FrameType.BLOB_END:
             body = json.loads(payload)
             with self._lock:
-                transfer = self._blobs.get(body.get("blob", ""))
+                finished = self._blobs.get(body.get("blob", ""))
                 self._active_blob = None
-            if transfer is not None:
+            if finished is not None:
                 if not body.get("ok", False):
-                    transfer.error = body.get("error", "transfer failed")
-                transfer.done.set()
+                    finished.error = body.get("error", "transfer failed")
+                finished.done.set()
         elif frame_type == FrameType.PONG:
             pass
 
@@ -420,7 +421,7 @@ class RemoteClient:
             self._proxies.pop(device_key, None)
         if device_key in self._claims:
             with contextlib.suppress(Exception):
-                self.call('agent.release', {'device': device_key})
+                self.call("agent.release", {"device": device_key})
             self._claims.discard(device_key)
 
     def device_names(self) -> list[str]:

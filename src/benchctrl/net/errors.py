@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import Optional
+from typing import Any, Optional, cast
 
 from benchctrl.exceptions import (
     BenchCommandError,
@@ -257,9 +257,9 @@ def _registry() -> dict[str, type]:
             log.debug("error registry: %s unavailable (%s)", module_path, exc)
             continue
         for name in names:
-            cls = getattr(module, name, None)
-            if isinstance(cls, type) and issubclass(cls, BaseException):
-                reg[name] = cls
+            found = getattr(module, name, None)
+            if isinstance(found, type) and issubclass(found, BaseException):
+                reg[name] = found
 
     _REGISTRY = reg
     return reg
@@ -404,7 +404,8 @@ def _instantiate(cls: type, message: str) -> Optional[BaseException]:
     except Exception:  # noqa: BLE001
         pass
     try:
-        exc = cls.__new__(cls)
+        # Any: cls's own __new__ signature is unknown at this point
+        exc = cast(Any, cls).__new__(cls)
         BaseException.__init__(exc, message)
         return exc
     except Exception as exc_info:  # noqa: BLE001

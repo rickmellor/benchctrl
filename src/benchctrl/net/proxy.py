@@ -26,7 +26,7 @@ import logging
 import threading
 import time
 from collections.abc import Iterator
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from benchctrl.exceptions import BenchValueError
 from benchctrl.interfaces import SourceMeasurementUnit  # noqa: F401 (documented intent)
@@ -320,10 +320,10 @@ class RemoteRecording:
     )
 
     def __init__(self, described: dict, client) -> None:
-        self._rec_id = described.get("id") or described.get("rec_id")
+        self._rec_id = cast("str", described.get("id") or described.get("rec_id"))
         self._client = client
         self._described = dict(described)
-        self._real = None
+        self._real: Optional[Any] = None
         self._blob_id = described.get("blob")
         self._running = bool(described.get("running", True))
         self.name = described.get("name", "recording")

@@ -46,7 +46,7 @@ import inspect
 import json
 import os
 import typing
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 from benchctrl import cli_tiers
 
@@ -301,7 +301,8 @@ def check_gate(
         )
 
     if tier == cli_tiers.TIER1_ENV:
-        var = cli_tiers.env_gate_for(tool_name)
+        # Every TIER1_ENV tool has an ENV_GATES entry, so this is a str here.
+        var = cast("str", cli_tiers.env_gate_for(tool_name))
         if environ.get(var) != "1":
             raise CliError(
                 f"{tool_name} needs {var}=1 as well as --yes.\n"
@@ -325,7 +326,7 @@ def iter_tools():
             yield group, mod_name, fn
 
 
-def add_device_groups(sub: argparse._SubParsersAction) -> dict[str, Callable]:
+def add_device_groups(sub: argparse._SubParsersAction) -> dict[tuple[str, str], Callable]:
     """Add one group per device, each with one subcommand per tool.
 
     Returns a ``{(group, subcommand): fn}`` map keyed by the two names the

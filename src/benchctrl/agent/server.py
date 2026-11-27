@@ -28,7 +28,7 @@ import threading
 import time
 import traceback
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from benchctrl.agent import dispatch
 from benchctrl.agent.blobs import CHUNK_BYTES, BlobStore
@@ -1753,7 +1753,9 @@ class _Handler(socketserver.BaseRequestHandler):
         if version_error:
             self._send_error(session, 0, PolicyError(version_error))
             return False
-        session.protocol_v = version
+        # negotiate() returns (None, error) when it cannot settle a version and
+        # the error branch returned above, so `version` is an int on this path.
+        session.protocol_v = cast("int", version)
         session.peer_caps = authmod.peer_caps(hello)
 
         # A client may ask for the read-only observer role. Self-declared on
@@ -1921,7 +1923,7 @@ class _Handler(socketserver.BaseRequestHandler):
             ],
         )
         with contextlib.suppress(Exception):
-            session.writer.send(FrameType.ERR, _json({'id': req_id, 'e': payload}))
+            session.writer.send(FrameType.ERR, _json({"id": req_id, "e": payload}))
 
     # --- routing --------------------------------------------------------
 
@@ -2437,7 +2439,7 @@ class AgentServer:
 
     @property
     def address(self) -> tuple[str, int]:
-        return self._server.server_address[:2]
+        return self._server.server_address[:2]  # type: ignore[return-value]  # a TCP server's address is always (str, int)
 
     @property
     def port(self) -> int:

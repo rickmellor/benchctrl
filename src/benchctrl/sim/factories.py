@@ -31,7 +31,7 @@ def _bind_lifetime(driver: Any, sim: Any) -> Any:
         finally:
             sim.close()
 
-    driver.close = close_both  # type: ignore[method-assign]
+    driver.close = close_both
     return driver
 
 
@@ -235,7 +235,7 @@ def make_cp2112(**kwargs) -> Any:
     kwargs.setdefault("allowed_lines", tuple(range(LINE_COUNT)))
     kwargs.setdefault("serial", sim.serial)
     try:
-        driver = CP2112(sim, **kwargs)
+        driver = CP2112(sim, **kwargs)  # type: ignore[arg-type]  # SimulatedCP2112 implements HidrawLink's surface
         # open() normally captures this; constructing the driver directly means
         # doing it here, or close() would have no as-found state to restore and
         # would silently skip the restore that keeps a DUT out of reset.

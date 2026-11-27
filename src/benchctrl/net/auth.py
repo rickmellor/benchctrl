@@ -25,7 +25,10 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # typing.TypeGuard is 3.10+; used only in annotations
+    from typing import TypeGuard
 
 log = logging.getLogger("benchctrl.net.auth")
 
@@ -211,7 +214,7 @@ def negotiate(payload: dict) -> tuple[Optional[int], Optional[str]]:
     return best, None
 
 
-def _is_version(value: object) -> bool:
+def _is_version(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
 
 

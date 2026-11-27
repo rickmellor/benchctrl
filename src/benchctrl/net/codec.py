@@ -347,7 +347,7 @@ class Decoder:
         return key
 
     @staticmethod
-    def _lookup(name: str) -> type:
+    def _lookup(name: str) -> Any:
         cls = _wire_types().get(name)
         if cls is None:
             raise BenchProtocolError(

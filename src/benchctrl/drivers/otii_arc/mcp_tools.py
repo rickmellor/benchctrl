@@ -148,7 +148,7 @@ def _render_plot_png(
     matplotlib.use("Agg")  # headless backend — no display required
     import matplotlib.pyplot as plt
 
-    ch_objs = None if channels is None else [OtiiArcChannel.coerce(c) for c in channels]
+    ch_objs: Optional[list] = None if channels is None else [OtiiArcChannel.coerce(c) for c in channels]
     fig = rec.plot(channels=ch_objs, show=False, title=title)
     out = Path(output_png)
     fig.savefig(out, dpi=150, bbox_inches="tight")

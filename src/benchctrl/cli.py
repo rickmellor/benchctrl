@@ -402,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
-    except device_error_types() as exc:
+    except device_error_types() as exc:  # type: ignore[misc]  # the tuple is built at runtime from the error registry
         # The class name is kept: with eight driver hierarchies, "which kind of
         # refusal" is most of the diagnosis, and `-v` is the way to the traceback.
         print(f"benchctrl error: {type(exc).__name__}: {exc}", file=sys.stderr)

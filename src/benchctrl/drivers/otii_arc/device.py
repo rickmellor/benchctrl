@@ -692,7 +692,7 @@ class OtiiArc:
                 continue
             for rec in iter_samples(fr.payload):
                 ch = WIRE_ID_TO_CHANNEL.get(rec.channel_id)
-                if ch in arc_to_inputs:
+                if ch is not None and ch in arc_to_inputs:
                     for inp in arc_to_inputs[ch]:
                         out[inp].append(rec.value)
                     self._state.last_value[ch] = rec.value

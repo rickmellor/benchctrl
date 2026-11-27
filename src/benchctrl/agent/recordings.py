@@ -219,7 +219,7 @@ class IteratorHandle:
 
     def take(self, max_items: int) -> list:
         """Pull up to ``max_items``, marking exhaustion."""
-        out = []
+        out: list = []
         with self._lock:
             if self.exhausted:
                 return out

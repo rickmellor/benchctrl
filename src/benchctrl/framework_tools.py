@@ -434,7 +434,7 @@ def battery_profiler_run(
         ),
         temperature=temperature,
     )
-    profiler = Profiler(smu, config)
+    profiler = Profiler(smu, config)  # type: ignore[arg-type]  # OtiiArc's channel type is narrower than the Protocol's
     result = profiler.run()
     out = result.profile.save(output_path)
     return {
@@ -512,7 +512,7 @@ def battery_emulator_start(
         safety_max_used_mAh=safety_max_used_mAh,
         soc_floor=soc_floor,
     )
-    _emulator = Emulator(smu, config)
+    _emulator = Emulator(smu, config)  # type: ignore[arg-type]  # as above: OtiiArc is the Protocol's only implementer
     _emulator.start()
     return {
         "started": True,

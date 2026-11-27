@@ -182,7 +182,7 @@ def _phase_index_from_store(store) -> dict:
     except Exception:  # noqa: BLE001
         log.debug("could not read the phase table for analysis", exc_info=True)
         return {}
-    index = {}
+    index: dict = {}
     for row in rows:
         name = row.get("name")
         if isinstance(name, str) and name:

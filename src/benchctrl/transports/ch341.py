@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from benchctrl.exceptions import BenchConnectionError, BenchValueError
 
@@ -172,8 +172,10 @@ class CH341Device:
         self._parity = parity
         self._stopbits = stopbits
 
-        self._ep_in = None
-        self._ep_out = None
+        # Both are set by open(), which every read/write path below follows;
+        # usb.core.Endpoint is not importable here, so the fields stay Any.
+        self._ep_in: Any = None
+        self._ep_out: Any = None
         self._rx = bytearray()
         self._rx_lock = threading.Lock()
         self._stop = threading.Event()
