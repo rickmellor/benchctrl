@@ -193,6 +193,12 @@ class PylonCamera:
                 self._cv.wait(remaining)
             return self._latest
 
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`close` has run; the stream handler ends on it."""
+        with self._cv:
+            return self._closed
+
     def close(self) -> None:
         with self._cv:
             self._closed = True
