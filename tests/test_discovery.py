@@ -632,6 +632,34 @@ def test_no_usb_access_is_not_a_discovery_failure(monkeypatch):
     assert discovery.scan_driverless_bridges() == []
 
 
+def test_a_missing_libusb_backend_does_not_take_down_discovery(monkeypatch):
+    """pyusb installed but no libusb behind it: no CH340, and no exception.
+
+    Windows CI, and any laptop that pulled in pyusb as a pyvisa-py dependency.
+    ``usb.core.find()`` raises ``NoBackendError`` there — a ``ValueError``, not a
+    ``USBError``, so it sailed past every USBError handler in the CH341 module and
+    out of ``discover()``, whose scans all land in one merged list. That is why
+    the serial assertion below matters as much as the empty CH340 list: the bug
+    was one scanner's host problem cancelling every other one. The remaining
+    scanners are switched off so this says nothing about them, only that the one
+    that answers still does.
+    """
+    import usb.core
+
+    def no_backend(*args, **kwargs):
+        raise usb.core.NoBackendError("No backend available")
+
+    monkeypatch.setattr(usb.core, "find", no_backend)
+    _patch_ports(monkeypatch, [FakePort("/dev/ttyACM0", vid=0x0FCE, pid=0xD1E6, product="Arc")])
+
+    assert discovery.scan_driverless_bridges() == []
+
+    found = discovery.discover(usbtmc=False, visa=False, hidraw=False, usbfs=False, usb=False)
+    assert [d.path for d in found] == ["/dev/ttyACM0"], (
+        "the CH340 scan's host problem removed the transports that could answer"
+    )
+
+
 def test_discover_includes_driverless_bridges(monkeypatch):
     """The wiring, not just the scanner: discover() must call it."""
     _patch_ports(monkeypatch, [])

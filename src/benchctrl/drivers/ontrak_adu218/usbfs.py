@@ -70,6 +70,7 @@ import ctypes
 import errno
 import logging
 import os
+import posixpath
 from typing import Optional
 
 try:
@@ -275,7 +276,13 @@ def enumerate_devices(
             continue
         found.append(
             Adu218Device(
-                path=os.path.join(dev_root, f"{bus:03d}", f"{device:03d}"),
+                # posixpath, not os.path: this is a usbdevfs node, so the
+                # separators are part of the Linux interface and have nothing to
+                # do with the host doing the describing. os.path.join handed back
+                # "/dev/bus/usb\\002\\007" on Windows, which opens nothing and
+                # reads as an absent device. sysfs paths just above stay on
+                # os.path — those really are files on this host.
+                path=posixpath.join(dev_root, f"{bus:03d}", f"{device:03d}"),
                 bus=bus,
                 device=device,
                 serial=_read_sysfs(directory, "serial"),

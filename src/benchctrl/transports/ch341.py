@@ -187,11 +187,24 @@ class CH341Device:
 
     @classmethod
     def find_all(cls) -> list:
-        """Every CH340 on the bus, as raw pyusb device objects."""
+        """Every CH340 on the bus, as raw pyusb device objects.
+
+        An empty list means "this host shows me no CH340", which is what a
+        scanner needs to hear. It is *not* the same as "no USB on this host":
+        pyusb installs fine without a libusb backend (Windows wheels, a board
+        with no usbfs) and raises ``NoBackendError`` from the first ``find()``.
+        That is a host with no answer from this scanner, not a crash, so it is
+        reported as no devices — the discovery scan merges one list, and an
+        exception here took VISA and usbtmc discovery down with it.
+        """
         usb_core = _import_usb()
-        return list(
-            usb_core.find(find_all=True, idVendor=CH340_VID, idProduct=CH340_PID)
-        )
+        try:
+            return list(
+                usb_core.find(find_all=True, idVendor=CH340_VID, idProduct=CH340_PID)
+            )
+        except _no_backend_error(usb_core):
+            log.debug("ch341: pyusb has no libusb backend here — reporting no CH340 devices")
+            return []
 
     @classmethod
     def open(cls, *, serial_number: Optional[str] = None, index: int = 0,
@@ -462,6 +475,21 @@ def _import_usb():
             "the same way pyserial is deployed (see docs/remote.md)."
         ) from exc
     return usb.core
+
+
+def _no_backend_error(usb_core) -> tuple:
+    """The exception type pyusb raises when no libusb backend is installed.
+
+    Taken by ``getattr`` rather than imported: ``usb.core.NoBackendError`` only
+    exists from pyusb 1.1, and a module that names it at import time would fail
+    to import on an older one — which is worse than the crash it guards. An
+    empty tuple means the name is absent, so nothing extra is caught and the
+    behaviour is what it always was.
+    """
+    exc = getattr(usb_core, "NoBackendError", None)
+    if isinstance(exc, type) and issubclass(exc, BaseException):
+        return (exc,)
+    return ()
 
 
 def _is_timeout(exc) -> bool:

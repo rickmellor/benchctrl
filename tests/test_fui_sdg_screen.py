@@ -322,15 +322,15 @@ def test_the_page_carries_the_screen_image_and_the_title_switch():
     title is a span the JS can swap. The JS gates on the AWG being *linked*, the
     word the rail reserves for a device the agent holds open."""
     static = pathlib.Path(fui_server.__file__).parent / "static"
-    html = (static / "index.html").read_text()
+    html = (static / "index.html").read_text(encoding="utf-8")
     assert 'id="dmm-title"' in html and "DIGITAL MULTIMETER" in html
     img = html.split('id="sdg-screen"')[1].split(">")[0]
     assert 'class="hidden"' in img and "src=" not in img
     assert 'id="vision-stream"' in html, "the vision pane is untouched"
-    js = (static / "fui.js").read_text()
+    js = (static / "fui.js").read_text(encoding="utf-8")
     assert "SDG1032X · SCREEN" in js and "'DIGITAL MULTIMETER'" in js
     assert "/sdg/screen?t=" in js
     assert "i.kind === 'awg'" in js and "awg.linked" in js
     assert "NO SCREEN" in js
-    css = (static / "fui.css").read_text()
+    css = (static / "fui.css").read_text(encoding="utf-8")
     assert "#sdg-screen" in css and "object-fit: contain" in css

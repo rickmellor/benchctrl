@@ -2592,6 +2592,27 @@ def test_the_page_and_its_assets_are_served(server):
         assert needle in get(server, path).read(), path
 
 
+def test_a_served_text_asset_declares_its_charset(server):
+    """The bytes are UTF-8 and the header says so; a browser must not guess.
+
+    The page's header comments carry an em dash. Sent as ``text/html`` with no
+    charset, a browser on a Windows-locale install sniffs cp1252 and paints
+    "â€"" where the dash is — the same corruption the host locale produced when
+    this file was decoded on the way out. The charset is half the fix; the other
+    half is that the handler still reads the file as bytes, so what is served is
+    what is committed.
+    """
+    for path in ("/", "/fui.css", "/fui.js"):
+        resp = get(server, path)
+        assert "charset=utf-8" in resp.headers["Content-Type"], path
+        body = resp.read()
+        dash = "—".encode()
+        assert dash in body, f"{path} no longer carries a UTF-8 em dash"
+        # The shape a locale decode/re-encode leaves behind: the three UTF-8
+        # bytes read as three cp1252 characters, then encoded properly again.
+        assert dash.decode("cp1252").encode("utf-8") not in body, f"{path} was re-encoded"
+
+
 def test_bench_status_is_never_cached(server):
     """A cached bench status is a lying bench status: a kiosk browser that served
     a 200 from cache would show a frozen screen that looks live."""

@@ -136,7 +136,7 @@ def test_the_page_carries_the_vision_quadrant_and_starts_dark():
     the JS proves otherwise, and the image starts hidden so a stalled script
     never leaves a broken-image glyph where a picture should be."""
     static = pathlib.Path(fui_server.__file__).parent / "static"
-    html = (static / "index.html").read_text()
+    html = (static / "index.html").read_text(encoding="utf-8")
     assert 'id="vision-panel"' in html and "VISION · LIVE" in html
     assert "SUPPLY / LOAD" not in html, "the scope quadrant was replaced, not duplicated"
     verdict = html.split('id="vision-verdict"')[1].split("</span>")[0]
@@ -145,6 +145,6 @@ def test_the_page_carries_the_vision_quadrant_and_starts_dark():
     assert 'class="hidden"' in img and "src=" not in img
     note = html.split('id="vision-note"')[1].split("</div>")[0]
     assert "NO FEED" in note
-    js = (static / "fui.js").read_text()
+    js = (static / "fui.js").read_text(encoding="utf-8")
     assert "/vision/stream" in js and "psu-verdict" not in js
     assert "i.key === 'bench_vision'" in js
