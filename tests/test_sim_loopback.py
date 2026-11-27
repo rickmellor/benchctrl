@@ -57,7 +57,12 @@ def test_loopback_client_to_device():
         ser = serial.Serial(link.port, timeout=0.5)
         try:
             ser.write(b"\xa3\x2c\xb5\x7f hello")
-            ser.flush()
+            # No ser.flush() here: pyserial's flush is tcdrain(), and on macOS
+            # tcdrain on a pty slave blocks until the MASTER side has read the
+            # bytes -- which this test only does below. The drivers' own flush()
+            # calls are fine against the simulators because a simulator drains
+            # its master continuously; here nobody is reading yet. (CI run
+            # 46035250629: macOS legs hung in this line until the deadline.)
             got = b""
             deadline = time.monotonic() + 2.0
             while len(got) < 12 and time.monotonic() < deadline:
