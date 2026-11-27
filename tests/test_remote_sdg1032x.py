@@ -38,6 +38,7 @@ def remote_awg():
     64 KB inline limit: the blob path is the thing under test, and a screen
     small enough to inline would silently skip it.
     """
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_sdg1032x
 
     # 160 px = 76.8 KB: above the 64 KB inline limit (the blob path is the

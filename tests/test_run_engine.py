@@ -166,6 +166,7 @@ def test_operators(op, value, sample, expected):
 
 @pytest.fixture()
 def device():
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.drivers.otii_arc import OtiiArc
 
     sim = SimulatedOtiiArc()

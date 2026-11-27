@@ -78,6 +78,7 @@ def leds(tmp_path):
 @pytest.fixture
 def bench():
     """Simulated vision + PDU + CP2112, opened through the sim factories."""
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_bench_vision, make_cp2112, make_pdu41002
 
     vision = make_bench_vision()

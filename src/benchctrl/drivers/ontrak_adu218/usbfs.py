@@ -68,10 +68,14 @@ from __future__ import annotations
 
 import ctypes
 import errno
-import fcntl
 import logging
 import os
 from typing import Optional
+
+try:
+    import fcntl  # Unix only
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 log = logging.getLogger("benchctrl.drivers.ontrak_adu218.usbfs")
 
@@ -142,6 +146,19 @@ class Adu218LinkTimeout(Adu218LinkError, TimeoutError):  # noqa: N818 - see belo
 def _ioc(direction: int, type_: int, nr: int, size: int) -> int:
     """Linux ``_IOC`` for the asm-generic layout used by every arch we run on."""
     return (direction << 30) | (size << 16) | (type_ << 8) | nr
+
+
+# usbdevfs is a Linux interface: ``/dev/bus/usb`` plus the ioctl numbers above,
+# with nothing cross-platform to fall back to. The module imports anywhere, so
+# collection on Windows reaches the tests that never reach an ioctl, and the
+# first call that does says so in these words rather than raising AttributeError
+# out of a None-valued module reference.
+POSIX_REQUIRED = "usbfs ioctl needs a POSIX host (termios/fcntl unavailable on this platform)"
+
+
+def _require_posix() -> None:
+    if fcntl is None:
+        raise Adu218LinkError(POSIX_REQUIRED)
 
 
 _IOC_WRITE = 1
@@ -415,6 +432,7 @@ class Adu218UsbfsLink:
             )
 
     def _claim(self) -> None:
+        _require_posix()
         assert self._fd is not None
         interface = ctypes.c_uint(INTERFACE)
         try:
@@ -447,7 +465,9 @@ class Adu218UsbfsLink:
         self._claimed = False
         if fd is None:
             return
-        if claimed:
+        # ``claimed`` can only be true where fcntl exists (the claim ioctl is
+        # what set it), so the None check is for mypy, not for a real path.
+        if claimed and fcntl is not None:
             try:
                 interface = ctypes.c_uint(INTERFACE)
                 fcntl.ioctl(fd, USBDEVFS_RELEASEINTERFACE, interface)
@@ -470,6 +490,7 @@ class Adu218UsbfsLink:
     def _transfer(self, endpoint: int, buffer: ctypes.Array, timeout_ms: int) -> int:
         if self._fd is None:
             raise Adu218LinkError("link is not open")
+        _require_posix()
         transfer = _BulkTransfer(
             ep=endpoint,
             len=len(buffer),

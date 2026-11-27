@@ -22,7 +22,6 @@ import contextlib
 import errno
 import logging
 import os
-import pty
 import select
 import shutil
 import signal
@@ -30,6 +29,11 @@ import time
 from typing import Optional
 
 import serial
+
+try:
+    import pty  # Unix only — pty imports tty, which imports termios
+except ImportError:  # pragma: no cover - Windows
+    pty = None  # type: ignore[assignment]
 
 log = logging.getLogger("benchctrl.drivers.cyberpower_pdu41002.links")
 
@@ -39,6 +43,17 @@ BAUDRATE = 9600
 
 class LinkError(RuntimeError):
     """Transport-level failure. The driver wraps this in its own hierarchy."""
+
+
+# The SSH link is a pty — ``pty.fork`` plus ``os.execvp`` — and Windows has no
+# pty to fork. The module imports anywhere so collection reaches ``SerialLink``
+# and ``argv()``, which are cross-platform; the call that needs a pty says so.
+POSIX_REQUIRED = "ssh-over-pty needs a POSIX host (termios/fcntl unavailable on this platform)"
+
+
+def _require_posix() -> None:
+    if pty is None:
+        raise LinkError(POSIX_REQUIRED)
 
 
 class SerialLink:
@@ -187,6 +202,10 @@ class SshLink:
     # -- lifecycle ----------------------------------------------------------
 
     def open(self) -> None:
+        # Before the ssh-on-PATH check: Windows ships an ssh.exe, so that check
+        # would pass and the failure would surface as an AttributeError inside
+        # pty.fork. The host not having a pty is the real cause.
+        _require_posix()
         if self._ssh_path is None and shutil.which("ssh") is None:
             raise LinkError(
                 "no ssh client found on PATH; the PDU's network transport "

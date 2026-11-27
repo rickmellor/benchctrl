@@ -86,6 +86,7 @@ def _disconnected_argv(port: int, **overrides) -> list:
 @pytest.fixture()
 def bench(tmp_path):
     """An agent on loopback serving one simulated Arc: the stand-in benchpi."""
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     registry = DeviceRegistry()
     registry.register_open(DEVICE, make_otii_arc())
     agent = BenchAgent(
@@ -104,6 +105,7 @@ def bench(tmp_path):
 # ---------------------------------------------------------------- wedge
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 @pytest.mark.plan("CORE-P0.7")
 def test_the_wedge_measurement_measures_a_run_watchdog_trip():
     code, report = _tool(["wedge", "--trials", "1", "--deadman-s", "2",
@@ -119,6 +121,7 @@ def test_the_wedge_measurement_measures_a_run_watchdog_trip():
     assert report["pass"] and code == 0, report
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_a_wedge_trial_restores_the_engine_it_patched(monkeypatch):
     """A hook left behind would wedge every run in the process from then on.
 

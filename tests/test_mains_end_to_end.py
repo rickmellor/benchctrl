@@ -34,6 +34,7 @@ Two conventions worth keeping if these are edited:
 from __future__ import annotations
 
 import json
+import sys
 import time
 import urllib.request
 
@@ -149,6 +150,7 @@ class _Bench:
 
 @pytest.fixture()
 def bench(tmp_path):
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     b = _Bench([PDU_KEY], runs_dir=tmp_path / "runs")
     try:
         yield b
@@ -158,6 +160,7 @@ def bench(tmp_path):
 
 @pytest.fixture()
 def run_bench(tmp_path):
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     b = _Bench([PDU_KEY, ARC_KEY], runs_dir=tmp_path / "runs")
     try:
         yield b
@@ -329,6 +332,7 @@ def test_the_display_is_not_what_opens_the_pdu(tmp_path):
     assert block["energised"] == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_a_bench_with_no_pdu_gets_no_panel(tmp_path):
     """No switched PDU served → the one self-hiding panel hides.
 

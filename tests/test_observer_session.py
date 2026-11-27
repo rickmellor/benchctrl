@@ -37,6 +37,7 @@ TOKEN = "observer-test-token"
 @pytest.fixture()
 def bench():
     """An agent with a simulated Arc, a normal client, and an observer."""
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.drivers.otii_arc import OtiiArc
 
     sim = SimulatedOtiiArc()

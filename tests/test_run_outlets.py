@@ -93,6 +93,7 @@ def _cycle_spec(*, settle_s=None, outlet=3, allowed=(3,), **overrides) -> RunSpe
 
 @pytest.fixture()
 def device():
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.drivers.otii_arc import OtiiArc
 
     sim = SimulatedOtiiArc()

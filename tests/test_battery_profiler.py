@@ -216,9 +216,14 @@ def test_profiler_runs_and_produces_samples():
 
 
 def test_profiler_stops_on_ocv_cutoff():
-    # With a fast-decaying mock and a high cutoff, the run should stop early
+    # With a fast-decaying mock and a high cutoff, the run should stop early.
+    # The mock drains capacity against *wall* time, so the capacity has to be
+    # small next to the load or the run spends minutes discharging: at the
+    # profile's 100 mA high step, 10 mAh is six minutes of simulated drain, and
+    # the cutoff lands about two thirds into it. 0.5 mAh reaches the same cutoff
+    # in seconds and still yields a profile worth asserting on.
     config = _fast_config(cutoff_v=4.0, iterations=0)
-    smu = _MockSMU(ocv_initial=4.2, ocv_final=3.0, capacity_mAh=10.0)  # tiny capacity
+    smu = _MockSMU(ocv_initial=4.2, ocv_final=3.0, capacity_mAh=0.5)  # tiny capacity
     profiler = Profiler(smu, config)
     result = profiler.run()
     assert result.stop_reason.startswith("OCV cutoff") or result.stop_reason.startswith(
