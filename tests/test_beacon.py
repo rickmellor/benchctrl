@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import socket
 
@@ -11,6 +12,30 @@ from benchctrl.net import beacon
 from benchctrl.net.auth import token_fingerprint
 
 TOKEN = "beacon-test-token"
+
+
+def _broadcast_usable() -> bool:
+    """Whether this host can send a UDP broadcast at all.
+
+    A host with no route for it fails with ``ENETUNREACH`` — a container with no
+    default route, or a bench box mid-provisioning. That is a missing capability,
+    not a broken beacon, so the test that asserts a packet arrives says so rather
+    than reporting the mechanism as broken. Only the two errors that mean "this
+    host cannot broadcast" skip it; anything else is a real failure and stays a
+    failure. The probe sends to a port nothing listens on, so an unreachable
+    *port* — an ICMP refusal, route fine — is not mistaken for the real thing.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.sendto(b"", ("255.255.255.255", 40911))
+        return True
+    except OSError as exc:
+        if exc.errno in (errno.ENETUNREACH, errno.EACCES):
+            return False
+        raise
+    finally:
+        sock.close()
 
 
 def test_payload_round_trips():
@@ -65,6 +90,8 @@ def test_malformed_port_is_rejected():
 
 def test_transmit_and_listen_over_loopback():
     """The actual mechanism, over a real UDP socket."""
+    if not _broadcast_usable():
+        pytest.skip("no route for UDP broadcast on this host")
     port = _free_udp_port()
     tx = beacon.BeaconTransmitter(
         host="testbench",
