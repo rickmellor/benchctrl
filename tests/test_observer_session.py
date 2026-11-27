@@ -256,6 +256,11 @@ def test_an_observer_polling_does_not_keep_an_armed_bench_alive(bench):
     # Arm a device directly on the governor: this test is about the deadman,
     # not about how arming happens.
     agent.governor.state_for("otii_arc").output_armed = True
+    # A real arm is contact (`_seed_contact`), and the window is sized from
+    # that moment. Without the touch the clock would still be running from
+    # when the fixture built the agent, so the fixture's own setup time would
+    # come out of the window this test just sized.
+    agent.governor.touch()
     assert agent.governor.any_armed
 
     deadline = time.monotonic() + _trip_deadline_s(window_s)
