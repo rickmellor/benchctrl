@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+from benchctrl.drivers.otii_arc.device import OtiiArc as SMU  # noqa: N814 - SMU is the project-wide alias for the SMU driver class
 
 pytestmark = pytest.mark.hardware
 

@@ -31,6 +31,7 @@ def remote_dmm():
     Built through :py:func:`make_sdm4065a` so the agent holds the *production*
     driver over a pty, exactly as it would hold one over USB-TMC.
     """
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_sdm4065a
 
     driver = make_sdm4065a(sim={"dut_ohm": 100.0, "lead_ohm": 0.2})

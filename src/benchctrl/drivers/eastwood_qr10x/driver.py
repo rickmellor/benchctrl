@@ -35,6 +35,7 @@ voltage range you're working in.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
@@ -132,7 +133,7 @@ class QR10x:
     # ---- lifecycle ---------------------------------------------------
 
     @classmethod
-    def open(cls, port: str, baudrate: int = 115200) -> "QR10x":
+    def open(cls, port: str, baudrate: int = 115200) -> QR10x:
         """Open a connection to the QR10x at ``port``."""
         qr = cls(port, baudrate)
         qr._connect()
@@ -157,25 +158,21 @@ class QR10x:
             ) from e
         # Settle + drain anything the device may have buffered
         time.sleep(0.15)
-        try:
+        with contextlib.suppress(Exception):
             self._ser.reset_input_buffer()
-        except Exception:
-            pass
 
     def close(self) -> None:
         """Close the serial port. Safe to call repeatedly."""
         if self._ser is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._ser.close()
-            except Exception:
-                pass
             self._ser = None
 
     @property
     def is_open(self) -> bool:
         return self._ser is not None and self._ser.is_open
 
-    def __enter__(self) -> "QR10x":
+    def __enter__(self) -> QR10x:
         return self
 
     def __exit__(self, *exc_info) -> None:
@@ -332,11 +329,11 @@ class QR10x:
     def incr(self, delta: float) -> dict:
         """Increase the setpoint by ``delta`` Ω."""
         if delta < 0:
-            raise QR10xValueError(f"delta must be >= 0; use decr() to step down")
+            raise QR10xValueError("delta must be >= 0; use decr() to step down")
         return self._parse_state_dump(self._cmd(f"AT+USER.SP+={delta}"))
 
     def decr(self, delta: float) -> dict:
         """Decrease the setpoint by ``delta`` Ω."""
         if delta < 0:
-            raise QR10xValueError(f"delta must be >= 0; use incr() to step up")
+            raise QR10xValueError("delta must be >= 0; use incr() to step up")
         return self._parse_state_dump(self._cmd(f"AT+USER.SP-={delta}"))

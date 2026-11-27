@@ -6,6 +6,7 @@ tests need the real DL3031A reachable via USB-TMC.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 from collections import deque
 
@@ -17,7 +18,6 @@ from benchctrl.drivers.rigol_dl3031a.driver import (
     RigolDLError,
     RigolDLValueError,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fake pyvisa-style instrument for hardware-free tests
@@ -570,7 +570,7 @@ def test_configure_battery_test_full_setup():
     assert ":SOURce:BATTary:TENabstop 1" in inst.writes
 
 
-def test_battery_stats_parses_HMS_discharge_time():
+def test_battery_stats_parses_HMS_discharge_time():  # noqa: N802 - HMS is the clock format the test parses
     """Bench-verified v0.9.7: :FETCh:DISChargingTime? returns
     H:M:S, not a float. battery_stats parses it to seconds."""
     drv, _ = _make({
@@ -713,10 +713,8 @@ def test_hardware_battery_discharge_test_smoke():
         # No SCPI errors
         assert load.last_error() is None
     finally:
-        try:
+        with contextlib.suppress(Exception):
             load.set_input(False)
-        except Exception:
-            pass
         load.close()
 
 

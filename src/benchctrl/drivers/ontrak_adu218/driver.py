@@ -447,7 +447,7 @@ class OntrakADU218:
         allowed_relays: Optional[tuple] = None,
         link: Optional[Adu218UsbfsLink] = None,
         disarm_watchdog: bool = True,
-    ) -> "OntrakADU218":
+    ) -> OntrakADU218:
         """Connect, and replace the inherited watchdog state with a known one.
 
         ``disarm_watchdog=True`` sends ``WD0`` at connect. This is not tidiness:
@@ -537,7 +537,7 @@ class OntrakADU218:
         except Adu218LinkError as exc:  # pragma: no cover - best-effort teardown
             log.debug("closing ADU218 link: %s", exc)
 
-    def __enter__(self) -> "OntrakADU218":
+    def __enter__(self) -> OntrakADU218:
         if not self.is_open:
             self._connect()
         return self

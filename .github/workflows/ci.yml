@@ -17,6 +17,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        # ubuntu-latest is now Ubuntu 26.04, whose setup-python has no 3.9
+        # ("The version '3.9' with architecture 'x64' was not found"). 3.9 still
+        # has to build, so that one combination runs on the last runner that
+        # ships it. Everything else stays on ubuntu-latest.
+        exclude:
+          - os: ubuntu-latest
+            python-version: "3.9"
+        include:
+          - os: ubuntu-24.04
+            python-version: "3.9"
     steps:
       - uses: actions/checkout@v4
 
@@ -35,8 +45,22 @@ jobs:
           # test errors at setup.
           pip install -e ".[dev,mcp,bench-visa-py,science]"
 
+      - name: Warm matplotlib font cache
+        # The first `import matplotlib.pyplot` on a fresh runner scans every system font; on macOS and
+        # Windows that takes minutes and tripped the 120 s per-test deadline in test_plot_recording_writes_png.
+        timeout-minutes: 15
+        run: python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot; print(matplotlib.__version__)"
+
       - name: Run hardware-free tests
-        run: pytest -m "not hardware" -q --junitxml=junit.xml
+        # --timeout is what turns a hang into a named failure. The macOS
+        # 3.10-3.13 legs ran to 94% and then said nothing for 25 min until the
+        # job limit killed them, which left no test name to work from.
+        # thread, not signal: a test blocked in C or in a socket accept is not
+        # interrupted by a signal handler, and that is exactly how those legs
+        # hung. 120 s, not the 60 s used for a local iteration: the slowest
+        # legs here are the pty and subprocess suites, and a busy shared
+        # runner must not be reported as a hang.
+        run: pytest -m "not hardware" -q --timeout=120 --timeout-method=thread --junitxml=junit.xml
 
       # One leg's results feed the plan-status job (tools/plancheck.py). It
       # uploads even when tests fail, so a failure can be named by plan item.

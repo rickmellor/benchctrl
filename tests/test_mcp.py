@@ -7,6 +7,8 @@ callable Python functions). Hardware-required tests live in
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 
@@ -146,6 +148,7 @@ def test_export_recording_unknown_extension_normalises_to_benchctrl(tmp_path):
 
 
 @pytest.mark.needs_mcp
+@pytest.mark.timeout(600)  # the first matplotlib import may build the font cache (minutes on CI)
 def test_plot_recording_writes_png(tmp_path):
     pytest.importorskip("matplotlib")
     from benchctrl.mcp import plot_recording
@@ -159,13 +162,14 @@ def test_plot_recording_writes_png(tmp_path):
 
 
 @pytest.mark.needs_mcp
+@pytest.mark.timeout(600)  # the first matplotlib import may build the font cache (minutes on CI)
 def test_plot_recording_subset_of_channels(tmp_path):
     pytest.importorskip("matplotlib")
     from benchctrl.mcp import plot_recording
 
     p = _make_saved_recording(tmp_path)
     out = tmp_path / "rec.png"
-    r = plot_recording(str(p), str(out), channels=["mc"])
+    plot_recording(str(p), str(out), channels=["mc"])
     assert out.exists()
 
 
@@ -173,9 +177,9 @@ def test_plot_recording_subset_of_channels(tmp_path):
 def test_smu_state_snapshot_shape():
     """The internal state-snapshot helper produces a well-formed dict for any
     SMU. Use a transport-less SMU stub to avoid hardware."""
-    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
-    from benchctrl.mcp import _smu_state
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU  # noqa: N814 - SMU is the project-wide alias for the SMU driver class
     from benchctrl.drivers.otii_arc.transport import Transport
+    from benchctrl.mcp import _smu_state
 
     smu = SMU(Transport("__dummy__"))  # never opened
     snap = _smu_state(smu)
@@ -1002,8 +1006,8 @@ def test_pdu41002_read_tools_report_a_clear_error_before_open():
     """A model that calls a read first must get "call open" back, not a
     ``NoneType`` traceback — the message is what tells it what to do next."""
     from benchctrl import mcp as m
-    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
     from benchctrl.drivers.cyberpower_pdu41002 import PDU41002ConnectionError
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
 
     pdu_tools._pdu = None
     with pytest.raises(PDU41002ConnectionError, match="pdu41002_open"):
@@ -1023,6 +1027,7 @@ def test_pdu41002_close_is_safe_to_call_when_not_open():
 
 
 @pytest.mark.needs_mcp
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_pdu41002_tools_work_against_the_simulator():
     """The tools end to end, through the module singleton.
 

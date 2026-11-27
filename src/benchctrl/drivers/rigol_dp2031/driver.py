@@ -246,8 +246,9 @@ class RigolDP2031:
             ) from e
 
         inst.timeout = timeout_ms
-        inst.read_termination = read_termination
-        inst.write_termination = write_termination
+        # pyvisa's base Resource declares neither; MessageBasedResource has both.
+        inst.read_termination = read_termination  # type: ignore[attr-defined]  # MessageBasedResource
+        inst.write_termination = write_termination  # type: ignore[attr-defined]  # MessageBasedResource
 
         return cls(
             inst,

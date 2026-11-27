@@ -12,6 +12,7 @@ model is commentary.** Most of this file asserts things the model cannot do.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -24,7 +25,6 @@ from benchctrl.agent.llm.tools import TOOL_NAMES, ToolExecutor, tool_schemas
 from benchctrl.agent.runs.engine import RunEngine
 from benchctrl.agent.runs.spec import LLMConfig, Phase, RunSpec, Safety, Sampling
 from benchctrl.sim import SimulatedOtiiArc
-
 
 # --------------------------------------------------------------------------
 # Stub inference server
@@ -113,6 +113,7 @@ def stub():
 
 @pytest.fixture()
 def engine(tmp_path):
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.drivers.otii_arc import OtiiArc
 
     sim = SimulatedOtiiArc()
@@ -286,7 +287,7 @@ def test_turn_annotates_the_run(engine, stub):
 
 def test_prompt_never_contains_raw_samples(engine, stub):
     """Raw samples would cost minutes of prompt processing."""
-    for i in range(200):
+    for _i in range(200):
         engine.store.append_metric(0, "mv", {"n": 1, "min": 3.3, "max": 3.3,
                                              "mean": 3.3, "last": 3.3})
     sup = _supervisor(engine, stub)
@@ -344,6 +345,7 @@ def test_notify_never_blocks_the_tick_loop(engine, stub):
         sup.stop(timeout=1.0)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_a_stalled_model_does_not_delay_a_run(tmp_path, stub):
     """The headline safety property of the whole layer."""
     from benchctrl.drivers.otii_arc import OtiiArc

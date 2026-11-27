@@ -612,6 +612,11 @@ class BenchVision:
         return self._open
 
     @property
+    def closed(self) -> bool:
+        """The camera the service should name when a stream has no more frames."""
+        return not self._open
+
+    @property
     def stream_url(self) -> str:
         """Where a browser can watch the camera live (MJPEG). Humans only."""
         return f"{self._url}/stream"

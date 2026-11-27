@@ -22,7 +22,7 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from benchctrl.agent.llm.client import LLMClient, LLMUnavailable, estimate_tokens
@@ -97,7 +97,7 @@ class LLMSupervisor:
 
     # --- lifecycle ------------------------------------------------------
 
-    def start(self) -> "LLMSupervisor":
+    def start(self) -> LLMSupervisor:
         if not self.enabled or self._thread is not None:
             return self
         self._stop.clear()

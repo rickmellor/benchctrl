@@ -87,7 +87,7 @@ def dl3031a_close() -> dict:
                         input_off_error)
         _dl3031a.close()
         _dl3031a = None
-    result = {"closed": True}
+    result: dict = {"closed": True}
     if input_off_error is not None:
         # SAFETY: the load may still be sinking current. Caller MUST
         # verify the DUT is disconnected or the load is physically off.

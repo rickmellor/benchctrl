@@ -24,6 +24,7 @@ import logging
 import re
 import socket
 import struct
+import sys
 import time
 
 import pytest
@@ -52,6 +53,7 @@ def _wait_for(predicate, timeout: float = 2.0) -> None:
 @pytest.fixture()
 def gen():
     """Driver + sim with the driver's own defaults: both channels, no cap."""
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     drv = make_sdg1032x()
     yield drv
     drv.close()
@@ -60,6 +62,7 @@ def gen():
 @pytest.fixture()
 def big_screen_gen():
     """A sim whose ``SCDP`` returns a 200x200 BMP — a 120 KB blob."""
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     drv = make_sdg1032x(sim={"screen_px": 200})
     yield drv
     drv.close()
@@ -144,6 +147,7 @@ def test_set_output_polarity(gen):
     assert gen.set_output_polarity(1, False).inverted is False
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_disable_outputs_covers_both_channels_regardless_of_allowed():
     drv = make_sdg1032x(allowed_channels=(1,))
     try:
@@ -293,6 +297,7 @@ def test_set_max_amplitude_is_a_driver_side_cap(gen):
     assert gen.set_amplitude(1, 4.5).amplitude_vpp == pytest.approx(4.5)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_max_amplitude_at_open_writes_nothing_and_gates_amplitude():
     drv = make_sdg1032x(max_amplitude_vpp=5.0)
     try:
@@ -336,6 +341,7 @@ def test_set_modulation_fm_deviation_with_bench_readback_order(gen):
     assert gen.query("C1:MDWV?") == "C1:MDWV STATE,OFF"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_modulation_guide_form_is_parsed_the_same():
     drv = make_sdg1032x(sim={"mdwv_guide_form": True})
     try:
@@ -398,6 +404,7 @@ def test_set_clock(gen):
     assert gen.query("ROSC?") == "ROSC EXT"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_set_clock_verifies_10mout_when_echoed():
     drv = make_sdg1032x(sim={"rosc_reports_10mout": True})
     try:
@@ -464,6 +471,7 @@ def test_set_harmonics_parses_stray_comma_reply(gen):
     assert gen.query("C1:HARM?") == "C1:HARM HARMSTATE,OFF"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_harm_query_is_unanswered_off_a_sine_wave():
     """Bench: ``C1:HARM?`` gets no reply unless the channel's wave is SINE.
     The driver reads BSWV first and never sends HARM? off a sine, so only a
@@ -797,6 +805,7 @@ def test_pty_wvdt_upload_is_silently_dropped(gen):
     assert gen.query("STL? USER") == "STL WVNM"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_lan_can_be_disabled_for_the_no_ethernet_case():
     drv = make_sdg1032x(sim={"lan": False})
     try:
@@ -806,6 +815,7 @@ def test_lan_can_be_disabled_for_the_no_ethernet_case():
         drv.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_factory_passes_the_sim_port_unless_the_caller_named_one():
     drv = make_sdg1032x()
     try:
@@ -842,6 +852,7 @@ def test_trigger_key_records_press(gen):
     assert gen.get_output(1).enabled is False
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_allowed_channels_gates_mutators_not_reads():
     drv = make_sdg1032x(allowed_channels=(1,))
     try:
@@ -855,6 +866,7 @@ def test_allowed_channels_gates_mutators_not_reads():
         drv.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_unknown_query_times_out_and_is_recorded():
     drv = make_sdg1032x(timeout_ms=300)
     try:
@@ -866,6 +878,7 @@ def test_unknown_query_times_out_and_is_recorded():
         drv.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_swwv_without_header_space_is_parsed_the_same():
     drv = make_sdg1032x(sim={"swwv_header_space": False})
     try:
@@ -901,6 +914,7 @@ def test_a_wave_type_change_with_fields_reads_back_despite_the_swallowed_message
     assert not sim.swallowed, "the driver combined WVTP with other fields"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_the_simulator_swallows_one_message_after_a_combined_wave_command():
     """The raw behaviour the driver works around, so a regression to a single
     combined command shows up here rather than on the bench."""
@@ -974,6 +988,7 @@ def test_read_arb_of_an_unknown_name_is_a_timeout(gen):
         gen.read_arb("never_uploaded")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_without_a_lan_the_arb_path_says_so_instead_of_trying_usb():
     from benchctrl.drivers.siglent_sdg1032x import SDG1032XConnectionError
     from benchctrl.sim.factories import make_sdg1032x

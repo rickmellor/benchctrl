@@ -14,10 +14,10 @@ import pytest
 
 from benchctrl.drivers.silabs_cp2112 import (
     ALTERNATE_FUNCTIONS,
+    CP2112,
     LINE_COUNT,
     MIN_PULSE_S,
     PACKAGE_PINS,
-    CP2112,
     CP2112ConnectionError,
     CP2112GpioConfig,
     CP2112PolicyError,
@@ -480,11 +480,10 @@ class TestCloseRestores:
 
     def test_context_manager_restores_on_exception(self) -> None:
         dev, sim = make_device()
-        with pytest.raises(ZeroDivisionError):
-            with dev:
-                dev.set_line_mode(2, output=True)
-                dev.set_line_asserted(2, True)
-                raise ZeroDivisionError
+        with pytest.raises(ZeroDivisionError), dev:
+            dev.set_line_mode(2, output=True)
+            dev.set_line_asserted(2, True)
+            raise ZeroDivisionError
         assert sim.latch & (1 << 2), "an exception must not leave reset asserted"
         assert not dev.is_open
 
@@ -497,9 +496,8 @@ class TestCloseRestores:
             raise RuntimeError("device vanished")
 
         sim.set_feature = explode  # type: ignore[method-assign]
-        with pytest.raises(ValueError, match="original"):
-            with dev:
-                raise ValueError("original")
+        with pytest.raises(ValueError, match="original"), dev:
+            raise ValueError("original")
 
 
 class TestGpioConfig:

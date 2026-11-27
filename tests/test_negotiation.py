@@ -96,6 +96,7 @@ def test_peer_caps_ignores_what_it_cannot_read():
 
 @pytest.fixture()
 def agent():
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_otii_arc
 
     registry = DeviceRegistry()

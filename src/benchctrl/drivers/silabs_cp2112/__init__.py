@@ -16,11 +16,11 @@ scope. See ``KNOWN_LIMITATIONS.md``.
 
 from benchctrl.drivers.silabs_cp2112.driver import (
     ALTERNATE_FUNCTIONS,
+    CP2112,
     LINE_COUNT,
     MIN_PULSE_S,
     PACKAGE_PINS,
     PART_NUMBER_CP2112,
-    CP2112,
     CP2112ConnectionError,
     CP2112Error,
     CP2112GpioConfig,

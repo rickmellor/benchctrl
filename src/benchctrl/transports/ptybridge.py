@@ -64,7 +64,7 @@ class PtySerialBridge:
     def is_open(self) -> bool:
         return not self._closed
 
-    def start(self) -> "PtySerialBridge":
+    def start(self) -> PtySerialBridge:
         if self._pump is not None:
             return self
         self._stop.clear()
@@ -126,7 +126,7 @@ class PtySerialBridge:
             log.warning("ptybridge: closing the device failed: %s", exc)
         self._pty.close()
 
-    def __enter__(self) -> "PtySerialBridge":
+    def __enter__(self) -> PtySerialBridge:
         return self
 
     def __exit__(self, *exc_info) -> None:

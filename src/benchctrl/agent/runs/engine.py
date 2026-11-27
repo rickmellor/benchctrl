@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -140,7 +141,7 @@ class RunEngine:
 
     # --- lifecycle ------------------------------------------------------
 
-    def start(self) -> "RunEngine":
+    def start(self) -> RunEngine:
         if self._thread is not None:
             return self
         self._stop.clear()
@@ -950,7 +951,7 @@ class RunManager:
             live.setdefault(info["run_id"], info)
         return sorted(live.values(), key=lambda r: r.get("created_utc", ""), reverse=True)
 
-    def abort_driving(self, device_keys, reason: str) -> list[str]:
+    def abort_driving(self, device_keys, reason: str) -> Sequence[str]:  # Sequence, not list: the method `list` above shadows the builtin in this class body
         """Abort every running engine that drives one of ``device_keys``.
 
         Called *before* the governor trips those devices, so a run whose

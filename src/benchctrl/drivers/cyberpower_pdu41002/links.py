@@ -18,10 +18,10 @@ refused even with a matching private key. Details in :py:class:`SshLink`.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
-import pty
 import select
 import shutil
 import signal
@@ -29,6 +29,11 @@ import time
 from typing import Optional
 
 import serial
+
+try:
+    import pty  # Unix only — pty imports tty, which imports termios
+except ImportError:  # pragma: no cover - Windows
+    pty = None  # type: ignore[assignment]
 
 log = logging.getLogger("benchctrl.drivers.cyberpower_pdu41002.links")
 
@@ -38,6 +43,17 @@ BAUDRATE = 9600
 
 class LinkError(RuntimeError):
     """Transport-level failure. The driver wraps this in its own hierarchy."""
+
+
+# The SSH link is a pty — ``pty.fork`` plus ``os.execvp`` — and Windows has no
+# pty to fork. The module imports anywhere so collection reaches ``SerialLink``
+# and ``argv()``, which are cross-platform; the call that needs a pty says so.
+POSIX_REQUIRED = "ssh-over-pty needs a POSIX host (termios/fcntl unavailable on this platform)"
+
+
+def _require_posix() -> None:
+    if pty is None:
+        raise LinkError(POSIX_REQUIRED)
 
 
 class SerialLink:
@@ -70,10 +86,8 @@ class SerialLink:
         except (OSError, serial.SerialException) as e:
             raise LinkError(f"could not open serial port {self.port!r}: {e}") from e
         time.sleep(0.15)
-        try:
+        with contextlib.suppress(Exception):
             self._ser.reset_input_buffer()
-        except Exception:  # pragma: no cover - best-effort drain
-            pass
 
     @property
     def is_open(self) -> bool:
@@ -99,17 +113,13 @@ class SerialLink:
 
     def reset_input(self) -> None:
         if self._ser is not None and self._ser.is_open:
-            try:
+            with contextlib.suppress(Exception):
                 self._ser.reset_input_buffer()
-            except Exception:  # pragma: no cover - best-effort
-                pass
 
     def close(self) -> None:
         if self._ser is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._ser.close()
-            except Exception:  # pragma: no cover - best-effort
-                pass
             self._ser = None
 
     def __repr__(self) -> str:
@@ -192,6 +202,10 @@ class SshLink:
     # -- lifecycle ----------------------------------------------------------
 
     def open(self) -> None:
+        # Before the ssh-on-PATH check: Windows ships an ssh.exe, so that check
+        # would pass and the failure would surface as an AttributeError inside
+        # pty.fork. The host not having a pty is the real cause.
+        _require_posix()
         if self._ssh_path is None and shutil.which("ssh") is None:
             raise LinkError(
                 "no ssh client found on PATH; the PDU's network transport "
@@ -261,10 +275,8 @@ class SshLink:
         fd, pid = self._fd, self._pid
         self._fd = self._pid = None
         if fd is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:  # pragma: no cover - best-effort
-                pass
         if pid is not None:
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
@@ -277,10 +289,8 @@ class SshLink:
                     return
                 except OSError:  # pragma: no cover - best-effort
                     return
-            try:
+            with contextlib.suppress(OSError):
                 os.waitpid(pid, os.WNOHANG)
-            except OSError:  # pragma: no cover - best-effort
-                pass
 
     def __repr__(self) -> str:
         # Deliberately no credential material: this object never holds the

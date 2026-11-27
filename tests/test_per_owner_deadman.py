@@ -18,6 +18,7 @@ One real-time test per behaviour proves the wiring through the agent.
 from __future__ import annotations
 
 import contextlib
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -138,6 +139,7 @@ def test_transfer_hands_the_device_to_its_new_owner():
     assert gov.stale_devices() == {"a": "s-new"}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_a_targeted_trip_leaves_other_owners_armed():
     from benchctrl.sim.factories import make_otii_arc
 
@@ -207,6 +209,7 @@ def test_the_bounded_wait_keeps_submits_contract():
 
 @pytest.fixture()
 def bench(tmp_path):
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_otii_arc
 
     registry = DeviceRegistry()

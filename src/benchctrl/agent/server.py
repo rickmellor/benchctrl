@@ -15,6 +15,7 @@ deployable at all.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import itertools
 import json
@@ -27,7 +28,7 @@ import threading
 import time
 import traceback
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from benchctrl.agent import dispatch
 from benchctrl.agent.blobs import CHUNK_BYTES, BlobStore
@@ -37,7 +38,7 @@ from benchctrl.agent.eventbus import (
     EventBus,
     EventSubscriber,
 )
-from benchctrl.agent.recordings import PREVIEW_HZ, IteratorTable, RecordingTable
+from benchctrl.agent.recordings import IteratorTable, RecordingTable
 from benchctrl.agent.registry import SWITCHED_PDU_KEYS, DeviceRegistry
 from benchctrl.agent.runs.engine import RunManager
 from benchctrl.agent.runs.spec import RunSpec
@@ -830,7 +831,7 @@ class Session:
 
     def __init__(
         self,
-        agent: "BenchAgent",
+        agent: BenchAgent,
         sock: socket.socket,
         address,
         *,
@@ -1724,10 +1725,8 @@ class _Handler(socketserver.BaseRequestHandler):
             session.mark_ended()
             self.agent.drop_session(session)
             session.writer.close()
-            try:
+            with contextlib.suppress(OSError):
                 self.request.close()
-            except OSError:
-                pass
             log.info("agent: %s disconnected", session.session_id)
 
     # --- handshake ------------------------------------------------------
@@ -1754,7 +1753,9 @@ class _Handler(socketserver.BaseRequestHandler):
         if version_error:
             self._send_error(session, 0, PolicyError(version_error))
             return False
-        session.protocol_v = version
+        # negotiate() returns (None, error) when it cannot settle a version and
+        # the error branch returned above, so `version` is an int on this path.
+        session.protocol_v = cast("int", version)
         session.peer_caps = authmod.peer_caps(hello)
 
         # A client may ask for the read-only observer role. Self-declared on
@@ -1921,10 +1922,8 @@ class _Handler(socketserver.BaseRequestHandler):
                 -4000:
             ],
         )
-        try:
+        with contextlib.suppress(Exception):
             session.writer.send(FrameType.ERR, _json({"id": req_id, "e": payload}))
-        except Exception:  # noqa: BLE001
-            pass
 
     # --- routing --------------------------------------------------------
 
@@ -2440,7 +2439,7 @@ class AgentServer:
 
     @property
     def address(self) -> tuple[str, int]:
-        return self._server.server_address[:2]
+        return self._server.server_address[:2]  # type: ignore[return-value]  # a TCP server's address is always (str, int)
 
     @property
     def port(self) -> int:

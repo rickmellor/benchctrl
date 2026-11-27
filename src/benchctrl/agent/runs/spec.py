@@ -455,7 +455,7 @@ class Phase:
                 f"brackets and cannot be claimed by a phase",
             )
         _require(
-            self.duration_s > 0 or self.exit,
+            bool(self.duration_s > 0 or self.exit),
             f"phase {self.name!r} has neither a duration nor an exit condition — "
             f"it would run forever",
         )

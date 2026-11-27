@@ -32,7 +32,7 @@ import logging
 import threading
 from typing import Any, Callable, Optional
 
-from benchctrl.config import Config, DEVICE_KEYS
+from benchctrl.config import DEVICE_KEYS, Config
 from benchctrl.exceptions import BenchValueError
 
 log = logging.getLogger("benchctrl.session")

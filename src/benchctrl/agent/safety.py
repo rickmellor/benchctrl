@@ -305,20 +305,24 @@ class SafetyGovernor:
             if not any(s.is_armed and s.armed_by_session == owner for s in self._states.values()):
                 self._contact.pop(owner, None)
 
+    def _bench_last_contact(self) -> float:
+        """The bench-wide contact time. __post_init__ seeds it; None is unreachable."""
+        return self.clock() if self._last_contact is None else self._last_contact
+
     @property
     def seconds_since_contact(self) -> float:
         """Seconds since contact from anyone (the bench-wide figure on displays)."""
         with self._lock:
-            return self.clock() - self._last_contact
+            return self.clock() - self._bench_last_contact()
 
     def seconds_since_owner_contact(self, owner: Optional[str]) -> float:
         with self._lock:
             if owner is None:
-                return self.clock() - self._last_contact
+                return self.clock() - self._bench_last_contact()
             # An owner with no record has never been heard from since arming
             # was tracked per owner; judge it from the bench-wide figure rather
             # than treating it as infinitely stale.
-            last = self._contact.get(owner, self._last_contact)
+            last = self._contact.get(owner, self._bench_last_contact())
             return self.clock() - last
 
     def stale_devices(self) -> dict[str, Optional[str]]:

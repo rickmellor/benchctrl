@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from benchctrl.battery import (
@@ -20,7 +18,6 @@ from benchctrl.battery import (
     estimate_life_from_profile,
 )
 from benchctrl.exceptions import BenchValueError
-
 
 # ---------------------------------------------------------------------------
 # DutyCycle

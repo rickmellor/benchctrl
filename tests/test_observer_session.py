@@ -37,6 +37,7 @@ TOKEN = "observer-test-token"
 @pytest.fixture()
 def bench():
     """An agent with a simulated Arc, a normal client, and an observer."""
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.drivers.otii_arc import OtiiArc
 
     sim = SimulatedOtiiArc()
@@ -90,22 +91,124 @@ def bench():
 # --------------------------------------------------------------------------
 
 
-def _poll_until(client, deadline, predicate, *, interval=0.05):
+#: The display's polling period, and the thing between two polls.
+POLL_S = 0.05
+
+
+def _poll_until(client, deadline, predicate, *, interval=POLL_S):
     """Poll ``client.status()`` until ``predicate()`` or ``deadline``.
 
-    Returns ``(predicate_result, polls)``. Polling is the whole point of the
-    test — a display that sat silent would prove nothing about the deadman.
+    Returns ``(predicate_result, polls, poll_seconds)`` — the elapsed time is
+    the round trip of the last poll, which is what a poll rate is made of.
+    Polling is the whole point of the test — a display that sat silent would
+    prove nothing about the deadman.
     """
     polls = 0
     hit = False
+    poll_seconds = 0.0
     while time.monotonic() < deadline:
+        started = time.monotonic()
         client.status()
+        poll_seconds = time.monotonic() - started
         polls += 1
         if predicate():
             hit = True
             break
         time.sleep(interval)
-    return hit, polls
+    return hit, polls, poll_seconds
+
+
+# The deadman thread ticks every 0.5 s and trips on the first tick past
+# ``deadman_s``, so the window it actually gives an owner is at most
+# ``deadman_s + 0.5``. The probe tests need that figure to size their own
+# deadlines: on a loaded runner it is the difference between a deadline that
+# proves the claim and one that merely expires.
+DEADMAN_TICK_S = 0.5
+
+#: Polls the probe tests need inside their window. The point of the number is
+#: that the display was talking the whole time, so it has to be comfortably
+#: more than the two or three a runner could manage if it is busy.
+MIN_POLLS = 20
+
+#: Margin on the measured iteration cost: size the window so ``MIN_POLLS``
+#: iterations fit even if this thread gets only half the CPU from here on.
+POLL_MARGIN = 2.0
+
+#: Floor on the window: two ticks, so the trip is never judged at the
+#: resolution of one. Below that the tick granularity — not the observer —
+#: would decide when it lands. The fixture's 1.0 s is exactly this.
+MIN_DEADMAN_S = DEADMAN_TICK_S * 2.0
+
+#: Ceiling on the window, which is also what bounds the test's own worst case:
+#: it is the per-test deadline scaled down to something a suite can carry. Past
+#: the ceiling the poll count demanded drops instead — with the rate it measured
+#: printed in the message — rather than the test sleeping longer.
+MAX_DEADMAN_S = 6.0
+
+#: How long the poll rate is sampled for, and the least and most it may take.
+#: A span rather than a fixed number of iterations, because the quantity is
+#: the sustained cost: three back-to-back iterations on an oversubscribed box
+#: came back at 60 ms while the loop that followed ran at 3 s each.
+CALIBRATION_S = 0.4
+CALIBRATION_MIN_POLLS = 5
+CALIBRATION_MAX_S = 2.0
+
+
+def _trip_deadline_s(window_s: float) -> float:
+    """When to stop waiting and call it a defeated deadman.
+
+    The trip is due within ``window_s`` plus one tick of thread granularity.
+    Three windows and four ticks is the failure deadline, not the expected
+    duration — it is the slack for a deadman thread that the runner starves,
+    and it stays proportional so a slow runner gets the same margin as a fast
+    one instead of a fixed number of seconds.
+    """
+    return window_s * 3 + DEADMAN_TICK_S * 4
+
+
+def _calibrate_window(client, predicate, *, interval, want_polls=MIN_POLLS, margin=POLL_MARGIN):
+    """Time iterations shaped exactly like the polling loop's own.
+
+    Returns ``(window_s, polls_per_s, seconds_sampled, polls_demanded)``.
+
+    Two things about the shape matter:
+
+    - A polling iteration is ``status(); predicate(); sleep(interval)``, and on
+      a loaded runner the sleep is the part that inflates — a busy kernel hands
+      a ``sleep(0.05)`` back late. Timing bare round trips measures the cheap
+      component and under-sizes the window. The CI runner that managed 10
+      polls in the fixture's 1.0 s window was running at about 0.1 s per
+      iteration: twice the sleep, and nothing like the round trip.
+    - It is sampled over a span rather than over three iterations, because the
+      quantity wanted is the sustained cost. Three back-to-back iterations on
+      an oversubscribed box came back at 60 ms while the loop that followed
+      ran at 3 s each, and a window sized from that number failed for the same
+      reason the fixed one did.
+
+    Nothing is armed yet, so calibrating cannot trip anything.
+    """
+    started = time.monotonic()
+    polls = 0
+    sampled = 0.0
+    while True:
+        client.status()
+        predicate()
+        polls += 1
+        time.sleep(interval)
+        sampled = time.monotonic() - started
+        enough = sampled >= CALIBRATION_S and polls >= CALIBRATION_MIN_POLLS
+        if enough or sampled >= CALIBRATION_MAX_S:
+            break
+    measured = sampled / polls
+    if measured <= 0.0:  # a clock too coarse to see an iteration
+        return MIN_DEADMAN_S, float("inf"), sampled, want_polls
+    window_s = min(MAX_DEADMAN_S, max(MIN_DEADMAN_S, want_polls * margin * measured))
+    # Normally window/(margin*cost) is exactly ``want_polls``. It is smaller
+    # only when the ceiling bit, i.e. the runner needs more wall clock than
+    # this test is allowed to take; say so in the numbers rather than
+    # pretending the 20 are still on the table.
+    demanded = max(2, min(want_polls, int(window_s / (margin * measured))))
+    return window_s, 1.0 / measured, sampled, demanded
 
 
 def test_an_observer_polling_does_not_keep_an_armed_bench_alive(bench):
@@ -121,25 +224,58 @@ def test_an_observer_polling_does_not_keep_an_armed_bench_alive(bench):
     False. Waiting for the trip itself is both race-free and the stronger
     claim — it proves the bench was actually made safe, not merely that it was
     eligible.
+
+    The window is sized from the runner rather than assumed. The claim needs
+    two things at once: the observer polled many times, and the bench tripped
+    anyway. A fixed window can only ever have one of them on a slow machine —
+    a loaded macOS 3.11 runner got 10 polls into the fixture's 1.0 s window
+    (CI run 46039088354), so the poll-count assertion failed on a bench that
+    had been driven safe exactly as it should have been. So: run the polling
+    loop for a moment to price one iteration, set ``deadman_s`` so that
+    ``MIN_POLLS`` of them fit at twice that cost, and then demand that many.
+    Both halves hold at any runner speed.
     """
     agent = bench.agent
     observer = bench.connect(observer=True)
 
-    # Arm a device directly on the governor: this test is about the deadman,
-    # not about how arming happens.
-    agent.governor.state_for("otii_arc").output_armed = True
-    assert agent.governor.any_armed
-
     def tripped():
         return any(t["reason"] == "heartbeat_lost" for t in agent.governor.status()["trips"])
 
-    deadline = time.monotonic() + (agent.deadman_s * 6)
-    hit, polls = _poll_until(observer, deadline, tripped)
+    # Timed before anything is armed, so calibrating cannot trip anything.
+    window_s, rate, calibrated_in, want = _calibrate_window(observer, tripped, interval=POLL_S)
+    # The fixture's deadman_s is what the agent advertised to the client; the
+    # governor's own figure is what decides the trip, and nothing else reads
+    # it after this point (the handler's read timeout is floored at 30 s).
+    agent.governor.deadman_s = window_s
+    assert window_s >= MIN_DEADMAN_S, (
+        f"a {window_s:.2f}s window is below the {MIN_DEADMAN_S:.1f}s floor, so the "
+        f"{DEADMAN_TICK_S}s deadman tick would decide when the trip lands rather "
+        f"than the observer's polling"
+    )
 
-    assert polls > 10, f"only managed {polls} polls; the test proves nothing"
+    # Arm a device directly on the governor: this test is about the deadman,
+    # not about how arming happens.
+    agent.governor.state_for("otii_arc").output_armed = True
+    # A real arm is contact (`_seed_contact`), and the window is sized from
+    # that moment. Without the touch the clock would still be running from
+    # when the fixture built the agent, so the fixture's own setup time would
+    # come out of the window this test just sized.
+    agent.governor.touch()
+    assert agent.governor.any_armed
+
+    deadline = time.monotonic() + _trip_deadline_s(window_s)
+    hit, polls, poll_s = _poll_until(observer, deadline, tripped, interval=POLL_S)
+
+    assert polls >= want, (
+        f"only managed {polls} polls at a deadman window of {window_s:.2f}s: the "
+        f"test proves nothing about a display that polls. Calibration measured "
+        f"{rate:.1f} polls/s over a {calibrated_in * 1000:.0f} ms sample, "
+        f"so the window was sized for {want} of them at {POLL_MARGIN:g}x margin; "
+        f"the last poll alone took {poll_s * 1000:.0f} ms"
+    )
     assert hit, (
         f"an armed bench was never tripped despite {polls} observer polls over "
-        f"more than {agent.deadman_s:.1f}s — the deadman has been defeated by "
+        f"more than {window_s:.1f}s — the deadman has been defeated by "
         f"the status display (last contact "
         f"{agent.governor.seconds_since_contact:.2f}s ago)"
     )
@@ -152,24 +288,40 @@ def test_a_normal_client_does_still_feed_the_deadman(bench):
     A real operator client must keep the bench alive — that is the whole point
     of the heartbeat. Without this test, deleting ``touch()`` outright would
     leave the suite green.
+
+    Sized the same way as the test above, for the same reason: three windows
+    of a fixed 1.0 s asked for more polls than a loaded runner could deliver,
+    and it failed with "only managed N polls" on a bench that was being kept
+    alive correctly.
     """
     agent = bench.agent
     client = bench.connect()
 
-    agent.governor.state_for("otii_arc").output_armed = True
-
     def tripped():
         return bool(agent.governor.status()["trips"])
 
-    deadline = time.monotonic() + (agent.deadman_s * 3)
-    hit, polls = _poll_until(client, deadline, tripped)
+    window_s, rate, calibrated_in, want = _calibrate_window(client, tripped, interval=POLL_S)
+    agent.governor.deadman_s = window_s
 
-    assert polls > 10, f"only managed {polls} polls; the test proves nothing"
+    agent.governor.state_for("otii_arc").output_armed = True
+
+    # Three windows without a trip is the claim: the deadman is being fed, not
+    # merely slow.
+    deadline = time.monotonic() + _trip_deadline_s(window_s)
+    hit, polls, poll_s = _poll_until(client, deadline, tripped, interval=POLL_S)
+
+    assert polls >= want, (
+        f"only managed {polls} polls at a deadman window of {window_s:.2f}s: the "
+        f"test proves nothing about a client that polls. Calibration measured "
+        f"{rate:.1f} polls/s over a {calibrated_in * 1000:.0f} ms sample, "
+        f"so the window was sized for {want} of them at {POLL_MARGIN:g}x margin; "
+        f"the last poll alone took {poll_s * 1000:.0f} ms"
+    )
     assert not hit, (
-        f"a normal client polling every 50ms was tripped anyway after {polls} "
+        f"a normal client polling was tripped anyway after {polls} "
         f"polls — its traffic is not registering as operator contact"
     )
-    assert agent.governor.seconds_since_contact < agent.deadman_s
+    assert agent.governor.seconds_since_contact < agent.governor.deadman_s
     assert agent.governor.any_armed
 
 

@@ -291,7 +291,7 @@ def teardown(group: str, *, mode: str) -> Optional[dict]:
 
     close_tool = entry["close"]
     try:
-        return _tool(entry["module"], close_tool)()
+        return _tool(str(entry["module"]), close_tool)()
     except Exception as exc:
         log.warning("cli: %s raised: %r", close_tool, exc)
         # dl3031a_close, dp2031_close and sdg1032x_close disable outputs *before*
@@ -328,7 +328,7 @@ def run_tool(
     # driver's open refuses when already open. Same for calling close directly:
     # teardown would then be the second close, which reports "was not open".
     if open_tool is not None and fn.__name__ not in (open_tool, entry["close"]):
-        opener = _tool(entry["module"], open_tool)
+        opener = _tool(str(entry["module"]), open_tool)
         opener(**open_kwargs_for(open_tool, device_key, bench))
 
     warning: Optional[str] = None

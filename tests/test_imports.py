@@ -20,12 +20,6 @@ def test_top_level_framework_primitives():
     Driver classes (OtiiArc, QR10x, RigolDL3031A) are imported by
     full path under benchctrl.drivers.*."""
     from benchctrl import (
-        ChannelInfoResult,
-        Recording,
-        Sample,
-        SourceMeasurementUnit,
-        StandardChannel,
-        Statistics,
         BenchCommandError,
         BenchConnectionError,
         BenchError,
@@ -33,6 +27,12 @@ def test_top_level_framework_primitives():
         BenchProtocolError,
         BenchTimeoutError,
         BenchValueError,
+        ChannelInfoResult,
+        Recording,
+        Sample,
+        SourceMeasurementUnit,
+        StandardChannel,
+        Statistics,
     )
     assert ChannelInfoResult
     assert Recording
@@ -60,10 +60,10 @@ def test_top_level_does_not_leak_driver_classes():
 def test_otii_arc_driver_importable():
     """The Arc driver classes are importable by full path."""
     from benchctrl.drivers.otii_arc import (
+        ChannelInfo,
         OtiiArc,
         OtiiArcChannel,
         OtiiArcInfo,
-        ChannelInfo,
         PortInfo,
     )
     assert OtiiArc and OtiiArcChannel and OtiiArcInfo

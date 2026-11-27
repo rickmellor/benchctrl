@@ -44,9 +44,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from benchctrl.exceptions import BenchValueError
-
 from benchctrl.battery.profile import BatteryProfile
+from benchctrl.exceptions import BenchValueError
 
 if TYPE_CHECKING:
     from benchctrl.recording import Recording
@@ -85,7 +84,7 @@ class DutyCycle:
         return self.active_time_s + self.sleep_time_s
 
     @property
-    def cycle_charge_C(self) -> float:
+    def cycle_charge_C(self) -> float:  # noqa: N802 - physics unit suffix; docs/guide/adding-a-driver.md "Vocabulary follows physics"
         """Charge consumed per cycle (Coulombs = A·s)."""
         return (
             self.active_current_A * self.active_time_s
@@ -93,7 +92,7 @@ class DutyCycle:
         )
 
     @property
-    def average_current_A(self) -> float:
+    def average_current_A(self) -> float:  # noqa: N802 - physics unit suffix; docs/guide/adding-a-driver.md "Vocabulary follows physics"
         """Cycle-averaged current draw (A)."""
         if self.cycle_time_s <= 0:
             return 0.0
@@ -390,7 +389,7 @@ def estimate_life_from_profile(
 
 
 def duty_cycle_from_recording(
-    rec: "Recording",
+    rec: Recording,
     *,
     active_window: tuple[float, float],
     sleep_window: tuple[float, float],

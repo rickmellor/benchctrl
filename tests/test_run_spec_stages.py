@@ -26,6 +26,7 @@ from benchctrl.agent.runs.spec import (
 )
 from benchctrl.exceptions import BenchValueError
 
+
 #: A spec written before stages existed: not one phase carries a ``stage``.
 #: Reconstructed here rather than loaded from a fixture so the fields are visible
 #: next to the hash they produce.

@@ -42,7 +42,7 @@ class StandardChannel(Enum):
         return self.value
 
     @classmethod
-    def from_code(cls, code: str) -> "StandardChannel":
+    def from_code(cls, code: str) -> StandardChannel:
         for member in cls:
             if member.value == code:
                 return member

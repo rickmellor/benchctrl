@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Union
 
 
 @dataclass(frozen=True)
@@ -89,7 +88,7 @@ class OtiiArcChannel(Enum):
         return self.value.co_enables
 
     @classmethod
-    def from_code(cls, code: str) -> Channel:
+    def from_code(cls, code: str) -> OtiiArcChannel:
         """Look up a channel by its two-letter code."""
         norm = code.strip().lower()
         for ch in cls:

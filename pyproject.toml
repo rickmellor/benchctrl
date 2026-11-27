@@ -37,8 +37,18 @@ dependencies = [
 dev = [
     "pytest>=7",
     "pytest-cov",
-    "ruff",
-    "mypy",
+    # A hung leg tells you nothing: the macOS 3.10-3.13 legs ran to 94% and
+    # then went silent for 25 min until the job limit killed them, so the
+    # suite ended with no test name and no failure. This turns a hang into a
+    # named failure. The CI command passes --timeout-method=thread, which is
+    # the only method that interrupts a test blocked in C or in a socket
+    # accept (see .github/workflows/ci.yml).
+    "pytest-timeout>=2.1",
+    "ruff==0.17.6",
+    # mypy 2.x requires Python >= 3.10; on 3.9 the pin made the whole install
+    # step fail ("No matching distribution found"). The lint job runs on 3.12,
+    # so 3.9 legs get ruff and pytest and simply have no mypy.
+    "mypy==2.4.1; python_version >= '3.10'",
 ]
 numpy = [
     "numpy>=1.20",
@@ -132,7 +142,21 @@ target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "N", "SIM"]
-ignore = ["E501"]
+# Physics vocabulary such as `nominal_mAh` is required by docs/guide/adding-a-driver.md ("Vocabulary follows physics")
+ignore = ["E501", "N803", "N806", "N815"]
+
+# benchctrl.mcp is a facade: its import block *is* its public surface (tests and
+# scripts do ``from benchctrl.mcp import set_voltage``), and it has to sit after
+# the register_mcp_tools() calls that build the server. Both are deliberate, so
+# F401/E402 there are noise; deleting those imports would drop ~400 public names.
+[tool.ruff.lint.per-file-ignores]
+"src/benchctrl/mcp.py" = ["F401", "E402"]
+
+# Still ships Python 3.9 (requires-python, and 3.9 is in the CI matrix), so PEP 604
+# `X | None` cannot replace `Optional[X]`/`Union[...]` in annotations that
+# get_type_hints() evaluates at runtime — which cli_generated.py does.
+[tool.ruff.lint.pyupgrade]
+keep-runtime-typing = true
 
 [tool.mypy]
 python_version = "3.10"

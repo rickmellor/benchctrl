@@ -10,6 +10,7 @@ because only the person who wired the bench knows it.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -37,6 +38,7 @@ def _row(registry: DeviceRegistry, key: str) -> dict:
 # ---------------------------------------------------------------- serial
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_the_serial_is_read_from_the_instrument_at_open():
     # Three drivers, three places the serial lives: the Arc's device-id query
     # (opened by port, so no USB descriptor), the QR10x's info() method, and
@@ -211,6 +213,7 @@ def test_a_bad_binding_in_agent_json_stops_the_agent(tmp_path, monkeypatch, caps
     assert "binding" in capsys.readouterr().err
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_serial_and_binding_cross_the_wire_in_welcome():
     from benchctrl.sim.factories import make_otii_arc
 

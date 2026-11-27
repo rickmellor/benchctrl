@@ -10,7 +10,7 @@ from benchctrl.exceptions import BenchNotImplementedError
 @pytest.fixture
 def smu_skeleton():
     """Construct an SMU without opening a port — for testing pure-Python stubs."""
-    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU  # noqa: N814 - SMU is the project-wide alias for the SMU driver class
     from benchctrl.drivers.otii_arc.transport import Transport
 
     transport = Transport("__dummy__")  # never opened

@@ -19,7 +19,7 @@ raise a limit, or re-energise a DUT.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 log = logging.getLogger("benchctrl.agent.llm.tools")
 

@@ -16,19 +16,47 @@ None of that is stubbed. The only thing that isn't real is the silicon.
 Binary-safety note: a pty's line discipline will happily mangle binary data
 (``\\r`` <-> ``\\n`` translation, echo, ``^C`` interpretation). We put the
 slave side into raw mode before anyone opens it, which disables all of it.
+
+POSIX note: a pty is the whole transport, so this module is Unix-only by
+nature. The stdlib imports are guarded and constructing a
+:py:class:`SerialLoopback` off POSIX raises ``BenchConnectionError`` — the
+module stays importable (so collection on Windows reaches the tests that
+never touch a pty) and the failure lands on the call that cannot be served.
 """
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
 import select
-import termios
-import tty
 from typing import Optional
 
+from benchctrl.exceptions import BenchConnectionError
+
+try:
+    import termios  # Unix only
+except ImportError:  # pragma: no cover - Windows
+    termios = None  # type: ignore[assignment]
+
+try:
+    import tty  # Unix only — imports termios, so it is POSIX-only too
+except ImportError:  # pragma: no cover - Windows
+    tty = None  # type: ignore[assignment]
+
 log = logging.getLogger("benchctrl.sim.loopback")
+
+#: The one message every POSIX-only seam in this package gives. A pty is not a
+#: transport we can emulate: there is no Windows equivalent of the tty layer
+#: pyserial opens, so the honest failure is "this host cannot do this" at the
+#: call, not an ``AttributeError`` from inside ``os.openpty``.
+POSIX_REQUIRED = "pty loopback needs a POSIX host (termios/fcntl unavailable on this platform)"
+
+
+def _require_posix() -> None:
+    if termios is None or tty is None:
+        raise BenchConnectionError(POSIX_REQUIRED)
 
 #: A pty's kernel buffer is small (typically 4 KB). Writes beyond it block
 #: until the reader drains. We cap our own outbound queue well above that so
@@ -52,6 +80,10 @@ class SerialLoopback:
     """
 
     def __init__(self, *, max_tx_queue: int = DEFAULT_MAX_TX_QUEUE) -> None:
+        # Checked before the openpty: on Windows ``os.openpty`` is missing
+        # outright, and on a host that has it but no termios the pty would open
+        # and then leak two descriptors on the way out.
+        _require_posix()
         self._master_fd, self._slave_fd = os.openpty()
         self._port = os.ttyname(self._slave_fd)
         self._max_tx_queue = max_tx_queue
@@ -169,10 +201,8 @@ class SerialLoopback:
             return
         self._closed = True
         for fd in (self._master_fd, self._slave_fd):
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
 
     def __enter__(self) -> SerialLoopback:
         return self

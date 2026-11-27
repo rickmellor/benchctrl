@@ -25,7 +25,8 @@ import contextlib
 import logging
 import threading
 import time
-from typing import Any, Iterator, Optional
+from collections.abc import Iterator
+from typing import Any, Optional, cast
 
 from benchctrl.exceptions import BenchValueError
 from benchctrl.interfaces import SourceMeasurementUnit  # noqa: F401 (documented intent)
@@ -247,7 +248,7 @@ class RemoteSMU(RemoteDevice):
         }
 
     @contextlib.contextmanager
-    def record(self, *channels, name: str = "recording") -> Iterator["RemoteRecording"]:
+    def record(self, *channels, name: str = "recording") -> Iterator[RemoteRecording]:
         """Context-managed remote recording.
 
         The body runs on the caller exactly as it does locally; only the
@@ -319,10 +320,10 @@ class RemoteRecording:
     )
 
     def __init__(self, described: dict, client) -> None:
-        self._rec_id = described.get("id") or described.get("rec_id")
+        self._rec_id = cast("str", described.get("id") or described.get("rec_id"))
         self._client = client
         self._described = dict(described)
-        self._real = None
+        self._real: Optional[Any] = None
         self._blob_id = described.get("blob")
         self._running = bool(described.get("running", True))
         self.name = described.get("name", "recording")
@@ -423,7 +424,7 @@ class RemoteIterator:
         self._exhausted = False
         self._closed = False
 
-    def __iter__(self) -> "RemoteIterator":
+    def __iter__(self) -> RemoteIterator:
         return self
 
     def __next__(self):

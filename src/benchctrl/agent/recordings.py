@@ -21,12 +21,14 @@ the run engine, which chunks.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import logging
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Optional
+from typing import Any, Optional
 
 from benchctrl.exceptions import BenchValueError
 
@@ -217,7 +219,7 @@ class IteratorHandle:
 
     def take(self, max_items: int) -> list:
         """Pull up to ``max_items``, marking exhaustion."""
-        out = []
+        out: list = []
         with self._lock:
             if self.exhausted:
                 return out
@@ -240,10 +242,8 @@ class IteratorHandle:
             self.exhausted = True
         closer = getattr(self.generator, "close", None)
         if callable(closer):
-            try:
+            with contextlib.suppress(Exception):
                 closer()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 class IteratorTable:

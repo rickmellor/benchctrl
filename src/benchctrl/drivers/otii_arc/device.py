@@ -22,14 +22,9 @@ from typing import Optional, Union
 
 from benchctrl.drivers.otii_arc.channels import (
     WIRE_ID_TO_CHANNEL,
-    OtiiArcChannel as Channel,
 )
-from benchctrl.exceptions import (
-    BenchCommandError,
-    BenchConnectionError,
-    BenchNotImplementedError,
-    BenchTimeoutError,
-    BenchValueError,
+from benchctrl.drivers.otii_arc.channels import (
+    OtiiArcChannel as Channel,
 )
 from benchctrl.drivers.otii_arc.protocol import (
     CMD_ENABLE_5V,
@@ -78,9 +73,16 @@ from benchctrl.drivers.otii_arc.protocol import (
     power_regulation_value,
     volts_to_microvolts,
 )
+from benchctrl.drivers.otii_arc.transport import PortInfo, Transport, discover_arc_ports
+from benchctrl.exceptions import (
+    BenchCommandError,
+    BenchConnectionError,
+    BenchNotImplementedError,
+    BenchTimeoutError,
+    BenchValueError,
+)
 from benchctrl.recording import Recording
 from benchctrl.samples import Sample
-from benchctrl.drivers.otii_arc.transport import PortInfo, Transport, discover_arc_ports
 
 log = logging.getLogger("benchctrl.device")
 
@@ -690,7 +692,7 @@ class OtiiArc:
                 continue
             for rec in iter_samples(fr.payload):
                 ch = WIRE_ID_TO_CHANNEL.get(rec.channel_id)
-                if ch in arc_to_inputs:
+                if ch is not None and ch in arc_to_inputs:
                     for inp in arc_to_inputs[ch]:
                         out[inp].append(rec.value)
                     self._state.last_value[ch] = rec.value

@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Optional, Sequence
+from collections.abc import Sequence
+from typing import Optional
 
 log = logging.getLogger("benchctrl.drivers.cyberpower_pdu41002.mcp_tools")
 

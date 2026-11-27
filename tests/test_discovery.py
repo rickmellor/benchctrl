@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Optional
 
@@ -239,6 +240,7 @@ def test_find_for_filters(monkeypatch):
     assert [d.path for d in discovery.unidentified()] == ["/dev/ttyUSB0"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_probe_identifies_a_simulated_qr10x():
     """The QR10x has no known VID/PID, so identification is by probe."""
     from benchctrl.sim.qr10x import SimulatedQR10x
@@ -247,6 +249,7 @@ def test_probe_identifies_a_simulated_qr10x():
         assert discovery.probe_serial_identity(sim.port) == "eastwood_qr10x"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_probe_returns_none_for_a_foreign_device():
     from benchctrl.sim.otii_arc import SimulatedOtiiArc
 
@@ -483,6 +486,7 @@ def test_no_two_probes_can_match_the_same_reply():
                     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_the_pdu_is_not_misidentified_as_a_qr10x(monkeypatch):
     """The concrete false positive, through the real probe loop.
 
@@ -504,6 +508,7 @@ def test_the_pdu_is_not_misidentified_as_a_qr10x(monkeypatch):
             assert discovery.probe_serial_identity(sim.port, timeout=0.3) is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_the_qr10x_still_identifies_after_the_marker_fix():
     """The tightened marker must not cost the identification it exists for."""
     from benchctrl.sim.qr10x import SimulatedQR10x
@@ -627,6 +632,34 @@ def test_no_usb_access_is_not_a_discovery_failure(monkeypatch):
     assert discovery.scan_driverless_bridges() == []
 
 
+def test_a_missing_libusb_backend_does_not_take_down_discovery(monkeypatch):
+    """pyusb installed but no libusb behind it: no CH340, and no exception.
+
+    Windows CI, and any laptop that pulled in pyusb as a pyvisa-py dependency.
+    ``usb.core.find()`` raises ``NoBackendError`` there — a ``ValueError``, not a
+    ``USBError``, so it sailed past every USBError handler in the CH341 module and
+    out of ``discover()``, whose scans all land in one merged list. That is why
+    the serial assertion below matters as much as the empty CH340 list: the bug
+    was one scanner's host problem cancelling every other one. The remaining
+    scanners are switched off so this says nothing about them, only that the one
+    that answers still does.
+    """
+    import usb.core
+
+    def no_backend(*args, **kwargs):
+        raise usb.core.NoBackendError("No backend available")
+
+    monkeypatch.setattr(usb.core, "find", no_backend)
+    _patch_ports(monkeypatch, [FakePort("/dev/ttyACM0", vid=0x0FCE, pid=0xD1E6, product="Arc")])
+
+    assert discovery.scan_driverless_bridges() == []
+
+    found = discovery.discover(usbtmc=False, visa=False, hidraw=False, usbfs=False, usb=False)
+    assert [d.path for d in found] == ["/dev/ttyACM0"], (
+        "the CH340 scan's host problem removed the transports that could answer"
+    )
+
+
 def test_discover_includes_driverless_bridges(monkeypatch):
     """The wiring, not just the scanner: discover() must call it."""
     _patch_ports(monkeypatch, [])
@@ -697,6 +730,7 @@ def test_a_scan_never_probes_unless_asked(monkeypatch):
     assert inv["identified"] == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_probing_identifies_a_qr10x_behind_a_bridge(monkeypatch):
     """The gap this closes, end to end against the real simulator.
 
@@ -804,6 +838,7 @@ def test_a_bridge_with_no_tty_is_not_probed(monkeypatch):
     assert spy.paths == [], "opened a bridge the caller had not asked us to claim"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_a_silent_device_is_left_unidentified_rather_than_claimed():
     """Silence is not evidence, in either direction.
 

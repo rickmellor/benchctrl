@@ -12,8 +12,6 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from benchctrl.channels import StandardChannel
-from benchctrl.interfaces import SourceMeasurementUnit
 from benchctrl.battery import (
     Battery,
     BatteryProfile,
@@ -24,8 +22,8 @@ from benchctrl.battery import (
     ExitConditions,
 )
 from benchctrl.battery.emulator import Emulator, EmulatorConfig
+from benchctrl.channels import StandardChannel
 from benchctrl.exceptions import BenchValueError
-
 
 # ---------------------------------------------------------------------------
 # Mock SMU (different from the profiler mock — this one models a DUT load)
@@ -389,7 +387,7 @@ def test_emulator_safety_max_voltage_clamps_output():
     assert st.output_voltage_V == pytest.approx(5.0, abs=0.05)
 
 
-def test_emulator_stops_when_safety_max_used_mAh_reached():
+def test_emulator_stops_when_safety_max_used_mAh_reached():  # noqa: N802 - physics unit suffix; docs/guide/adding-a-driver.md "Vocabulary follows physics"
     smu = _MockSMU(dut_current_A=0.500)   # 500 mA
     config = EmulatorConfig(
         profile=_flat_profile(capacity_mAh=100.0),
@@ -427,7 +425,6 @@ def test_emulator_run_for_returns_final_state():
 
 def test_emulator_parallel_scales_capacity():
     """parallel=2 means twice the bank capacity for the same per-cell profile."""
-    smu = _MockSMU(dut_current_A=0.500)
     p = _flat_profile(capacity_mAh=10.0)
     cfg1 = EmulatorConfig(profile=p, parallel=1, update_interval_s=0.02,
                           safety_max_voltage_V=4.0)
@@ -437,13 +434,15 @@ def test_emulator_parallel_scales_capacity():
     smu2 = _MockSMU(dut_current_A=0.500)
     e1 = Emulator(smu1, cfg1)
     e2 = Emulator(smu2, cfg2)
-    e1.start(); e2.start()
+    e1.start()
+    e2.start()
     try:
         time.sleep(0.3)
         s1 = e1.state()
         s2 = e2.state()
     finally:
-        e1.stop(); e2.stop()
+        e1.stop()
+        e2.stop()
     # parallel=2 has used roughly the same total mAh, but SoC drops half as fast
     # because bank capacity doubled
     assert s2.soc > s1.soc

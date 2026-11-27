@@ -17,6 +17,7 @@ filling it takes down the whole board, not just the run.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -26,7 +27,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Optional
 
 log = logging.getLogger("benchctrl.agent.runs.store")
 
@@ -611,11 +612,8 @@ class RunStore:
         return path
 
     def close(self) -> None:
-        with self._lock:
-            try:
-                self._conn.close()
-            except sqlite3.Error:
-                pass
+        with self._lock, contextlib.suppress(sqlite3.Error):
+            self._conn.close()
 
 
 def new_run_id(name: str) -> str:

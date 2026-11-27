@@ -19,6 +19,7 @@ reasonable implementation gets wrong:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import warnings
 
@@ -41,6 +42,7 @@ def dmm():
     [6]), so the default fixture reproduces the error rather than a clean
     ideal that would hide it.
     """
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_sdm4065a
 
     drv = make_sdm4065a(sim={"dut_ohm": 100.0, "lead_ohm": 0.2})
@@ -1252,10 +1254,8 @@ def test_hw_autozero_round_trips_via_zero_auto(hw_dmm):
 
     # Liveness: a reading still works, which a wedged session would not allow.
     hw_dmm.set_nplc(1.0)
-    try:
+    with contextlib.suppress(SDM4065AOverloadError):
         hw_dmm.read()
-    except SDM4065AOverloadError:
-        pass  # open input is fine; liveness is the point
 
 
 @pytest.mark.hardware

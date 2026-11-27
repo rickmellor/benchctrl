@@ -221,6 +221,7 @@ def test_the_simulated_sidecar_serves_the_same_router_over_http():
 
 
 def test_the_stream_endpoint_emits_mjpeg_parts_until_the_client_leaves():
+    before = {t.name for t in threading.enumerate()}
     with SimulatedVisionSidecar() as sim:
         host, port = sim.url[len("http://") :].split(":")
         conn = http.client.HTTPConnection(host, int(port), timeout=5)
@@ -232,6 +233,24 @@ def test_the_stream_endpoint_emits_mjpeg_parts_until_the_client_leaves():
         chunk = resp.fp.read(len(b"--frame\r\nContent-Type: image/jpeg\r\n"))
         assert chunk.startswith(b"--frame")
         conn.close()
+
+    # The leak this pins: `_stream` only notices a gone client on a *write*, so
+    # once the camera is closed and no frame arrives it spun forever in
+    # `if rec is None: continue`, and CI's timeout dump named the handler thread
+    # for a test that had already passed. Closing the sidecar must end it.
+    # socketserver names the thread "<n> (process_request_thread)", so match on
+    # the substring; an exact name would match nothing and pass by accident.
+    deadline = time.monotonic() + 3.0
+    while True:
+        leaked = [
+            t.name
+            for t in threading.enumerate()
+            if "process_request_thread" in t.name and t.name not in before
+        ]
+        if not leaked or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    assert not leaked, f"stream handler still alive 3 s after the camera closed: {leaked}"
 
 
 # ----------------------------------------------------------- the JPEG trick

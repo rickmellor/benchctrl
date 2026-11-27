@@ -23,6 +23,7 @@ actual outlet state rather than on a return value.
 
 from __future__ import annotations
 
+import sys
 import time
 
 import pytest
@@ -44,7 +45,17 @@ KEY = "cyberpower_pdu41002"
 
 @pytest.fixture()
 def pdu():
-    """A real driver over a pty to a simulated PDU, with outlets 2-3 panicable."""
+    """A real driver over a pty to a simulated PDU, with outlets 2-3 panicable.
+
+    Skipped from inside the fixture rather than with a mark on it: pytest 9
+    rejects marks on fixture functions outright ("Marks cannot be applied to
+    fixtures"), and a skip raised here is reported as SKIPPED, where the pty
+    error was reported as 13 ERRORs at setup. Only the tests that take this
+    fixture are skipped — the governor's own arm/disarm logic is plain Python
+    and runs on every host.
+    """
+    if sys.platform == "win32":
+        pytest.skip("pty-backed simulators need a POSIX host")
     from benchctrl.sim.factories import make_pdu41002
 
     driver = make_pdu41002(allowed_outlets=(2, 3, 4), panic_outlets=(2, 3))
@@ -160,6 +171,7 @@ def test_the_default_safe_state_reaches_a_multi_channel_instrument():
     assert psu.disarmed and not any(psu.outputs.values())
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_the_dp2031_is_disarmed_by_the_default_safe_state():
     """The real driver against its simulator: the gap this closes was a PSU
     left armed across a service stop."""
@@ -248,6 +260,7 @@ def test_the_cut_raises_when_an_outlet_does_not_go_off(pdu):
     assert sim.outlet_state[2] is True
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_the_cut_is_a_no_op_without_authorisation():
     """Empty `panic_outlets` is the default, and it must write zero bytes —
     not "cut nothing after connecting", which would still hold the device's
@@ -499,6 +512,7 @@ def test_the_trip_event_names_the_panic_outlet_device(pdu, worker):
     assert trips[0]["panic_outlet_devices"] == [KEY]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_panic_outlets_cannot_exceed_allowed_outlets():
     """The invariant that makes the whole mechanism safe to enable: the
     governor can never cut an outlet the driver itself may not touch."""

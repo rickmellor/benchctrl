@@ -175,7 +175,11 @@ def _routable(ip: Optional[str]) -> Optional[str]:
 
 
 def _read_text(path: Path) -> str:
-    return path.read_text()
+    # utf-8, not the host locale: this reads /proc and /sys, whose contents are
+    # ASCII regardless of where the panel runs. Left to the default, a cp1252
+    # host would decode the same bytes differently — and on a Windows box a
+    # non-ASCII byte anywhere in the file raises before the panel has a view.
+    return path.read_text(encoding="utf-8")
 
 
 def lan_status(

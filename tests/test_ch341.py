@@ -177,6 +177,7 @@ def _wait_for(predicate, timeout: float = 2.0) -> bool:
 
 @pytest.fixture
 def bridge():
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     fake = FakeUsbSerial()
     b = PtySerialBridge(fake, name="test").start()
     try:
@@ -187,7 +188,8 @@ def bridge():
 
 def test_bridge_exposes_a_port_pyserial_can_open(bridge):
     b, _ = bridge
-    assert b.port.startswith("/dev/pts/")
+    # Linux names a pty slave /dev/pts/N, macOS /dev/ttysNNN.
+    assert b.port.startswith(("/dev/pts/", "/dev/ttys"))
     # The whole design rests on this: an unmodified serial.Serial opens it.
     with serial.Serial(b.port, baudrate=115200, timeout=0.2) as ser:
         assert ser.is_open
@@ -317,6 +319,7 @@ class _ChunkLimitedDevice(LoopbackBackedDevice):
 @pytest.fixture
 def bridged_qr10x():
     """SimulatedQR10x <-> pty <-> PtySerialBridge <-> pty <-> QR10x driver."""
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     sim = SimulatedQR10x(settle_s=0.0).start()
     device = LoopbackBackedDevice(sim.port)
     b = PtySerialBridge(device, name="sim-ch341").start()

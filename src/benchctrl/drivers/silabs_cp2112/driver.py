@@ -69,8 +69,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Optional
 
 from benchctrl.drivers.silabs_cp2112.hidraw import (
     PRODUCT_ID,
@@ -224,7 +225,7 @@ class CP2112GpioConfig:
         )
 
     @classmethod
-    def from_bytes(cls, raw: bytes) -> "CP2112GpioConfig":
+    def from_bytes(cls, raw: bytes) -> CP2112GpioConfig:
         if len(raw) != 4:
             raise CP2112ProtocolError(
                 f"GPIO configuration report should be 4 bytes, got {len(raw)}"
@@ -324,7 +325,7 @@ class CP2112:
         allowed_lines: Iterable[int],
         serial: Optional[str] = None,
         verify_identity: bool = True,
-    ) -> "CP2112":
+    ) -> CP2112:
         """Open a CP2112 and record its as-found GPIO configuration.
 
         ``allowed_lines`` is required and keyword-only — deliberately not
@@ -743,7 +744,7 @@ class CP2112:
                 log.warning("could not restore CP2112 GPIO configuration: %s", e)
         self._link.close()
 
-    def __enter__(self) -> "CP2112":
+    def __enter__(self) -> CP2112:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:

@@ -75,7 +75,7 @@ class ChannelInfoResult:
         }
 
 
-def _coerce(channel: ChannelLike) -> "Channel":
+def _coerce(channel: ChannelLike) -> Channel:
     return _get_channel_cls().coerce(channel)
 
 
@@ -543,7 +543,7 @@ class Recording:
             "end_time": (
                 self._end_time.isoformat() + "Z" if self._end_time else None
             ),
-            "channel_order": [ch.code for ch in self._buffers.keys()],
+            "channel_order": [ch.code for ch in self._buffers],
         }
         header_bytes = json.dumps(header).encode("utf-8")
         written = 0

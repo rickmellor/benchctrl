@@ -61,12 +61,14 @@ derived from, and ``KNOWN_LIMITATIONS.md`` for the SSH firmware defects.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Any, Optional, cast
 
 from benchctrl.drivers.cyberpower_pdu41002.links import (
     BAUDRATE,
@@ -426,7 +428,7 @@ class CyberPowerPDU41002:
         self._username = username
         # Held only in memory, never logged, never in __repr__, never returned
         # by any method. See the module docstring.
-        self.__password = password
+        self.__password: Optional[str] = password
         self._outlet_count = outlet_count
         self._allowed = frozenset(_coerce_outlet_set(allowed_outlets, "allowed_outlets"))
         self._panic = frozenset(_coerce_outlet_set(panic_outlets, "panic_outlets"))
@@ -457,7 +459,7 @@ class CyberPowerPDU41002:
         panic_outlets: Iterable[int] = (),
         outlet_count: int = 8,
         env: Optional[dict] = None,
-    ) -> "CyberPowerPDU41002":
+    ) -> CyberPowerPDU41002:
         """Open a session over serial (``port``) or SSH (``host``).
 
         Args:
@@ -487,7 +489,7 @@ class CyberPowerPDU41002:
         resolved = _resolve_password(password, env)
 
         if port is not None:
-            link = SerialLink(port, baudrate=baudrate)
+            link: Any = SerialLink(port, baudrate=baudrate)
             transport = "serial"
         else:
             link = SshLink(str(host), username=username, port=ssh_port)
@@ -563,12 +565,10 @@ class CyberPowerPDU41002:
 
     def _close_link(self) -> None:
         if self._link is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._link.close()
-            except Exception:  # pragma: no cover - best-effort
-                pass
 
-    def __enter__(self) -> "CyberPowerPDU41002":
+    def __enter__(self) -> CyberPowerPDU41002:
         return self
 
     def __exit__(self, *exc_info) -> None:
@@ -635,7 +635,7 @@ class CyberPowerPDU41002:
                 f"unreachable or the KEX workaround may have stopped working"
             )
 
-        self._link.write(self.__password.encode("ascii") + b"\r")
+        self._link.write(cast(str, self.__password).encode("ascii") + b"\r")
         after = self._read_until(
             [PROMPT, _SSH_PASSWORD_PROMPT, *_SSH_DENIED_MARKERS],
             timeout=max(5.0, deadline - time.monotonic()),
@@ -678,7 +678,9 @@ class CyberPowerPDU41002:
         tell those apart.
         """
         deadline = time.monotonic() + budget
-        password = self.__password
+        # open() resolves the password through _resolve_password() and raises
+        # PDU41002AuthError when there is none, so this is a str by now.
+        password = cast(str, self.__password)
         #: Set when the device answered "Login Failed" at least once, so the
         #: error raised on exhaustion can say which of the two things happened.
         refusals = 0
@@ -990,15 +992,15 @@ class CyberPowerPDU41002:
             energy_kWh=_parse_optional_suffixed(fields, "Energy", "kWh"),
         )
 
-    def measure_load_A(self) -> float:
+    def measure_load_A(self) -> float:  # noqa: N802 - physics unit suffix; docs/guide/adding-a-driver.md "Vocabulary follows physics"
         """Total device load in amps."""
         return self.read_device_status().load_A
 
-    def measure_voltage_V(self) -> float:
+    def measure_voltage_V(self) -> float:  # noqa: N802 - physics unit suffix; docs/guide/adding-a-driver.md "Vocabulary follows physics"
         """Input mains voltage."""
         return self.read_device_status().voltage_V
 
-    def measure_frequency_Hz(self) -> float:
+    def measure_frequency_Hz(self) -> float:  # noqa: N802 - physics unit suffix; docs/guide/adding-a-driver.md "Vocabulary follows physics"
         """Input mains frequency."""
         return self.read_device_status().frequency_Hz
 

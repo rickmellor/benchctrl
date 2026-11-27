@@ -166,6 +166,7 @@ class VisionService:
         trigger(seq: int) -> None            raises ServiceCaptureError
         latest() -> FrameRecord | None
         wait_for(after_frame_id: int, timeout_s: float) -> FrameRecord | None
+        closed: bool                         read-only; True once close() ran
         close()
 
     The detector, if any, must provide::
@@ -609,15 +610,27 @@ def make_handler(
             self._dispatch("PUT")
 
         def _stream(self) -> None:
-            """MJPEG for a human. Ends when the client goes away."""
+            """MJPEG for a human. Ends when the client goes away or the camera
+            closes — and the connection with it, because an endless multipart
+            body has no end a client could parse and a second request on this
+            connection is never valid. Without it the handler would return from
+            this method and park in the keep-alive read, which is the same live
+            thread either way."""
             self.send_response(200)
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Connection", "close")
             self.end_headers()
             last = -1
             try:
                 while True:
                     rec = service.camera.wait_for(last, 1.0)
                     if rec is None:
+                        # A closed camera will never deliver another frame, and
+                        # with none left there is no write to notice the client
+                        # went away on — so end the handler here, not on the
+                        # next write.
+                        if service.camera.closed:
+                            return
                         continue
                     last = rec.frame_id
                     self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n")
