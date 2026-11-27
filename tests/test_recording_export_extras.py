@@ -149,6 +149,7 @@ def test_save_parquet_smaller_than_csv(tmp_path):
 # ----- plot -----------------------------------------------------------------
 
 
+@pytest.mark.timeout(600)  # the first matplotlib import may build the font cache (minutes on CI)
 def test_plot_returns_figure_with_one_axes_per_channel():
     pytest.importorskip("matplotlib")
     import matplotlib
@@ -161,6 +162,7 @@ def test_plot_returns_figure_with_one_axes_per_channel():
     assert fig.axes[-1].get_xlabel() == "time (s)"
 
 
+@pytest.mark.timeout(600)  # the first matplotlib import may build the font cache (minutes on CI)
 def test_plot_subset_of_channels():
     pytest.importorskip("matplotlib")
     import matplotlib
@@ -171,6 +173,7 @@ def test_plot_subset_of_channels():
     assert len(fig.axes) == 1
 
 
+@pytest.mark.timeout(600)  # the first matplotlib import may build the font cache (minutes on CI)
 def test_plot_rejects_empty_recording():
     pytest.importorskip("matplotlib")
     import matplotlib

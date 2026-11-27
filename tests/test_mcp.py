@@ -148,6 +148,7 @@ def test_export_recording_unknown_extension_normalises_to_benchctrl(tmp_path):
 
 
 @pytest.mark.needs_mcp
+@pytest.mark.timeout(600)  # the first matplotlib import may build the font cache (minutes on CI)
 def test_plot_recording_writes_png(tmp_path):
     pytest.importorskip("matplotlib")
     from benchctrl.mcp import plot_recording
@@ -161,6 +162,7 @@ def test_plot_recording_writes_png(tmp_path):
 
 
 @pytest.mark.needs_mcp
+@pytest.mark.timeout(600)  # the first matplotlib import may build the font cache (minutes on CI)
 def test_plot_recording_subset_of_channels(tmp_path):
     pytest.importorskip("matplotlib")
     from benchctrl.mcp import plot_recording
