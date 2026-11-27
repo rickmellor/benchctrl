@@ -39,6 +39,18 @@ import pytest
 DEPLOY = pathlib.Path(__file__).resolve().parent.parent / "deploy"
 MANIFEST_PY = DEPLOY / "board_sync_manifest.py"
 
+#: The apply-side tests drive ``tar`` and ``sh`` over a local tmp_path, so they
+#: test the board's own scripts rather than anything this host runs. GNU tar on
+#: Windows reads a path like ``C:\Users\...\sync.tgz`` as a remote host named
+#: "C:" and dies with "Cannot connect to C: resolve failed" — which is a fact
+#: about tar's argument parsing, not about the sweep. The scripts are POSIX
+#: shell and run on the board.
+_needs_posix_tar = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="board sync drives tar over a local path; GNU tar on Windows reads "
+    "a drive letter as a remote host",
+)
+
 
 def load_module():
     """Import board_sync_manifest.py by path, since deploy/ is not a package."""
@@ -581,6 +593,7 @@ def board(tmp_path):
     return src, tmp_path, make_tarball, apply
 
 
+@_needs_posix_tar
 def test_the_sweep_deletes_a_file_removed_from_the_repo(board):
     """panel.py, the case that motivated the whole thing."""
     src, _, make_tarball, apply = board
@@ -598,6 +611,7 @@ def test_the_sweep_deletes_a_file_removed_from_the_repo(board):
     assert "panel.py" in out.stdout
 
 
+@_needs_posix_tar
 def test_the_sweep_does_not_touch_the_vendored_dependencies(board):
     """The failure that would take the agent, and the bench, down.
 
@@ -615,6 +629,7 @@ def test_the_sweep_does_not_touch_the_vendored_dependencies(board):
     assert "serial" not in out.stdout and "usb" not in out.stdout
 
 
+@_needs_posix_tar
 def test_the_sweep_does_not_touch_anything_above_the_source_root(board):
     """Standing in for /home/arduino/benchctrl, the agent's live runs directory."""
     src, top, make_tarball, apply = board
@@ -624,6 +639,7 @@ def test_the_sweep_does_not_touch_anything_above_the_source_root(board):
     assert (top / "PRECIOUS_RUN_ARTIFACT").read_text() == "do not delete\n"
 
 
+@_needs_posix_tar
 def test_the_sweep_removes_stale_bytecode_in_the_importable_location(board):
     """A legacy-location .pyc keeps a deleted module importable.
 
@@ -712,6 +728,7 @@ def test_a_tarball_without_the_package_is_refused_before_extracting(board):
     assert (src / "benchctrl" / "panel.py").exists()
 
 
+@_needs_posix_tar
 def test_the_sweep_leaves_a_symlinked_directory_alone(board):
     """The manifest skips symlinks, so the sweep must not delete through them.
 
@@ -730,6 +747,7 @@ def test_the_sweep_leaves_a_symlinked_directory_alone(board):
     assert (outside / "artifact.json").read_text() == "{}\n"
 
 
+@_needs_posix_tar
 def test_applying_twice_is_idempotent(board):
     """A re-run after an interrupted sync must converge, not keep deleting."""
     src, _, make_tarball, apply = board

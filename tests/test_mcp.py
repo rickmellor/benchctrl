@@ -7,6 +7,8 @@ callable Python functions). Hardware-required tests live in
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 
@@ -1023,6 +1025,7 @@ def test_pdu41002_close_is_safe_to_call_when_not_open():
 
 
 @pytest.mark.needs_mcp
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_pdu41002_tools_work_against_the_simulator():
     """The tools end to end, through the module singleton.
 

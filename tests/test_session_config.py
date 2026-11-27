@@ -7,6 +7,7 @@ nothing is configured. Everything else is opt-in.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -275,6 +276,7 @@ def test_register_sim_factory_rejects_unknown_key():
         session.register_sim_factory("nope", lambda **kw: None)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_sim_mode_default_factory_returns_a_real_driver():
     """``mode="sim"`` must exercise the production driver, not a mock."""
     from benchctrl.drivers.otii_arc import OtiiArc
@@ -292,6 +294,7 @@ def test_sim_mode_default_factory_returns_a_real_driver():
         smu.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_closing_a_sim_driver_releases_the_simulator():
     from benchctrl.drivers.otii_arc import OtiiArc
 
@@ -302,6 +305,7 @@ def test_closing_a_sim_driver_releases_the_simulator():
     assert not sim.link.is_open
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_mcp_get_smu_honours_sim_mode():
     """The seam works through the real MCP accessor, not just session."""
     from benchctrl.drivers.otii_arc import mcp_tools as arc_tools
@@ -342,6 +346,7 @@ def test_mcp_globals_remain_injectable():
 
 
 @pytest.mark.needs_mcp
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_mcp_install_config_makes_sim_env_take_effect(monkeypatch):
     """``BENCHCTRL_SIM_DEVICES`` must reach ``session.resolve``."""
     from benchctrl import mcp as mcpmod

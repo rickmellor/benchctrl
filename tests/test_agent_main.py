@@ -9,6 +9,7 @@ systemd, where there is no meaningful cwd.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -118,6 +119,13 @@ def test_world_readable_token_file_warns(tmp_path, caplog):
     assert "chmod 640" in caplog.text
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    # NT has no owner/group/other bits. Path.chmod maps a mode onto the
+    # read-only attribute, so 0o640 and 0o600 arrive as the same st_mode and
+    # the check under test cannot distinguish them here.
+    reason="POSIX mode bits do not exist on Windows",
+)
 def test_documented_0640_token_file_does_not_warn(tmp_path, caplog):
     """0640 root:<service user> is the deployed mode, so it must be quiet.
 

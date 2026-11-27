@@ -63,6 +63,16 @@ _PRELUDE = (
 )
 
 
+#: The emulation is for Linux hosts: it proves the guarded imports work on a
+#: host that *has* the POSIX layer and hides it. On Windows the layer is really
+#: absent, so the same checks run unemulated and the real run is the proof.
+_LINUX_ONLY_EMULATION = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="emulates a Windows host by hiding POSIX modules from a POSIX one; "
+    "on Windows there is nothing to hide and the real run is the proof",
+)
+
+
 def _run(body: str, *, block: bool) -> subprocess.CompletedProcess:
     """Run ``body`` in a fresh interpreter, with or without the POSIX modules."""
     env = dict(os.environ, BENCHCTRL_BLOCK_POSIX="1" if block else "0")
@@ -94,6 +104,7 @@ def test_module_imports_without_posix(module: str):
     assert proc.returncode == 0, f"{module} failed to import without POSIX:\n{proc.stderr}"
 
 
+@_LINUX_ONLY_EMULATION
 def test_posix_block_is_real():
     """Otherwise every check below passes for the wrong reason.
 
@@ -186,6 +197,7 @@ def test_posix_only_call_raises_the_module_error(
     assert "needs a POSIX host" in message, f"{exc_name} did not name the cause: {message!r}"
 
 
+@_LINUX_ONLY_EMULATION
 def test_posix_errors_stay_module_local_on_linux():
     """The guards must not change what Linux sees.
 

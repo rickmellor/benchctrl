@@ -31,7 +31,16 @@ SCRIPTS = (
 
 #: sha256 of Axelera's own 72-axelera.rules as shipped in metis-dkms_1.6.2_all.deb.
 #: The copy in deploy/vision/udev/ is a reference; the .deb installs the real one.
-RULES_SHA256 = hashlib.sha256((VISION / "udev" / "72-axelera.rules").read_bytes()).hexdigest()
+#:
+#: Hashed with CRLF folded to LF, so the pin is a statement about the rule's
+#: text rather than about one checkout. Git for Windows with core.autocrlf
+#: hands the same file back with \r\n on every line, which changes every byte
+#: of the digest and reads as "the vendor rule changed" when nothing did.
+#: .gitattributes pins eol=lf, so this is the second line of defence, not the
+#: only one — a clone that ignores it still gets an honest answer here.
+RULES_SHA256 = hashlib.sha256(
+    (VISION / "udev" / "72-axelera.rules").read_bytes().replace(b"\r\n", b"\n")
+).hexdigest()
 
 
 def _code(name: str) -> str:

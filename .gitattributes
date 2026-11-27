@@ -1,0 +1,10 @@
+# Everything in this repo is LF in the working tree, on every platform.
+#
+# Why it is pinned rather than left to each clone's core.autocrlf: several
+# tests hash or execute checked-out files, and a CRLF checkout makes them wrong
+# in ways that have nothing to do with the code. deploy/vision/udev's rule file
+# is pinned by sha256; the deploy shell scripts run under `sh -n` and a
+# shebang ending \r is no shebang at all. This repo's own content is Linux-only
+# either way — udev rules, systemd units, POSIX shell — so normalising to LF
+# states the truth instead of leaving it to the operator's git config.
+* text=auto eol=lf
