@@ -41,6 +41,7 @@ def dmm():
     [6]), so the default fixture reproduces the error rather than a clean
     ideal that would hide it.
     """
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_sdm4065a
 
     drv = make_sdm4065a(sim={"dut_ohm": 100.0, "lead_ohm": 0.2})

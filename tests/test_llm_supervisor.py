@@ -12,6 +12,7 @@ model is commentary.** Most of this file asserts things the model cannot do.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -113,6 +114,7 @@ def stub():
 
 @pytest.fixture()
 def engine(tmp_path):
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.drivers.otii_arc import OtiiArc
 
     sim = SimulatedOtiiArc()
@@ -344,6 +346,7 @@ def test_notify_never_blocks_the_tick_loop(engine, stub):
         sup.stop(timeout=1.0)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_a_stalled_model_does_not_delay_a_run(tmp_path, stub):
     """The headline safety property of the whole layer."""
     from benchctrl.drivers.otii_arc import OtiiArc

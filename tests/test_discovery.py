@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Optional
 
@@ -239,6 +240,7 @@ def test_find_for_filters(monkeypatch):
     assert [d.path for d in discovery.unidentified()] == ["/dev/ttyUSB0"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_probe_identifies_a_simulated_qr10x():
     """The QR10x has no known VID/PID, so identification is by probe."""
     from benchctrl.sim.qr10x import SimulatedQR10x
@@ -247,6 +249,7 @@ def test_probe_identifies_a_simulated_qr10x():
         assert discovery.probe_serial_identity(sim.port) == "eastwood_qr10x"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_probe_returns_none_for_a_foreign_device():
     from benchctrl.sim.otii_arc import SimulatedOtiiArc
 
@@ -483,6 +486,7 @@ def test_no_two_probes_can_match_the_same_reply():
                     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_the_pdu_is_not_misidentified_as_a_qr10x(monkeypatch):
     """The concrete false positive, through the real probe loop.
 
@@ -504,6 +508,7 @@ def test_the_pdu_is_not_misidentified_as_a_qr10x(monkeypatch):
             assert discovery.probe_serial_identity(sim.port, timeout=0.3) is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_the_qr10x_still_identifies_after_the_marker_fix():
     """The tightened marker must not cost the identification it exists for."""
     from benchctrl.sim.qr10x import SimulatedQR10x
@@ -697,6 +702,7 @@ def test_a_scan_never_probes_unless_asked(monkeypatch):
     assert inv["identified"] == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_probing_identifies_a_qr10x_behind_a_bridge(monkeypatch):
     """The gap this closes, end to end against the real simulator.
 
@@ -804,6 +810,7 @@ def test_a_bridge_with_no_tty_is_not_probed(monkeypatch):
     assert spy.paths == [], "opened a bridge the caller had not asked us to claim"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_a_silent_device_is_left_unidentified_rather_than_claimed():
     """Silence is not evidence, in either direction.
 

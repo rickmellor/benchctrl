@@ -31,6 +31,7 @@ DEADMAN_S = 1.0
 
 @pytest.fixture()
 def bench(tmp_path):
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_otii_arc
 
     registry = DeviceRegistry()

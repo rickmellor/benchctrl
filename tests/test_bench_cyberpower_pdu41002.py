@@ -29,6 +29,8 @@ Three things make this file different from the other per-driver test suites:
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from benchctrl.drivers.cyberpower_pdu41002 import (
@@ -50,6 +52,7 @@ def pdu():
     directly, so the sim-mode registration path is exercised on every test in
     this file rather than only in the one test that names it.
     """
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_pdu41002
 
     driver = make_pdu41002()
@@ -67,6 +70,7 @@ def narrow_pdu():
     sim mode; the allowlist cannot be tested against a fixture that permits
     everything.
     """
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_pdu41002
 
     driver = make_pdu41002(allowed_outlets=(2, 3))
@@ -123,6 +127,7 @@ class TestOpen:
                 port="/dev/null", allowed_outlets=(1,), env={}
             )
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_the_password_is_read_from_the_environment(self):
         """The supported production path: the secret lives in the environment
         of the process that talks to the device, never in config or on the
@@ -145,6 +150,7 @@ class TestOpen:
         finally:
             sim.close()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_a_wrong_password_raises_auth_error(self, monkeypatch):
         """And it takes the whole login budget to say so, on purpose.
 
@@ -171,6 +177,7 @@ class TestOpen:
         finally:
             sim.close()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_a_busy_device_refusing_a_correct_password_is_retried(self, monkeypatch):
         """The bug this shape hid: a *correct* password, refused, then accepted.
 
@@ -210,6 +217,7 @@ class TestOpen:
     def test_the_transport_is_recorded(self, pdu):
         assert pdu.transport == "serial"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_panic_outlets_must_be_a_subset_of_allowed(self):
         """A governor that may cut an outlet nobody authorised for switching is
         a hole in the allowlist, reachable only on trip — i.e. exactly when
@@ -230,6 +238,7 @@ class TestOpen:
 
 
 class TestTheSecretDoesNotLeak:
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_the_password_is_absent_from_the_driver_repr(self):
         from benchctrl.sim.factories import make_pdu41002
 
@@ -239,6 +248,7 @@ class TestTheSecretDoesNotLeak:
         finally:
             driver.close()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_the_password_is_absent_from_the_link_repr(self):
         from benchctrl.sim.factories import make_pdu41002
 
@@ -248,6 +258,7 @@ class TestTheSecretDoesNotLeak:
         finally:
             driver.close()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_the_simulator_never_logs_the_password(self):
         """``login_log`` records ``(user, accepted)`` deliberately.
 
@@ -460,6 +471,7 @@ class TestAllowlist:
     def test_the_policy_check_permits_an_allowed_outlet(self, narrow_pdu):
         narrow_pdu._require_allowed(2)
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_an_empty_allowlist_permits_no_switching(self):
         """The most restrictive configuration has to be expressible — it is the
         right one for a PDU that is only being metered."""
@@ -672,6 +684,7 @@ class TestSession:
             ("admin", True),
         ]
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_a_device_that_never_answers_is_not_reported_as_a_bad_password(
         self, monkeypatch
     ):
@@ -793,6 +806,7 @@ class TestSession:
         sim = pdu._benchctrl_sim
         assert {i: sim.outlet_state[i] for i in before} == before
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_the_context_manager_closes_but_does_not_switch(self):
         from benchctrl.sim.factories import make_pdu41002
 
@@ -1452,6 +1466,7 @@ class TestFixtureParsing:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 class TestSimulatorFidelity:
     def test_the_simulator_treats_ctrl_c_as_part_of_the_command(self):
         r"""The simulator's most valuable property: it is faithful where the

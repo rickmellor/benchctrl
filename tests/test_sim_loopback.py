@@ -8,6 +8,7 @@ the kernel's tty layer.
 
 from __future__ import annotations
 
+import sys
 import time
 
 import pytest
@@ -25,6 +26,7 @@ from benchctrl.sim import SimulatedOtiiArc, SimulatedQR10x, Square
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_loopback_is_binary_safe():
     """A pty in cooked mode mangles CR/LF; ours must not."""
     from benchctrl.sim.loopback import SerialLoopback
@@ -45,6 +47,7 @@ def test_loopback_is_binary_safe():
             ser.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_loopback_client_to_device():
     from benchctrl.sim.loopback import SerialLoopback
     import serial
@@ -70,6 +73,7 @@ def test_loopback_client_to_device():
 
 @pytest.fixture()
 def sim_arc():
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     sim = SimulatedOtiiArc()
     sim.start()
     yield sim
@@ -285,6 +289,7 @@ def test_recording_round_trips_through_opensmu(sim_arc, tmp_path):
 
 @pytest.fixture()
 def sim_qr():
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     sim = SimulatedQR10x()
     sim.start()
     yield sim
@@ -366,6 +371,7 @@ def test_scpi_header_normalisation():
 
 @pytest.fixture()
 def dl3031a():
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_dl3031a
 
     drv = make_dl3031a()
@@ -415,6 +421,7 @@ def test_dl3031a_error_queue_round_trips(dl3031a):
     assert "out of range" in message
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_dp2031_identity_and_channels():
     from benchctrl.sim.factories import make_dp2031
 
@@ -431,6 +438,7 @@ def test_dp2031_identity_and_channels():
         psu.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 def test_dp2031_current_limit_folds_back():
     from benchctrl.sim.scpi import SimulatedRigolDP2031
 

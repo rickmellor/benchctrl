@@ -34,6 +34,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+import sys
 
 import pytest
 
@@ -490,6 +491,7 @@ class TestLifecycle:
 
     @pytest.fixture
     def plumbing(self, tmp_path, monkeypatch):
+        pytest.importorskip('fcntl', reason='usbfs and hidraw ioctls need a POSIX host')
         node = tmp_path / "usbnode"
         node.write_bytes(b"")
         device = Adu218Device(str(node), 1, 15, "E02246", "ADU218", "www.ontrak.net")
@@ -544,6 +546,7 @@ class TestLifecycle:
         link.close()
         assert usbfs.USBDEVFS_BULK not in plumbing
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
     def test_a_failed_claim_closes_the_fd(self, tmp_path, monkeypatch):
         """Otherwise a retry loop leaks fds and the second attempt gets EBUSY
         from the process's own abandoned handle."""
@@ -591,6 +594,7 @@ class TestLifecycle:
         assert not link.is_open
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pty-backed simulators need a POSIX host")
 class TestTransferErrors:
     """errno translation. Each class needs a different operator response."""
 

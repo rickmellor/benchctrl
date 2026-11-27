@@ -38,6 +38,7 @@ def _ids(agent: BenchAgent, n: int) -> list[str]:
 
 @pytest.fixture()
 def registry():
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_otii_arc
 
     reg = DeviceRegistry()

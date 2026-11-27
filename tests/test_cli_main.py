@@ -470,6 +470,7 @@ def claim_conflict_error():
     after the server reworded it, which is exactly the failure the marker is
     exposed to: the explanation would silently stop appearing.
     """
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     import contextlib
 
     from benchctrl.agent.registry import DeviceRegistry

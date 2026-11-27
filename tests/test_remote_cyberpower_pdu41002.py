@@ -44,6 +44,7 @@ def remote_pdu():
     *production* driver over a pty exactly as it would hold one over the FTDI
     cable.
     """
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_pdu41002
 
     driver = make_pdu41002(allowed_outlets=(2, 3))
@@ -558,6 +559,7 @@ def remote_bench(tmp_path):
     keys with separate writer claims, and the interesting failure is a session
     that holds one and switches the other.
     """
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.sim.factories import make_pdu41002
 
     from benchctrl.drivers.otii_arc import OtiiArc

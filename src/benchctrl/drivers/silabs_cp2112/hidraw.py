@@ -123,7 +123,7 @@ class HidrawError(RuntimeError):
 # module stays importable anywhere (collection on Windows reaches the tests that
 # never reach an ioctl); the first call that needs one says so in these words
 # rather than raising AttributeError out of a None-valued module reference.
-POSIX_REQUIRED = "hidraw feature reports need a POSIX host (termios/fcntl unavailable on this platform)"
+POSIX_REQUIRED = "hidraw ioctl needs a POSIX host (termios/fcntl unavailable on this platform)"
 
 
 def _require_posix() -> None:

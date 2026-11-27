@@ -28,6 +28,7 @@ TOKEN = "test-token-do-not-use-in-anger"
 @pytest.fixture()
 def bench():
     """An agent serving a simulated Arc, and a connected client."""
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.drivers.otii_arc import OtiiArc
 
     sim = SimulatedOtiiArc()
@@ -644,6 +645,7 @@ def lazy_bench():
     instrument that is powered off does not stop the others being served, and
     "open" genuinely starts False and changes mid-session.
     """
+    pytest.importorskip('termios', reason='pty-backed simulators need a POSIX host')
     from benchctrl.drivers.otii_arc import OtiiArc
 
     sim = SimulatedOtiiArc()

@@ -153,7 +153,7 @@ def _ioc(direction: int, type_: int, nr: int, size: int) -> int:
 # collection on Windows reaches the tests that never reach an ioctl, and the
 # first call that does says so in these words rather than raising AttributeError
 # out of a None-valued module reference.
-POSIX_REQUIRED = "usbfs transfers need a POSIX host (termios/fcntl unavailable on this platform)"
+POSIX_REQUIRED = "usbfs ioctl needs a POSIX host (termios/fcntl unavailable on this platform)"
 
 
 def _require_posix() -> None:
