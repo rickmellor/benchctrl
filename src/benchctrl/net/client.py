@@ -196,6 +196,12 @@ class RemoteClient:
     def close(self) -> None:
         self._stop.set()
         self._connected = False
+        # Shut the socket down BEFORE joining the reader: it sits in recv() with a
+        # 60 s timeout and nothing else wakes it, so joining first always waited
+        # out the 2 s join timeout and every close() took two seconds.
+        if self._sock is not None:
+            with contextlib.suppress(OSError):
+                self._sock.shutdown(socket.SHUT_RDWR)
         for thread in (self._rx_thread, self._hb_thread):
             if thread is not None and thread is not threading.current_thread():
                 thread.join(timeout=2.0)
@@ -203,8 +209,6 @@ class RemoteClient:
         if self._writer is not None:
             self._writer.close()
         if self._sock is not None:
-            with contextlib.suppress(OSError):
-                self._sock.shutdown(socket.SHUT_RDWR)
             with contextlib.suppress(OSError):
                 self._sock.close()
         self._sock = None
