@@ -188,7 +188,8 @@ def bridge():
 
 def test_bridge_exposes_a_port_pyserial_can_open(bridge):
     b, _ = bridge
-    assert b.port.startswith("/dev/pts/")
+    # Linux names a pty slave /dev/pts/N, macOS /dev/ttysNNN.
+    assert b.port.startswith(("/dev/pts/", "/dev/ttys"))
     # The whole design rests on this: an unmodified serial.Serial opens it.
     with serial.Serial(b.port, baudrate=115200, timeout=0.2) as ser:
         assert ser.is_open

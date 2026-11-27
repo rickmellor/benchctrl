@@ -28,10 +28,12 @@ def _broadcast_usable() -> bool:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.sendto(b"", ("255.255.255.255", 40911))
+        # A real byte, not an empty datagram: macOS accepts the empty one and
+        # then refuses the real transmit with EHOSTUNREACH (errno 65).
+        sock.sendto(b"\x00", ("255.255.255.255", 40911))
         return True
     except OSError as exc:
-        if exc.errno in (errno.ENETUNREACH, errno.EACCES):
+        if exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EACCES):
             return False
         raise
     finally:
