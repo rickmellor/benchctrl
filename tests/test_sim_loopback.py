@@ -8,6 +8,7 @@ the kernel's tty layer.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import time
 
@@ -16,7 +17,7 @@ import pytest
 from benchctrl.drivers.eastwood_qr10x import QR10x
 from benchctrl.drivers.otii_arc import OtiiArc
 from benchctrl.drivers.otii_arc.channels import OtiiArcChannel
-from benchctrl.exceptions import BenchCommandError
+from benchctrl.exceptions import BenchCommandError, BenchTimeoutError
 from benchctrl.interfaces import SourceMeasurementUnit
 from benchctrl.sim import SimulatedOtiiArc, SimulatedQR10x, Square
 
@@ -181,6 +182,18 @@ def test_recording_captures_a_known_waveform(sim_arc):
     try:
         smu.set_voltage(3.3)
         smu.set_output(True)
+        # Poll until a reading says 3.3 V before opening the statistics
+        # window. ``start_recording()`` does not flush the serial input buffer
+        # (KNOWN_LIMITATIONS § A-3), so the baseline samples the Arc streams
+        # from the moment the port opens — all of them 0 V, before the SET has
+        # landed — are queued ahead of the recording and count in its mean.
+        # Reading here does the flushing A-3 tells you to do, and does it up
+        # to a value that proves the SET has landed rather than up to a sleep.
+        # The share those samples are is set by how busy the runner is, not by
+        # the code: 3.283 of 3.3 here when the SET lands in milliseconds, and
+        # 3.2223 on a loaded macOS 3.13 runner (CI run 46039088354) — that one
+        # outside the 2 % tolerance.
+        _wait_until_reading_is(smu, OtiiArcChannel.MAIN_VOLTAGE, 3.3, tol_rel=0.005, timeout=5.0)
         with smu.record("mc", "mv") as rec:
             # Record to a sample count, not to a wall-clock second. The
             # assertion below is about samples, and samples per second is a
@@ -204,10 +217,12 @@ def test_recording_captures_a_known_waveform(sim_arc):
 
         mv = rec.statistics(OtiiArcChannel.MAIN_VOLTAGE)
         assert mv.max == pytest.approx(3.3, abs=1e-6)
-        # Not 3.3 exactly: ``start_recording()`` does not flush the serial
-        # input buffer, so baseline samples emitted before ``set_output(True)``
-        # are still queued and land at the head of the recording. Real
-        # hardware behaves the same way. See KNOWN_LIMITATIONS § A-3.
+        # Still a tolerance and not an equality: ``start_recording()`` does not
+        # flush the serial input buffer, so baseline samples are still queued
+        # and land at the head of the recording. Real hardware behaves the same
+        # way. See KNOWN_LIMITATIONS § A-3. What the settle above buys is that
+        # those samples now carry the settled 3.3 V rather than the ramp, so
+        # how much of them there are no longer moves the mean.
         assert mv.average == pytest.approx(3.3, rel=0.02)
     finally:
         smu.close()
@@ -249,10 +264,26 @@ def test_ohmic_load_closes_the_loop(sim_arc):
     try:
         smu.set_voltage(3.3)
         smu.set_output(True)
+        # Wait for the loop to close before measuring it. ``set_voltage`` and
+        # ``set_output`` are fire-and-forget on the wire, so until the sim
+        # thread has processed both, ``mc`` still reports 0 A — and the 0.5 s
+        # of samples the old fixed sleep collected was 0 A followed by 10 mA
+        # with the split set by how long the runner took. Measured here, where
+        # the SETs land in milliseconds: the mean came back 0.0494 of 0.050,
+        # which passes; CI run 46039088354 got 0.009767 on macOS 3.11, 2.3 %
+        # low, because the first 0 A samples filled most of the window. The
+        # assertion is about Ohm's law, not about how fast the SET lands, so
+        # the wait is what belongs here — the tolerance stays at 2 %.
+        settled_at, last = _wait_for_settled_current(
+            smu, 3.3 / 330.0, tol_rel=0.02, timeout=10.0
+        )
         with smu.record("mc") as rec:
             time.sleep(0.5)
         mean = rec.statistics(OtiiArcChannel.MAIN_CURRENT).average
-        assert mean == pytest.approx(3.3 / 330.0, rel=0.02)
+        assert mean == pytest.approx(3.3 / 330.0, rel=0.02), (
+            f"mean {mean!r} A across 330 R at 3.3 V, after the loop settled at "
+            f"{settled_at:.3f}s (last reading {last!r} A)"
+        )
     finally:
         smu.close()
 
@@ -469,3 +500,50 @@ def _wait_for(predicate, timeout: float = 2.0, interval: float = 0.01) -> None:
             return
         time.sleep(interval)
     raise AssertionError("condition not met within timeout")
+
+
+def _wait_until_reading_is(smu, channel, target: float, *, tol_rel: float, timeout: float) -> float:
+    """Poll ``channel`` until one reading is within ``tol_rel`` of ``target``.
+
+    Returns the seconds it took. The deadline is the test's own, and it expires
+    naming the reading it last saw, so a timeout says which value never arrived
+    instead of just running out of sleep.
+    """
+    started = time.monotonic()
+    # Stays NaN until the first reading lands, and NaN fails the band check
+    # below, so "nothing on the wire yet" is just another lap of the poll.
+    last = float("nan")
+    while time.monotonic() - started < timeout:
+        with contextlib.suppress(BenchTimeoutError):
+            last = smu.read_value(channel, timeout=1.0)
+        if abs(last - target) <= tol_rel * abs(target):
+            return time.monotonic() - started
+    raise AssertionError(
+        f"{channel} never reached {target} within {timeout}s: last reading {last!r}"
+    )
+
+
+def _wait_for_settled_current(smu, target: float, *, tol_rel: float, timeout: float) -> tuple:
+    """Poll the main-current reading until TWO consecutive readings are inside
+    ``tol_rel`` of ``target``; return ``(seconds taken, last reading)``.
+
+    One reading inside the band can be the transient itself. Two agree, and the
+    test then measures a settled loop instead of a race between the SET landing
+    and the recorder starting. The deadline names the readings it saw.
+    """
+    started = time.monotonic()
+    readings: list[float] = []
+    while time.monotonic() - started < timeout:
+        try:
+            readings.append(smu.read_value(OtiiArcChannel.MAIN_CURRENT, timeout=1.0))
+        except BenchTimeoutError:
+            continue
+        if len(readings) >= 2 and all(
+            abs(v - target) <= tol_rel * abs(target) for v in readings[-2:]
+        ):
+            return time.monotonic() - started, readings[-1]
+    seen = ", ".join(repr(v) for v in readings[-4:]) or "no reading at all"
+    raise AssertionError(
+        f"the ohmic loop did not settle to {target} A within {timeout}s; "
+        f"last readings: {seen}"
+    )
