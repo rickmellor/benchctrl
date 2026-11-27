@@ -45,11 +45,15 @@ over the control pipe, so the kernel requires write access on the fd.
 from __future__ import annotations
 
 import ctypes
-import fcntl
 import glob
 import logging
 import os
 from typing import Optional
+
+try:
+    import fcntl  # Unix only
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 log = logging.getLogger("benchctrl.drivers.silabs_cp2112.hidraw")
 
@@ -112,6 +116,19 @@ def hidiocgfeature(size: int) -> int:
 
 class HidrawError(RuntimeError):
     """Transport-level failure. The driver wraps this in its own hierarchy."""
+
+
+# hidraw is a Linux kernel interface — ``/dev/hidraw*`` plus the
+# HIDIOCS/GFEATURE ioctls — so there is nothing to fall back to off POSIX. The
+# module stays importable anywhere (collection on Windows reaches the tests that
+# never reach an ioctl); the first call that needs one says so in these words
+# rather than raising AttributeError out of a None-valued module reference.
+POSIX_REQUIRED = "hidraw feature reports need a POSIX host (termios/fcntl unavailable on this platform)"
+
+
+def _require_posix() -> None:
+    if fcntl is None:
+        raise HidrawError(POSIX_REQUIRED)
 
 
 def _sysfs_attr(hidraw_name: str, attr: str) -> Optional[str]:
@@ -236,6 +253,7 @@ class HidrawLink:
         if not 1 <= length <= MAX_REPORT_BYTES - 1:
             raise HidrawError(f"length {length!r} out of range for a feature report")
         fd = self._require_fd()
+        _require_posix()
         buf = ctypes.create_string_buffer(length + 1)
         buf[0] = bytes([report_id])
         try:
@@ -264,6 +282,7 @@ class HidrawLink:
                 f"payload of {len(payload)} bytes out of range for a feature report"
             )
         fd = self._require_fd()
+        _require_posix()
         data = bytes([report_id]) + bytes(payload)
         buf = ctypes.create_string_buffer(data, len(data))
         try:
