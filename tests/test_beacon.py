@@ -6,6 +6,8 @@ import errno
 import json
 import socket
 
+import pytest
+
 from benchctrl.net import beacon
 from benchctrl.net.auth import token_fingerprint
 
