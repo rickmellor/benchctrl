@@ -165,7 +165,7 @@ def test_plot_recording_subset_of_channels(tmp_path):
 
     p = _make_saved_recording(tmp_path)
     out = tmp_path / "rec.png"
-    r = plot_recording(str(p), str(out), channels=["mc"])
+    plot_recording(str(p), str(out), channels=["mc"])
     assert out.exists()
 
 
@@ -173,9 +173,9 @@ def test_plot_recording_subset_of_channels(tmp_path):
 def test_smu_state_snapshot_shape():
     """The internal state-snapshot helper produces a well-formed dict for any
     SMU. Use a transport-less SMU stub to avoid hardware."""
-    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
-    from benchctrl.mcp import _smu_state
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU  # noqa: N814 - SMU is the project-wide alias for the SMU driver class
     from benchctrl.drivers.otii_arc.transport import Transport
+    from benchctrl.mcp import _smu_state
 
     smu = SMU(Transport("__dummy__"))  # never opened
     snap = _smu_state(smu)
@@ -1002,8 +1002,8 @@ def test_pdu41002_read_tools_report_a_clear_error_before_open():
     """A model that calls a read first must get "call open" back, not a
     ``NoneType`` traceback — the message is what tells it what to do next."""
     from benchctrl import mcp as m
-    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
     from benchctrl.drivers.cyberpower_pdu41002 import PDU41002ConnectionError
+    from benchctrl.drivers.cyberpower_pdu41002 import mcp_tools as pdu_tools
 
     pdu_tools._pdu = None
     with pytest.raises(PDU41002ConnectionError, match="pdu41002_open"):

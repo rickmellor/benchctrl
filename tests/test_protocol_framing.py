@@ -6,13 +6,13 @@ import struct
 
 import pytest
 
-from benchctrl.exceptions import BenchProtocolError
 from benchctrl.drivers.otii_arc.protocol import (
     WIRE_MAGIC,
     checksum,
     encode_frame,
     iter_frames,
 )
+from benchctrl.exceptions import BenchProtocolError
 
 
 def test_checksum_is_simple_sum_mod_65536():

@@ -29,7 +29,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_TIMEOUT_S = 180.0
 
 
-class LLMUnavailable(RuntimeError):
+class LLMUnavailable(RuntimeError):  # noqa: N818 - public exception name, caught across agent.llm; renaming breaks call sites
     """No inference backend is reachable.
 
     Not an error worth failing a run over — the model is advisory, and a run

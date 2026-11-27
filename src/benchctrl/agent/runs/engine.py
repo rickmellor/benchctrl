@@ -140,7 +140,7 @@ class RunEngine:
 
     # --- lifecycle ------------------------------------------------------
 
-    def start(self) -> "RunEngine":
+    def start(self) -> RunEngine:
         if self._thread is not None:
             return self
         self._stop.clear()

@@ -7,6 +7,8 @@ import pytest
 from benchctrl.drivers.otii_arc.channels import (
     WIRE_ID_TO_CHANNEL,
     ChannelInfo,
+)
+from benchctrl.drivers.otii_arc.channels import (
     OtiiArcChannel as Channel,
 )
 

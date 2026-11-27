@@ -14,7 +14,7 @@ import pytest
 
 from benchctrl.agent.runs import store as store_mod
 from benchctrl.agent.runs.engine import RunEngine, RunManager
-from benchctrl.agent.runs.rules import ConditionState, RuleEngine
+from benchctrl.agent.runs.rules import ConditionState
 from benchctrl.agent.runs.spec import (
     Condition,
     LLMConfig,
@@ -25,7 +25,6 @@ from benchctrl.agent.runs.spec import (
 )
 from benchctrl.exceptions import BenchValueError
 from benchctrl.sim import SimulatedOtiiArc
-
 
 # --------------------------------------------------------------------------
 # Spec validation — the envelope is declared before anything is energised
@@ -431,7 +430,7 @@ def _stages(engine) -> list[str]:
     ]
 
 
-def test_a_run_walks_INIT_through_its_phases_to_DONE(device, tmp_path):
+def test_a_run_walks_INIT_through_its_phases_to_DONE(device, tmp_path):  # noqa: N802 - INIT/DONE are RunPhase enum names
     """The whole sequence, on a run whose phases span two stages.
 
     ``record=False`` keeps chunks out of it so ANALYZE — which reports the
@@ -570,7 +569,7 @@ def test_analysis_is_reported_only_when_there_was_data_to_hash(device, tmp_path)
     assert "ANALYZE" not in _stages(engine)
 
 
-def test_the_manifest_is_written_while_ANALYZE_is_on_the_glass(device, tmp_path):
+def test_the_manifest_is_written_while_ANALYZE_is_on_the_glass(device, tmp_path):  # noqa: N802 - ANALYZE is a RunPhase enum name
     """The stage has to precede the work it describes, not follow it.
 
     Announced after the hashing finished, the node would light for zero duration
@@ -592,7 +591,7 @@ def test_the_manifest_is_written_while_ANALYZE_is_on_the_glass(device, tmp_path)
     assert manifest["event_count"] == total - 2
 
 
-def test_a_store_that_cannot_count_chunks_still_reports_DONE(device, tmp_path):
+def test_a_store_that_cannot_count_chunks_still_reports_DONE(device, tmp_path):  # noqa: N802 - DONE is a RunPhase enum name
     """Losing a node is cosmetic; losing DONE strands the display mid-flow.
 
     A run aborted hard can reach ``_finish`` with a store that will not answer.
@@ -619,7 +618,7 @@ def test_a_store_that_cannot_count_chunks_still_reports_DONE(device, tmp_path):
     assert [e["kind"] for e in engine.store.events_since(0)][-1] == "run_end"
 
 
-def test_DONE_is_reported_on_an_aborted_run(device, tmp_path):
+def test_DONE_is_reported_on_an_aborted_run(device, tmp_path):  # noqa: N802 - DONE is a RunPhase enum name
     """An operator abort is a terminal path, so the sequence must terminate.
 
     Without this the display would hold EXECUTE forever on a run that stopped
@@ -640,7 +639,7 @@ def test_DONE_is_reported_on_an_aborted_run(device, tmp_path):
     assert _stages(engine)[-1] == "DONE"
 
 
-def test_DONE_is_reported_on_a_safety_stop(device, tmp_path):
+def test_DONE_is_reported_on_a_safety_stop(device, tmp_path):  # noqa: N802 - DONE is a RunPhase enum name
     """The path where a stranded sequence would be most misleading.
 
     A safe stop is the one outcome where an operator most needs to know the bench
@@ -657,7 +656,7 @@ def test_DONE_is_reported_on_a_safety_stop(device, tmp_path):
     assert _stages(engine)[-1] == "DONE"
 
 
-def test_DONE_is_reported_when_the_run_raises(device, tmp_path):
+def test_DONE_is_reported_when_the_run_raises(device, tmp_path):  # noqa: N802 - DONE is a RunPhase enum name
     """The error path routes through ``_finish`` too, or it would strand as well.
 
     Raised from ``_apply_setpoints`` because that is inside the engine's own

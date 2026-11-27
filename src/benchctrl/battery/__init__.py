@@ -23,6 +23,11 @@ from benchctrl.battery.calculator import (
     estimate_life_constant_current,
     estimate_life_from_profile,
 )
+from benchctrl.battery.emulator import (
+    Emulator,
+    EmulatorConfig,
+    EmulatorState,
+)
 from benchctrl.battery.profile import (
     Battery,
     BatteryProfile,
@@ -32,11 +37,6 @@ from benchctrl.battery.profile import (
     DischargeStep,
     DischargeTable,
     ExitConditions,
-)
-from benchctrl.battery.emulator import (
-    Emulator,
-    EmulatorConfig,
-    EmulatorState,
 )
 from benchctrl.battery.profiler import (
     Profiler,

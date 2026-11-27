@@ -44,8 +44,8 @@ import sys
 import time
 from pathlib import Path
 
-from benchctrl.drivers.otii_arc import OtiiArc, OtiiArcChannel
 from benchctrl._version import __version__
+from benchctrl.drivers.otii_arc import OtiiArc, OtiiArcChannel
 from benchctrl.exceptions import BenchError
 
 log = logging.getLogger("benchctrl.cli")

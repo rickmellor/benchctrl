@@ -17,7 +17,6 @@ from benchctrl.drivers.eastwood_qr10x import (
     QR10xValueError,
 )
 
-
 # ---------------------------------------------------------------------------
 # Hardware-free — parser + validation logic
 # ---------------------------------------------------------------------------

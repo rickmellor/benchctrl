@@ -54,7 +54,7 @@ def test_timestamps_numpy_matches_synthetic_axis():
 
 
 def test_timestamps_numpy_includes_offset():
-    np = pytest.importorskip("numpy")
+    pytest.importorskip("numpy")
     rec = _build_recording()
     rec.offset = 10.0
     ts = rec.timestamps_numpy(Channel.MAIN_CURRENT)
@@ -124,7 +124,7 @@ def test_save_parquet_round_trips_via_pandas(tmp_path):
 
 
 def test_save_parquet_embeds_column_metadata(tmp_path):
-    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     rec = _build_recording()
     p = rec.save_parquet(tmp_path / "rec.parquet")

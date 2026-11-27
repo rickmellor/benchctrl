@@ -18,6 +18,8 @@ from typing import Optional
 
 from benchctrl.drivers.otii_arc.channels import (
     WIRE_ID_TO_CHANNEL,
+)
+from benchctrl.drivers.otii_arc.channels import (
     OtiiArcChannel as Channel,
 )
 from benchctrl.drivers.otii_arc.protocol import (

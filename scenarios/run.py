@@ -40,6 +40,7 @@ Use ``--all`` to run the full static matrix across every bundled profile.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import logging
@@ -47,17 +48,17 @@ import re
 import shutil
 import sys
 import time
-
-log = logging.getLogger("benchctrl.scenarios")
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
-from benchctrl.channels import StandardChannel
-from benchctrl._version import __version__ as BENCHCTRL_VERSION
+from benchctrl._version import __version__ as BENCHCTRL_VERSION  # noqa: N812 - module constant
 from benchctrl.battery import BatteryProfile, Emulator, EmulatorConfig
+from benchctrl.channels import StandardChannel
 from benchctrl.drivers.eastwood_qr10x import QR10x
+from benchctrl.drivers.otii_arc.device import OtiiArc as SMU  # noqa: N814 - SMU is the project-wide alias for the SMU driver
+
+log = logging.getLogger("benchctrl.scenarios")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCENARIO_DIR = REPO_ROOT / "scenarios" / "saved"
@@ -234,10 +235,8 @@ class _QR10xAdapter(_LoadAdapter):
     def teardown(self, idle_R: float) -> None:
         if self.qr is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             self.qr.set_resistance(idle_R)
-        except Exception:
-            pass
 
     def close(self) -> None:
         if self.qr is not None:
@@ -932,10 +931,8 @@ def run_dynamic_hires(*, profile_path: Path, load: _LoadAdapter,
                     })
             finally:
                 load.teardown(sleep_idle_R)
-                try:
+                with contextlib.suppress(Exception):
                     smu.set_output(False)
-                except Exception:
-                    pass
         finally:
             load.close()
 
@@ -1048,8 +1045,6 @@ def run_dynamic_list(*, profile_path: Path, load: _LoadAdapter,
     stem = profile_path.stem
     overrides = PROFILE_OVERRIDES.get(stem, {})
     pattern_A = list(pattern_A if pattern_A is not None else DEFAULT_LIST_TX_PATTERN_A)
-    safety_R = overrides.get("qr_safety_R", 12.0)
-    safety_V = overrides.get("safety_max_V", 3.5)
 
     scenario_name = f"{_slugify(stem)}_dynamic-list_{load.kind}_{_timestamp()}"
     out_base = output_dir / scenario_name

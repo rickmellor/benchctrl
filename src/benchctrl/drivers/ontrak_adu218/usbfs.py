@@ -458,7 +458,7 @@ class Adu218UsbfsLink:
         except OSError as exc:  # pragma: no cover - best-effort
             log.debug("close(%d) failed: %s", fd, exc)
 
-    def __enter__(self) -> "Adu218UsbfsLink":
+    def __enter__(self) -> Adu218UsbfsLink:
         self.open()
         return self
 

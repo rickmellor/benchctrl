@@ -403,7 +403,7 @@ class BatteryProfile:
         return self.battery.voltage
 
     @property
-    def nominal_capacity_mAh(self) -> float:
+    def nominal_capacity_mAh(self) -> float:  # noqa: N802 - physics unit suffix; docs/guide/adding-a-driver.md "Vocabulary follows physics"
         """Nominal capacity from the battery metadata, normalised to mAh."""
         c = self.battery.capacity
         unit = (self.battery.capacity_unit or "mAh").lower()

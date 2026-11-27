@@ -26,7 +26,7 @@ def smu():
 
     Skips the test if no device is found rather than failing.
     """
-    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU  # noqa: N814 - SMU is the project-wide alias for the SMU driver class
     from benchctrl.exceptions import BenchConnectionError
 
     try:

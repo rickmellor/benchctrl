@@ -198,13 +198,12 @@ class EventSubscriber:
         with self._lock:
             if self._stop:
                 return False
-            if len(self._queue) >= self.max_queue:
-                if not self._evict_for(incoming):
-                    # Nothing queued is less important than this event, so the
-                    # incoming one is the right thing to lose.
-                    self._dropped += 1
-                    self._dropped_unreported += 1
-                    return False
+            if len(self._queue) >= self.max_queue and not self._evict_for(incoming):
+                # Nothing queued is less important than this event, so the
+                # incoming one is the right thing to lose.
+                self._dropped += 1
+                self._dropped_unreported += 1
+                return False
             self._queue.append(event)
             self._wake.notify()
             return True

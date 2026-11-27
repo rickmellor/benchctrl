@@ -46,11 +46,11 @@ DEFAULT_MAX_BLOCKING_S = 5.0
 DEFAULT_QUEUE_LIMIT = 256
 
 
-class WorkerBusy(BenchError):
+class WorkerBusy(BenchError):  # noqa: N818 - public exception name in the agent worker's raise surface
     """The device's queue is full."""
 
 
-class WorkerStopped(BenchError):
+class WorkerStopped(BenchError):  # noqa: N818 - public exception name in the agent worker's raise surface
     """The worker was shut down while this call was queued."""
 
 

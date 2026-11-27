@@ -25,7 +25,6 @@ from benchctrl.agent.runs.engine import RunEngine
 from benchctrl.agent.runs.spec import LLMConfig, Phase, RunSpec, Safety, Sampling
 from benchctrl.sim import SimulatedOtiiArc
 
-
 # --------------------------------------------------------------------------
 # Stub inference server
 # --------------------------------------------------------------------------
@@ -286,7 +285,7 @@ def test_turn_annotates_the_run(engine, stub):
 
 def test_prompt_never_contains_raw_samples(engine, stub):
     """Raw samples would cost minutes of prompt processing."""
-    for i in range(200):
+    for _i in range(200):
         engine.store.append_metric(0, "mv", {"n": 1, "min": 3.3, "max": 3.3,
                                              "mean": 3.3, "last": 3.3})
     sup = _supervisor(engine, stub)

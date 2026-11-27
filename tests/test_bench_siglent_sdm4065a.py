@@ -19,6 +19,7 @@ reasonable implementation gets wrong:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import warnings
 
@@ -1252,10 +1253,8 @@ def test_hw_autozero_round_trips_via_zero_auto(hw_dmm):
 
     # Liveness: a reading still works, which a wedged session would not allow.
     hw_dmm.set_nplc(1.0)
-    try:
+    with contextlib.suppress(SDM4065AOverloadError):
         hw_dmm.read()
-    except SDM4065AOverloadError:
-        pass  # open input is fine; liveness is the point
 
 
 @pytest.mark.hardware

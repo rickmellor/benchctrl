@@ -44,6 +44,7 @@ over the control pipe, so the kernel requires write access on the fd.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import fcntl
 import glob
@@ -275,10 +276,8 @@ class HidrawLink:
 
     def close(self) -> None:
         if self._fd is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(self._fd)
-            except OSError:  # pragma: no cover - best-effort
-                pass
             self._fd = None
 
     def __repr__(self) -> str:

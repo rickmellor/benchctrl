@@ -37,7 +37,7 @@ from benchctrl.drivers.otii_arc import protocol as p
 from benchctrl.drivers.otii_arc.channels import OtiiArcChannel
 from benchctrl.sim.base import SimDevice
 from benchctrl.sim.loopback import SerialLoopback
-from benchctrl.sim.waveforms import Constant, OhmicLoad, Waveform
+from benchctrl.sim.waveforms import OhmicLoad, Waveform
 
 log = logging.getLogger("benchctrl.sim.otii_arc")
 
@@ -380,7 +380,7 @@ class SimulatedOtiiArc(SimDevice):
         t = self.elapsed_s if t is None else t
         self._packed_seq = (self._packed_seq + 1) & 0xFFFFFFFF
         payload = bytearray(p.PACKED_FRAME_MAGIC + struct.pack("<I", self._packed_seq))
-        for wire_id, ch in sorted(self.recording_channels.items()):
+        for _wire_id, ch in sorted(self.recording_channels.items()):
             if ch.subtype == 4:
                 dt = 1.0 / ch.sample_rate if ch.sample_rate else 0.0
                 vals = [self._channel_value(ch, t + k * dt) for k in range(4)]

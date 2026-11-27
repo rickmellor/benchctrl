@@ -20,6 +20,7 @@ slave side into raw mode before anyone opens it, which disables all of it.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
@@ -169,10 +170,8 @@ class SerialLoopback:
             return
         self._closed = True
         for fd in (self._master_fd, self._slave_fd):
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
 
     def __enter__(self) -> SerialLoopback:
         return self

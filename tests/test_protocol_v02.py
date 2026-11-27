@@ -7,7 +7,6 @@ import struct
 import pytest
 
 from benchctrl.drivers.otii_arc.protocol import (
-    CMD_GET_DEVICE_NAME,
     CMD_SET_POWER_REGULATION,
     CMD_WRITE_TX,
     POWER_REGULATION_MAP,
@@ -15,7 +14,6 @@ from benchctrl.drivers.otii_arc.protocol import (
     TYPE_PREPARE_STOP,
     TYPE_SET_PARAMETER,
     TYPE_WRITE_TEXT,
-    Response,
     encode_get_command,
     encode_gpo,
     encode_poll,
@@ -25,7 +23,6 @@ from benchctrl.drivers.otii_arc.protocol import (
     parse_response,
     power_regulation_value,
 )
-
 
 # ----- power regulation -----------------------------------------------------
 
@@ -90,7 +87,7 @@ def test_encode_write_tx_accepts_bytes():
 
 def test_encode_write_tx_utf8():
     payload = encode_write_tx(0x01, "µa")
-    assert payload[12:] == "µa".encode("utf-8")
+    assert payload[12:] == "µa".encode()
 
 
 # ----- prepare-stop (0x7E) --------------------------------------------------

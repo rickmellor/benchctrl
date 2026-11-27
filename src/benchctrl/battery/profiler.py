@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
 from benchctrl.battery.profile import (
@@ -184,7 +184,7 @@ class Profiler:
             result.profile.save("LP-1000-(25).json")
     """
 
-    def __init__(self, smu: "SourceMeasurementUnit", config: ProfilerConfig) -> None:
+    def __init__(self, smu: SourceMeasurementUnit, config: ProfilerConfig) -> None:
         self.smu = smu
         self.config = config
         self._aborted = False
@@ -261,10 +261,7 @@ class Profiler:
                 # --- ESR -------------------------------------------
                 # i_loaded is negative (sinking from cell), so use |I| in
                 # the divider. OCV > V_loaded under positive sink draw.
-                if abs(i_loaded) < 1e-9:
-                    esr = 0.0
-                else:
-                    esr = max(0.0, (v_ocv - v_loaded) / abs(i_loaded))
+                esr = 0.0 if abs(i_loaded) < 1e-9 else max(0.0, (v_ocv - v_loaded) / abs(i_loaded))
 
                 capacity_consumed_mAh = capacity_consumed_C / 3.6  # C -> mAh
 

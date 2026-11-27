@@ -12,13 +12,12 @@ import time
 
 import pytest
 
+from benchctrl.drivers.eastwood_qr10x import QR10x
 from benchctrl.drivers.otii_arc import OtiiArc
 from benchctrl.drivers.otii_arc.channels import OtiiArcChannel
-from benchctrl.drivers.eastwood_qr10x import QR10x
 from benchctrl.exceptions import BenchCommandError
 from benchctrl.interfaces import SourceMeasurementUnit
 from benchctrl.sim import SimulatedOtiiArc, SimulatedQR10x, Square
-
 
 # --------------------------------------------------------------------------
 # Loopback plumbing
@@ -27,8 +26,9 @@ from benchctrl.sim import SimulatedOtiiArc, SimulatedQR10x, Square
 
 def test_loopback_is_binary_safe():
     """A pty in cooked mode mangles CR/LF; ours must not."""
-    from benchctrl.sim.loopback import SerialLoopback
     import serial
+
+    from benchctrl.sim.loopback import SerialLoopback
 
     with SerialLoopback() as link:
         ser = serial.Serial(link.port, timeout=0.5)
@@ -46,8 +46,9 @@ def test_loopback_is_binary_safe():
 
 
 def test_loopback_client_to_device():
-    from benchctrl.sim.loopback import SerialLoopback
     import serial
+
+    from benchctrl.sim.loopback import SerialLoopback
 
     with SerialLoopback() as link:
         ser = serial.Serial(link.port, timeout=0.5)

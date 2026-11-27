@@ -19,7 +19,7 @@ from benchctrl.exceptions import BenchCommandError, BenchValueError
 from benchctrl.interfaces import SourceMeasurementUnit
 from benchctrl.net.client import RemoteClient
 from benchctrl.net.errors import PolicyError
-from benchctrl.net.proxy import RemoteDevice, RemoteSMU
+from benchctrl.net.proxy import RemoteSMU
 from benchctrl.sim import SimulatedOtiiArc, Square
 
 TOKEN = "test-token-do-not-use-in-anger"
@@ -89,7 +89,7 @@ def test_bad_token_is_refused(bench):
 def test_repeated_failures_tarpit_the_address(bench):
     endpoint = EndpointConfig(host="127.0.0.1", port=bench.server.port, token="nope")
     for _ in range(3):
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 - any refusal will do
             RemoteClient(endpoint).connect()
     assert bench.agent.failures.is_blocked("127.0.0.1")
 
@@ -149,9 +149,9 @@ def test_identity_queries(arc):
 def test_unknown_attribute_raises_rather_than_returning_a_callable(arc):
     """This is what stops enable_output arming with no current limit."""
     with pytest.raises(AttributeError):
-        arc.no_such_method
+        _ = arc.no_such_method
     with pytest.raises(AttributeError):
-        arc.current_limitt  # typo — must not silently become a method
+        _ = arc.current_limitt  # typo — must not silently become a method
 
 
 def test_enable_output_refuses_without_a_current_limit(bench, arc):

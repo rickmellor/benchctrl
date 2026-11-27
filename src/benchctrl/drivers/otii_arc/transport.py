@@ -6,6 +6,7 @@ with deadlines. Knows nothing about commands or framing.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
@@ -14,8 +15,8 @@ from typing import Optional
 import serial
 import serial.tools.list_ports as list_ports
 
-from benchctrl.exceptions import BenchConnectionError
 from benchctrl.drivers.otii_arc.protocol import PID, VID
+from benchctrl.exceptions import BenchConnectionError
 
 log = logging.getLogger("benchctrl.drivers.otii_arc.transport")
 
@@ -91,18 +92,13 @@ class Transport:
         except (OSError, serial.SerialException) as e:
             log.debug("could not set DTR/RTS on %s (non-fatal): %s", self.port, e)
         time.sleep(0.2)
-        try:
+        with contextlib.suppress(Exception):
             self._ser.reset_input_buffer()
-        except Exception:
-            # Some platforms throw here; non-fatal.
-            pass
 
     def close(self) -> None:
         if self._ser is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._ser.close()
-            except Exception:
-                pass
             self._ser = None
 
     @property

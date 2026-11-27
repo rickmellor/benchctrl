@@ -7,6 +7,7 @@ DL3031A connected to CH1 for closed-loop validation.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 from collections import deque
 
@@ -26,7 +27,6 @@ from benchctrl.drivers.rigol_dp2031.driver import (
     _query_block_payload,
     _strip_block_header_bytes,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fake pyvisa-style instrument
@@ -1773,10 +1773,8 @@ def hw_dp2031():
     time.sleep(0.5)
     # Disable all outputs first (in case a prior test left them on)
     for ch in (1, 2, 3):
-        try:
+        with contextlib.suppress(Exception):
             psu.set_output(ch, False)
-        except Exception:
-            pass
     # Clear PAIR — survives *RST. Long settle.
     try:
         psu.set_channel_pair("OFF")
@@ -1786,10 +1784,8 @@ def hw_dp2031():
     # Clear tracking + sync
     for setter in (lambda: psu.set_tracking(False),
                    lambda: psu.set_output_sync(False)):
-        try:
+        with contextlib.suppress(Exception):
             setter()
-        except Exception:
-            pass
     # Clear latched OVP / OCP per channel — also survives *RST sometimes
     for ch in (1, 2, 3):
         try:
@@ -1810,10 +1806,8 @@ def hw_dp2031():
     yield psu
     # Teardown: best-effort outputs off + restore safe defaults
     for ch in (1, 2, 3):
-        try:
+        with contextlib.suppress(Exception):
             psu.set_output(ch, False)
-        except Exception:
-            pass
     psu.close()
 
 
@@ -2259,10 +2253,8 @@ def _all_remote_sense_off(psu):
     remote sense disabled, since leaving it on with floating sense
     leads is a hazard."""
     for ch in (1, 2, 3):
-        try:
+        with contextlib.suppress(Exception):
             psu.set_remote_sense(ch, False)
-        except Exception:
-            pass
 
 
 @pytest.mark.hardware
@@ -2321,7 +2313,6 @@ def test_hw_channel_pair_off_default(hw_dp2031):
 @pytest.mark.hardware
 def test_hw_timer_state_round_trip(hw_dp2031):
     """STATe / CHANnel / CYCLEs / ENDState / RUN / TRIG round-trip."""
-    import time
     hw_dp2031.set_timer_enabled(False)
     assert hw_dp2031.get_timer_enabled() is False
 
@@ -2394,7 +2385,6 @@ def test_hw_timer_template_round_trip(hw_dp2031):
 @pytest.mark.hardware
 def test_hw_trigger_io_round_trip(hw_dp2031):
     """Trigger I/O state round-trip across D1-D4."""
-    import time
     for line in ("D1", "D2", "D3", "D4"):
         hw_dp2031.set_trigger_in_enabled(line, True)
         assert hw_dp2031.get_trigger_in_enabled(line) is True

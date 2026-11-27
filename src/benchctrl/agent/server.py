@@ -15,6 +15,7 @@ deployable at all.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import itertools
 import json
@@ -37,7 +38,7 @@ from benchctrl.agent.eventbus import (
     EventBus,
     EventSubscriber,
 )
-from benchctrl.agent.recordings import PREVIEW_HZ, IteratorTable, RecordingTable
+from benchctrl.agent.recordings import IteratorTable, RecordingTable
 from benchctrl.agent.registry import SWITCHED_PDU_KEYS, DeviceRegistry
 from benchctrl.agent.runs.engine import RunManager
 from benchctrl.agent.runs.spec import RunSpec
@@ -830,7 +831,7 @@ class Session:
 
     def __init__(
         self,
-        agent: "BenchAgent",
+        agent: BenchAgent,
         sock: socket.socket,
         address,
         *,
@@ -1724,10 +1725,8 @@ class _Handler(socketserver.BaseRequestHandler):
             session.mark_ended()
             self.agent.drop_session(session)
             session.writer.close()
-            try:
+            with contextlib.suppress(OSError):
                 self.request.close()
-            except OSError:
-                pass
             log.info("agent: %s disconnected", session.session_id)
 
     # --- handshake ------------------------------------------------------
@@ -1921,10 +1920,8 @@ class _Handler(socketserver.BaseRequestHandler):
                 -4000:
             ],
         )
-        try:
-            session.writer.send(FrameType.ERR, _json({"id": req_id, "e": payload}))
-        except Exception:  # noqa: BLE001
-            pass
+        with contextlib.suppress(Exception):
+            session.writer.send(FrameType.ERR, _json({'id': req_id, 'e': payload}))
 
     # --- routing --------------------------------------------------------
 

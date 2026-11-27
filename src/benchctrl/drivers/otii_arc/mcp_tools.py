@@ -22,8 +22,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-log = logging.getLogger("benchctrl.drivers.otii_arc.mcp_tools")
-
 from benchctrl.drivers.otii_arc.channels import (
     WIRE_ID_TO_CHANNEL,
     OtiiArcChannel,
@@ -32,6 +30,8 @@ from benchctrl.drivers.otii_arc.device import OtiiArc
 from benchctrl.drivers.otii_arc.protocol import iter_frames, iter_samples
 from benchctrl.exceptions import BenchError
 from benchctrl.recording import Recording
+
+log = logging.getLogger("benchctrl.drivers.otii_arc.mcp_tools")
 
 _smu: Optional[OtiiArc] = None
 _lock = threading.RLock()

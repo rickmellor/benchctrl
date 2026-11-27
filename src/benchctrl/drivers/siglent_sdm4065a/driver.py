@@ -380,7 +380,7 @@ class SiglentSDM4065A:
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         read_termination: str = "\n",
         write_termination: str = "\n",
-    ) -> "SiglentSDM4065A":
+    ) -> SiglentSDM4065A:
         """Open a VISA session to an SDM4065A.
 
         With ``resource=None``, scans USB resources for the Siglent SDM4065A
@@ -460,7 +460,7 @@ class SiglentSDM4065A:
         """Whether the session is still open (the ``session.resolve`` contract)."""
         return not self._closed
 
-    def __enter__(self) -> "SiglentSDM4065A":
+    def __enter__(self) -> SiglentSDM4065A:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

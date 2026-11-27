@@ -18,6 +18,7 @@ refused even with a matching private key. Details in :py:class:`SshLink`.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
@@ -70,10 +71,8 @@ class SerialLink:
         except (OSError, serial.SerialException) as e:
             raise LinkError(f"could not open serial port {self.port!r}: {e}") from e
         time.sleep(0.15)
-        try:
+        with contextlib.suppress(Exception):
             self._ser.reset_input_buffer()
-        except Exception:  # pragma: no cover - best-effort drain
-            pass
 
     @property
     def is_open(self) -> bool:
@@ -99,17 +98,13 @@ class SerialLink:
 
     def reset_input(self) -> None:
         if self._ser is not None and self._ser.is_open:
-            try:
+            with contextlib.suppress(Exception):
                 self._ser.reset_input_buffer()
-            except Exception:  # pragma: no cover - best-effort
-                pass
 
     def close(self) -> None:
         if self._ser is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._ser.close()
-            except Exception:  # pragma: no cover - best-effort
-                pass
             self._ser = None
 
     def __repr__(self) -> str:
@@ -261,10 +256,8 @@ class SshLink:
         fd, pid = self._fd, self._pid
         self._fd = self._pid = None
         if fd is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:  # pragma: no cover - best-effort
-                pass
         if pid is not None:
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
@@ -277,10 +270,8 @@ class SshLink:
                     return
                 except OSError:  # pragma: no cover - best-effort
                     return
-            try:
+            with contextlib.suppress(OSError):
                 os.waitpid(pid, os.WNOHANG)
-            except OSError:  # pragma: no cover - best-effort
-                pass
 
     def __repr__(self) -> str:
         # Deliberately no credential material: this object never holds the

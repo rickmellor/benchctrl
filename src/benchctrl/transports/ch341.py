@@ -194,7 +194,7 @@ class CH341Device:
     @classmethod
     def open(cls, *, serial_number: Optional[str] = None, index: int = 0,
              baudrate: int = 115200, bytesize: int = 8, parity: str = "N",
-             stopbits: int = 1) -> "CH341Device":
+             stopbits: int = 1) -> CH341Device:
         """Open a CH340. Picks by ``serial_number`` if given, else ``index``."""
         devices = cls.find_all()
         if not devices:
@@ -437,7 +437,7 @@ class CH341Device:
     def is_open(self) -> bool:
         return not self._closed
 
-    def __enter__(self) -> "CH341Device":
+    def __enter__(self) -> CH341Device:
         return self
 
     def __exit__(self, *exc_info) -> None:

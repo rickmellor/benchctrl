@@ -168,7 +168,7 @@ class Emulator:
     any thread.
     """
 
-    def __init__(self, smu: "SourceMeasurementUnit", config: EmulatorConfig) -> None:
+    def __init__(self, smu: SourceMeasurementUnit, config: EmulatorConfig) -> None:
         self.smu = smu
         self.config = config
         self._validate()
@@ -324,15 +324,15 @@ class Emulator:
         if self.config.profile.nominal_capacity_mAh <= 0:
             raise BenchValueError("profile.nominal_capacity_mAh must be > 0")
 
-    def _bank_capacity_mAh(self) -> float:
+    def _bank_capacity_mAh(self) -> float:  # noqa: N802 - physics unit suffix; docs/guide/adding-a-driver.md "Vocabulary follows physics"
         return (
             self.config.profile.nominal_capacity_mAh * self.config.parallel
         )
 
-    def _initial_used_mAh(self) -> float:
+    def _initial_used_mAh(self) -> float:  # noqa: N802 - physics unit suffix; docs/guide/adding-a-driver.md "Vocabulary follows physics"
         return self._bank_capacity_mAh() * (1.0 - self.config.initial_soc)
 
-    def _per_cell_used_mAh(self) -> float:
+    def _per_cell_used_mAh(self) -> float:  # noqa: N802 - physics unit suffix; docs/guide/adding-a-driver.md "Vocabulary follows physics"
         # The profile is per-cell. With ``parallel`` cells, used charge
         # divides across them so each cell sees ``used_mAh / parallel``.
         return self._used_mAh / self.config.parallel
@@ -362,7 +362,7 @@ class Emulator:
             last_tick = now
 
             try:
-                I = self._read_current()
+                i_A = self._read_current()
             except Exception:
                 # Connection might have flickered — back off briefly and retry
                 log.warning("read_current failed", exc_info=True)
@@ -370,11 +370,11 @@ class Emulator:
                 continue
 
             with self._lock:
-                self._measured_current_A = I
+                self._measured_current_A = i_A
 
                 # SoC integration
                 if self.config.soc_tracking and dt > 0:
-                    drawn_mAh = I * dt / 3.6  # A * s = C; C/3.6 = mAh
+                    drawn_mAh = i_A * dt / 3.6  # A * s = C; C/3.6 = mAh
                     self._used_mAh += drawn_mAh
                     self._used_mAh = max(0.0, self._used_mAh)
 
@@ -387,7 +387,7 @@ class Emulator:
                 # Series multiplies V + ESR; parallel divides ESR
                 total_ocv = ocv * self.config.series
                 total_esr = esr * self.config.series / self.config.parallel
-                v_out = total_ocv - I * total_esr
+                v_out = total_ocv - i_A * total_esr
                 v_out = max(0.0, min(v_out, self.config.safety_max_voltage_V))
                 self._last_v_out = v_out
 

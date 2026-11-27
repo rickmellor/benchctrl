@@ -25,7 +25,6 @@ from benchctrl.battery import (
 )
 from benchctrl.exceptions import BenchValueError
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

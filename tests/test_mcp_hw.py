@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 pytestmark = pytest.mark.hardware
@@ -20,7 +18,7 @@ def _disconnect_after_each_test():
 
 def _ensure_hardware_available():
     """Skip if no Arc is connected."""
-    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU
+    from benchctrl.drivers.otii_arc.device import OtiiArc as SMU  # noqa: N814 - SMU is the project-wide alias for the SMU driver class
 
     if not SMU.discover():
         pytest.skip("no Arc Pro found")

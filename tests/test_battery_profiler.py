@@ -8,12 +8,10 @@ terminals).
 from __future__ import annotations
 
 import time
-from collections import deque
 from dataclasses import dataclass, field
 
 import pytest
 
-from benchctrl.channels import StandardChannel
 from benchctrl.battery import (
     Battery,
     DischargeProfile,
@@ -26,7 +24,6 @@ from benchctrl.battery.profiler import (
     ProfilerSample,
 )
 from benchctrl.exceptions import BenchValueError
-
 
 # ---------------------------------------------------------------------------
 # Mock SMU

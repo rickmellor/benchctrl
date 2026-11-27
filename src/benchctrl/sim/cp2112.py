@@ -139,10 +139,7 @@ class SimulatedCP2112:
                     level = not driving_low
                 else:
                     # Open-drain: can pull low, cannot force high.
-                    if driving_low:
-                        level = False
-                    else:
-                        level = not (self.pull_downs & bit)
+                    level = False if driving_low else not self.pull_downs & bit
                     if self.externally_driven_high & bit:
                         # Something stronger wins; the chip cannot sink it.
                         level = True

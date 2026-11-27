@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional
 
 log = logging.getLogger("benchctrl.drivers.rigol_dl3031a.driver")
 
@@ -720,7 +720,7 @@ class RigolDL3031A:
 
     def program_list(
         self,
-        steps: "list[tuple[float, float]]",
+        steps: list[tuple[float, float]],
         *,
         mode: str = "CC",
         count: int = 1,

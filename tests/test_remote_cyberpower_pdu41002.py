@@ -558,10 +558,9 @@ def remote_bench(tmp_path):
     keys with separate writer claims, and the interesting failure is a session
     that holds one and switches the other.
     """
-    from benchctrl.sim.factories import make_pdu41002
-
     from benchctrl.drivers.otii_arc import OtiiArc
     from benchctrl.sim import SimulatedOtiiArc
+    from benchctrl.sim.factories import make_pdu41002
 
     arc_sim = SimulatedOtiiArc()
     arc_sim.start()

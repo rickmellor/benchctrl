@@ -28,8 +28,9 @@ when the first driver in each category arrives.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Iterable, Protocol, Union, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, Union, runtime_checkable
 
 from benchctrl.channels import StandardChannel
 

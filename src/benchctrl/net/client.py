@@ -8,12 +8,12 @@ above this layer never learn that anything moved.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import logging
 import socket
 import threading
-import time
 from typing import Any, Callable, Optional
 
 from benchctrl.config import EndpointConfig
@@ -203,14 +203,10 @@ class RemoteClient:
         if self._writer is not None:
             self._writer.close()
         if self._sock is not None:
-            try:
+            with contextlib.suppress(OSError):
                 self._sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
+            with contextlib.suppress(OSError):
                 self._sock.close()
-            except OSError:
-                pass
         self._sock = None
         self._die(BenchConnectionError("connection closed"))
 
@@ -423,10 +419,8 @@ class RemoteClient:
         with self._lock:
             self._proxies.pop(device_key, None)
         if device_key in self._claims:
-            try:
-                self.call("agent.release", {"device": device_key})
-            except Exception:  # noqa: BLE001
-                pass
+            with contextlib.suppress(Exception):
+                self.call('agent.release', {'device': device_key})
             self._claims.discard(device_key)
 
     def device_names(self) -> list[str]:

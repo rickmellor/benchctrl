@@ -16,6 +16,7 @@ dropped connection is idempotent and a truncated transfer is detectable.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import itertools
 import logging
@@ -23,9 +24,10 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
 
 from benchctrl.exceptions import BenchValueError
 
@@ -185,10 +187,8 @@ class BlobStore:
         if info is None:
             return False
         if info.path is not None:
-            try:
+            with contextlib.suppress(OSError):
                 info.path.unlink()
-            except OSError:
-                pass
         return True
 
     def evict_expired(self, now: Optional[float] = None) -> int:
